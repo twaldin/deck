@@ -218,7 +218,7 @@ Board / effort / accounts / domains / skills views — pure renders of files+soc
 
 ## 15. Open technical questions
 1. ~~Rehydration: token-budget vs count~~ **RESOLVED (D-G)**: token-budget, tight posture (§4.6); exact K per owner model tuned in Phase 2.
-2. Broker HTTP: single OpenAI-compat vs + native Anthropic endpoint (caching/thinking favor native) — leaning both.
+2. ~~Broker HTTP: single OpenAI-compat vs + native Anthropic endpoint~~ **RESOLVED (Phase-1 spike, 2026-07-22): both, served by pi-ai's gateway.** Broker-composed `/v1/messages` passes the full battery (caching, thinking, tool-calls). Caveat from pi wiring: a *client*-composed native-Anthropic request (pi's own anthropic client via custom provider) was rejected upstream by third-party-app plan policy — clients route through OpenAI-compat ingress; the broker re-shapes to the Claude-Code presentation internally.
 3. Router owns all owner processes as children (so it can inject via stdin + fence via pgid) vs per-session socket shim — leaning router-owns.
 4. `watching` fallout monitors: per-effort vs per-deploy (leaning per-deploy, fans back to touched efforts).
 5. Smithers Gateway: per-project-on-demand vs global (leaning per-project).

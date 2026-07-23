@@ -40,9 +40,18 @@ export function ensureToken(file: string): string {
 	return token;
 }
 
-/** Atomic 0600 JSON write: temp file + rename, never a partially-written roster. */
+/**
+ * Atomic 0600 JSON write: unique same-dir temp + rename. Temp name carries
+ * pid+random so concurrent writers (roster timer vs control `usage`) never
+ * rename each other's file out from under them; rename picks a winner.
+ */
 export function writeJsonAtomic(file: string, value: unknown): void {
-	const tmp = `${file}.tmp`;
+	const tmp = `${file}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
 	fs.writeFileSync(tmp, `${JSON.stringify(value, null, "\t")}\n`, { mode: 0o600 });
-	fs.renameSync(tmp, file);
+	try {
+		fs.renameSync(tmp, file);
+	} catch (error) {
+		fs.rmSync(tmp, { force: true });
+		throw error;
+	}
 }
