@@ -308,9 +308,25 @@ export default function registerDeckLifecycle(pi: DeckExtensionApi): void {
 			warnStaleOwner();
 			return false;
 		}
-		// Ready to mutate only when the manifest projection agrees on the epoch —
-		// the exact predicate the store's mutation fence enforces (no divergence).
-		return store.leaseMatches(leaseToken);
+		if (store.leaseMatches(leaseToken)) {
+			return true;
+		}
+		// Token matches but the manifest epoch disagrees. Two very different cases,
+		// distinguished by the lease holder:
+		//  - holder === null: the reserve→bind window (bind is still coming) —
+		//    transient, return false WITHOUT latching so a later call succeeds.
+		//  - holder !== null: the lease was BOUND but the manifest still lags —
+		//    only reachable if bindLeaseSession crashed between writing the bound
+		//    lease and the manifest. That never self-heals for this process, so
+		//    latch + warn-exit (the router re-establishes a clean generation);
+		//    livelocking here was the reviewer's HIGH crash case.
+		const lease = store.readLease();
+		if (lease !== null && lease.holder !== null) {
+			fenced = true;
+			warnStaleOwner();
+			return false;
+		}
+		return false;
 	};
 
 	const assertOwnerLease = (): void => {

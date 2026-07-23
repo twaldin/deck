@@ -663,6 +663,45 @@ void describe("deck lifecycle extension", () => {
 		expect(store.inboxState()[0]?.acked).not.toBeNull();
 	});
 
+	test("a BOUND lease with a lagging manifest (crashed bind) fences the owner — no livelock", async () => {
+		effortSequence += 1;
+		const effortId = `deck--extension-crashbind-${effortSequence}`;
+		const store = core.createEffort({
+			effort_id: effortId,
+			project: "deck",
+			title: "Crashed bind",
+			charter: { goal: "crash window", acceptance_criteria: ["no livelock"], constraints: [] },
+		});
+		const reserved = store.reserveLease(store.readManifest().revision);
+		// Simulate bindLeaseSession crashing AFTER writing the bound lease (holder
+		// set) but BEFORE the manifest.session update: holder != null, token still
+		// valid, manifest.session still null (epoch mismatch that never self-heals).
+		const crashedLease = {
+			epoch: reserved.epoch,
+			token: reserved.token,
+			holder: { machine: "test-machine", session_id: `bound-crash-${effortSequence}`, lease_epoch: reserved.epoch, last_heartbeat: null },
+			written: Date.now(),
+		};
+		writeFileSync(path.join(core.effortDir(effortId), core.EFFORT_FILES.lease), `${JSON.stringify(crashedLease)}\n`, { mode: 0o600 });
+		expect(store.verifyLease(reserved.token)).toBe(true); // token still matches
+		expect(store.leaseMatches(reserved.token)).toBe(false); // manifest lags
+
+		process.env.DECK_EFFORT = effortId;
+		process.env.DECK_LEASE_TOKEN = reserved.token;
+		delete process.env.DECK_ACTOR;
+		const harness = new ExtensionHarness();
+		registerDeckLifecycle(harness);
+		await harness.emit("session_start", { type: "session_start", reason: "startup" });
+
+		// Must latch fenced (holder != null ⇒ corruption, not the pending window):
+		// a tool call throws E_LEASE instead of spinning forever returning false.
+		await expectDeckError(
+			requireTool(harness, "report_progress").execute("p", { status: "should be fenced" }, toolSignal, noUpdate, {}),
+			"E_LEASE",
+		);
+		expect(harness.messages.some((message) => message.customType === "deck.lease_warning")).toBe(true);
+	});
+
 	test("attributes lifecycle events to the router-provided actor", async () => {
 		const { harness, store } = await setupOwner("wf:reviewer/dispatch-1");
 		await requireTool(harness, "report_progress").execute(
