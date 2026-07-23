@@ -113,7 +113,7 @@ describe("SPEC 6.5 rotation (I8)", () => {
 		const body = z.looseObject({ content: z.array(z.looseObject({ type: z.string() })) }).parse(JSON.parse(bodyText));
 		expect(body.content.some(block => block.type === "text")).toBe(true);
 
-		// Evidence classification — only claim 429→rotate on a NEW/extended block.
+		// Evidence classification — newly recorded vs pre-existing cooling evidence.
 		const afterStatus = statusShape.parse(await controlRequest("status"));
 		const exhaustedIds = new Set(exhausted.map(account => account.id));
 		let newBlockEvidence = "";
