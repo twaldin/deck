@@ -13,10 +13,14 @@
  *
  * Evidence classification (before/after cooling blocks via control `status`):
  * - block newly recorded (or extended) on an exhausted account this run
- *   ⇒ the 429→markUsageLimitReached→rotate path executed;
+ *   ⇒ a new exhaustion/cooling block was recorded. NOTE: this does NOT prove
+ *   a wire 429 — AuthStorage's pre-request ranking also records blocks from
+ *   cached usage (#rankOAuthSelections → #markCredentialBlocked,
+ *   auth-storage.ts ~4068-4078). Either mechanism yields the same pooling
+ *   outcome; attributing the wire-429 retry specifically would require
+ *   capturing the gateway's own retry log/event (out of spike scope);
  * - block pre-existing ⇒ cooling exclusion honored;
- * - no block ⇒ ranking routed around the hot account (429 path not exercised
- *   this run — still a pass for the pooling contract, logged as such).
+ * - no block ⇒ selection avoided the hot account without recording state.
  */
 import { describe, expect, test } from "bun:test";
 import { z } from "zod";
@@ -125,11 +129,13 @@ describe("SPEC 6.5 rotation (I8)", () => {
 			}
 		}
 		if (newBlockEvidence) {
-			console.warn(`[rotation] 429→rotate exercised THIS RUN: new/extended cooling block on ${newBlockEvidence}`);
+			console.warn(
+				`[rotation] new exhaustion/cooling block recorded THIS RUN on ${newBlockEvidence} (usage-ranking or wire-429; rotation outcome proven either way)`,
+			);
 		} else if (preexistingBlockEvidence) {
-			console.warn(`[rotation] cooling exclusion honored (pre-existing block on ${preexistingBlockEvidence}); 429 path not re-exercised`);
+			console.warn(`[rotation] cooling exclusion honored (pre-existing block on ${preexistingBlockEvidence})`);
 		} else {
-			console.warn("[rotation] ranking routed around the exhausted account; 429 path not exercised this run");
+			console.warn("[rotation] selection avoided the exhausted account without recording a block");
 		}
 	}, 120_000);
 });
