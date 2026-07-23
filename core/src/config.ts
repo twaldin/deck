@@ -5,6 +5,7 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { z } from "zod";
 import { DECK_HOME } from "./layout";
 
 /** Conciseness caps (D-H): schema-level max lengths; violation ⇒ E_TOO_LONG. */
@@ -72,15 +73,63 @@ export const DEFAULT_CONFIG: DeckConfig = {
 	seedTokenBudget: 8_000,
 };
 
+const positiveInt = z.number().int().positive();
+
+/** Operator override file: every field optional, every value bounds-checked. */
+const configOverrideSchema = z.object({
+	admission: z
+		.object({
+			maxConcurrentPolls: positiveInt.max(64),
+			maxDispatchesPerEffort: positiveInt.max(64),
+			maxActiveSessionsGlobal: positiveInt.max(128),
+			maxWorktreesGlobal: positiveInt.max(256),
+			maxBrowserTabsGlobal: positiveInt.max(128),
+			maxWorkflowNodesPerRun: positiveInt.max(10_000),
+			swapThresholdBytes: positiveInt,
+		})
+		.partial()
+		.optional(),
+	router: z
+		.object({
+			tickMs: positiveInt.min(1_000),
+			pollDeadlineMs: positiveInt.min(1_000),
+			pollOutputCapBytes: positiveInt.min(1_024),
+			intervals: z
+				.object({ hot: positiveInt, green: positiveInt, quiet: positiveInt, watching: positiveInt })
+				.partial()
+				.optional(),
+			coalesceMs: positiveInt,
+			spawnDeadlineMs: positiveInt.min(1_000),
+			heartbeatIntervalMs: positiveInt.min(1_000),
+		})
+		.partial()
+		.optional(),
+	seedTokenBudget: positiveInt.min(500).max(200_000).optional(),
+});
+
+/**
+ * Load ~/.deck/config.json over defaults. Missing file ⇒ defaults; a present
+ * but malformed/invalid file THROWS (silent fallback would let D-B resource
+ * limits drift without anyone noticing). `router.intervals` deep-merges.
+ */
 export function loadConfig(): DeckConfig {
+	const file = path.join(DECK_HOME, "config.json");
+	let text: string;
 	try {
-		const raw = JSON.parse(fs.readFileSync(path.join(DECK_HOME, "config.json"), "utf8")) as Partial<DeckConfig>;
-		return {
-			admission: { ...DEFAULT_CONFIG.admission, ...raw.admission },
-			router: { ...DEFAULT_CONFIG.router, ...raw.router },
-			seedTokenBudget: raw.seedTokenBudget ?? DEFAULT_CONFIG.seedTokenBudget,
-		};
-	} catch {
-		return DEFAULT_CONFIG;
+		text = fs.readFileSync(file, "utf8");
+	} catch (error) {
+		const code = error instanceof Error && "code" in error ? (error as NodeJS.ErrnoException).code : undefined;
+		if (code === "ENOENT") return DEFAULT_CONFIG;
+		throw error;
 	}
+	const raw = configOverrideSchema.parse(JSON.parse(text));
+	return {
+		admission: { ...DEFAULT_CONFIG.admission, ...raw.admission },
+		router: {
+			...DEFAULT_CONFIG.router,
+			...raw.router,
+			intervals: { ...DEFAULT_CONFIG.router.intervals, ...raw.router?.intervals },
+		},
+		seedTokenBudget: raw.seedTokenBudget ?? DEFAULT_CONFIG.seedTokenBudget,
+	};
 }
