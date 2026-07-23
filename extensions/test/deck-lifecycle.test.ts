@@ -68,7 +68,7 @@ async function setupOwner(actor?: string) {
 			constraints: [],
 		},
 	});
-	const lease = store.bumpLease({
+	const lease = store.bumpLease(store.readManifest().revision, {
 		machine: "test-machine",
 		session_id: `session-${effortSequence}`,
 		last_heartbeat: Date.now(),
@@ -319,7 +319,7 @@ void describe("deck lifecycle extension", () => {
 	test("fences every tool after the lease becomes stale and warns once", async () => {
 		const { harness, store } = await setupOwner();
 		const before = store.readManifest();
-		store.bumpLease({
+		store.bumpLease(before.revision, {
 			machine: "test-machine",
 			session_id: "replacement-session",
 			last_heartbeat: Date.now(),
@@ -532,6 +532,67 @@ void describe("deck lifecycle extension", () => {
 		});
 		expect(store.inboxState()[0]?.acked).toBeNull();
 		expect(store.readTail().filter((event) => event.type === "lifecycle.ack")).toHaveLength(0);
+	});
+
+	test("acks only after a failed tool turn is successfully retried", async () => {
+		const { harness, store } = await setupOwner();
+		store.inboxAppend({
+			cmd_id: "cmd-retry",
+			cmd: { action: "advance" },
+			from: "router",
+			ts: Date.now(),
+		});
+		await harness.emit("message_start", {
+			type: "message_start",
+			message: {
+				role: "user",
+				content: "[deck:cmd cmd-retry]\nAdvance the effort.",
+				timestamp: Date.now(),
+			},
+		});
+		await harness.emit("turn_end", {
+			type: "turn_end",
+			turnIndex: 0,
+			message: {
+				role: "assistant",
+				stopReason: "toolUse",
+				usage: { input: 5, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 7 },
+			},
+			toolResults: [{ isError: true }],
+		});
+		expect(store.inboxState()[0]?.acked).toBeNull();
+		await harness.emit("turn_end", {
+			type: "turn_end",
+			turnIndex: 1,
+			message: {
+				role: "assistant",
+				stopReason: "stop",
+				usage: { input: 2, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 4 },
+			},
+			toolResults: [],
+		});
+		expect(store.inboxState()[0]?.acked).toBeNull();
+
+		await harness.emit("message_start", {
+			type: "message_start",
+			message: {
+				role: "user",
+				content: "[deck:cmd cmd-retry]\nAdvance the effort.",
+				timestamp: Date.now(),
+			},
+		});
+		await harness.emit("turn_end", {
+			type: "turn_end",
+			turnIndex: 2,
+			message: {
+				role: "assistant",
+				stopReason: "stop",
+				usage: { input: 2, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 4 },
+			},
+			toolResults: [],
+		});
+		expect(store.inboxState()[0]?.acked).not.toBeNull();
+		expect(store.readTail().filter((event) => event.type === "lifecycle.ack")).toHaveLength(1);
 	});
 
 	test("attributes lifecycle events to the router-provided actor", async () => {

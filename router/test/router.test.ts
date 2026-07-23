@@ -274,7 +274,7 @@ describe("process groups", () => {
 describe("owner exit semantics", () => {
 	test("recognizes agent-end park only for the current generation and keeps exit classes separate", () => {
 		const store = createTestEffort("park-exit");
-		const firstLease = store.bumpLease({
+		const firstLease = store.bumpLease(store.readManifest().revision, {
 			machine: "router-test",
 			session_id: "owner-one",
 			last_heartbeat: Date.now(),
@@ -293,7 +293,7 @@ describe("owner exit semantics", () => {
 		expect(hasCurrentParkEvent(store)).toBe(true);
 		expect(classifyOwnerExit(0)).toBe("ended");
 		expect(classifyOwnerExit(1)).toBe("crash");
-		store.bumpLease({ machine: "router-test", session_id: "owner-two", last_heartbeat: null });
+		store.bumpLease(store.readManifest().revision, { machine: "router-test", session_id: "owner-two", last_heartbeat: null });
 		expect(hasCurrentParkEvent(store)).toBe(false);
 	});
 });
@@ -356,7 +356,7 @@ describe("pi supervision", () => {
 
 	test("dispatch liveness timeout kills the group and records no running lane", async () => {
 		const store = createTestEffort("dispatch-timeout");
-		const lease = store.bumpLease({ machine: "router-test", session_id: "owner-session", last_heartbeat: Date.now() });
+		const lease = store.bumpLease(store.readManifest().revision, { machine: "router-test", session_id: "owner-session", last_heartbeat: Date.now() });
 		const supervisor = new OwnerSupervisor({
 			config: configWith({ spawnDeadlineMs: 120 }),
 			piCommand: [process.execPath, fakePi],
@@ -384,7 +384,7 @@ describe("pi supervision", () => {
 
 	test("caller abort kills an unverified dispatch child", async () => {
 		const store = createTestEffort("dispatch-abort");
-		const lease = store.bumpLease({ machine: "router-test", session_id: "owner-session", last_heartbeat: Date.now() });
+		const lease = store.bumpLease(store.readManifest().revision, { machine: "router-test", session_id: "owner-session", last_heartbeat: Date.now() });
 		const supervisor = new OwnerSupervisor({
 			config: configWith({ spawnDeadlineMs: 1_000 }),
 			piCommand: [process.execPath, fakePi],

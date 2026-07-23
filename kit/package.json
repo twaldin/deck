@@ -13,6 +13,8 @@
 	},
 	"dependencies": {
 		"@deck/core": "file:../core",
+		"@earendil-works/pi-coding-agent": "0.81.1",
+		"@earendil-works/pi-tui": "0.81.1",
 		"@smithers-orchestrator/pi-plugin": "0.30.0",
 		"smithers-orchestrator": "0.30.0",
 		"zod": "^4"

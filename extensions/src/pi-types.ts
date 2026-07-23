@@ -17,11 +17,12 @@ export interface DeckTool {
 	description: string;
 	promptSnippet: string;
 	parameters: TSchema;
+	prepareArguments?(params: unknown): unknown;
 	execute(
 		toolCallId: string,
 		params: unknown,
-		signal: AbortSignal,
-		onUpdate: (update: unknown) => void,
+		signal: AbortSignal | undefined,
+		onUpdate: ((update: unknown) => void) | undefined,
 		context: unknown,
 	): Promise<ToolResult>;
 }

@@ -103,6 +103,7 @@ const turnEndEventSchema = z.looseObject({
 		stopReason: z.enum(["stop", "length", "toolUse", "error", "aborted"]).optional(),
 		usage: z.unknown().optional(),
 	}),
+	toolResults: z.array(z.looseObject({ isError: z.boolean() })),
 });
 
 const commandMarkerSchema = z.string().min(1).regex(/^[^\]\s]+$/);
@@ -118,7 +119,10 @@ type LifecycleToolName =
 
 const TOOL_PARAMETERS: Record<LifecycleToolName, TSchema> = {
 	report_progress: Type.Object({
-		status: Type.String({ description: "Concise progress status, at most 500 characters" }),
+		status: Type.String({
+			maxLength: CAPS.reportProgressStatus,
+			description: "Concise progress status, at most 500 characters",
+		}),
 	}, { additionalProperties: false }),
 	ask_tim: Type.Object({
 		kind: Type.Union([
@@ -127,11 +131,20 @@ const TOOL_PARAMETERS: Record<LifecycleToolName, TSchema> = {
 			Type.Literal("flagged"),
 			Type.Literal("degraded"),
 		]),
-		question: Type.String({ description: "Question for Tim, at most 600 characters" }),
-		recommendation: Type.String({ description: "Recommended answer, at most 400 characters" }),
+		question: Type.String({
+			maxLength: CAPS.askTimQuestion,
+			description: "Question for Tim, at most 600 characters",
+		}),
+		recommendation: Type.String({
+			maxLength: CAPS.askTimRecommendation,
+			description: "Recommended answer, at most 400 characters",
+		}),
 		options: Type.Array(
-			Type.String({ description: "Option label, at most 120 characters" }),
-			{ minItems: 1, description: "One to five answer options" },
+			Type.String({
+				maxLength: CAPS.askTimOptionLabel,
+				description: "Option label, at most 120 characters",
+			}),
+			{ minItems: 1, maxItems: CAPS.askTimMaxOptions, description: "One to five answer options" },
 		),
 		cancel_in_flight: Type.Optional(Type.String({
 			description: "Required only for cancellation cards: the dispatch id to cancel",
@@ -143,7 +156,10 @@ const TOOL_PARAMETERS: Record<LifecycleToolName, TSchema> = {
 		brief: Type.String(),
 	}, { additionalProperties: false }),
 	park: Type.Object({
-		digest: Type.String({ description: "Park digest, at most 2000 characters" }),
+		digest: Type.String({
+			maxLength: CAPS.parkDigest,
+			description: "Park digest, at most 2000 characters",
+		}),
 	}, { additionalProperties: false }),
 	record_evidence: Type.Object({
 		label: Type.String(),
@@ -180,6 +196,39 @@ function parseToolParams<T>(tool: string, schema: z.ZodType<T>, input: unknown):
 		throw new DeckError("E_ARG", `${tool} parameters are invalid`, { issues: parsed.error.issues });
 	}
 	return parsed.data;
+}
+
+type ReportProgressParams = z.infer<typeof reportProgressSchema>;
+type AskTimParams = z.infer<typeof askTimSchema>;
+type ParkParams = z.infer<typeof parkSchema>;
+
+function validateReportProgressParams(input: unknown): ReportProgressParams {
+	const params = parseToolParams("report_progress", reportProgressSchema, input);
+	assertCap("status", params.status, CAPS.reportProgressStatus);
+	return params;
+}
+
+function validateAskTimParams(input: unknown): AskTimParams {
+	const params = parseToolParams("ask_tim", askTimSchema, input);
+	assertCap("question", params.question, CAPS.askTimQuestion);
+	assertCap("recommendation", params.recommendation, CAPS.askTimRecommendation);
+	if (params.options.length > CAPS.askTimMaxOptions) {
+		throw new DeckError(
+			"E_TOO_LONG",
+			`options has ${params.options.length} entries; limit ${CAPS.askTimMaxOptions}. Compress and retry.`,
+			{ field: "options", limit: CAPS.askTimMaxOptions, length: params.options.length },
+		);
+	}
+	for (const [index, option] of params.options.entries()) {
+		assertCap(`options[${index}]`, option, CAPS.askTimOptionLabel);
+	}
+	return params;
+}
+
+function validateParkParams(input: unknown): ParkParams {
+	const params = parseToolParams("park", parkSchema, input);
+	assertCap("digest", params.digest, CAPS.parkDigest);
+	return params;
 }
 
 function extractUserText(content: unknown): string | null {
@@ -230,6 +279,7 @@ export default function registerDeckLifecycle(pi: DeckExtensionApi): void {
 	const pendingCommandIds = new Set<string>();
 	let fenced = false;
 	let warned = false;
+	let pendingToolFailed = false;
 
 	const warnStaleOwner = (): void => {
 		if (warned) {
@@ -279,7 +329,16 @@ export default function registerDeckLifecycle(pi: DeckExtensionApi): void {
 		if (text === null) {
 			return;
 		}
-		for (const commandId of leadingCommandIds(text)) {
+		const inboxCommandIds = new Set(
+			store.inboxState()
+				.filter((command) => command.acked === null)
+				.map((command) => command.cmd_id),
+		);
+		const commandIds = leadingCommandIds(text).filter((commandId) => inboxCommandIds.has(commandId));
+		if (commandIds.length > 0) {
+			pendingToolFailed = false;
+		}
+		for (const commandId of commandIds) {
 			pendingCommandIds.add(commandId);
 		}
 	});
@@ -291,16 +350,18 @@ export default function registerDeckLifecycle(pi: DeckExtensionApi): void {
 		}
 
 		const commandIds = [...pendingCommandIds];
-		pendingCommandIds.clear();
 		const outcome = parsed.data.message;
+		const toolCallFailed = outcome.stopReason === "toolUse"
+			&& (parsed.data.toolResults.length === 0
+				|| parsed.data.toolResults.some((toolResult) => toolResult.isError));
+		if (toolCallFailed) {
+			pendingToolFailed = true;
+		}
 		const turnApplied = outcome.role === "assistant"
-			&& (outcome.stopReason === "stop" || outcome.stopReason === "toolUse");
+			&& ((outcome.stopReason === "stop" && !pendingToolFailed)
+				|| (outcome.stopReason === "toolUse" && !toolCallFailed));
 		if (turnApplied) {
-			const inbox = store.inboxState();
 			for (const commandId of commandIds) {
-				if (!inbox.some((command) => command.cmd_id === commandId)) {
-					throw new DeckError("E_STATE", "unknown inbox command marker", { cmd_id: commandId });
-				}
 				store.appendEvent({
 					plane: "lifecycle",
 					type: "lifecycle.ack",
@@ -310,6 +371,11 @@ export default function registerDeckLifecycle(pi: DeckExtensionApi): void {
 				}, leaseToken);
 				store.inboxAck(commandId, leaseToken);
 			}
+			pendingCommandIds.clear();
+			pendingToolFailed = false;
+		} else if (outcome.stopReason !== "toolUse") {
+			pendingCommandIds.clear();
+			pendingToolFailed = false;
 		}
 
 		const usage = tokenUsageSchema.safeParse(outcome.usage);
@@ -435,7 +501,7 @@ export default function registerDeckLifecycle(pi: DeckExtensionApi): void {
 				kind: params.kind,
 				target: params.target,
 				brief: params.brief,
-			}, signal);
+			}, signal ?? new AbortController().signal);
 			return result(
 				`Dispatch live: ${dispatched.dispatch_id}; session ${dispatched.session.machine}:${dispatched.session.session_id}; lease epoch ${dispatched.session.lease_epoch}.`,
 				{ ...dispatched },

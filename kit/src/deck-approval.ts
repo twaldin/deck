@@ -12,6 +12,7 @@ const deckApprovalInputSchema = z
 		effortId: z.string().min(1),
 		workflowRunId: z.string().min(1).max(200),
 		nodeId: z.string().min(1).max(200),
+		iteration: z.number().int().nonnegative().default(0),
 		title: z.string().min(1).max(600),
 		summary: z.string().min(1).max(400).optional(),
 		recommendation: z.string().min(1).max(400).optional(),
@@ -27,8 +28,8 @@ export interface DeckApprovalMirrorResult {
 	created: boolean;
 }
 
-function approvalCardId(runId: string, nodeId: string): string {
-	return `smithers:${runId}:${nodeId}`;
+function approvalCardId(runId: string, nodeId: string, iteration: number): string {
+	return `smithers:${encodeURIComponent(runId)}:${encodeURIComponent(nodeId)}:${iteration}`;
 }
 
 function sameCard(left: Card, right: Card): boolean {
@@ -49,7 +50,7 @@ export class DeckApproval {
 	mirror(input: DeckApprovalInput): DeckApprovalMirrorResult {
 		const parsed = deckApprovalInputSchema.parse(input);
 		const store = openEffort(parsed.effortId);
-		const cardId = approvalCardId(parsed.workflowRunId, parsed.nodeId);
+		const cardId = approvalCardId(parsed.workflowRunId, parsed.nodeId, parsed.iteration);
 		const card = cardSchema.parse({
 			kind: "decision",
 			question: parsed.title,
@@ -94,6 +95,7 @@ export class DeckApproval {
 							effort_id: parsed.effortId,
 							workflow_run_id: parsed.workflowRunId,
 							node_id: parsed.nodeId,
+							iteration: parsed.iteration,
 							card_id: cardId,
 						},
 					},

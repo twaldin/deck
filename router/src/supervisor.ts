@@ -301,7 +301,7 @@ export class OwnerSupervisor {
 		const resumeSessionId = manifest.session?.session_id;
 		const lease = resumeSessionId === undefined
 			? store.reserveLease(manifest.revision)
-			: store.bumpLease({
+			: store.bumpLease(store.readManifest().revision, {
 				machine: ROUTER_MACHINE,
 				session_id: resumeSessionId,
 				last_heartbeat: null,

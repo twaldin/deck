@@ -5,34 +5,26 @@ export interface CardAnswerResult {
 	command: InboxCommand;
 }
 
+/**
+ * Delegates to the store's composite (inbox-first write order, D-A): a crash
+ * can leave a deliverable command with the card still open (benign, idempotent
+ * re-answer completes it) but can never drop the decision. expectedRevision is
+ * kept for UI staleness UX: reject up front if the board rendered stale state.
+ */
 export function answerCard(effortId: string, cardId: string, answer: string, expectedRevision: number): CardAnswerResult {
 	const trimmedAnswer = answer.trim();
 	if (trimmedAnswer.length === 0) throw new DeckError("E_ARG", "card answer must be non-empty");
 	const store = openEffort(effortId);
-	const manifest = store.mutate(expectedRevision, null, draft => {
-		const entry = draft.cards.find(candidate => candidate.id === cardId);
-		if (entry === undefined) throw new DeckError("E_STATE", "card no longer exists", { card_id: cardId });
-		if (entry.status !== "open") throw new DeckError("E_STATE", "card is already answered", { card_id: cardId });
-		const answeredAt = Date.now();
-		entry.status = "answered";
-		entry.answer = trimmedAnswer;
-		entry.answered_ts = answeredAt;
-		draft.decisions.push({ ts: answeredAt, card_id: cardId, answer: trimmedAnswer });
-		draft.overlays.needs_tim = draft.overlays.needs_tim.filter(candidate => candidate !== cardId);
-		return {
-			manifest: draft,
-			event: {
-				plane: "tim",
-				type: "tim.decision",
-				actor: "tim",
-				data: { card_id: cardId, answer: trimmedAnswer },
-			},
-		};
-	});
-	const command = store.inboxAppend({
-		cmd: { kind: "card_answer", card_id: cardId, answer: trimmedAnswer },
-		from: "tim",
-	});
+	const current = store.readManifest();
+	if (current.revision !== expectedRevision) {
+		throw new DeckError("E_CAS", "board state is stale; refresh before answering", {
+			expected: expectedRevision,
+			actual: current.revision,
+		});
+	}
+	const manifest = store.answerCard(cardId, trimmedAnswer);
+	const command = store.inboxState().find(entry => entry.cmd_id === `card-answer:${cardId}`);
+	if (command === undefined) throw new DeckError("E_IO", "card answer command missing after composite write");
 	return { manifest, command };
 }
 
