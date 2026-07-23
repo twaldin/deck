@@ -99,28 +99,48 @@ describe("EffortStore", () => {
 		expect(store.readManifest().session?.lease_epoch).toBe(reserved.epoch);
 	});
 
-	test("leaseMatches fences the reserve→bind epoch divergence that verifyLease misses", () => {
-		const store = deck.createEffort({ effort_id: "test--lease-matches", project: "test", title: "Matches", charter });
+	test("leaseStatus classifies pending / current / stale coherently (reserve→bind, rotate, crashed bind)", () => {
+		const store = deck.createEffort({ effort_id: "test--lease-status", project: "test", title: "Status", charter });
 		const reserved = store.reserveLease(store.readManifest().revision);
-		// Reserve bumps the lease epoch+token but NOT manifest.session — so a
-		// token-only check passes while the store's mutation fence would reject.
+		// Reserve bumps lease epoch+token but NOT manifest.session: token-only
+		// verifyLease passes, but the coherent status is "pending" (holder null).
 		expect(store.verifyLease(reserved.token)).toBe(true);
-		expect(store.leaseMatches(reserved.token)).toBe(false); // divergence caught
+		expect(store.leaseStatus(reserved.token)).toBe("pending");
 
 		store.bindLeaseSession(store.readManifest().revision, reserved.token, {
 			machine: "m1",
 			session_id: "real-session",
 			last_heartbeat: null,
 		});
-		expect(store.leaseMatches(reserved.token)).toBe(true); // manifest now agrees
+		expect(store.leaseStatus(reserved.token)).toBe("current"); // manifest agrees
 
-		// A newer generation reserved on top: the old token is fenced by BOTH
-		// checks; the new token passes verifyLease but leaseMatches rejects until
-		// it too is bound.
+		// A newer generation reserved on top: the old token is now "stale"
+		// (rotated); the new token is "pending" until it too is bound.
 		const next = store.reserveLease(store.readManifest().revision);
-		expect(store.leaseMatches(reserved.token)).toBe(false);
-		expect(store.verifyLease(next.token)).toBe(true);
-		expect(store.leaseMatches(next.token)).toBe(false);
+		expect(store.leaseStatus(reserved.token)).toBe("stale");
+		expect(store.leaseStatus(next.token)).toBe("pending");
+		expect(store.bindLeaseSession(store.readManifest().revision, next.token, {
+			machine: "m1",
+			session_id: "next-session",
+			last_heartbeat: null,
+		}).epoch).toBe(next.epoch);
+		expect(store.leaseStatus(next.token)).toBe("current");
+	});
+
+	test("leaseStatus returns stale for a bound lease with a lagging manifest (crashed bind)", () => {
+		const store = deck.createEffort({ effort_id: "test--lease-crashbind", project: "test", title: "CrashBind", charter });
+		const reserved = store.reserveLease(store.readManifest().revision);
+		// Simulate bindLeaseSession crashing AFTER the bound-lease write, BEFORE the
+		// manifest write: holder set, token valid, manifest.session still null.
+		const crashed = {
+			epoch: reserved.epoch,
+			token: reserved.token,
+			holder: { machine: "m1", session_id: "crashed", lease_epoch: reserved.epoch, last_heartbeat: null },
+			written: Date.now(),
+		};
+		fs.writeFileSync(path.join(deck.effortDir("test--lease-crashbind"), deck.EFFORT_FILES.lease), `${JSON.stringify(crashed)}\n`, { mode: 0o600 });
+		expect(store.verifyLease(reserved.token)).toBe(true); // token still valid
+		expect(store.leaseStatus(reserved.token)).toBe("stale"); // holder set + lagging manifest ⇒ corruption, not pending
 	});
 
 	test("requires deploy evidence and a fallout verdict before done", () => {

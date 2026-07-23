@@ -684,7 +684,7 @@ void describe("deck lifecycle extension", () => {
 		};
 		writeFileSync(path.join(core.effortDir(effortId), core.EFFORT_FILES.lease), `${JSON.stringify(crashedLease)}\n`, { mode: 0o600 });
 		expect(store.verifyLease(reserved.token)).toBe(true); // token still matches
-		expect(store.leaseMatches(reserved.token)).toBe(false); // manifest lags
+		expect(store.leaseStatus(reserved.token)).toBe("stale"); // holder set + lagging manifest ⇒ corruption
 
 		process.env.DECK_EFFORT = effortId;
 		process.env.DECK_LEASE_TOKEN = reserved.token;

@@ -320,22 +320,35 @@ export class EffortStore {
 	}
 
 	/**
-	 * True iff `token` is the current lease AND the manifest projection agrees on
-	 * the epoch — the EXACT predicate the mutation fence (assertLeaseMatches)
-	 * enforces. Fast-fail callers (the lifecycle extension) MUST use this, not
-	 * verifyLease: during the reserve→bind window the lease epoch leads
-	 * manifest.session, so a token-only check passes while a real mutation would
-	 * reject. Fencing on both keeps the fast-fail consistent with the authority.
+	 * Coherent lease classification read UNDER manifest.lock — the only safe way
+	 * for a fast-fail caller (the lifecycle extension) to check its generation.
+	 * Reading lease + manifest in ONE critical section eliminates the TOCTOU
+	 * where a concurrent HEALTHY bindLeaseSession is caught mid-write (bound
+	 * lease written, manifest not yet) and mistaken for a crashed bind: under the
+	 * lock no writer sits between its two writes, and stale-lock takeover surfaces
+	 * a genuinely crashed writer's persistent mismatch.
+	 *   "current" — token matches AND manifest epoch agrees (ready to mutate;
+	 *               exactly the mutation-fence predicate).
+	 *   "pending" — token matches, manifest lags, holder null (reserve→bind
+	 *               window; the bind is still coming — do NOT fence).
+	 *   "stale"   — no lease, token rotated, OR a BOUND lease (holder set) whose
+	 *               manifest still lags (crashed bind; never self-heals — fence).
 	 */
-	leaseMatches(token: string): boolean {
+	leaseStatus(token: string): "current" | "pending" | "stale" {
 		if (token.length === 0) {
-			return false;
+			return "stale";
 		}
-		const lease = this.readLease();
-		if (lease === null || lease.token !== token) {
-			return false;
-		}
-		return this.readManifest().session?.lease_epoch === lease.epoch;
+		return withExclusiveLock(this.lockPath, () => {
+			const lease = this.readLease();
+			if (lease === null || lease.token !== token) {
+				return "stale";
+			}
+			const manifest = this.readManifest();
+			if (manifest.session?.lease_epoch === lease.epoch) {
+				return "current";
+			}
+			return lease.holder === null ? "pending" : "stale";
+		});
 	}
 
 	inboxAppend(input: InboxCommandInput): InboxCommand {

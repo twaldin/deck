@@ -298,34 +298,22 @@ export default function registerDeckLifecycle(pi: DeckExtensionApi): void {
 		if (fenced) {
 			return false;
 		}
-		// Truly stale = the token rotated (a newer generation exists). Latch +
-		// warn-exit only here. A matching token whose manifest epoch merely lags
-		// (the transient reserve→bind startup window) is NOT stale — it's not-yet-
-		// ready, so we return false WITHOUT latching and let a later call succeed
-		// once the router binds the session.
-		if (!store.verifyLease(leaseToken)) {
-			fenced = true;
-			warnStaleOwner();
-			return false;
-		}
-		if (store.leaseMatches(leaseToken)) {
+		// ONE lock-coherent classification (store.leaseStatus reads lease+manifest
+		// under manifest.lock). Three separate unlocked reads here would race a
+		// healthy in-progress bindLeaseSession and false-fence a fresh owner.
+		const status = store.leaseStatus(leaseToken);
+		if (status === "current") {
 			return true;
 		}
-		// Token matches but the manifest epoch disagrees. Two very different cases,
-		// distinguished by the lease holder:
-		//  - holder === null: the reserve→bind window (bind is still coming) —
-		//    transient, return false WITHOUT latching so a later call succeeds.
-		//  - holder !== null: the lease was BOUND but the manifest still lags —
-		//    only reachable if bindLeaseSession crashed between writing the bound
-		//    lease and the manifest. That never self-heals for this process, so
-		//    latch + warn-exit (the router re-establishes a clean generation);
-		//    livelocking here was the reviewer's HIGH crash case.
-		const lease = store.readLease();
-		if (lease !== null && lease.holder !== null) {
-			fenced = true;
-			warnStaleOwner();
+		if (status === "pending") {
+			// reserve→bind window: not ready yet, but NOT stale — do not latch.
 			return false;
 		}
+		// stale: token rotated OR a crashed bind (bound lease, lagging manifest).
+		// Either way this generation is dead; latch + warn-exit so the router
+		// re-establishes a clean owner.
+		fenced = true;
+		warnStaleOwner();
 		return false;
 	};
 
