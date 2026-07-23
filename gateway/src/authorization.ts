@@ -25,7 +25,7 @@ export type MergeAuthorization = z.infer<typeof authorizationSchema>;
 const consumeRecordSchema = z.object({
 	id: z.string().min(1),
 	consumed_ts: z.number(),
-	result: z.enum(["merged", "rejected"]),
+	result: z.enum(["claimed", "merged", "rejected"]),
 	detail: z.string(),
 });
 const recordSchema = z.union([authorizationSchema, consumeRecordSchema]);
@@ -34,6 +34,9 @@ export interface AuthorizationState extends MergeAuthorization {
 	consumed_ts: number | null;
 	result: string | null;
 }
+
+/** Terminal (single-use spent) states; `claimed` also spends the authorization. */
+export type AuthorizationResult = "claimed" | "merged" | "rejected";
 
 const GATEWAY_DIR = path.join(DECK_HOME, "gateway");
 const AUTH_FILE = path.join(GATEWAY_DIR, "authorizations.jsonl");
@@ -112,24 +115,56 @@ function withConsumeLock<T>(fn: () => T): T {
 }
 
 /**
- * Atomic consume: validates single-use + head binding under the lock and
- * appends the consume record before returning. `expectedHeadSha` is the sha
- * ABOUT to be merged — if the PR head moved after minting, this rejects
- * (SPEC §10: a head Tim never approved cannot be merged).
+ * Atomic single-use CLAIM (SPEC §10): under the lock, verify unconsumed + head
+ * binding, then append a `claimed` record that spends the authorization. This
+ * is the single-use gate and MUST run before the irreversible merge PUT — two
+ * concurrent merges serialize here and the loser sees `already consumed`
+ * (adversarial-review: a post-PUT consume let both callers reach the merge).
+ * A crash after claim leaves the authorization spent → reauthorization needed,
+ * the deliberate safe failure.
  */
-export function consumeAuthorization(id: string, expectedHeadSha: string, result: "merged" | "rejected", detail: string): MergeAuthorization {
+export function claimAuthorization(id: string, expectedHeadSha: string): MergeAuthorization {
 	return withConsumeLock(() => {
 		const state = listAuthorizations().find(candidate => candidate.id === id);
 		if (state === undefined) throw new DeckError("E_STATE", "no such authorization", { id });
 		if (state.consumed_ts !== null) throw new DeckError("E_STATE", "authorization already consumed", { id });
 		if (state.head_sha !== expectedHeadSha) {
-			appendRecord({ id, consumed_ts: Date.now(), result: "rejected", detail: `head moved: authorized ${state.head_sha}, saw ${expectedHeadSha}` });
-			throw new DeckError("E_STATE", "authorization bound to a different head sha", {
+			throw new DeckError("E_STATE", "claim head sha does not match authorization (verify live head first)", {
 				authorized: state.head_sha,
 				actual: expectedHeadSha,
 			});
 		}
-		appendRecord({ id, consumed_ts: Date.now(), result, detail });
+		appendRecord({ id, consumed_ts: Date.now(), result: "claimed", detail: expectedHeadSha });
 		return authorizationSchema.parse({ ...state, consumed_ts: undefined, result: undefined });
+	});
+}
+
+/**
+ * Finalize a CLAIMED authorization after the merge PUT resolves. Appends the
+ * terminal result; does NOT re-check `consumed_ts` (the claim already spent it
+ * and this is the same caller closing its own claim). Idempotent-safe: a
+ * missing claim throws (finalize without claim is a bug).
+ */
+export function finalizeAuthorization(id: string, result: "merged" | "rejected", detail: string): void {
+	withConsumeLock(() => {
+		const state = listAuthorizations().find(candidate => candidate.id === id);
+		if (state === undefined) throw new DeckError("E_STATE", "no such authorization", { id });
+		if (state.result !== "claimed") throw new DeckError("E_STATE", "finalize requires a claimed authorization", { id, result: state.result });
+		appendRecord({ id, consumed_ts: state.consumed_ts ?? Date.now(), result, detail });
+	});
+}
+
+/**
+ * Burn an authorization on a REJECTED merge attempt (head moved, red check,
+ * upstream refusal). Unconditional single-use burn — no head-binding fight
+ * (adversarial-review: passing the moved sha to the consume guard was wrong).
+ * Idempotent: a already-consumed authorization is left as-is.
+ */
+export function rejectAuthorization(id: string, detail: string): void {
+	withConsumeLock(() => {
+		const state = listAuthorizations().find(candidate => candidate.id === id);
+		if (state === undefined) throw new DeckError("E_STATE", "no such authorization", { id });
+		if (state.consumed_ts !== null) return;
+		appendRecord({ id, consumed_ts: Date.now(), result: "rejected", detail });
 	});
 }

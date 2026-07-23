@@ -323,6 +323,40 @@ describe("pi supervision", () => {
 		await supervisor.shutdown();
 	});
 
+	test("D-A: a command appended for a live owner is delivered on the next tick without an explicit wake", async () => {
+		const store = createTestEffort("live-owner-deliver");
+		const promptLog = path.join(deckHome, `${store.effortId}.prompts`);
+		const supervisor = new OwnerSupervisor({
+			config: configWith({ spawnDeadlineMs: 500 }),
+			piCommand: [process.execPath, fakePi],
+			ownerModel: "fake",
+			lifecycleExtensionPath: fakePi,
+			queueLimit: 10,
+			registry: new ChildRegistry(),
+			spawnEnv: { FAKE_PI_PROMPT_LOG: promptLog },
+			killGraceMs: 50,
+		});
+		// Spawn a live owner (its initial wake command delivers).
+		await supervisor.wake(store.effortId, "initial wake");
+		// Simulate a TUI send: append a command with NO accompanying router wake.
+		store.inboxAppend({ from: "tim", cmd: { text: "later message" }, cmd_id: "cmd-live-deliver" });
+		expect(store.inboxState().find((command) => command.cmd_id === "cmd-live-deliver")?.delivered).toBeNull();
+		// A plain tick (the heartbeat cadence) must deliver it — no wake required.
+		await supervisor.tick();
+		expect(store.inboxState().find((command) => command.cmd_id === "cmd-live-deliver")?.delivered).not.toBeNull();
+		const prompts = fs.readFileSync(promptLog, "utf8");
+		expect(prompts).toContain("[deck:cmd cmd-live-deliver]");
+		// Leave the effort inert: ack all pending commands so the shared-DECK_HOME
+		// suite's later recover()/reconcile tests see no revivable residue.
+		const leaseToken = store.readLease()?.token;
+		if (leaseToken !== undefined) {
+			for (const command of store.inboxState()) {
+				if (command.acked === null) store.inboxAck(command.cmd_id, leaseToken);
+			}
+		}
+		await supervisor.shutdown();
+	});
+
 	test("agent_end after a current park event terminates and marks the owner parked", async () => {
 		const store = createTestEffort("owner-park");
 		const { promise: parked, resolve: resolveParked } = Promise.withResolvers<void>();

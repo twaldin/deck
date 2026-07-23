@@ -1,0 +1,50 @@
+{
+  "overall": "request_changes",
+  "source": "paths",
+  "base": null,
+  "intent": "Deck wake router (pi RPC owner supervision, fact pipeline, admission per SPEC section 5) and merge gateway (single-use authorizations, GitHub App tokens, fenced merge per SPEC section 10) in ~/dev/deck.",
+  "reviewers": [
+    {
+      "tag": "claude:claude-opus-4-6 (spawn/revive race conditions, process-group leaks and orphan reaping, admission bypass, capability-auth gaps on control sockets, merge gateway fencing order (authorization consume vs merge call vs receipt), token/PEM leak paths)",
+      "harness": "claude",
+      "model": "claude-opus-4-6",
+      "focus": "spawn/revive race conditions, process-group leaks and orphan reaping, admission bypass, capability-auth gaps on control sockets, merge gateway fencing order (authorization consume vs merge call vs receipt), token/PEM leak paths",
+      "verdict": "request_changes",
+      "failed": false,
+      "summary": "One high-severity spawn race in drainQueues (bypasses the spawnOwnerSerialized guard, enabling orphan process-group leaks and duplicate owners for the same effort) and three medium-severity merge-gateway issues: consumeAuthorization called with wrong expectedHeadSha on head-move rejection, confirmSideEffect lacks CAS retry leaving ghost 'attempted' records after successful merges, and the lease-epoch fence has a TOCTOU window between the check and the irreversible merge PUT.",
+      "findings": [
+        {
+          "severity": "high",
+          "file": "router/src/supervisor.ts",
+          "line": 618,
+          "issue": "drainQueues wake-queue path calls this.spawnOwner() directly instead of this.spawnOwnerSerialized(), bypassing the in-flight spawn guard (this.spawning map). A control-socket wake() or reviveDurableInbox() that arrives while drainQueues is mid-spawn for the same effort will not see the spawning entry, admission.tryReserve returns true (idempotent on existing key), and a second pi process is spawned for the same effort. The first owner becomes orphaned: it's running and registered in child-registry but overwritten in the owners map, so no code path ever terminates or cleans it up. This is the exact race spawnOwnerSerialized was built to prevent (see the Phase-2 D-A comment at line 145), but drainQueues wasn't migrated.",
+          "suggestion": "Replace lines 617-621 with: const owner = await this.spawnOwnerSerialized(store, wake.triggeringEvent); await this.deliverPendingInbox(owner); — spawnOwnerSerialized already sets this.owners and calls watchOwnerExit. Also remove the now-redundant admission.release in the catch block since spawnOwnerSerialized handles that internally."
+        },
+        {
+          "severity": "medium",
+          "file": "gateway/src/merge.ts",
+          "line": 73,
+          "issue": "consumeAuthorization is called with pr.head.sha (the new, unauthorized head) as expectedHeadSha, but consumeAuthorization's head-binding guard compares state.head_sha (the authorized sha) against this value. Since the caller already established they differ, the guard always fires: it appends a 'rejected' consume record (correct) but then throws its own DeckError before the caller's throw on line 74 executes. The authorization IS consumed, but via the head-mismatch guard's error path rather than the normal consume path. The caller's richer error message ('PR head moved since authorization; re-approve required') is lost. Compare with line 106 which correctly passes authorization.head_sha.",
+          "suggestion": "Change line 73 to: consumeAuthorization(authorization.id, authorization.head_sha, 'rejected', 'head moved before merge'); — matching the expectedHeadSha to the authorized sha lets the normal consume path run with the caller's result and detail values, and the subsequent throw on line 74 executes with the intended error message."
+        },
+        {
+          "severity": "medium",
+          "file": "gateway/src/merge.ts",
+          "line": 140,
+          "issue": "confirmSideEffect has no CAS retry loop. It runs after the irreversible merge PUT succeeded (line 99) and after the authorization was atomically consumed (line 110). If the effort manifest was concurrently mutated (e.g., by the router persisting a heartbeat), store.mutate throws E_CAS and the side-effect remains in 'attempted' state permanently. Unlike recordSideEffect (which fails before the irreversible call, allowing retry), this failure leaves an orphaned 'attempted' record with no recovery path — the authorization is consumed, so the merge can't be re-run.",
+          "suggestion": "Wrap confirmSideEffect's mutate in a CAS retry loop (same 5-attempt pattern used throughout the codebase, e.g., recordDispatch, appendFlaggedDecision). The operation is idempotent (confirming an already-confirmed effect is a no-op in the map), so retries are safe."
+        },
+        {
+          "severity": "medium",
+          "file": "gateway/src/merge.ts",
+          "line": 45,
+          "issue": "The lease-epoch fence (line 49) is checked once before any network calls, but the irreversible merge PUT happens many seconds later (after token mint, PR fetch, check-runs fetch). The epoch could rotate in that window (new owner spawned by the router). recordSideEffect on line 97 does CAS on manifest.revision, which would catch a concurrent manifest mutation, but has no retry loop — so a CAS failure from an unrelated heartbeat mutation also aborts the merge. Neither check re-validates the epoch immediately before the PUT. If the CAS passes but the epoch moved between recordSideEffect's read and the PUT, the merge proceeds under a stale epoch, violating the SPEC §4.5 fence intent.",
+          "suggestion": "Re-read the lease epoch inside recordSideEffect's mutate callback (the draft has the latest manifest) and reject if it no longer matches expectedLeaseEpoch. This closes the TOCTOU window between the initial check and the merge PUT. Also add a CAS retry loop to recordSideEffect so that benign concurrent mutations (heartbeats) don't spuriously abort the merge."
+        }
+      ],
+      "suppressedFindings": [],
+      "suppressedLowCount": 0,
+      "error": null
+    }
+  ]
+}

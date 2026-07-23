@@ -1,5 +1,4 @@
 import { beforeAll, describe, expect, test } from "bun:test";
-import { generateKeyPairSync, createVerify } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -9,19 +8,28 @@ process.env.DECK_HOME = TEMP_HOME;
 
 // Env pin must precede layout-reading imports (same pattern as itest).
 const core = await import("@deck/core");
-const { mintAuthorization, consumeAuthorization, listAuthorizations } = await import("../src/authorization");
-const { buildAppJwt, mintInstallationToken } = await import("../src/app-token");
+const { mintAuthorization, claimAuthorization, finalizeAuthorization, rejectAuthorization, listAuthorizations } = await import("../src/authorization");
 const { executeMerge } = await import("../src/merge");
+import type { KeychainCredentialSource } from "../src/credential";
 
-const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
-const PEM = privateKey.export({ type: "pkcs1", format: "pem" }).toString();
-const PEM_FILE = path.join(TEMP_HOME, "test-app.pem");
 const EFFORT_ID = "gw--merge-test";
 const HEAD = "abc1234def5678";
+const SOURCE: KeychainCredentialSource = { service: "deck-merge-app", account: "github" };
+
+/** Test releaser: never touches the real Keychain; records that it was asked. */
+function stubReleaser() {
+	const calls: KeychainCredentialSource[] = [];
+	return {
+		calls,
+		release: async (source: KeychainCredentialSource) => {
+			calls.push(source);
+			return "personal-write-token";
+		},
+	};
+}
 
 beforeAll(() => {
 	core.ensureStateDirs();
-	fs.writeFileSync(PEM_FILE, PEM, { mode: 0o600 });
 	core.createEffort({
 		effort_id: EFFORT_ID,
 		project: "gw",
@@ -38,9 +46,6 @@ function githubStub(options: { headSha?: string; checkConclusion?: string; merge
 		async fetch(request) {
 			const url = new URL(request.url);
 			seen.push(`${request.method} ${url.pathname}`);
-			if (url.pathname.includes("/access_tokens")) {
-				return Response.json({ token: "ghs_stub_token", expires_at: new Date(Date.now() + 3_600_000).toISOString() }, { status: 201 });
-			}
 			if (url.pathname.includes("/pulls/") && request.method === "GET") {
 				return Response.json({ head: { sha: options.headSha ?? HEAD } });
 			}
@@ -67,72 +72,47 @@ function leaseEpoch(): number {
 	return core.openEffort(EFFORT_ID).readManifest().session?.lease_epoch ?? 0;
 }
 
-describe("app jwt", () => {
-	test("RS256 JWT verifies against the public key with backdated iat", () => {
-		const now = 1_800_000_000;
-		const jwt = buildAppJwt("12345", PEM, now);
-		const [header, payload, signature] = jwt.split(".") as [string, string, string];
-		const verifier = createVerify("RSA-SHA256");
-		verifier.update(`${header}.${payload}`);
-		expect(verifier.verify(publicKey, Buffer.from(signature, "base64url"))).toBe(true);
-		const claims = JSON.parse(Buffer.from(payload, "base64url").toString());
-		expect(claims).toEqual({ iat: now - 60, exp: now + 540, iss: "12345" });
-	});
-
-	test("mint hits the installations endpoint with the JWT and never logs bytes", async () => {
-		const stub = githubStub();
-		try {
-			const token = await mintInstallationToken({
-				appId: "1",
-				installationId: "99",
-				pem: { kind: "file", path: PEM_FILE },
-				apiBase: stub.base,
-			});
-			expect(token.token).toBe("ghs_stub_token");
-			expect(stub.seen).toContain("POST /app/installations/99/access_tokens");
-		} finally {
-			stub.server.stop(true);
-		}
-	});
-});
-
-describe("merge gateway scenarios (SPEC 10)", () => {
-	test("happy path: fence, checks, merge, consume, receipt attempted->confirmed", async () => {
+describe("merge gateway scenarios (SPEC 10, I12 personal-cred)", () => {
+	test("happy path: fence, checks, personal-cred release, merge, consume, receipt attempted->confirmed", async () => {
 		const auth = freshAuthorization();
 		const stub = githubStub();
+		const releaser = stubReleaser();
 		try {
 			const receipt = await executeMerge({
 				authorizationId: auth.id,
 				effortId: EFFORT_ID,
 				expectedLeaseEpoch: leaseEpoch(),
-				tokenRequest: { appId: "1", installationId: "99", pem: { kind: "file", path: PEM_FILE } },
+				credentialSource: SOURCE,
+				releaseCredential: releaser.release,
 				apiBase: stub.base,
 			});
 			expect(receipt.mergeSha).toBe("merge-sha-1");
+			// The personal write credential was released exactly once, from the Keychain source.
+			expect(releaser.calls).toEqual([SOURCE]);
 			const manifest = core.openEffort(EFFORT_ID).readManifest();
-			const effect = manifest.side_effects.find(candidate => candidate.id === receipt.sideEffectId);
-			expect(effect?.status).toBe("confirmed");
+			expect(manifest.side_effects.find(candidate => candidate.id === receipt.sideEffectId)?.status).toBe("confirmed");
 			expect(listAuthorizations().find(candidate => candidate.id === auth.id)?.result).toBe("merged");
-			// sha binding actually sent to the merge API
 			expect(stub.seen).toContain("PUT /repos/acme/widgets/pulls/7/merge");
 		} finally {
 			stub.server.stop(true);
 		}
 	});
 
-	test("head moved: rejected before merge, authorization burned", async () => {
+	test("head moved: burned via rejectAuthorization, no merge call", async () => {
 		const auth = freshAuthorization();
 		const stub = githubStub({ headSha: "moved9999999" });
+		const releaser = stubReleaser();
 		try {
 			await expect(
 				executeMerge({
 					authorizationId: auth.id,
 					effortId: EFFORT_ID,
 					expectedLeaseEpoch: leaseEpoch(),
-					tokenRequest: { appId: "1", installationId: "99", pem: { kind: "file", path: PEM_FILE } },
+					credentialSource: SOURCE,
+					releaseCredential: releaser.release,
 					apiBase: stub.base,
 				}),
-			).rejects.toThrow(/head moved|different head/);
+			).rejects.toThrow(/head moved/);
 			expect(stub.seen.some(entry => entry.endsWith("/merge"))).toBe(false);
 			expect(listAuthorizations().find(candidate => candidate.id === auth.id)?.result).toBe("rejected");
 		} finally {
@@ -140,45 +120,123 @@ describe("merge gateway scenarios (SPEC 10)", () => {
 		}
 	});
 
-	test("red check: rejected, no merge call", async () => {
+	test("red check: burned, no merge call", async () => {
 		const auth = freshAuthorization();
 		const stub = githubStub({ checkConclusion: "failure" });
+		const releaser = stubReleaser();
 		try {
 			await expect(
 				executeMerge({
 					authorizationId: auth.id,
 					effortId: EFFORT_ID,
 					expectedLeaseEpoch: leaseEpoch(),
-					tokenRequest: { appId: "1", installationId: "99", pem: { kind: "file", path: PEM_FILE } },
+					credentialSource: SOURCE,
+					releaseCredential: releaser.release,
 					apiBase: stub.base,
 				}),
 			).rejects.toThrow(/required check not green/);
 			expect(stub.seen.some(entry => entry.endsWith("/merge"))).toBe(false);
+			expect(listAuthorizations().find(candidate => candidate.id === auth.id)?.result).toBe("rejected");
 		} finally {
 			stub.server.stop(true);
 		}
 	});
 
-	test("double consume rejected", () => {
+	test("double claim rejected (single-use gate)", () => {
 		const auth = freshAuthorization();
-		consumeAuthorization(auth.id, HEAD, "merged", "first");
-		expect(() => consumeAuthorization(auth.id, HEAD, "merged", "second")).toThrow(/already consumed/);
+		claimAuthorization(auth.id, HEAD);
+		expect(() => claimAuthorization(auth.id, HEAD)).toThrow(/already consumed/);
+		// Finalizing the claim we hold is allowed and records the terminal result.
+		finalizeAuthorization(auth.id, "merged", "merge-sha-x");
+		expect(listAuthorizations().find(candidate => candidate.id === auth.id)?.result).toBe("merged");
 	});
 
-	test("stale lease epoch fenced before any GitHub call", async () => {
+	test("rejectAuthorization is idempotent and blocks a later claim", () => {
+		const auth = freshAuthorization();
+		rejectAuthorization(auth.id, "manual reject");
+		rejectAuthorization(auth.id, "again"); // idempotent, no throw
+		expect(() => claimAuthorization(auth.id, HEAD)).toThrow(/already consumed/);
+	});
+
+	test("concurrent merges of one authorization: exactly one PUT, one merged, one rejected", async () => {
 		const auth = freshAuthorization();
 		const stub = githubStub();
+		const releaser = stubReleaser();
+		try {
+			const attempt = () =>
+				executeMerge({
+					authorizationId: auth.id,
+					effortId: EFFORT_ID,
+					expectedLeaseEpoch: leaseEpoch(),
+					credentialSource: SOURCE,
+					releaseCredential: releaser.release,
+					apiBase: stub.base,
+				});
+			const results = await Promise.allSettled([attempt(), attempt()]);
+			const fulfilled = results.filter(result => result.status === "fulfilled");
+			const rejected = results.filter(result => result.status === "rejected");
+			expect(fulfilled.length).toBe(1);
+			expect(rejected.length).toBe(1);
+			// The single-use gate means at most one merge PUT reached GitHub.
+			expect(stub.seen.filter(entry => entry.endsWith("/merge")).length).toBe(1);
+			expect(listAuthorizations().find(candidate => candidate.id === auth.id)?.result).toBe("merged");
+		} finally {
+			stub.server.stop(true);
+		}
+	});
+
+	test("stale lease epoch fenced before any GitHub call OR credential release", async () => {
+		const auth = freshAuthorization();
+		const stub = githubStub();
+		const releaser = stubReleaser();
 		try {
 			await expect(
 				executeMerge({
 					authorizationId: auth.id,
 					effortId: EFFORT_ID,
 					expectedLeaseEpoch: leaseEpoch() + 42,
-					tokenRequest: { appId: "1", installationId: "99", pem: { kind: "file", path: PEM_FILE } },
+					credentialSource: SOURCE,
+					releaseCredential: releaser.release,
 					apiBase: stub.base,
 				}),
 			).rejects.toThrow(/lease epoch moved/);
 			expect(stub.seen.length).toBe(0);
+			expect(releaser.calls.length).toBe(0); // credential never released for a fenced merge
+		} finally {
+			stub.server.stop(true);
+		}
+	});
+
+	test("epoch rotates mid-preflight (concurrent router revive): fenced, no PUT, authorization burned", async () => {
+		const auth = freshAuthorization();
+		const stub = githubStub();
+		const startEpoch = leaseEpoch();
+		// The releaser simulates time passing during credential release, and a
+		// concurrent router revive bumping the owner lease epoch in that window.
+		const releaser: KeychainCredentialSource[] = [];
+		try {
+			await expect(
+				executeMerge({
+					authorizationId: auth.id,
+					effortId: EFFORT_ID,
+					expectedLeaseEpoch: startEpoch,
+					credentialSource: SOURCE,
+					releaseCredential: async source => {
+						releaser.push(source);
+						core.openEffort(EFFORT_ID).bumpLease(core.openEffort(EFFORT_ID).readManifest().revision, {
+							machine: "router",
+							session_id: "revived-owner",
+							last_heartbeat: null,
+						});
+						return "personal-write-token";
+					},
+					apiBase: stub.base,
+				}),
+			).rejects.toThrow(/lease epoch moved/);
+			// Pre-flight passed (epoch matched at entry); the fence caught the bump
+			// before the PUT. No merge call reached GitHub.
+			expect(stub.seen.some(entry => entry.endsWith("/merge"))).toBe(false);
+			expect(leaseEpoch()).toBeGreaterThan(startEpoch);
 		} finally {
 			stub.server.stop(true);
 		}

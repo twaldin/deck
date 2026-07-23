@@ -1,17 +1,19 @@
 #!/usr/bin/env bun
 /**
- * deck-merge CLI (SPEC §10).
+ * deck-merge CLI (SPEC §10, I12 personal-credential model).
  *   deck-merge mint --repo o/r --pr N --head-sha SHA --base main --checks a,b
  *   deck-merge run --authorization ID --effort EFFORT --lease-epoch N \
- *     --app-id ID --installation-id ID [--pem-file PATH | --keychain svc:acct]
- * v1 note (judgment call, recorded): minting is local CLI; the TUI-signed
- * authorization path (Tim's Keychain-held signing key) lands with the board
- * merge action in Phase 3 TUI work.
+ *     --keychain <service>:<account>
+ * The Keychain item holds Tim's personal Contents:write credential; releasing
+ * it prompts his biometric per merge. No GitHub App, no PEM, no installation
+ * id — Deck is invisible to lindy (I12). v1 note (judgment call, recorded):
+ * minting is local CLI; the TUI-signed authorization path lands with the board
+ * merge action in later TUI work.
  */
 import { DeckError } from "@deck/core";
 import { mintAuthorization } from "./authorization";
 import { executeMerge } from "./merge";
-import type { PemSource } from "./app-token";
+import type { KeychainCredentialSource } from "./credential";
 
 function flag(name: string): string | undefined {
 	const index = process.argv.indexOf(`--${name}`);
@@ -39,22 +41,18 @@ async function run(): Promise<number> {
 		return 0;
 	}
 	if (command === "run") {
-		const pemFile = flag("pem-file");
 		const keychain = flag("keychain");
-		let pem: PemSource;
-		if (pemFile !== undefined) pem = { kind: "file", path: pemFile };
-		else if (keychain !== undefined) {
-			const [service, account] = keychain.split(":");
-			if (service === undefined || account === undefined || account.length === 0) {
-				throw new DeckError("E_ARG", "--keychain expects service:account");
-			}
-			pem = { kind: "keychain", service, account };
-		} else throw new DeckError("E_ARG", "one of --pem-file or --keychain is required");
+		if (keychain === undefined) throw new DeckError("E_ARG", "--keychain <service>:<account> is required");
+		const [service, account] = keychain.split(":");
+		if (service === undefined || account === undefined || account.length === 0) {
+			throw new DeckError("E_ARG", "--keychain expects service:account");
+		}
+		const credentialSource: KeychainCredentialSource = { service, account };
 		const receipt = await executeMerge({
 			authorizationId: requireFlag("authorization"),
 			effortId: requireFlag("effort"),
 			expectedLeaseEpoch: Number(requireFlag("lease-epoch")),
-			tokenRequest: { appId: requireFlag("app-id"), installationId: requireFlag("installation-id"), pem },
+			credentialSource,
 		});
 		console.log(`merged ${receipt.mergeSha}; receipt ${receipt.sideEffectId}`);
 		return 0;

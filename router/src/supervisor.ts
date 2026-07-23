@@ -608,6 +608,30 @@ export class OwnerSupervisor {
 			return;
 		}
 		for (const [effortId, wake] of [...this.wakeQueue]) {
+			// A live owner or an in-flight spawn (from a concurrent wake()) already
+			// exists: dequeue WITHOUT reserving admission (joining a foreign spawn
+			// would leak the slot), but still DELIVER the pending inbox — dropping
+			// it here is a D-A silent-drop (adversarial-review finding).
+			const liveOwner = this.owners.get(effortId);
+			if (liveOwner !== undefined) {
+				this.wakeQueue.delete(effortId);
+				try {
+					await this.deliverPendingInbox(liveOwner);
+				} catch {
+					// owner is wedged; its exit handler will revive + redeliver from the durable inbox.
+				}
+				continue;
+			}
+			const inFlight = this.spawning.get(effortId);
+			if (inFlight !== undefined) {
+				this.wakeQueue.delete(effortId);
+				try {
+					await this.deliverPendingInbox(await inFlight);
+				} catch {
+					// spawn failed (already recorded) or delivery raced an exit; revive path recovers it.
+				}
+				continue;
+			}
 			const decision = this.admission.tryReserve(`owner:${effortId}`, "owner", effortId);
 			if (!decision.allowed) {
 				break;
@@ -615,15 +639,13 @@ export class OwnerSupervisor {
 			this.wakeQueue.delete(effortId);
 			try {
 				const store = openEffort(effortId);
-				const owner = await this.spawnOwner(store, wake.triggeringEvent);
-				this.owners.set(effortId, owner);
-				this.watchOwnerExit(owner);
+				// Serialized spawn: shares the per-effort in-flight guard with wake()
+				// and reviveDurableInbox() so a concurrent tick can't double-spawn
+				// this effort (adversarial-review HIGH: this path bypassed the guard).
+				const owner = await this.spawnOwnerSerialized(store, wake.triggeringEvent);
 				await this.deliverPendingInbox(owner);
-			} catch (error) {
-				this.admission.release(`owner:${effortId}`);
-				appendLifecycleEvent(effortId, "lifecycle.owner_spawn_degraded", {
-					error: error instanceof Error ? error.message : String(error),
-				});
+			} catch {
+				// spawnOwnerSerialized already released admission + recorded the degraded event.
 			}
 		}
 		await this.reviveDurableInbox();

@@ -1,0 +1,43 @@
+{
+  "overall": "request_changes",
+  "source": "paths",
+  "base": null,
+  "intent": "Deck effort store (CAS+lease manifest writer, O_APPEND tail, append-only inbox with receipt fold, seed builder) and the pi lifecycle-tools extension that is the only agent mutation path. SPEC sections 3, 4.1-4.6 of ~/dev/deck/SPEC.md are the contract.",
+  "reviewers": [
+    {
+      "tag": "claude:claude-opus-4-6 (crash-window correctness of the file store (fsync/rename/append ordering, lock discipline, partial-line recovery), lease fencing completeness, D-H cap enforcement gaps, silent message-drop paths in the inbox fold)",
+      "harness": "claude",
+      "model": "claude-opus-4-6",
+      "focus": "crash-window correctness of the file store (fsync/rename/append ordering, lock discipline, partial-line recovery), lease fencing completeness, D-H cap enforcement gaps, silent message-drop paths in the inbox fold",
+      "verdict": "request_changes",
+      "failed": false,
+      "summary": "The store's crash-window ordering, fsync discipline, lock protocol, JSONL repair, D-H cap enforcement, and inbox fold correctness are solid. The critical finding is a lease-validation gap between the extension's token-only fast-fail (verifyLease) and the store's token+epoch fence (assertLeaseMatches): after a bindLeaseSession crash between the lease and manifest writes, the owner enters a silent livelock of E_LEASE failures with no fenced flag set and no stale-owner warning surfaced. Two medium findings: turn_end acks inbox commands on the first successful tool-call turn rather than on the model's final stop, which can lose router action commands on crash; and inboxAppend's dedup is a no-op when cmd_id is auto-generated, creating a latent duplicate-command foot-gun.",
+      "findings": [
+        {
+          "severity": "high",
+          "file": "extensions/src/deck-lifecycle.ts",
+          "line": 297,
+          "issue": "leaseIsCurrent() uses verifyLease (token-only check at effort-store.ts:314) but every store mutation uses assertLeaseMatches (token + manifest.session.lease_epoch == lease.epoch at effort-store.ts:441). After a bindLeaseSession crash between the lease write and the manifest write, the owner process has a valid token (verifyLease passes) but the manifest epoch doesn't match the lease epoch (assertLeaseMatches rejects). Every lifecycle tool call and turn_end handler passes leaseIsCurrent() then throws E_LEASE from the store — but fenced is never set and warnStaleOwner is never called, because the only path that sets fenced is verifyLease returning false. The owner enters a livelock of E_LEASE exceptions, wasting compute and flooding logs, without surfacing the stale-owner warning that would tell the model to exit. The same gap exists on reserveLease crash between lease and manifest writes: the spawned process has the reserved token, verifyLease passes, but the manifest session epoch is stale.",
+          "suggestion": "Catch E_LEASE from any store call in the turn_end handler and in every tool execute(), and set fenced = true + call warnStaleOwner(). Alternatively, make verifyLease read the manifest and check epoch parity, or add a verifyLeaseFull(token) method that does both checks and use it in leaseIsCurrent()."
+        },
+        {
+          "severity": "medium",
+          "file": "extensions/src/deck-lifecycle.ts",
+          "line": 360,
+          "issue": "turn_end acks inbox commands whenever stopReason === 'toolUse' && !toolCallFailed, regardless of whether the successful tool calls relate to the inbox command. The pendingToolFailed flag only gates acking on stopReason === 'stop', not on subsequent successful tool-call turns. Concrete scenario: model receives [deck:cmd foo], makes an unrelated file-read tool call that succeeds → turnApplied = true → command acked. Model crashes next turn before acting on the command's intent. On respawn the command is not redelivered (already acked), violating the D-A 'ack on apply' contract. The practical blast radius is limited because the manifest captures durable state, but router-sourced action commands (cancel, re-prioritize) that require the owner to call a lifecycle tool can be silently lost.",
+          "suggestion": "Defer acking until stopReason === 'stop' with no preceding tool failures, so commands are acked only when the model's full multi-turn processing chain completes. Or track which tool calls correspond to command-driven work and ack per-command rather than per-turn."
+        },
+        {
+          "severity": "medium",
+          "file": "core/src/store/effort-store.ts",
+          "line": 325,
+          "issue": "inboxAppend dedup check compares parsedInput.cmd_id against committed command IDs, but cmd_id is optional in inboxCommandInputSchema. When omitted, parsedInput.cmd_id is undefined, so the find (command.cmd_id === undefined) never matches any stored command (all cmd_ids are non-empty strings). The ULID is generated AFTER the dedup check, so a retry with no caller-supplied cmd_id generates a different ULID and creates a duplicate inbox command. All current internal callers provide deterministic cmd_ids (answerCard uses 'card-answer:{cardId}'), so this is latent, but the optional schema signals to future callers and external integrations that omitting cmd_id is safe when it silently breaks retry idempotency.",
+          "suggestion": "Either make cmd_id required in inboxCommandInputSchema (forcing callers to supply deterministic keys), or generate the ULID before the dedup check and pass it through so the same ID is used on both the check and the write."
+        }
+      ],
+      "suppressedFindings": [],
+      "suppressedLowCount": 0,
+      "error": null
+    }
+  ]
+}
