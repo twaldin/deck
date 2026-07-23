@@ -1,6 +1,16 @@
-# Deck SPEC v0.2 — technical contracts & implementation details
+# Deck SPEC v0.3 — technical contracts & implementation details
 
 *Companion to PLAN.md (goals/invariants/phases). This document owns schemas, APIs, process models, acceptance criteria. RFC draft.*
+
+**v0.3 changelog** — post-mortem-driven (POSTMORTEM.md, 19-day firstmate operating record, deltas D-A…D-H Tim-accepted via Lavish 2026-07-22):
+- D-A: §4.5 inbox receipt state Tim-visible in TUI (§14) + Phase-2 exit test: no Tim→owner message silently droppable.
+- D-B: `max_active_sessions_global` (§5.5.3) + global swap threshold as spawn-admission input (§5.5.5).
+- D-C: whole-system kill -9 + reboot recovery drill added to §5.5.6, promoted to Phase-2 exit gate.
+- D-D: `dispatch` succeeds only on verified liveness (session + first heartbeat) (§4.4).
+- D-E: merged ≠ done — `done` requires deploy evidence + fallout verdict (§3).
+- D-F: Done→backward ticket transitions / PR-link changes on Done tickets detected router-side ⇒ decision card (§5.3); CLI refusal is secondary (external automation bypasses CLIs).
+- D-G: §15 Q1 resolved — tight rehydration budget (§4.6).
+- D-H: three known doctrine rules (reviewer-deference, drafts-only comms, structural conciseness caps) ship in Phase-2 role blocks (§9).
 
 **v0.2 changelog** — review-driven (codex/gpt-5.6-sol xhigh adversarial pass, 2026-07-22):
 - Honest security model: same-UID file perms are NOT a boundary (§14 rewritten); broker proxies LLM calls (no raw model tokens); tool CLIs get scoped short-lived capabilities; agent-authored workflows = trusted code, documented.
@@ -83,6 +93,7 @@ Ephemeral: pi sessions (owners/workers), poll subprocesses, Smithers gateway (on
 - **Overlays never substitute for stage.**
 - **Atomic write**: under `flock(manifest.lock)` → write `manifest.json.tmp` → fsync → rename. Readers lock-free.
 - **Only deck extension + router write.** Agents mutate only via lifecycle tools.
+- **Stage semantics — merged ≠ done (post-mortem D-E, Tim-sharpened):** `landed` = merge receipt exists. `done` additionally requires ≥1 deploy-scoped evidence link AND a fallout-watch verdict event in the tail. Terminal CAS into `done` without both is rejected; the reconcile job raises a decision card on any evidence-less done attempt.
 
 ### 3.1 Charter — `charter.json` (immutable-ish)
 Set at effort creation; mutated only by explicit Tim-approved charter-change events (appended, never overwritten): `{ goal, acceptance_criteria[], constraints[], created, charter_changes:[…] }`. The seed builder (§4.6) always includes it — root intent survives any crash.
@@ -107,16 +118,18 @@ Router keeps per-source cursor + ring buffer of recent `(source, external_id, ve
 
 ### 4.4 Lifecycle tools + card schema
 `report_progress`, `ask_tim`, `dispatch`, `park` (table in v0.1 unchanged). Card = `{ kind, question, recommendation, options[] }` (all required, options non-empty). **New:** `ask_tim` with `kind: cancellation` carries `cancel_in_flight: <dispatch_id>`; answering it triggers the fencing cancel (§4.5.3).
+**`dispatch` returns verified liveness (D-D):** the call succeeds only after session-exists + first heartbeat; a handle with no heartbeat within the spawn deadline fails the dispatch, and reconcile flags any recorded dispatch whose session never heartbeat — a "running" status line is never proof a lane exists (firstmate lost lanes silently, twice in one session).
+**Conciseness caps (D-H — the enforcement §9 references):** schema-level max lengths, validated by the extension before any write: `ask_tim.question ≤ 600` chars, `recommendation ≤ 400`, each option label ≤ 120, `options[] ≤ 5`; `report_progress.status ≤ 500` chars; `park.digest ≤ 2000` (all config, chosen at roughly Tim's "one paragraph or bullets" bar). **Rejection, not truncation:** an over-limit call fails with `E_TOO_LONG` naming the field and limit — the agent must compress and retry (truncation would silently hide information; rejection forces the summary Tim actually asked for). Long-form material (reports, evidence, diffs) goes into files/evidence links, never into card or status text.
 
 ### 4.5 Owner fencing (one owner, ever)
 - **Lease**: `session.lease_epoch` (monot int) + a random lease token in `lease`. Spawn/revive writes the new epoch and token; router kills or fences any process whose token is stale.
 - **Mutation fence**: every lifecycle tool call carries the owner's lease token; CAS check = `revision` AND `lease_epoch`. A stale owner's write is rejected (it must re-spawn).
 - **Side-effect fence** (§10): every irreversible op (push/merge/deploy/migration) checks `lease_epoch` immediately before executing AND records a `lifecycle.side_effect` receipt after.
 - **4.5.3 Cancellation**: a `cancellation` card answered, or router detecting a dead lease, issues a cancel to the dispatch's process group (§5.5.2); the dispatch id is marked `cancelled`; in-flight side-effects are fenced by epoch.
-- **Command inbox** (durable, ack'd): router→owner and Tim→owner commands go through `efforts/<id>/inbox.jsonl` with `{cmd_id, cmd, delivered, acked}`; owner acks on apply. Survives owner crash and dedupes redelivery.
+- **Command inbox** (durable, ack'd): router→owner and Tim→owner commands go through `efforts/<id>/inbox.jsonl` with `{cmd_id, cmd, delivered, acked}`; owner acks on apply. Survives owner crash and dedupes redelivery. **Receipt state is Tim-visible (D-A):** the TUI renders `delivered`/`acked` per message (§14). **Phase-2 exit test:** end-to-end assertion that no Tim→owner message can be silently dropped (TUI send → inbox append → owner ack → tail event), including across owner crash/revive — the firstmate resend pattern (~28% of captain messages) must be structurally impossible.
 
 ### 4.6 Rehydration seed builder
-Token-budgeted (not event-counted). Always included first, in order: charter (§3.1), open cards, active dispatches + their latest result, the triggering event, digest (if present), last `tim.decision`s. Remaining budget fills with recent tail (newest backward). Full-tail fallback if budget allows. Oversized single events are summarized (not dumped) — one event can't overflow the window.
+Token-budgeted (not event-counted). Always included first, in order: charter (§3.1), open cards, active dispatches + their latest result, the triggering event, digest (if present), last `tim.decision`s. Remaining budget fills with recent tail (newest backward). Full-tail fallback if budget allows. Oversized single events are summarized (not dumped) — one event can't overflow the window. **Budget posture (resolves §15 Q1 — D-G): tight.** Park-digest + bounded tail window are the norm; exact K per owner model tuned in Phase 2. Anti-patterns explicitly rejected: firstmate-style full boot dumps (its 578-line/143KB session-start digest, 16s wall) and transcript replay at session boundaries.
 
 ## 5. Wake router
 ### 5.1 Loop
@@ -124,16 +137,16 @@ Single bun process; 30s scheduler tick; per-target `{next_poll_at, interval, lev
 ### 5.2 Sources
 `gh` v1; linear/slack adapters land with their CLIs (Phase 3). Adapter contract `{ pollCmd(cursor) → {facts[], cursor'} }`, executed by router, never self-scheduling.
 ### 5.3 Routing & wake
-Fact → effort via watch index (rebuilt from manifests on boot). Each fact type classified `wake`/`record` (config, not code).
+Fact → effort via watch index (rebuilt from manifests on boot). Each fact type classified `wake`/`record` (config, not code). **External ticket-state regressions (D-F, Tim-sharpened):** facts showing a Done→backward ticket transition or a PR-link change on a Done ticket are classified `wake` + flagged ⇒ decision card ("revert or accept?"). Observed causes — Linear's own PR-mirroring automation, wrong/related-PR auto-linking (a link appearing in the ticket is enough), teammate agents acting on links in comments/descriptions — NONE pass through deck CLIs, so detection must be router-side; the linear CLI's refusal of agent-initiated Done→backward writes and PR-attach-to-Done (PLAN §5.5) is only the secondary guard.
 ### 5.4 Spawn/revive protocol (lease-aware)
 alive (rpc ping with lease token) → inject via inbox. Else resume `session_id` → new epoch → inject. Else fresh rpc with seed (§4.6) → new epoch. **Concurrent wake race**: the CAS on `lease_epoch` means only the first writer wins a spawn; a second router tick/TUI attach sees the bumped epoch and routes to the live session instead of spawning again.
 ### 5.5 Resource & OOM bounds (the motivating failure, finally bounded)
 - **5.5.1 Subprocess discipline**: every poll has a deadline (default 45s) and an output cap (default 512KB); exceeding either cancels the process group (§5.5.2) and emits a degraded-intake event. No poll can hang the router.
 - **5.5.2 Process-group cancellation**: router spawns polls/owners/workflows in their own process group; cancel = `kill(-pgid, SIGTERM)` then SIGKILL after grace; reaps children so none orphan (the firstmate reaper lesson).
-- **5.5.3 Admission limits (global + per-effort)**: `max_concurrent_polls=4`, `max_dispatches_per_effort=8`, `max_worktrees_global=24`, `max_browser_tabs_global=16`, `max_workflow_nodes_per_run=200` (config). Over-limit ⇒ queue with backpressure + coalescing.
+- **5.5.3 Admission limits (global + per-effort)**: `max_concurrent_polls=4`, `max_dispatches_per_effort=8`, **`max_active_sessions_global=12` (D-B — per-effort caps alone leave total sessions unbounded: the "over 30 agents nuking my memory" scenario)**, `max_worktrees_global=24`, `max_browser_tabs_global=16`, `max_workflow_nodes_per_run=200` (config). Over-limit ⇒ queue with backpressure + coalescing.
 - **5.5.4 Queue coalescing**: multiple facts for one effort within a 5s window coalesce into one wake with a folded summary (no 10× wake for 10 CI events).
-- **5.5.5 Memory budgets + degraded alerts**: per-process RSS cap with graceful shed; broker/router report degraded state into a system effort visible on the board.
-- **5.5.6 Acceptance tests**: (a) kill -9 the router mid-poll ⇒ on restart, no orphan polls, no lost facts (idempotency), no duplicate owners (lease CAS); (b) simulate swap pressure ⇒ graceful shed, not OOM; (c) 4 deliberately-hung CLIs ⇒ router stays responsive, degraded-intake card raised.
+- **5.5.5 Memory budgets + degraded alerts**: per-process RSS cap with graceful shed; broker/router report degraded state into a system effort visible on the board. **Global memory admission (D-B):** machine swap usage is an admission *input*, not just a shed trigger — above a configured swap threshold (default 18GB; firstmate's observed OOM band was 26–29GB with alarms at ~22GB) new spawns are deferred and idle owners parked first.
+- **5.5.6 Acceptance tests**: (a) kill -9 the router mid-poll ⇒ on restart, no orphan polls, no lost facts (idempotency), no duplicate owners (lease CAS); (b) simulate swap pressure ⇒ graceful shed, not OOM; (c) 4 deliberately-hung CLIs ⇒ router stays responsive, degraded-intake card raised; **(d) whole-system drill (D-C — Phase-2 exit gate): kill -9 router + broker + every live owner, then a full machine reboot ⇒ board renders, manifests/tails intact, owners revive on next wake or drilldown, zero manual steps.** "Everything comes back by itself" is a tested gate, not a goal (firstmate suffered ≥6 whole-fleet deaths from host events, never mitigated).
 
 ## 6. Credential broker
 ### 6.1 Process & surfaces
@@ -166,7 +179,7 @@ Catalog `catalog/mcpx.toml`; `mcpx <server> list-tools` / `call <tool> --args`; 
 - **Day-one**: lindy `lsid` onboarded to vault (trust=high, mediated-only); robotim chrome-debug retired after verify.
 
 ## 9. Skills overlay & prompts (unchanged structure)
-Local visibility manifest (`auto`/`name-only`/`user-only`/`off`; unknown⇒`name-only`) ∩ scope; content-hash auto-dedup; per-skill source policy (worktree-pinned vs main-fetched); composed prompts (base ≤50 lines + role block ≤40 + brief); owner model = best available (PLAN D5); doctrine-mining pass seeds role blocks.
+Local visibility manifest (`auto`/`name-only`/`user-only`/`off`; unknown⇒`name-only`) ∩ scope; content-hash auto-dedup; per-skill source policy (worktree-pinned vs main-fetched); composed prompts (base ≤50 lines + role block ≤40 + brief); owner model = best available (PLAN D5); doctrine-mining pass seeds role blocks. **Role-block doctrine ships Phase 2 (D-H):** three rules are already known and don't wait for the mining pass — reviewer-deference (implement-or-escalate, never argue in-thread), drafts-only external comms, and the conciseness contract enforced structurally via the §4.4 schema caps (`E_TOO_LONG` rejection — memory-doc rules demonstrably decayed in firstmate within days). Initial owner/worker role blocks + prompt composition are Phase-2 substrate (PLAN §7.2); the mining pass and reviewer role block stay Phase 3.
 
 ## 10. Merge & side-effect gateway (new)
 I7 mechanized — the merge stamp is no longer prose.
@@ -199,10 +212,10 @@ Machine-qualified ids; sockets v1 → tailnet TCP + token auth later; effort syn
 - **Note on unattended merges**: Keychain-release-per-merge means overnight unattended merges are impossible by construction. This is *consistent* with I7 (Tim gates merges); if an overnight "land while Tim sleeps" path is ever wanted, it requires an explicit Tim-pre-authorized, head-SHA-bound, time-boxed capability — a separate, deliberately-scoped feature, not the default.
 
 ## 14. Deck TUI (view-level; unchanged)
-Board / effort / accounts / domains / skills views — pure renders of files+sockets. Drilldown attaches via router (which owns owner process groups, §15 Q3).
+Board / effort / accounts / domains / skills views — pure renders of files+sockets. Drilldown attaches via router (which owns owner process groups, §15 Q3). Effort view renders per-message inbox receipt state (`delivered`/`acked`, §4.5 — D-A).
 
 ## 15. Open technical questions
-1. Rehydration: token-budget (chosen) vs count — confirm K budget per owner model.
+1. ~~Rehydration: token-budget vs count~~ **RESOLVED (D-G)**: token-budget, tight posture (§4.6); exact K per owner model tuned in Phase 2.
 2. Broker HTTP: single OpenAI-compat vs + native Anthropic endpoint (caching/thinking favor native) — leaning both.
 3. Router owns all owner processes as children (so it can inject via stdin + fence via pgid) vs per-session socket shim — leaning router-owns.
 4. `watching` fallout monitors: per-effort vs per-deploy (leaning per-deploy, fans back to touched efforts).
