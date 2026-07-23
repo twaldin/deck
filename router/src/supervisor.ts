@@ -109,6 +109,7 @@ export class OwnerSupervisor {
 	private readonly owners = new Map<string, ManagedOwner>();
 	private readonly dispatches = new Map<string, ManagedDispatch>();
 	private readonly wakeQueue = new Map<string, QueuedWake>();
+	private readonly spawning = new Map<string, Promise<ManagedOwner>>();
 	private readonly dispatchQueue: PendingDispatch[] = [];
 	private stopping = false;
 
@@ -141,6 +142,37 @@ export class OwnerSupervisor {
 		}
 	}
 
+	/**
+	 * Per-effort in-flight spawn guard: `wake` (control socket) and the tick's
+	 * `reviveDurableInbox` can race on the same effort; without this the loser's
+	 * `bindLeaseSession` dies E_LEASE because the winner rotated the reserved
+	 * token (caught live by the Phase-2 D-A gate). Concurrent requests join the
+	 * same spawn promise instead of double-reserving.
+	 */
+	private async spawnOwnerSerialized(store: EffortStore, triggeringEvent?: DeckEvent): Promise<ManagedOwner> {
+		const existing = this.spawning.get(store.effortId);
+		if (existing !== undefined) return existing;
+		const admissionKey = `owner:${store.effortId}`;
+		const attempt = (async () => {
+			try {
+				const spawned = await this.spawnOwner(store, triggeringEvent);
+				this.owners.set(store.effortId, spawned);
+				this.watchOwnerExit(spawned);
+				return spawned;
+			} catch (error) {
+				this.admission.release(admissionKey);
+				appendLifecycleEvent(store.effortId, "lifecycle.owner_spawn_degraded", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+				throw error;
+			} finally {
+				this.spawning.delete(store.effortId);
+			}
+		})();
+		this.spawning.set(store.effortId, attempt);
+		return attempt;
+	}
+
 	async wake(effortId: string, reason: string, triggeringEvent?: DeckEvent): Promise<{ queued: boolean }> {
 		const store = openEffort(effortId);
 		store.inboxAppend({
@@ -151,6 +183,12 @@ export class OwnerSupervisor {
 				event_ids: triggeringEvent === undefined ? [] : [triggeringEvent.id],
 			},
 		});
+		const inFlight = this.spawning.get(effortId);
+		if (inFlight !== undefined) {
+			const spawned = await inFlight;
+			await this.deliverPendingInbox(spawned);
+			return { queued: false };
+		}
 		const owner = this.owners.get(effortId);
 		if (owner !== undefined && await this.ownerResponsive(owner)) {
 			await this.deliverPendingInbox(owner);
@@ -166,19 +204,9 @@ export class OwnerSupervisor {
 			appendAdmissionDegraded(store, decision);
 			return { queued: true };
 		}
-		try {
-			const spawned = await this.spawnOwner(store, triggeringEvent);
-			this.owners.set(effortId, spawned);
-			this.watchOwnerExit(spawned);
-			await this.deliverPendingInbox(spawned);
-			return { queued: false };
-		} catch (error) {
-			this.admission.release(admissionKey);
-			appendLifecycleEvent(effortId, "lifecycle.owner_spawn_degraded", {
-				error: error instanceof Error ? error.message : String(error),
-			});
-			throw error;
-		}
+		const spawned = await this.spawnOwnerSerialized(store, triggeringEvent);
+		await this.deliverPendingInbox(spawned);
+		return { queued: false };
 	}
 
 	async dispatch(
@@ -620,7 +648,7 @@ export class OwnerSupervisor {
 
 	private async reviveDurableInbox(): Promise<void> {
 		for (const store of listEfforts()) {
-			if (this.owners.has(store.effortId) || this.wakeQueue.has(store.effortId)) {
+			if (this.owners.has(store.effortId) || this.wakeQueue.has(store.effortId) || this.spawning.has(store.effortId)) {
 				continue;
 			}
 			const parkedAt = latestParkedAt(store);
@@ -635,15 +663,10 @@ export class OwnerSupervisor {
 				break;
 			}
 			try {
-				const owner = await this.spawnOwner(store);
-				this.owners.set(store.effortId, owner);
-				this.watchOwnerExit(owner);
+				const owner = await this.spawnOwnerSerialized(store);
 				await this.deliverPendingInbox(owner);
-			} catch (error) {
-				this.admission.release(admissionKey);
-				appendLifecycleEvent(store.effortId, "lifecycle.owner_spawn_degraded", {
-					error: error instanceof Error ? error.message : String(error),
-				});
+			} catch {
+				// spawnOwnerSerialized already released admission + recorded the degraded event.
 			}
 		}
 	}
