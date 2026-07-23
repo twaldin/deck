@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Firstmate Post-Mortem — Review &amp; Deck Plan Deltas</title>
+<style>
+  :root{
+    --bg:#0e1116; --panel:#161b23; --panel2:#1c2330; --line:#2a3342;
+    --text:#dbe2ec; --dim:#8b96a8; --accent:#5aa9ff; --good:#4fc98a; --bad:#ef6a6a; --warn:#e5b45b;
+    --mono:'SF Mono',ui-monospace,Menlo,monospace;
+  }
+  *{box-sizing:border-box;min-width:0}
+  body{margin:0;background:var(--bg);color:var(--text);font:15px/1.55 -apple-system,'Inter',system-ui,sans-serif;padding:32px 20px 80px}
+  .wrap{max-width:1060px;margin:0 auto}
+  h1{font-size:26px;margin:0 0 4px}
+  h2{font-size:19px;margin:36px 0 12px;padding-bottom:6px;border-bottom:1px solid var(--line)}
+  h3{font-size:15px;margin:18px 0 8px}
+  .sub{color:var(--dim);margin-bottom:28px}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin:18px 0}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+  .card .big{font-size:24px;font-weight:700}
+  .card .lbl{color:var(--dim);font-size:12.5px;margin-top:2px}
+  .good{color:var(--good)} .bad{color:var(--bad)} .warn{color:var(--warn)} .accent{color:var(--accent)}
+  table{width:100%;border-collapse:collapse;font-size:13.5px;margin:12px 0}
+  th{color:var(--dim);text-align:left;font-weight:600;padding:7px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+  td{padding:8px 10px;border-bottom:1px solid #1f2733;vertical-align:top}
+  tr:last-child td{border-bottom:none}
+  .tag{display:inline-block;padding:1px 8px;border-radius:20px;font-size:11.5px;font-weight:600;white-space:nowrap}
+  .tag.arch{background:#3a1f24;color:#ff9b9b} .tag.pers{background:#3a3320;color:#eecf8a} .tag.ok{background:#1d3529;color:#7fe0ae}
+  blockquote{margin:10px 0;padding:10px 14px;background:var(--panel2);border-left:3px solid var(--accent);border-radius:0 8px 8px 0;font-size:13.5px;color:#c4cdd9}
+  blockquote .who{display:block;color:var(--dim);font-size:11.5px;margin-top:6px}
+  code{font-family:var(--mono);font-size:12.5px;background:#212a38;padding:1px 5px;border-radius:4px}
+  .verdict{background:linear-gradient(135deg,#14202e,#182234);border:1px solid #2c4a6e;border-radius:12px;padding:20px 22px;margin:20px 0}
+  .verdict h2{border:none;margin:0 0 8px;padding:0}
+  .delta{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin:14px 0}
+  .delta .head{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap}
+  .delta .id{font-family:var(--mono);font-weight:700;color:var(--accent);font-size:14px}
+  .delta .title{font-weight:650}
+  .delta .where{color:var(--dim);font-size:12.5px;margin-left:auto;white-space:nowrap}
+  .delta p{margin:8px 0;font-size:13.8px;color:#c4cdd9}
+  .delta .ev{font-size:12.5px;color:var(--dim)}
+  .choices{display:flex;gap:14px;margin-top:10px;flex-wrap:wrap;align-items:center}
+  .choices label{display:flex;gap:6px;align-items:center;font-size:13px;cursor:pointer;padding:4px 10px;border:1px solid var(--line);border-radius:8px}
+  .choices label:has(input:checked){border-color:var(--accent);background:#1a2c44}
+  .choices input{accent-color:var(--accent)}
+  .submitbar{position:sticky;bottom:0;background:rgba(14,17,22,.95);backdrop-filter:blur(6px);border-top:1px solid var(--line);padding:14px 0;margin-top:40px}
+  .submitbar .inner{max-width:1060px;margin:0 auto;display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+  button.primary{background:var(--accent);color:#0b1220;font-weight:700;border:none;border-radius:8px;padding:10px 22px;font-size:14px;cursor:pointer}
+  button.primary:hover{filter:brightness(1.1)}
+  .note{color:var(--dim);font-size:12.5px}
+  ul{margin:8px 0;padding-left:22px} li{margin:4px 0}
+  .bars{font-family:var(--mono);font-size:12.5px;white-space:pre;overflow-x:auto;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Firstmate Post-Mortem</h1>
+<div class="sub">19 days of operation (Jul 4 – 23) · 122 MB supervisor transcripts · 463 lane sessions (432 MB) · 728 captain messages · 6 independent scout analyses · Canonical source: <code>~/dev/deck/POSTMORTEM.md</code></div>
+
+<div class="verdict">
+<h2>Verdict: the revamp is justified — and the PR uptick doesn't contradict your gut</h2>
+<p>PRs/day is confounded (Graphite batch-lands, task mix, general skill growth; firstmate's start straddles your biggest pre-existing week). The metric firstmate was supposed to move is <b>supervision cost per unit of output</b> — and it stayed high and flat for the entire 19 days. Of 11 friction themes traceable from bootstrap to the mature window, <b class="bad">10 were still occurring at the end, 0 cleanly resolved</b>. Deck's design already targets every architectural root cause found; 8 small deltas below are the only changes the evidence forces.</p>
+</div>
+
+<div class="cards">
+  <div class="card"><div class="big bad">1 : 10</div><div class="lbl">praise : complaint ratio — every window, incl. mature period</div></div>
+  <div class="card"><div class="big bad">~28%</div><div class="lbl">of your messages were resends of something already said</div></div>
+  <div class="card"><div class="big warn">⅓–½</div><div class="lbl">of supervisor turns = fleet plumbing (qualitative estimate from episode sampling of the 3 largest sessions — not a measured statistic)</div></div>
+  <div class="card"><div class="big warn">82–85%</div><div class="lbl">of secondmate inbound = self-generated watcher noise</div></div>
+  <div class="card"><div class="big bad">≥6</div><div class="lbl">whole-fleet deaths from laptop events (OOM/wifi/sleep) — never mitigated</div></div>
+  <div class="card"><div class="big bad">14.8 h</div><div class="lbl">longest silent escalation wedge (20 escalations buffered overnight)</div></div>
+</div>
+
+<h2>Where the toolbelt's effort actually went</h2>
+<div class="bars">fm-supervise-daemon.sh   85K  ██████████████████████████  defensive (wedge-alarm dispatcher)
+backends/herdr.sh        75K  ███████████████████████     defensive (TUI-scrape shims)
+fm-watch.sh              50K  ███████████████             defensive (watcher lifecycle)
+fm-arm-command-policy    37K  ███████████                 defensive (hand-rolled shell tokenizer)
+fm-bootstrap.sh          38K  ███████████                 defensive (liveness healing sweep)
+docs/herdr-backend.md   113K  ── largest doc in repo: pure incident record</div>
+<p class="note">Five vocabularies — guard / check / lock / drain / hold / checkpoint / continuity / wedge-alarm — all re-solve one problem: proving supervision hasn't silently died.</p>
+
+<h2>Failure modes (triangulated across ≥2 corpora)</h2>
+<table>
+<tr><th>#</th><th>Failure mode</th><th>Class</th><th>Killer evidence</th></tr>
+<tr><td>1</td><td>Screen-scraped agent state (composer/busy/ghost-text)</td><td><span class="tag arch">architectural</span></td><td>4+ dated herdr incidents; dead-shell-as-empty-composer bug latent in 3 other backends</td></tr>
+<tr><td>2</td><td>Keystroke injection, no delivery ack</td><td><span class="tag arch">architectural</span></td><td>"Enter swallowed" ×31 in one session; afk-invx-i5 dropped 100% of escalations; 14.8h wedge</td></tr>
+<tr><td>3</td><td>File-polling + mtime beacons as liveness truth</td><td><span class="tag arch">architectural</span></td><td>Watcher down 23.8h unnoticed; "supervision decapitation" via harness task-reaping</td></tr>
+<tr><td>4</td><td>Command-string classification as only enforcement boundary</td><td><span class="tag arch">architectural</span></td><td>37K shell tokenizer with self-declared fragility tripwire</td></tr>
+<tr><td>5</td><td>Per-harness hook divergence</td><td><span class="tag arch">architectural</span></td><td>Turn-end guard blocks on 2/5 harnesses, fails open on 3; dead pi panes report as generic <code>node</code></td></tr>
+<tr><td>6</td><td>Host SPOF (laptop = whole fleet)</td><td><span class="tag arch">architectural</span></td><td>Swap to 26.6GB; OS reaper killed supervisors' own watchers; ≥6 fleet deaths</td></tr>
+<tr><td>7</td><td>Dropped parallel work / no durable ledger</td><td><span class="tag pers">persistent</span></td><td>"state is fucked… forgotten half of the work" (Jul 7) → "why do you keep dropping… its just 3" (Jul 18)</td></tr>
+<tr><td>8</td><td>Prompt-level rules decay</td><td><span class="tag pers">persistent</span></td><td>Verbosity rule codified Jul 18, violated Jul 21; reviewer-deference violated 2× in 24h</td></tr>
+<tr><td>9</td><td>Tim as ambient credential store</td><td><span class="tag pers">persistent</span></td><td>≥7 manual credential interventions wk 1; you burned your own rate-limit reset Jul 20</td></tr>
+<tr><td>10</td><td>Self-certified "done"</td><td><span class="tag pers">persistent</span></td><td>Premature-done caught by you across ≥4 unrelated domains</td></tr>
+</table>
+
+<h2>In your own words (contemporaneous)</h2>
+<blockquote>"i feel firstmate has been kinda failing me specifically because it feels like work is 1. not parallelizable enough where i am basically just synchronously working, with you, like a normal coding agent… and 2. agents arent following/abiding by guidelines normally/as planned."<span class="who">— Jul 13, sent 3× (the resend itself is failure mode #2)</span></blockquote>
+<blockquote>"should i just go back to using the harness myself and managing multiple tmux sessions? seems like one harness session is incapable of managing a crew/fleet of the size i need"<span class="who">— Jul 16</span></blockquote>
+
+<h2>Strengths deck must preserve <span class="tag ok">worked</span></h2>
+<ul>
+<li><b>The hierarchy itself.</b> Multi-day unattended secondmates merged+deployed PRs, proved the $135k/wk cost root cause, and correctly overturned your own wrong premise.</li>
+<li><b>Front-loaded briefs ≈ zero corrections.</b> 5.6–7K-char self-contained briefs needed 0–1 steers vs dozens for iterative tasks.</li>
+<li><b>Batched decision rounds.</b> The one interaction mode you praised — validates deck's decision cards as the core primitive.</li>
+<li><b>Fallout-watch</b> caught a real 169-user regression; verification matured to quantified verdicts ("210/day → 0/day").</li>
+<li><b>Decision-tagged escalation digests</b> — the only mechanism that measurably improved in 19 days. Deck ships this shape day 1.</li>
+</ul>
+
+<h2>Proposed deltas to PLAN/SPEC — accept or reject each</h2>
+<p class="note">No finding invalidates any current deck decision. These are small additions. Select a verdict per delta; nothing is sent until you press <b>Queue answers</b> at the bottom. Explicitly NOT proposed (over-engineering): webhooks in v1, any DB, per-worker sandboxes, remote control plane in v1.</p>
+
+<div class="delta" data-delta="D-A">
+  <div class="head"><span class="id">D-A</span><span class="title">Surface + gate the §4.5 inbox (mechanism already in SPEC)</span><span class="where">SPEC §4.5 + §14 TUI · Phase 2 exit</span></div>
+  <p>SPEC §4.5 already specifies the durable ack'd command inbox (<code>{cmd_id, cmd, delivered, acked}</code>). Genuinely missing: (1) Tim-visible receipt state in the TUI per message, (2) a Phase-2 exit test asserting no Tim→owner message can be silently dropped end-to-end (TUI → inbox → owner ack → tail).</p>
+  <p class="ev">Evidence: ~28% of all your messages were resends; unresolved from day 1 to day 19; worst burst 5× in 2 min.</p>
+  <div class="choices"><label><input type="radio" name="D-A" value="accept" checked> Accept</label><label><input type="radio" name="D-A" value="reject"> Reject</label><label><input type="radio" name="D-A" value="discuss"> Discuss</label></div>
+</div>
+
+<div class="delta" data-delta="D-B">
+  <div class="head"><span class="id">D-B</span><span class="title">Close two gaps in §5.5 admission control (rest already in SPEC)</span><span class="where">SPEC §5.5.3 / §5.5.5</span></div>
+  <p>§5.5 already has count limits, per-process RSS shed, and a swap-pressure test. Gaps: (1) session limits are per-effort (<code>max_dispatches_per_effort=8</code> × N efforts = unbounded) — add <code>max_active_sessions_global</code>; (2) make global memory/swap a spawn <em>admission input</em> (defer/park under pressure), not just per-process shed.</p>
+  <p class="ev">Evidence: swap to 26.6GB (prior OOM 29GB); macOS reaper killed supervisors' own watchers; "over 30 agents nuking my memory."</p>
+  <div class="choices"><label><input type="radio" name="D-B" value="accept" checked> Accept</label><label><input type="radio" name="D-B" value="reject"> Reject</label><label><input type="radio" name="D-B" value="discuss"> Discuss</label></div>
+</div>
+
+<div class="delta" data-delta="D-C">
+  <div class="head"><span class="id">D-C</span><span class="title">Promote §5.5.6(a) to a whole-system Phase-2 exit drill</span><span class="where">SPEC §5.5.6 → §7 Phase 2 exit</span></div>
+  <p>The router kill -9 test exists in SPEC; extend to full-fleet: <code>kill -9</code> router+broker+owners, plus a reboot test — board, manifests, owners recover with zero manual steps. "Comes back by itself" becomes a gate, not a goal.</p>
+  <p class="ev">Evidence: ≥6 whole-fleet deaths from host events across the lifecycle; never mitigated in firstmate.</p>
+  <div class="choices"><label><input type="radio" name="D-C" value="accept" checked> Accept</label><label><input type="radio" name="D-C" value="reject"> Reject</label><label><input type="radio" name="D-C" value="discuss"> Discuss</label></div>
+</div>
+
+<div class="delta" data-delta="D-D">
+  <div class="head"><span class="id">D-D</span><span class="title">dispatch returns verified liveness</span><span class="where">SPEC lifecycle tools</span></div>
+  <p>The <code>dispatch</code> lifecycle tool succeeds only on session-exists + first-heartbeat; reconcile flags handle-without-heartbeat.</p>
+  <p class="ev">Evidence: dispatched lanes silently vanished (no meta, no work) twice in one session; "a status line claiming a lane is running is NOT proof it exists."</p>
+  <div class="choices"><label><input type="radio" name="D-D" value="accept" checked> Accept</label><label><input type="radio" name="D-D" value="reject"> Reject</label><label><input type="radio" name="D-D" value="discuss"> Discuss</label></div>
+</div>
+
+<div class="delta" data-delta="D-E">
+  <div class="head"><span class="id">D-E</span><span class="title">Done requires evidence</span><span class="where">§5.1 manifest schema</span></div>
+  <p>Manifest transition to done/landed gated on ≥1 evidence link; reconcile flags evidence-less dones for a decision card.</p>
+  <p class="ev">Evidence: premature-done across ≥4 unrelated domains; you were repeatedly the last line of defense.</p>
+  <div class="choices"><label><input type="radio" name="D-E" value="accept" checked> Accept</label><label><input type="radio" name="D-E" value="reject"> Reject</label><label><input type="radio" name="D-E" value="discuss"> Discuss</label></div>
+</div>
+
+<div class="delta" data-delta="D-F">
+  <div class="head"><span class="id">D-F</span><span class="title">Ticket-state invariants at the router; CLI as secondary guard</span><span class="where">SPEC §5.3 + PLAN §5.5</span></div>
+  <p>The cited Done→In-Review regression came from <em>Linear's own automation</em> — it never passes through a deck CLI, so a CLI refusal alone cannot prevent it. Primary: router fact classification (§5.3) flags Done→backward transitions ⇒ decision card ("revert or accept?"). Secondary: linear CLI refuses agent-initiated Done→backward writes and PR-attach-to-Done.</p>
+  <p class="ev">Evidence: Done↔In-Review ping-pong (forensically traced to Linear automation); memory-doc rules demonstrably decay.</p>
+  <div class="choices"><label><input type="radio" name="D-F" value="accept" checked> Accept</label><label><input type="radio" name="D-F" value="reject"> Reject</label><label><input type="radio" name="D-F" value="discuss"> Discuss</label></div>
+</div>
+
+<div class="delta" data-delta="D-G">
+  <div class="head"><span class="id">D-G</span><span class="title">Rehydration budget: resolve SPEC §15 toward "tight"</span><span class="where">SPEC §15 → §5.1</span></div>
+  <p>Park-digest + bounded tail window; explicitly reject fm-session-start-style full dumps (578-line/143KB, 16s boot digest; whole-session replay observed at session boundaries).</p>
+  <p class="ev">Evidence: boot-digest + replay tax visible in supervisor transcripts; S3's early content was a near-verbatim replay of S2.</p>
+  <div class="choices"><label><input type="radio" name="D-G" value="accept" checked> Accept</label><label><input type="radio" name="D-G" value="reject"> Reject</label><label><input type="radio" name="D-G" value="discuss"> Discuss</label></div>
+</div>
+
+<div class="delta" data-delta="D-H">
+  <div class="head"><span class="id">D-H</span><span class="title">Role-block doctrine ships in Phase 2, not Phase 3</span><span class="where">§5.7 / §7</span></div>
+  <p>Reviewer-deference, drafts-only external comms, and a machine-checked conciseness cap (in the ask/report tool schema) — these three rules are already known; the broader doctrine-mining pass stays Phase 3.</p>
+  <p class="ev">Evidence: 2 authority violations in 24h (DM to Jeremy; arguing with Sathira's review); verbosity rule broken 3 days after being codified in captain.md.</p>
+  <div class="choices"><label><input type="radio" name="D-H" value="accept" checked> Accept</label><label><input type="radio" name="D-H" value="reject"> Reject</label><label><input type="radio" name="D-H" value="discuss"> Discuss</label></div>
+</div>
+
+<div class="submitbar"><div class="inner">
+  <button class="primary" id="queueBtn">Queue answers →</button>
+  <span class="note">Sends one prompt with your verdict on all 8 deltas. Annotate any element directly for open-ended feedback.</span>
+</div></div>
+
+</div>
+<script>
+document.getElementById('queueBtn').addEventListener('click', () => {
+  const ids = ['D-A','D-B','D-C','D-D','D-E','D-F','D-G','D-H'];
+  const verdicts = ids.map(id => {
+    const sel = document.querySelector(`input[name="${id}"]:checked`);
+    return `${id}: ${sel ? sel.value : 'unanswered'}`;
+  });
+  const summary = verdicts.join(', ');
+  window.lavish.queuePrompt(
+    'Post-mortem delta verdicts — apply the accepted deltas to PLAN.md/SPEC.md, drop rejected ones, and raise discussion points for any marked discuss. Verdicts: ' + summary,
+    { tag: 'choice', text: 'Delta verdicts: ' + summary, element: document.querySelector('.submitbar'), data: { verdicts } }
+  );
+});
+</script>
+</body>
+</html>

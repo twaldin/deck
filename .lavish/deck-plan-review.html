@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Deck — dev-workflow revamp plan · review</title>
+<style>
+  :root{
+    --bg:#0e1116; --panel:#161b23; --panel2:#1c2330; --line:#2a3342;
+    --ink:#e6ebf2; --dim:#8b96a8; --accent:#5aa9ff; --good:#4ade80; --warn:#fbbf24; --bad:#f87171;
+    --mono:'SF Mono',ui-monospace,Menlo,monospace;
+  }
+  *{box-sizing:border-box;min-width:0}
+  body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 -apple-system,'Inter',system-ui,sans-serif}
+  .wrap{max-width:1080px;margin:0 auto;padding:32px 24px 80px}
+  h1{font-size:26px;margin:0 0 4px}
+  h2{font-size:19px;margin:40px 0 14px;padding-bottom:6px;border-bottom:1px solid var(--line)}
+  h3{font-size:15px;margin:0 0 8px}
+  .sub{color:var(--dim);margin:0 0 24px}
+  .chip{display:inline-block;padding:1px 9px;border-radius:99px;font-size:12px;font-weight:600;border:1px solid var(--line);vertical-align:2px}
+  .chip.b{color:var(--accent);border-color:#2b4b73}
+  .chip.g{color:var(--good);border-color:#2b5b40}
+  .chip.y{color:var(--warn);border-color:#6b5420}
+  .chip.r{color:var(--bad);border-color:#6b2b2b}
+  .grid{display:grid;gap:12px}
+  .g2{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .g3{grid-template-columns:repeat(3,minmax(0,1fr))}
+  @media(max-width:820px){.g2,.g3{grid-template-columns:minmax(0,1fr)}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px}
+  .card h3{color:var(--accent)}
+  .card p,.card ul{margin:6px 0;color:#c6cfdc;font-size:13.5px}
+  .card ul{padding-left:18px}
+  table{width:100%;border-collapse:collapse;font-size:13.5px}
+  th{color:var(--dim);text-align:left;font-weight:600;padding:8px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+  td{padding:8px 10px;border-bottom:1px solid #202836;vertical-align:top}
+  tr:last-child td{border-bottom:none}
+  .tbl{background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  code,kbd{font-family:var(--mono);font-size:12.5px;background:#10151d;border:1px solid var(--line);border-radius:4px;padding:1px 5px;overflow-wrap:anywhere}
+  .flow{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:20px;overflow-x:auto}
+  .lane{display:flex;flex-direction:column;align-items:center;gap:6px}
+  .node{background:var(--panel2);border:1px solid #34415a;border-radius:8px;padding:10px 16px;text-align:center;font-size:13px;max-width:640px;width:100%}
+  .node b{color:var(--accent)}
+  .node small{display:block;color:var(--dim);font-size:11.5px;margin-top:3px}
+  .arrow{color:var(--dim);font-size:15px;line-height:1}
+  .sublayer{display:flex;gap:8px;flex-wrap:wrap;justify-content:center;width:100%}
+  .sublayer .node{flex:1 1 140px;max-width:none}
+  .phase{display:flex;gap:14px;margin-bottom:10px}
+  .pnum{flex:0 0 34px;height:34px;border-radius:99px;background:var(--panel2);border:1px solid #34415a;color:var(--accent);font-weight:700;display:flex;align-items:center;justify-content:center}
+  .pbody{flex:1;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 16px}
+  .pbody b{font-size:14px}
+  .pbody .exit{color:var(--good);font-size:12.5px;margin-top:5px}
+  .pbody p{margin:4px 0;color:#c6cfdc;font-size:13.5px}
+  .dq{background:var(--panel);border:1px solid #3a4a6b;border-left:4px solid var(--accent);border-radius:10px;padding:14px 16px;margin-bottom:12px}
+  .dq b{font-size:14.5px}
+  .dq .opts{display:flex;gap:8px;flex-wrap:wrap;margin-top:9px}
+  .opt{background:var(--panel2);border:1px solid #34415a;border-radius:7px;padding:5px 11px;font-size:12.5px}
+  .opt.rec{border-color:#2b5b40;color:var(--good)}
+  .opt.rec::before{content:"★ ";font-size:11px}
+  .kv b{color:var(--ink)}
+  .note{color:var(--dim);font-size:12.5px}
+  .inv td:first-child{color:var(--accent);font-family:var(--mono);white-space:nowrap}
+  .fate-retire{color:var(--bad)} .fate-keep{color:var(--good)} .fate-hold{color:var(--warn)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Deck <span class="chip b">plan review</span> <span class="chip y">name provisional</span></h1>
+<p class="sub">Dev-workflow revamp · replaces firstmate/tmux orchestration with an all-pi, extension-only fleet · grilled 2026-07-22, 10 decision branches resolved · canonical source: <code>~/dev/deck/PLAN.md</code></p>
+
+<h2>Why (the five diagnosed problems)</h2>
+<div class="grid g2">
+  <div class="card"><h3>1 · Transport is the bug</h3><p>tmux send-keys + pane-regex caused the incident classes in <code>learnings.md</code>: swallowed Enters, watcher lapses, 13 orphaned shells after OOM. flt died on the same rock.</p></div>
+  <div class="card"><h3>2 · Chat can't hold a queue</h3><p>15–30 ticket/PR pairs into one thread ⇒ agent follows the last pivot, drops bg work. Structural, not a prompting failure.</p></div>
+  <div class="card"><h3>3 · Config hell is multiplicative</h3><p>3 daily + 6 dormant harnesses × MCP × OAuth × skills × instruction files. Notion reachable 3 ways; ≥9 model OAuth grants; 2 local proxies.</p></div>
+  <div class="card"><h3>4 · Five meta-layers, no kernel</h3><p>firstmate, flt, Superset, no-mistakes, robotim each own a slice of spawn-watch-react.</p></div>
+  <div class="card"><h3>5 · Voluntary bookkeeping fails</h3><p><code>fm-effort.sh</code> autopsy: 137 events, one day, all batch ingest, zero agent emissions, board never rendered.</p></div>
+  <div class="card"><h3>North star</h3><p>One TUI over all projects. Tim issues intent + stamps merges. Everything else — orchestration included — just happens.</p></div>
+</div>
+
+<h2>Architecture</h2>
+<div class="flow"><div class="lane">
+  <div class="node"><b>Tim</b><small>intent · decisions · merge stamps</small></div>
+  <div class="arrow">▼</div>
+  <div class="node"><b>Deck TUI</b> (pi-tui)<small>efforts by project · staleness · decision cards · account usage · browser auth matrix · drilldown</small></div>
+  <div class="arrow">▼</div>
+  <div class="node"><b>Effort owners</b> — 1 per open effort<small>parked pi sessions, revived on events · negotiate/dispatch/judge · never implement · feel persistent, are ephemeral</small></div>
+  <div class="arrow">▼ dispatch</div>
+  <div class="node"><b>Workflows + subagents</b> (many per effort)<small>pr-pipeline · watch-ci · fallout-watch · ui-review · cross-family adversarial review<br>Smithers (durable/gated) · pi-dynamic-workflows (intraday) · NL macro skills</small></div>
+  <div class="arrow">▼</div>
+  <div class="sublayer">
+    <div class="node"><b>Manifests</b><small>+ auto event tails</small></div>
+    <div class="node"><b>Wake router</b><small>watchers → revive</small></div>
+    <div class="node"><b>Cred broker</b><small>plan-limit Claude ×3 · Codex · z.ai · tool tokens</small></div>
+    <div class="node"><b>Tool CLIs</b><small>gh model + mcpx bridge</small></div>
+    <div class="node"><b>Browser vault</b><small>authed profile + clones</small></div>
+    <div class="node"><b>Worktree pool</b><small>one allocator</small></div>
+  </div>
+</div></div>
+<p class="note">Drilldown semantics: resume session if alive; else fresh spawn seeded from manifest + event tail (+ last transcript segment after unclean death). Smithers drilldown = <code>hijack</code> (pause → hand over → resume).</p>
+
+<h2>Invariants (hard)</h2>
+<div class="tbl"><table class="inv">
+<tr><td>I1</td><td><b>Extension-only.</b> pi never forked/patched; everything is extensions + packages + config.</td></tr>
+<tr><td>I2</td><td><b>One harness has config.</b> Anything else invoked is stateless, zero footprint.</td></tr>
+<tr><td>I3</td><td><b>Session ≠ state.</b> Manifests + tails on disk are truth; sessions ephemeral, revivable.</td></tr>
+<tr><td>I4</td><td><b>No voluntary bookkeeping.</b> Records are side effects of hooks, watchers, lifecycle tools.</td></tr>
+<tr><td>I5</td><td><b>Judgment is agent work, facts are watcher work.</b> The substrate never thinks.</td></tr>
+<tr><td>I6</td><td><b>Idempotent intake.</b> (source, external_id, version) + cursors; edits are new facts.</td></tr>
+<tr><td>I7</td><td><b>Tim gates merges.</b> Slack CLI is read+draft only.</td></tr>
+<tr><td>I8</td><td><b>Plan-limit multi-account pooling</b> is core infra, non-negotiable.</td></tr>
+<tr><td>I9</td><td><b>All work in worktrees; owners never cd in.</b> One pool, one allocator.</td></tr>
+<tr><td>I10</td><td><b>Shared trees read-only; Tim's prefs are local overlays</b> (skills visibility, source policy).</td></tr>
+<tr><td>I11</td><td><b>Network-shaped seams</b> now (machine:session ids, broker on socket); multi-machine later.</td></tr>
+</table></div>
+
+<h2>Components (what gets built)</h2>
+<div class="grid g2">
+  <div class="card"><h3>Credential broker <span class="chip r">critical path</span></h3>
+    <ul><li>Item #1: extract omp's <b>plan-limits Claude OAuth</b> mechanism (pi-native + cli-proxy-api both burn extra-usage — no interim workaround exists)</li>
+    <li>Namespaced store: llm-accounts + tool-tokens (schema day-one, tools later)</li>
+    <li><code>registerProvider</code> wiring · rotation on 429 · usage events → board roster</li>
+    <li>Cutover kills VibeProxy, cli-proxy-api, all orphaned grants</li></ul></div>
+  <div class="card"><h3>Manifests + event tails</h3>
+    <ul><li>Extension-owned, atomic; written by <code>report_progress · ask_tim · dispatch · park</code></li>
+    <li>Auto tail: Tim msgs, dispatches, results, turn ends — survives any crash</li>
+    <li>Park digest = optimization, never requirement</li>
+    <li>Decision cards: fm-effort schema (kind/question/recommendation/options); terminal-CAS kept; blocked/needs-tim are overlays not stages</li></ul></div>
+  <div class="card"><h3>Wake router</h3>
+    <ul><li>Watchers (adapted watch-ci-review.ts, Linear/Slack/GH pollers) → resume or fresh-spawn owner</li>
+    <li>Re-arm on boot · orphan reap · polling first</li></ul></div>
+  <div class="card"><h3>Workflow library</h3>
+    <ul><li>pr-pipeline · watch-ci · fallout-watch · ui-review — versioned in git</li>
+    <li>Smithers only via Gateway RPC + pi-plugin + PiAgent (never its SQLite)</li>
+    <li>pi-dynamic-workflows for intraday fan-out · NL macros stay first-class</li></ul></div>
+  <div class="card"><h3>Tool layer — everything is a CLI</h3>
+    <ul><li>gh model: CLI in PATH, broker-fed tokens</li>
+    <li><code>mcpx</code> bridge: hosted MCP = HTTPS call; stdio MCP = spawn-per-invocation; zero resident servers</li>
+    <li>slack (read+draft) · linear · notion · gsuite; each with a usage skill</li></ul></div>
+  <div class="card"><h3>Browser layer</h3>
+    <ul><li>Dedicated Chromium <b>vault profile</b> = auth authority (browser-harness owns CDP)</li>
+    <li>Zen cookie import = opportunistic bootstrap, proven domains only</li>
+    <li>Per-domain matrix in TUI: clone-ok / tabs-in-vault / serialized / needs-reauth</li></ul></div>
+  <div class="card"><h3>Skills + prompts</h3>
+    <ul><li>Local visibility manifest: auto / name-only / user-only / off · manifest ∩ scope</li>
+    <li>Per-skill source policy: worktree-pinned vs fetched-main · commit+age in TUI</li>
+    <li>Composed system prompts per spawn: base (~50 lines) + role block + brief; codebase lore → on-demand doc</li></ul></div>
+  <div class="card"><h3>Worktrees + TUI</h3>
+    <ul><li>One <code>worktree</code> primitive; treehouse reused underneath if harness-agnostic; Smithers uses same pool</li>
+    <li>Deck TUI: efforts, loud staleness, cards, usage, matrix, toggles, drilldown</li></ul></div>
+</div>
+
+<h2>Build order</h2>
+<div class="phase"><div class="pnum">1</div><div class="pbody"><b>Broker v1</b><p>omp Claude mechanism → Claude+Codex+z.ai modules → registerProvider → usage ledger.</p><div class="exit">Exit: pi session on plan-limit Claude; rotation proven.</div></div></div>
+<div class="phase"><div class="pnum">2</div><div class="pbody"><b>Substrate v1</b><p>Manifests+tails · lifecycle tools · wake router + watch-ci adapter · worktree primitive · minimal TUI (list/cards/drilldown).</p><div class="exit">Exit: one real lindy PR driven end-to-end through an effort owner.</div></div></div>
+<div class="phase"><div class="pnum">3</div><div class="pbody"><b>Workflow library</b><p>pr-pipeline/watch-ci/fallout-watch defs · Smithers spike behind Gateway seam (adopt/park gate) · ui-review + vault + matrix · skills overlay + prompt composition · slack/linear CLIs.</p></div></div>
+<div class="phase"><div class="pnum">4</div><div class="pbody"><b>Migration</b><p>Efforts move one by one · firstmate drained, stopped · proxies+grants+config sprawl deleted · instruction files collapsed.</p><div class="exit">firstmate keeps running until here — day job never stops.</div></div></div>
+<div class="phase"><div class="pnum">5</div><div class="pbody"><b>Later</b><p>Tailnet nodes (deploy boxes, static-IP laptop) · gsuite CLIs · webhooks if polling hurts.</p></div></div>
+
+<h2>Decommission map</h2>
+<div class="tbl"><table>
+<tr><th>Thing</th><th>Fate</th></tr>
+<tr><td>firstmate</td><td class="fate-retire">retire after Phase 4 · salvage decision-card schema, reconcile, learnings doctrine</td></tr>
+<tr><td>Claude Code / Codex as harnesses · omp</td><td class="fate-retire">retired · models via pi providers · omp stays the reference spec</td></tr>
+<tr><td>VibeProxy · cli-proxy-api</td><td class="fate-retire">retired at broker cutover</td></tr>
+<tr><td>Per-harness MCP/OAuth/instruction sprawl (8 harnesses)</td><td class="fate-retire">config deleted · CLIs stay installed as stateless break-glass</td></tr>
+<tr><td>flt · agentelo · harness-ts · robotim</td><td class="fate-hold">dormant prior art</td></tr>
+<tr><td>Superset · no-mistakes</td><td class="fate-hold">out of scope · confirm fate before deleting (open decision 4)</td></tr>
+<tr><td>tasks-axi</td><td class="fate-hold">demoted: board data source at most</td></tr>
+<tr><td>plaintext gho_ token · stale pi grants · 6 skill backup trees</td><td class="fate-retire">deleted at cleanup</td></tr>
+<tr><td>~/brain</td><td class="fate-keep">unchanged · no new memory engine</td></tr>
+</table></div>
+
+<h2>Risks</h2>
+<div class="tbl"><table>
+<tr><th>Risk</th><th>Mitigation</th></tr>
+<tr><td>pi 0.x churn (~28 breaking releases)</td><td>I1 extension-only · version-pin · bg agent absorbs upgrades</td></tr>
+<tr><td>Smithers bus-factor ≈ 1, pre-1.0</td><td>Gateway-seam only; workflows are replaceable macros under our contract</td></tr>
+<tr><td>omp Claude mechanism hard to extract</td><td>Phase-1 spike is a <b>go/no-go gate</b> (I8): no pre-accepted fallback — if plan-limits auth can't be reproduced, the fallback is your explicit call (see D7)</td></tr>
+<tr><td>Visibility-not-enforcement lets efforts drift</td><td>Loud heartbeat-age on board · reconcile flags dead-session efforts</td></tr>
+<tr><td>Zen cookie transplant flaky</td><td>Vault is authority; matrix gates parallelism per domain</td></tr>
+<tr><td>Attention tax migrates to deck itself</td><td>Substrate kept small (router+manifests+broker); every component delegable</td></tr>
+</table></div>
+
+<h2>Open decisions — annotate your calls here</h2>
+<div class="dq"><b>D1 · System name</b><p class="note">"deck" is a placeholder.</p>
+  <div class="opts"><span class="opt rec">deck</span><span class="opt">keep grilling names</span><span class="opt">your call:</span></div></div>
+<div class="dq"><b>D2 · Treehouse reuse</b><p class="note">Pending a 20-min inspection of its allocator API.</p>
+  <div class="opts"><span class="opt rec">inspect, reuse if harness-agnostic</span><span class="opt">fresh thin allocator regardless</span></div></div>
+<div class="dq"><b>D3 · Smithers adopt/park gate</b><p class="note">What Phase-3 spike outcome counts as "adopt"?</p>
+  <div class="opts"><span class="opt rec">pr-pipeline runs overnight w/ approval gate, survives reboot, resumes clean</span><span class="opt">stricter: + two weeks of daily use</span><span class="opt">looser: any successful gated run</span></div></div>
+<div class="dq"><b>D4 · Superset & no-mistakes fate</b>
+  <div class="opts"><span class="opt rec">keep out of scope, revisit post-migration</span><span class="opt">decommission both in Phase 4</span></div></div>
+<div class="dq"><b>D5 · Effort-owner model policy</b>
+  <div class="opts"><span class="opt rec">cheap model for routing turns, big model for judgment turns</span><span class="opt">one big model always</span><span class="opt">one cheap model always</span></div></div>
+<div class="dq"><b>D6 · Lindy skills dedupe</b><p class="note">~⅓ of 72 duplicate globally-shipped skills.</p>
+  <div class="opts"><span class="opt rec">hide locally via manifest now; team PR to delete upstream later</span><span class="opt">local hide only</span><span class="opt">team PR now</span></div></div>
+<div class="dq"><b>D7 · Phase-1 no-go contingency</b><p class="note">Only if omp's plan-limits Claude auth can't be extracted.</p>
+  <div class="opts"><span class="opt">extra-usage tokens (ugly)</span><span class="opt">keep omp for Claude traffic only</span><span class="opt">rethink plan</span></div></div>
+
+<h2 style="margin-top:36px">Adversarial review — codex / gpt-5.6-sol @ xhigh</h2>
+<p class="sub" style="margin:-6px 0 16px">Cross-harness pass on PLAN + SPEC. Verdict: <span class="chip r">request_changes</span> · 10 findings (9 high, 1 medium). SPEC rewritten to v0.2; full report at <code>.lavish/adversarial-report.json</code>.</p>
+<div class="tbl"><table>
+<tr><th>#</th><th>Finding</th><th>Disposition</th></tr>
+<tr><td>1</td><td>Smithers "durable" claim hollow — Deck excludes its SQLite, so abandonment loses run state</td><td><b>Partial accept.</b> Corrected the claim (PLAN §5.3): Deck mirrors only <i>side-effect receipts</i> for irreversible ops (§10), not the whole run graph — abandonment cost is real but bounded. Rejected full journal duplication as over-engineering.</td></tr>
+<tr><td>2</td><td>Migration has no exclusive-ownership handoff — firstmate + deck can both act on a PR</td><td><b>Accept.</b> New SPEC §16 cutover protocol: freeze→drain→marker→verify→rollback, per-effort.</td></tr>
+<tr><td>3</td><td>Persistence not atomic at op level; crash can split tail/cursor/dedupe</td><td><b>Accept concern, reject SQLite-for-v1.</b> Ordered writes (tail-before-cursor) + idempotency keys make the crash window benign (worst case = dropped duplicate, never loss). SQLite stays a measured-volume trigger (SPEC §4.2) — honors your no-DB pushback.</td></tr>
+<tr><td>4</td><td>Exactly-one-owner / exactly-once not enforced; two owners can spawn post-reboot</td><td><b>Accept.</b> New SPEC §4.5: per-effort lease + epoch token, CAS on every mutation, side-effect fencing, durable command inbox with ack, cancellation protocol.</td></tr>
+<tr><td>5</td><td>No privilege boundary — same-UID agents reach the whole credential estate; agent-authored JSX = arbitrary code</td><td><b>Accept the gap, partial the fix.</b> SPEC §13 rewritten honestly: same-UID is NOT a boundary (v0.1 was wrong); broker proxies LLM (no raw tokens); tool CLIs get scoped short-lived capabilities. Full sandbox + signed workflows = explicit <b>v2 path</b>, not v1 — keeps your no-overengineer line.</td></tr>
+<tr><td>6</td><td>Merge stamp is convention, not auth — agent can merge a head Tim never approved</td><td><b>Accept + corrected twice.</b> Two-tier model (SPEC §10/§13): split transports (read+PR-write API token + SSH deploy key; deploy keys can't call REST; branch protection) stop the accidental path; the <code>Contents:write</code> merge PAT lives in <b>macOS Keychain behind a per-merge Tim-biometric ACL</b> — the real OS boundary under same-UID. <i>v0.2's "no merge scope" was impossible (merge = Contents:write) and "physically cannot" overclaimed under same-UID; Keychain release is what actually satisfies I7.</i> Unattended merges blocked by construction (consistent with I7).</td></tr>
+<tr><td>7</td><td>Browser matrix controls concurrency, not auth; raw ws_endpoint leaks storage/admin session</td><td><b>Accept.</b> SPEC §8 rewritten: mediated API (no raw ws_endpoint to workers); privileged domains never cloned; serialization contradiction fixed.</td></tr>
+<tr><td>8</td><td>Broker go/no-go proves quota, not authorization/TOS; needs conformance battery + single-flight refresh</td><td><b>Accept.</b> SPEC §6.5 expanded (streaming/tools/thinking/cache/cancel/eligibility/revocation/concurrent-rotation); single-flight refresh §6.3; TOS risk recorded as deliberate human decision §6.7.</td></tr>
+<tr><td>9</td><td>Fresh-owner recovery depends on lost chat state; only 50 events; no charter</td><td><b>Accept.</b> Immutable charter + decision ledger in manifest (§3.1); token-budgeted seed preserving root-intent/cards/dispatches/trigger (§4.6); full-tail fallback.</td></tr>
+<tr><td>10</td><td>Resource model doesn't bound the OOM that motivated the rewrite</td><td><b>Accept.</b> New SPEC §5.5: poll deadlines+output caps, process-group cancel, global+per-effort admission limits, wake coalescing, RSS budgets, OOM acceptance tests. PLAN §5.2 daemon-count contradiction fixed.</td></tr>
+</table></div>
+<p class="note" style="margin-top:14px"><b>Net:</b> 9 accepted, 1 partial (Smithers), 1 sub-rejected (SQLite-for-v1, concern accepted via ordered writes). Two reviewer asks explicitly declined as over-engineering — documented in SPEC v0.2 changelog.</p>
+<p class="note" style="margin-top:28px">Canonical source of truth: <code>~/dev/deck/PLAN.md</code> + <code>~/dev/deck/SPEC.md</code> (v0.2). This page is a review surface — annotate anything; accepted changes land in the markdown.</p>
+</div>
+</body>
+</html>

@@ -12,6 +12,8 @@
 - D-G: §15 Q1 resolved — tight rehydration budget (§4.6).
 - D-H: three known doctrine rules (reviewer-deference, drafts-only comms, structural conciseness caps) ship in Phase-2 role blocks (§9).
 
+**v0.3.1 amendment** — §6.4 store format `store.json` → `store.db` (SQLite via pi-ai `SqliteAuthCredentialStore`); rationale inline in §6.4; Tim-approved 2026-07-22.
+
 **v0.2 changelog** — review-driven (codex/gpt-5.6-sol xhigh adversarial pass, 2026-07-22):
 - Honest security model: same-UID file perms are NOT a boundary (§14 rewritten); broker proxies LLM calls (no raw model tokens); tool CLIs get scoped short-lived capabilities; agent-authored workflows = trusted code, documented.
 - Merge authority mechanized (§10 new): SHA-bound single-use authorization, scoped GH tokens (no merge permission), atomic consume. I7 was prose; now it's a gateway.
@@ -47,7 +49,7 @@ efforts/<id>/manifest.lock     # flock for read-modify-write (single writer)
 efforts/<id>/lease             # current owner epoch token (§4.5)
 intake/cursors.json            # per-source poll cursors
 intake/seen/<source>.ring      # idempotency key ring
-broker/store.json              # credentials (§6.4)
+broker/store.db                # credentials (§6.4)
 broker/usage.json              # account roster snapshot
 catalog/mcpx.toml · catalog/browser-domains.json · catalog/skills.json
 run/broker.sock · run/router.sock
@@ -158,7 +160,7 @@ Bun daemon: unix socket (control, capability-auth'd) + `127.0.0.1:<port>` HTTP e
 - `rate_limited` → account cooling, session re-pins, `fact.broker.rotated` event.
 - **Single-flight refresh**: two concurrent requests needing the same expiring refresh token share ONE in-flight refresh (dedup on `(account_id)`); losers await the winner's result. Prevents the refresh-token-rotation race that invalidates tokens.
 ### 6.4 Store & security
-`broker/store.json` 0600. **The broker is the sole reader of the store.** CLIs/tools obtain scoped short-lived access tokens over the capability-auth'd unix socket (§14). macOS keychain = optional v2 hardening.
+`broker/store.db` (SQLite, 0600) — pi-ai's `SqliteAuthCredentialStore` reused as-is (v0.3.1 amendment: was `store.json`; the JSON contract would force duplicating pi-ai's module-private multi-account identity/dedup + refresh-lease CAS semantics — hand-rolled rotation logic is the exact hazard class the post-mortem flagged. Multi-account rotation + usage-limit visibility invariants preserved by construction, Tim-approved 2026-07-22). **The broker is the sole reader of the store.** CLIs/tools obtain scoped short-lived access tokens over the capability-auth'd unix socket (§14). macOS keychain = optional v2 hardening.
 ### 6.5 Claude plan-limits module — acceptance (expanded)
 Extract omp's client presentation (client id, headers, beta flags, token exchange). **Conformance battery** (not just one prompt): (1) quota attribution matches omp on the account usage surface (the original test); (2) streaming; (3) tool-calls; (4) thinking blocks; (5) prompt caching headers honored; (6) mid-stream cancellation; (7) model-eligibility (only plan-covered models routed); (8) token revocation handling; (9) atomic refresh rotation under concurrency. Failure after timeboxed spike (3 working days) ⇒ D7 escalation.
 ### 6.6 Usage roster

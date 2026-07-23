@@ -1,0 +1,16 @@
+{
+  "name": "broker",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@oh-my-pi/pi-ai": "^17.0.8",
+    "@oh-my-pi/pi-catalog": "^17.0.8"
+  }
+}
