@@ -69,4 +69,4 @@ cd ~/dev/deck
 ./ops/uninstall.sh --yes
 ```
 
-The uninstaller uses `launchctl bootout`, falls back to `launchctl unload -w`, verifies that each label is absent, and removes its plist. Re-running it is safe. It preserves `~/.deck/logs` and the daemon log files.
+The uninstaller uses `launchctl bootout`, falls back to `launchctl unload -w` (or label-based `launchctl remove` when an installed plist is already absent), verifies that each label is absent, and removes its plist. Re-running it is safe. It preserves `~/.deck/logs` and the daemon log files.

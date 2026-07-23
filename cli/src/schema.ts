@@ -1,3 +1,4 @@
+import * as path from "node:path";
 import { z } from "zod";
 
 export const worktreeIdSchema = z.string().regex(/^wt:[A-Za-z0-9._-]+:[1-9][0-9]*$/);
@@ -7,11 +8,16 @@ export const effortIdSchema = z
 	.max(200)
 	.regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/, "must be safe for use in a git branch name");
 
+const absolutePathSchema = z
+	.string()
+	.min(1)
+	.refine((value) => path.isAbsolute(value), "must be an absolute path");
+
 export const worktreeEntrySchema = z
 	.object({
 		id: worktreeIdSchema,
-		repo: z.string().min(1),
-		path: z.string().min(1),
+		repo: absolutePathSchema,
+		path: absolutePathSchema,
 		effort: effortIdSchema,
 		branch: z.string().min(1),
 		created: z.string().datetime({ offset: true }),

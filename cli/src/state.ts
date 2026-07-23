@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { randomBytes } from "node:crypto";
+import { dlopen, FFIType, type Library } from "bun:ffi";
 import { DECK_HOME, WORKTREES_STATE } from "@deck/core";
 import { DeckError } from "@deck/core";
 import { z } from "zod";
@@ -69,6 +70,7 @@ export function writeWorktreesState(state: WorktreesState): void {
 
 	const temporary = `${WORKTREES_STATE}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
 	let descriptor: number | undefined;
+	let directoryDescriptor: number | undefined;
 	try {
 		descriptor = fs.openSync(temporary, "wx", 0o600);
 		fs.writeFileSync(descriptor, `${JSON.stringify(validated, null, "\t")}\n`);
@@ -76,37 +78,79 @@ export function writeWorktreesState(state: WorktreesState): void {
 		fs.closeSync(descriptor);
 		descriptor = undefined;
 		fs.renameSync(temporary, WORKTREES_STATE);
-		fs.chmodSync(WORKTREES_STATE, 0o600);
+		directoryDescriptor = fs.openSync(path.dirname(WORKTREES_STATE), "r");
+		fs.fsyncSync(directoryDescriptor);
+		fs.closeSync(directoryDescriptor);
+		directoryDescriptor = undefined;
 	} catch (error) {
 		if (descriptor !== undefined) {
 			fs.closeSync(descriptor);
+		}
+		if (directoryDescriptor !== undefined) {
+			fs.closeSync(directoryDescriptor);
 		}
 		fs.rmSync(temporary, { force: true });
 		throw new DeckError("E_IO", `cannot atomically write ${WORKTREES_STATE}: ${ioMessage(error)}`);
 	}
 }
 
+const LOCK_EXCLUSIVE = 2;
+const LOCK_NONBLOCKING = 4;
+const FLOCK_SYMBOLS = {
+	flock: {
+		args: [FFIType.i32, FFIType.i32],
+		returns: FFIType.i32,
+	},
+} as const;
+
+
 async function acquireStateLock(): Promise<number> {
-	const deadline = Date.now() + 30_000;
-	while (true) {
-		try {
-			return fs.openSync(WORKTREES_LOCK, "wx", 0o600);
-		} catch (error) {
-			if (!hasNodeErrorCode(error, "EEXIST")) {
-				throw new DeckError("E_IO", `cannot acquire allocator lock: ${ioMessage(error)}`);
-			}
+	let descriptor: number;
+	try {
+		descriptor = fs.openSync(WORKTREES_LOCK, "a", 0o600);
+		fs.chmodSync(WORKTREES_LOCK, 0o600);
+	} catch (error) {
+		throw new DeckError("E_IO", `cannot prepare allocator lock: ${ioMessage(error)}`);
+	}
+
+	const libraryPath = process.platform === "darwin"
+		? "/usr/lib/libSystem.B.dylib"
+		: process.platform === "linux"
+			? "libc.so.6"
+			: undefined;
+	if (libraryPath === undefined) {
+		fs.closeSync(descriptor);
+		throw new DeckError("E_IO", `allocator locking is unsupported on ${process.platform}`);
+	}
+
+	let library: Library<typeof FLOCK_SYMBOLS>;
+	try {
+		library = dlopen(libraryPath, FLOCK_SYMBOLS);
+	} catch (error) {
+		fs.closeSync(descriptor);
+		throw new DeckError("E_IO", `cannot load allocator locking primitive: ${ioMessage(error)}`);
+	}
+
+	const deadline = Date.now() + 300_000;
+	try {
+		while (library.symbols.flock(descriptor, LOCK_EXCLUSIVE | LOCK_NONBLOCKING) !== 0) {
 			if (Date.now() >= deadline) {
 				throw new DeckError("E_IO", `timed out waiting for allocator lock ${WORKTREES_LOCK}`);
 			}
 			await Bun.sleep(25);
 		}
+		return descriptor;
+	} catch (error) {
+		fs.closeSync(descriptor);
+		throw error;
+	} finally {
+		library.close();
 	}
 }
 
 /**
- * Exclusive allocator section. The lock is intentionally never broken by a
- * waiter: deleting a lock owned by a slow fetch would violate PLAN §5.8's
- * single-allocator invariant.
+ * Exclusive allocator section. The kernel lock belongs to this process and
+ * its open descriptor, so process death and reboot release it automatically.
  */
 export async function withStateLock<T>(operation: () => Promise<T>): Promise<T> {
 	ensureAllocatorDirs();
@@ -116,7 +160,6 @@ export async function withStateLock<T>(operation: () => Promise<T>): Promise<T> 
 	} finally {
 		try {
 			fs.closeSync(descriptor);
-			fs.rmSync(WORKTREES_LOCK);
 		} catch (error) {
 			throw new DeckError("E_IO", `cannot release allocator lock: ${ioMessage(error)}`);
 		}

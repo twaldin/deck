@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { EFFORT_FILES, effortDir, loadConfig, manifestSchema, ulid } from "@deck/core";
 import { DeckError } from "@deck/core";
 import { z } from "zod";
-import { addWorktree, prepareBase, removeWorktree, resolveRepository } from "./git";
+import { addWorktree, prepareBase, removeWorktree, resolveRepository, validateBranchName } from "./git";
 import {
 	type WorktreeEntry,
 	type WorktreesState,
@@ -68,8 +68,13 @@ export interface AllocateRequest {
 }
 
 export async function allocateWorktree(request: AllocateRequest): Promise<WorktreeEntry> {
-	const effort = effortIdSchema.parse(request.effort);
-	const repo = await resolveRepository(request.repo);
+	const effortResult = effortIdSchema.safeParse(request.effort);
+	if (!effortResult.success) {
+		throw new DeckError("E_ARG", `invalid effort id: ${z.prettifyError(effortResult.error)}`);
+	}
+	const effort = effortResult.data;
+	const resolvedRepo = await resolveRepository(request.repo);
+	const repo = resolvedRepo.identity;
 	return withStateLock(async () => {
 		const state = readWorktreesState();
 		const config = loadConfig();
@@ -88,20 +93,22 @@ export async function allocateWorktree(request: AllocateRequest): Promise<Worktr
 		}
 
 		const project = projectName(repo);
-		const reusable = state.entries.find((entry) => entry.repo === repo && entry.state === "free");
-		const number = reusable === undefined ? nextSlotNumber(state, project) : entryNumber(reusable);
-		const id = reusable?.id ?? `wt:${project}:${number}`;
-		const worktreePath = reusable?.path ?? path.join(WORKTREE_POOL_DIR, `${project}-${number}`);
-		if (fs.existsSync(worktreePath)) {
-			throw new DeckError("E_STATE", `worktree slot path already exists: ${worktreePath}`);
+		const reusable = state.entries.find(
+			(entry) => entry.repo === repo && entry.state === "free" && !fs.existsSync(entry.path),
+		);
+		let number = reusable === undefined ? nextSlotNumber(state, project) : entryNumber(reusable);
+		let worktreePath = reusable?.path ?? path.join(WORKTREE_POOL_DIR, `${project}-${number}`);
+		while (reusable === undefined && fs.existsSync(worktreePath)) {
+			number += 1;
+			worktreePath = path.join(WORKTREE_POOL_DIR, `${project}-${number}`);
 		}
+		const id = reusable?.id ?? `wt:${project}:${number}`;
 
-		const base = await prepareBase(repo, request.base);
 		// Keep the entropy-bearing tail. The timestamp-bearing ULID prefix is a
 		// poor discriminator for branches allocated in the same millisecond.
 		const branch = `deck/${effort}/${ulid().slice(-8)}`;
-		await addWorktree(repo, worktreePath, branch, base);
-
+		await validateBranchName(repo, branch);
+		const base = await prepareBase(resolvedRepo.context, request.base);
 		const entry: WorktreeEntry = {
 			id,
 			repo,
@@ -111,19 +118,26 @@ export async function allocateWorktree(request: AllocateRequest): Promise<Worktr
 			created: new Date().toISOString(),
 			state: "active",
 		};
-		const nextState = reusable === undefined
+		const reservedState = reusable === undefined
 			? worktreesStateSchema.parse({ v: 1, entries: [...state.entries, entry] })
 			: replaceEntry(state, entry);
 
+		// Journal the slot before Git crosses the filesystem boundary. A killed
+		// allocator leaves a discoverable active record for release/reap rather
+		// than an untracked branch and worktree.
+		writeWorktreesState(reservedState);
 		try {
-			writeWorktreesState(nextState);
+			await addWorktree(repo, worktreePath, branch, base);
+			fs.chmodSync(worktreePath, 0o700);
 		} catch (error) {
 			try {
-				await removeWorktree(repo, worktreePath, branch, true);
+				await removeWorktree(repo, worktreePath, branch, fs.existsSync(worktreePath));
+				const failed: WorktreeEntry = { ...entry, state: "free" };
+				writeWorktreesState(replaceEntry(reservedState, failed));
 			} catch (rollbackError) {
 				throw new DeckError(
 					"E_IO",
-					`state write failed and allocator rollback failed: ${errorMessage(error)}; ${errorMessage(rollbackError)}`,
+					`worktree creation failed and allocator rollback failed: ${errorMessage(error)}; ${errorMessage(rollbackError)}`,
 				);
 			}
 			throw error;
@@ -144,7 +158,7 @@ export async function releaseWorktree(id: string, deleteBranch: boolean): Promis
 		}
 
 		await removeWorktree(entry.repo, entry.path, entry.branch, deleteBranch);
-		const released = { ...entry, state: "free" as const };
+		const released: WorktreeEntry = { ...entry, state: "free" };
 		writeWorktreesState(replaceEntry(state, released));
 		return released;
 	});
@@ -179,18 +193,36 @@ export async function reapWorktrees(): Promise<WorktreeEntry[]> {
 	return withStateLock(async () => {
 		let state = readWorktreesState();
 		const reaped: WorktreeEntry[] = [];
+		const failures: string[] = [];
 		for (const entry of state.entries) {
-			if (entry.state !== "active" || !readEffortTerminalState(entry.effort)) {
+			if (entry.state !== "active") {
 				continue;
 			}
-
-			await removeWorktree(entry.repo, entry.path, entry.branch, false);
-			const released = { ...entry, state: "free" as const };
+			const crashedReservation = !fs.existsSync(entry.path);
+			try {
+				if (!crashedReservation && !readEffortTerminalState(entry.effort)) {
+					continue;
+				}
+				if (!(crashedReservation && !fs.existsSync(entry.repo))) {
+					await removeWorktree(entry.repo, entry.path, entry.branch, crashedReservation);
+				}
+			} catch (error) {
+				failures.push(`${entry.id}: ${errorMessage(error)}`);
+				continue;
+			}
+			const released: WorktreeEntry = { ...entry, state: "free" };
 			state = replaceEntry(state, released);
 			// Commit each successful physical removal before proceeding. A later
 			// repository failure cannot make already-removed slots appear active.
 			writeWorktreesState(state);
 			reaped.push(released);
+		}
+		if (failures.length > 0) {
+			throw new DeckError(
+				"E_IO",
+				`reaped ${reaped.length} worktree${reaped.length === 1 ? "" : "s"}; ${failures.length} failed: ${failures.join("; ")}`,
+				{ reaped: reaped.map((entry) => entry.id), failures },
+			);
 		}
 		return reaped;
 	});

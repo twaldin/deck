@@ -1,5 +1,5 @@
-import { DEFAULT_CONFIG, type DeckEvent, type InboxCommand, type Manifest, type SessionRef, type Stage } from "@deck/core";
-import type { AccountsViewData, BoardViewData, EffortViewData, LoadIssue, UsageReport } from "./types";
+import { DEFAULT_CONFIG, type InboxCommand, type Manifest, type SessionRef, type Stage } from "@deck/core";
+import type { AccountsViewData, BoardViewData, EffortViewData, LoadIssue } from "./types";
 
 const STAGE_ORDER: Record<Stage, number> = {
 	intake: 0,
@@ -11,7 +11,28 @@ const STAGE_ORDER: Record<Stage, number> = {
 	abandoned: 6,
 };
 
-const SUMMARY_KEYS = ["summary", "message", "status", "reason", "result", "title"] as const;
+const SUMMARY_KEYS = ["summary", "message", "body", "status", "reason", "result", "title"] as const;
+
+/** Strip C0/C1 bytes before any line reaches a terminal. */
+export function sanitizeTerminalLines(lines: readonly string[]): string[] {
+	return lines.map(line => line.replace(/[\u0000-\u001f\u007f-\u009f]/g, " "));
+}
+
+/** Wrap sanitized text so row budgeting matches physical terminal rows. */
+export function wrapTerminalLines(lines: readonly string[], maxColumns: number): string[] {
+	const width = Math.max(1, Math.floor(maxColumns));
+	const wrapped: string[] = [];
+	for (const line of sanitizeTerminalLines(lines)) {
+		if (line.length === 0) {
+			wrapped.push("");
+			continue;
+		}
+		for (let offset = 0; offset < line.length; offset += width) {
+			wrapped.push(line.slice(offset, offset + width));
+		}
+	}
+	return wrapped;
+}
 
 function epochMs(value: number): number {
 	return value < 1_000_000_000_000 ? value * 1_000 : value;
@@ -38,6 +59,11 @@ function formatUpdated(value: string): string {
 	return new Date(parsed).toISOString().replace("T", " ").slice(0, 19);
 }
 
+function formatUpdatedAge(value: string, now: number): string {
+	const parsed = Date.parse(value);
+	return Number.isFinite(parsed) ? formatDuration(Math.max(0, now - parsed)) : "?";
+}
+
 function oneLine(value: string, limit = 110): string {
 	const collapsed = value.replace(/\s+/g, " ").trim();
 	if (collapsed.length <= limit) return collapsed;
@@ -59,11 +85,11 @@ function pad(value: string, width: number): string {
 	return clipped.padEnd(width);
 }
 
-function sessionLiveness(session: SessionRef | null, now: number): string {
+function sessionLiveness(session: SessionRef | null, now: number, heartbeatIntervalMs: number): string {
 	if (session === null) return "-";
 	if (session.last_heartbeat === null) return "NEVER";
 	const age = Math.max(0, now - epochMs(session.last_heartbeat));
-	const staleAfter = DEFAULT_CONFIG.router.heartbeatIntervalMs * 3;
+	const staleAfter = heartbeatIntervalMs * 3;
 	return `${age > staleAfter ? "STALE" : "live"} ${formatDuration(age)}`;
 }
 
@@ -71,6 +97,13 @@ function overlayLabel(manifest: Manifest): string {
 	const badges: string[] = [];
 	if (manifest.overlays.needs_tim.length > 0) badges.push(`[needs_tim:${manifest.overlays.needs_tim.length}]`);
 	if (manifest.overlays.blocked !== null) badges.push("[blocked]");
+	return badges.length === 0 ? "-" : badges.join(" ");
+}
+
+function compactOverlayLabel(manifest: Manifest): string {
+	const badges: string[] = [];
+	if (manifest.overlays.needs_tim.length > 0) badges.push(`T:${manifest.overlays.needs_tim.length}`);
+	if (manifest.overlays.blocked !== null) badges.push("B");
 	return badges.length === 0 ? "-" : badges.join(" ");
 }
 
@@ -92,49 +125,80 @@ export function sortBoardEfforts(efforts: readonly Manifest[]): Manifest[] {
 	});
 }
 
-export function renderBoard(data: BoardViewData, selectedIndex: number, now: number): string[] {
+export function renderBoard(
+	data: BoardViewData,
+	selectedIndex: number,
+	now: number,
+	heartbeatIntervalMs = DEFAULT_CONFIG.router.heartbeatIntervalMs,
+	maxRows = Number.POSITIVE_INFINITY,
+	maxColumns = Number.POSITIVE_INFINITY,
+): string[] {
 	const efforts = sortBoardEfforts(data.efforts);
+	const issueLines = renderIssues(data.issues);
+	const compact = Number.isFinite(maxColumns) && maxColumns < 145;
 	const lines = [
 		"DECK / BOARD",
 		"",
-		`  ${pad("stage", 10)} ${pad("effort", 30)} ${pad("title", 34)} ${pad("overlays", 24)} ${pad("cards", 5)} ${pad("heartbeat", 14)} updated`,
+		compact
+			? `  ${pad("stage", 8)} ${pad("effort", 20)} ${pad("title", 16)} ${pad("flags", 7)} ${pad("C", 1)} ${pad("heartbeat", 9)} updated`
+			: `  ${pad("stage", 10)} ${pad("effort", 30)} ${pad("title", 34)} ${pad("overlays", 24)} ${pad("cards", 5)} ${pad("heartbeat", 14)} updated`,
 	];
-	for (let index = 0; index < efforts.length; index += 1) {
+	let first = 0;
+	let last = efforts.length;
+	let clipped = false;
+	if (Number.isFinite(maxRows) && efforts.length > 0) {
+		const capacity = Math.max(1, Math.floor(maxRows) - lines.length - issueLines.length - 1);
+		if (efforts.length > capacity) {
+			first = Math.min(
+				Math.max(0, selectedIndex - Math.floor(capacity / 2)),
+				efforts.length - capacity,
+			);
+			last = first + capacity;
+			clipped = true;
+		}
+	}
+	for (let index = first; index < last; index += 1) {
 		const effort = efforts[index];
 		if (!effort) continue;
 		const openCards = effort.cards.reduce((count, entry) => count + (entry.status === "open" ? 1 : 0), 0);
 		const cursor = index === selectedIndex ? ">" : " ";
-		lines.push(
-			`${cursor} ${pad(effort.stage, 10)} ${pad(effort.effort_id, 30)} ${pad(effort.title, 34)} ${pad(overlayLabel(effort), 24)} ${pad(String(openCards), 5)} ${pad(sessionLiveness(effort.session, now), 14)} ${formatUpdated(effort.updated)}`,
-		);
+		lines.push(compact
+			? `${cursor} ${pad(effort.stage, 8)} ${pad(effort.effort_id, 20)} ${pad(effort.title, 16)} ${pad(compactOverlayLabel(effort), 7)} ${pad(String(openCards), 1)} ${pad(sessionLiveness(effort.session, now, heartbeatIntervalMs), 9)} ${pad(formatUpdatedAge(effort.updated, now), 7)}`
+			: `${cursor} ${pad(effort.stage, 10)} ${pad(effort.effort_id, 30)} ${pad(effort.title, 34)} ${pad(overlayLabel(effort), 24)} ${pad(String(openCards), 5)} ${pad(sessionLiveness(effort.session, now, heartbeatIntervalMs), 14)} ${formatUpdated(effort.updated)}`);
 	}
 	if (efforts.length === 0) lines.push("  No efforts found.");
-	lines.push(...renderIssues(data.issues));
-	return lines;
+	if (clipped) lines.push(`  Showing ${first + 1}-${last} of ${efforts.length} efforts.`);
+	lines.push(...issueLines);
+	const safe = sanitizeTerminalLines(lines);
+	if (!Number.isFinite(maxColumns)) return safe;
+	const width = Math.max(1, Math.floor(maxColumns));
+	return safe.map(line => line.length <= width ? line : `${line.slice(0, width - 1)}…`);
 }
 
-function renderEvent(event: DeckEvent): string {
-	return `${event.ts}  ${event.type}  ${summarizeRecord(event.data)}`;
-}
 
 function renderInbox(command: InboxCommand): string[] {
 	return [
-		`${command.ts}  ${command.cmd_id}  from=${command.from}  delivered=${formatEpoch(command.delivered)}  acked=${formatEpoch(command.acked)}`,
+		`${formatEpoch(command.ts)}  ${command.cmd_id}  from=${command.from}  delivered=${formatEpoch(command.delivered)}  acked=${formatEpoch(command.acked)}`,
 		`    ${summarizeRecord(command.cmd)}`,
 	];
 }
 
-export function renderEffort(data: EffortViewData, selectedCardIndex: number, now: number): string[] {
+export function renderEffort(
+	data: EffortViewData,
+	selectedCardIndex: number,
+	now: number,
+	heartbeatIntervalMs = DEFAULT_CONFIG.router.heartbeatIntervalMs,
+): string[] {
 	const manifest = data.manifest;
 	const lines = [`DECK / EFFORT / ${data.effortId}`, ""];
 	if (manifest === null) {
 		lines.push("Manifest unavailable.", ...renderIssues(data.issues));
-		return lines;
+		return sanitizeTerminalLines(lines);
 	}
 
 	lines.push(`title: ${manifest.title}`);
 	lines.push(`stage: ${manifest.stage}`);
-	lines.push(`heartbeat: ${sessionLiveness(manifest.session, now)}`);
+	lines.push(`heartbeat: ${sessionLiveness(manifest.session, now, heartbeatIntervalMs)}`);
 	lines.push(`overlays: ${overlayLabel(manifest)}`);
 	lines.push(`goal: ${data.charter?.goal ?? "(charter unavailable)"}`);
 
@@ -157,25 +221,22 @@ export function renderEffort(data: EffortViewData, selectedCardIndex: number, no
 	if (manifest.dispatches.length === 0) lines.push("  none");
 	for (const dispatch of manifest.dispatches) {
 		lines.push(
-			`  ${dispatch.state.padEnd(9)} ${dispatch.id}  ${dispatch.kind}:${dispatch.target}  started=${formatEpoch(dispatch.started)}  heartbeat=${sessionLiveness(dispatch.session, now)}`,
+			`  ${dispatch.state.padEnd(9)} ${dispatch.id}  ${dispatch.kind}:${dispatch.target}  started=${formatEpoch(dispatch.started)}  heartbeat=${sessionLiveness(dispatch.session, now, heartbeatIntervalMs)}`,
 		);
 	}
 
 	lines.push("", `RECENT EVENTS (${data.events.length})`);
 	if (data.events.length === 0) lines.push("  none");
-	for (const event of data.events) lines.push(`  ${renderEvent(event)}`);
+	for (const event of data.events) lines.push(`  ${event.ts}  ${event.type}  ${summarizeRecord(event.data)}`);
 
 	lines.push("", `INBOX (${data.inbox.length})`);
 	if (data.inbox.length === 0) lines.push("  none");
 	for (const command of data.inbox) lines.push(...renderInbox(command).map(line => `  ${line}`));
 
 	lines.push(...renderIssues(data.issues));
-	return lines;
+	return sanitizeTerminalLines(lines);
 }
 
-function usageIdentity(report: UsageReport): string {
-	return report.metadata?.email ?? report.metadata?.accountId ?? report.metadata?.orgName ?? "unknown account";
-}
 
 export function renderAccounts(data: AccountsViewData, now: number): string[] {
 	const lines = ["DECK / ACCOUNTS", ""];
@@ -210,15 +271,25 @@ export function renderAccounts(data: AccountsViewData, now: number): string[] {
 		lines.push("  none");
 	} else {
 		for (const report of data.usage.reports) {
-			lines.push(`  ${report.provider} / ${usageIdentity(report)}  fetched=${formatEpoch(report.fetchedAt)}`);
+			const identity = report.metadata?.email ?? report.metadata?.accountId ?? report.metadata?.orgName ?? "unknown account";
+			lines.push(`  ${report.provider} / ${identity}  fetched=${formatEpoch(report.fetchedAt)}`);
 			for (const limit of report.limits) {
-				const usedPercent = Math.round(limit.amount.usedFraction * 100);
+				const amount = limit.amount;
+				const usedFraction = amount.usedFraction
+					?? (amount.used !== undefined && amount.limit !== undefined && amount.limit > 0
+						? amount.used / amount.limit
+						: amount.unit === "percent" && amount.used !== undefined
+							? amount.used / 100
+							: amount.remainingFraction !== undefined
+								? Math.max(0, 1 - amount.remainingFraction)
+								: undefined);
+				const usedPercent = usedFraction === undefined ? "?" : String(Math.round(usedFraction * 100));
 				lines.push(
-					`    ${limit.label}: ${limit.amount.used}/${limit.amount.limit} ${limit.amount.unit} (${usedPercent}% used) status=${limit.status} resets=${formatEpoch(limit.window.resetsAt)}`,
+					`    ${limit.label}: ${amount.used ?? "?"}/${amount.limit ?? "?"} ${amount.unit} (${usedPercent}% used) status=${limit.status ?? "unknown"} resets=${formatEpoch(limit.window?.resetsAt ?? null)}`,
 				);
 			}
 		}
 	}
 	lines.push(...renderIssues(data.issues));
-	return lines;
+	return sanitizeTerminalLines(lines);
 }

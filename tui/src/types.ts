@@ -16,18 +16,18 @@ const usageWindowSchema = z
 	.object({
 		id: z.string(),
 		label: z.string(),
-		durationMs: z.number().nonnegative(),
-		resetsAt: z.number().nullable(),
+		durationMs: z.number().nonnegative().optional(),
+		resetsAt: z.number().nullable().optional(),
 	})
 	.catchall(z.unknown());
 
 const usageAmountSchema = z
 	.object({
-		used: z.number(),
-		limit: z.number(),
-		remaining: z.number(),
-		usedFraction: z.number(),
-		remainingFraction: z.number(),
+		used: z.number().optional(),
+		limit: z.number().optional(),
+		remaining: z.number().optional(),
+		usedFraction: z.number().optional(),
+		remainingFraction: z.number().optional(),
 		unit: z.string(),
 	})
 	.catchall(z.unknown());
@@ -37,9 +37,9 @@ export const usageLimitSchema = z
 		id: z.string(),
 		label: z.string(),
 		scope: usageScopeSchema,
-		window: usageWindowSchema,
+		window: usageWindowSchema.optional(),
 		amount: usageAmountSchema,
-		status: z.string(),
+		status: z.string().optional(),
 	})
 	.catchall(z.unknown());
 export type UsageLimit = z.infer<typeof usageLimitSchema>;

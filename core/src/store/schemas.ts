@@ -8,7 +8,16 @@ import {
 	sessionRefSchema,
 } from "../schemas";
 
-export const eventInputSchema = eventSchema.partial({ id: true, ts: true });
+const ulidSchema = z.string().regex(/^[0-9A-HJKMNP-TV-Z]{26}$/, "id must be a ULID");
+const jsonObjectSchema = z.record(z.string(), z.json());
+
+export const eventInputSchema = eventSchema
+	.omit({ id: true, ts: true, data: true })
+	.extend({
+		id: ulidSchema.optional(),
+		ts: z.iso.datetime().optional(),
+		data: jsonObjectSchema,
+	});
 export type EventInput = z.infer<typeof eventInputSchema>;
 
 export const charterDraftSchema = charterSchema.omit({ created: true, charter_changes: true });
@@ -32,8 +41,12 @@ export const leaseSessionInputSchema = sessionRefSchema.omit({ lease_epoch: true
 export type LeaseSessionInput = z.infer<typeof leaseSessionInputSchema>;
 
 export const inboxCommandInputSchema = inboxCommandSchema
-	.omit({ delivered: true, acked: true })
-	.extend({ cmd_id: z.string().min(1).optional(), ts: z.number().optional() });
+	.omit({ cmd_id: true, ts: true, delivered: true, acked: true, cmd: true })
+	.extend({
+		cmd_id: z.string().min(1).optional(),
+		ts: z.number().optional(),
+		cmd: jsonObjectSchema,
+	});
 export type InboxCommandInput = z.infer<typeof inboxCommandInputSchema>;
 
 export const inboxReceiptSchema = z.object({

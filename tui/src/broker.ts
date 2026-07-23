@@ -71,6 +71,10 @@ export class BrokerStatusClient {
 				socket: {
 					open(socket) {
 						activeSocket = socket;
+						if (settled) {
+							socket.end();
+							return;
+						}
 						socket.write(`${JSON.stringify(request)}\n`);
 					},
 					data(_socket, chunk) {

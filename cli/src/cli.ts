@@ -7,6 +7,7 @@ import {
 	reapCommandSchema,
 	releaseCommandSchema,
 	type WorktreeCommand,
+	type WorktreeEntry,
 } from "./schema";
 import { allocateWorktree, listWorktrees, reapWorktrees, releaseWorktree } from "./worktrees";
 
@@ -128,7 +129,7 @@ function parseArguments(input: string[]): WorktreeCommand {
 	}
 }
 
-function printHumanTable(entries: ReturnType<typeof listWorktrees>): void {
+function printHumanTable(entries: WorktreeEntry[]): void {
 	if (entries.length === 0) {
 		console.log("No worktrees.");
 		return;

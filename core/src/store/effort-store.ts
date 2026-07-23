@@ -16,11 +16,12 @@ import {
 } from "../schemas";
 import {
 	appendJsonLine,
-	appendQuarantinedLine,
 	atomicWriteJson,
 	ensurePrivateDir,
+	fsyncDirectory,
 	parseJsonFile,
 	readJsonLines,
+	repairTrailingJsonLine,
 	withExclusiveLock,
 } from "./io";
 import {
@@ -112,6 +113,9 @@ export class EffortStore {
 					actual: result.manifest.effort_id,
 				});
 			}
+			if (result.manifest.project !== current.project) {
+				throw new DeckError("E_STATE", "manifest project is immutable");
+			}
 			if (result.manifest.created !== current.created) {
 				throw new DeckError("E_STATE", "manifest created timestamp is immutable");
 			}
@@ -122,18 +126,38 @@ export class EffortStore {
 				revision: current.revision + 1,
 				updated: new Date().toISOString(),
 			});
-			this.assertTerminalEvidence(current, next);
+			this.assertTerminalEvidence(next);
 			const event = normalizeEvent(result.event);
+			const committed = this.findCommittedEvent(event);
+			if (committed !== null) {
+				throw new DeckError("E_STATE", "paired mutation event is already committed", {
+					event_id: event.id,
+					committed_event_id: committed.id,
+				});
+			}
 			atomicWriteJson(this.manifestPath, next, manifestSchema, `${this.manifestPath}.tmp`);
 			appendJsonLine(this.tailPath, event, eventSchema);
 			return next;
 		});
 	}
 
-	/** Standalone append: one O_APPEND write of one pre-serialized line + fsync. */
-	appendEvent(input: EventInput): DeckEvent {
+	/**
+	 * Standalone append: one O_APPEND write + fsync. All appends serialize with
+	 * boot repair; a supplied owner token is fenced in the same lock hold.
+	 * Retried facts return the already-committed matching idem record.
+	 */
+	appendEvent(input: EventInput, leaseToken: string | null = null): DeckEvent {
 		const event = normalizeEvent(input);
-		return appendJsonLine(this.tailPath, event, eventSchema);
+		return withExclusiveLock(this.lockPath, () => {
+			if (leaseToken !== null) {
+				this.assertLeaseMatches(leaseToken, this.readManifest());
+			}
+			const committed = this.findCommittedEvent(event);
+			if (committed !== null) {
+				return committed;
+			}
+			return appendJsonLine(this.tailPath, event, eventSchema);
+		});
 	}
 
 	/**
@@ -157,14 +181,96 @@ export class EffortStore {
 	}
 
 	/**
+	 * Allocate the fencing generation before a process exists. The returned
+	 * token can be injected into its immutable spawn environment; bind it after
+	 * the session id becomes observable.
+	 */
+	reserveLease(expectedRevision: number): Lease {
+		assertExpectedRevision(expectedRevision);
+		return withExclusiveLock(this.lockPath, () => {
+			const manifest = this.readManifest();
+			assertManifestRevision(manifest, expectedRevision);
+			const currentLease = this.readLease();
+			const epoch = Math.max(currentLease?.epoch ?? 0, manifest.session?.lease_epoch ?? 0) + 1;
+			const lease = leaseSchema.parse({
+				epoch,
+				token: randomBytes(32).toString("base64url"),
+				holder: null,
+				written: Date.now(),
+			});
+			atomicWriteJson(this.leasePath, lease, leaseSchema, `${this.leasePath}.tmp`);
+			const next = manifestSchema.parse({
+				...manifest,
+				revision: manifest.revision + 1,
+				updated: new Date().toISOString(),
+			});
+			const event = normalizeEvent({
+				plane: "lifecycle",
+				type: "lifecycle.lease_reserved",
+				actor: "router",
+				data: { epoch },
+			});
+			atomicWriteJson(this.manifestPath, next, manifestSchema, `${this.manifestPath}.tmp`);
+			appendJsonLine(this.tailPath, event, eventSchema);
+			return lease;
+		});
+	}
+
+	/**
+	 * Bind a reserved generation without rotating its token. CAS prevents two
+	 * spawn completions from projecting different sessions for one generation.
+	 */
+	bindLeaseSession(expectedRevision: number, token: string, sessionRef: LeaseSessionInput): Lease {
+		assertExpectedRevision(expectedRevision);
+		const session = leaseSessionInputSchema.parse(sessionRef);
+		if (token.length === 0) {
+			throw new DeckError("E_ARG", "lease token must be non-empty");
+		}
+		return withExclusiveLock(this.lockPath, () => {
+			const manifest = this.readManifest();
+			assertManifestRevision(manifest, expectedRevision);
+			const lease = this.readLease();
+			if (lease === null || lease.token !== token) {
+				throw new DeckError("E_LEASE", "reserved owner lease is stale");
+			}
+			if (lease.holder !== null
+				&& (lease.holder.machine !== session.machine || lease.holder.session_id !== session.session_id)) {
+				throw new DeckError("E_LEASE", "lease generation is already bound to another session", {
+					epoch: lease.epoch,
+				});
+			}
+			const holder = { ...session, lease_epoch: lease.epoch };
+			const boundLease = leaseSchema.parse({ ...lease, holder, written: Date.now() });
+			atomicWriteJson(this.leasePath, boundLease, leaseSchema, `${this.leasePath}.tmp`);
+			const next = manifestSchema.parse({
+				...manifest,
+				session: holder,
+				revision: manifest.revision + 1,
+				updated: new Date().toISOString(),
+			});
+			const event = normalizeEvent({
+				plane: "lifecycle",
+				type: "lifecycle.lease_bound",
+				actor: "router",
+				data: { epoch: lease.epoch, machine: holder.machine, session_id: holder.session_id },
+			});
+			atomicWriteJson(this.manifestPath, next, manifestSchema, `${this.manifestPath}.tmp`);
+			appendJsonLine(this.tailPath, event, eventSchema);
+			return boundLease;
+		});
+	}
+
+	/**
 	 * Establish a new owner generation. This fencing primitive serializes on
 	 * manifest.lock, advances from the latest durable epoch, writes the lease
 	 * first (fencing the old owner), then updates manifest.session and its event.
 	 */
-	bumpLease(sessionRef: LeaseSessionInput): Lease {
+	bumpLease(expectedRevision: number, sessionRef: LeaseSessionInput): Lease {
+		assertExpectedRevision(expectedRevision);
 		const session = leaseSessionInputSchema.parse(sessionRef);
 		return withExclusiveLock(this.lockPath, () => {
 			const manifest = this.readManifest();
+			assertManifestRevision(manifest, expectedRevision);
 			const currentLease = this.readLease();
 			const manifestEpoch = manifest.session?.lease_epoch ?? 0;
 			const epoch = Math.max(currentLease?.epoch ?? 0, manifestEpoch) + 1;
@@ -231,12 +337,15 @@ export class EffortStore {
 		});
 	}
 
-	inboxMarkDelivered(cmdId: string): InboxCommand {
-		return this.appendInboxReceipt(cmdId, "delivered");
+	inboxMarkDelivered(cmdId: string, leaseToken: string | null = null): InboxCommand {
+		return this.appendInboxReceipt(cmdId, "delivered", leaseToken);
 	}
 
-	inboxAck(cmdId: string): InboxCommand {
-		return this.appendInboxReceipt(cmdId, "acked");
+	inboxAck(cmdId: string, leaseToken: string): InboxCommand {
+		if (leaseToken.length === 0) {
+			throw new DeckError("E_ARG", "leaseToken must be non-empty");
+		}
+		return this.appendInboxReceipt(cmdId, "acked", leaseToken);
 	}
 
 	/** Fold append-only command and follow-up receipt records (SPEC §4.5.3). */
@@ -261,65 +370,70 @@ export class EffortStore {
 		}
 		return [...commands.values()];
 	}
+	/**
+	 * Composite card answer (TUI flow, D-A). WRITE ORDER: the card_answer inbox
+	 * command lands FIRST (fsynced, deterministic cmd_id so retries dedupe),
+	 * then the manifest projection flips under the lock. A crash between the
+	 * two leaves a deliverable command with the card still open — benign: the
+	 * owner receives the answer and a re-answer completes the projection. The
+	 * reverse order would silently drop the decision (the firstmate resend bug).
+	 */
+	answerCard(cardId: string, answer: string): Manifest {
+		if (cardId.length === 0 || answer.length === 0) {
+			throw new DeckError("E_ARG", "answerCard requires cardId and answer");
+		}
+		const before = this.readManifest();
+		const entry = before.cards.find((candidate) => candidate.id === cardId);
+		if (entry === undefined) {
+			throw new DeckError("E_STATE", "no such card", { cardId });
+		}
+		if (entry.status === "answered") {
+			if (entry.answer === answer) return before; // idempotent re-answer (crash recovery)
+			throw new DeckError("E_STATE", "card already answered differently", { cardId });
+		}
+		this.inboxAppend({
+			cmd_id: `card-answer:${cardId}`,
+			from: "tim",
+			cmd: { kind: "card_answer", card_id: cardId, answer },
+		});
+		const now = Date.now();
+		return this.mutate(before.revision, null, (manifest) => ({
+			manifest: {
+				...manifest,
+				cards: manifest.cards.map((candidate) =>
+					candidate.id === cardId
+						? { ...candidate, status: "answered" as const, answer, answered_ts: now }
+						: candidate,
+				),
+				decisions: [...manifest.decisions, { ts: now, card_id: cardId, answer }],
+				overlays: {
+					...manifest.overlays,
+					needs_tim: manifest.overlays.needs_tim.filter((id) => id !== cardId),
+				},
+			},
+			event: {
+				plane: "tim",
+				type: "tim.decision",
+				actor: "tim",
+				data: { card_id: cardId, answer },
+			},
+		}));
+	}
 
 	/** Called by openEffort before the handle is returned. */
 	recoverTrailingTail(): void {
-		if (!fs.existsSync(this.tailPath)) {
-			fs.writeFileSync(this.tailPath, "", { mode: 0o600 });
-			return;
-		}
-		const bytes = fs.readFileSync(this.tailPath);
-		let logicalEnd = bytes.length;
-		while (logicalEnd > 0 && (bytes[logicalEnd - 1] === 0x0a || bytes[logicalEnd - 1] === 0x0d)) {
-			logicalEnd -= 1;
-		}
-		if (logicalEnd === 0) {
-			return;
-		}
-
-		const content = bytes.subarray(0, logicalEnd).toString("utf8");
-		const lines = content.split("\n");
-		let malformedLast = false;
-		for (let index = 0; index < lines.length; index += 1) {
-			const rawLine = lines[index];
-			if (rawLine === undefined) {
-				continue;
-			}
-			const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
-			try {
-				const decoded: unknown = JSON.parse(line);
-				eventSchema.parse(decoded);
-			} catch (error) {
-				if (index !== lines.length - 1) {
-					throw new DeckError("E_IO", "malformed non-trailing tail record", {
-						line: index + 1,
-						cause: error instanceof Error ? error.message : String(error),
-					});
-				}
-				malformedLast = true;
-			}
-		}
-		if (!malformedLast) {
-			return;
-		}
-
-		const previousNewline = bytes.lastIndexOf(0x0a, logicalEnd - 1);
-		const badStart = previousNewline < 0 ? 0 : previousNewline + 1;
-		appendQuarantinedLine(path.join(this.directory, EFFORT_FILES.tailBad), bytes.subarray(badStart, logicalEnd));
-		let descriptor: number | null = null;
-		try {
-			descriptor = fs.openSync(this.tailPath, fs.constants.O_WRONLY);
-			fs.ftruncateSync(descriptor, badStart);
-			fs.fsyncSync(descriptor);
-		} catch (error) {
-			throw new DeckError("E_IO", "cannot truncate quarantined tail", {
-				cause: error instanceof Error ? error.message : String(error),
-			});
-		} finally {
-			if (descriptor !== null) {
-				fs.closeSync(descriptor);
-			}
-		}
+		withExclusiveLock(this.lockPath, () => {
+			repairTrailingJsonLine(
+				this.tailPath,
+				path.join(this.directory, EFFORT_FILES.tailBad),
+				eventSchema,
+			);
+			repairTrailingJsonLine(
+				this.inboxPath,
+				path.join(this.directory, "inbox.bad"),
+				inboxRecordSchema,
+			);
+		});
 	}
 
 	private assertLeaseMatches(token: string, manifest: Manifest): void {
@@ -332,8 +446,8 @@ export class EffortStore {
 		}
 	}
 
-	private assertTerminalEvidence(current: Manifest, next: Manifest): void {
-		if (current.stage === "done" || next.stage !== "done") {
+	private assertTerminalEvidence(next: Manifest): void {
+		if (next.stage !== "done") {
 			return;
 		}
 		const hasDeployEvidence = next.evidence.some((entry) => entry.scope === "deploy");
@@ -347,11 +461,18 @@ export class EffortStore {
 		}
 	}
 
-	private appendInboxReceipt(cmdId: string, receipt: "delivered" | "acked"): InboxCommand {
+	private appendInboxReceipt(
+		cmdId: string,
+		receipt: "delivered" | "acked",
+		leaseToken: string | null,
+	): InboxCommand {
 		if (cmdId.length === 0) {
 			throw new DeckError("E_ARG", "cmd_id must be non-empty");
 		}
 		return withExclusiveLock(this.lockPath, () => {
+			if (leaseToken !== null) {
+				this.assertLeaseMatches(leaseToken, this.readManifest());
+			}
 			const command = this.inboxState().find((candidate) => candidate.cmd_id === cmdId);
 			if (command === undefined) {
 				throw new DeckError("E_STATE", "unknown inbox command", { cmd_id: cmdId });
@@ -367,11 +488,40 @@ export class EffortStore {
 				: { ...command, acked: followUp.ts });
 		});
 	}
+
+	private findCommittedEvent(event: DeckEvent): DeckEvent | null {
+		const committed = readJsonLines(this.tailPath, eventSchema);
+		const sameId = committed.find((candidate) => candidate.id === event.id);
+		if (sameId !== undefined) {
+			if (JSON.stringify(sameId) !== JSON.stringify(event)) {
+				throw new DeckError("E_STATE", "event id is already used by different content", { event_id: event.id });
+			}
+			return sameId;
+		}
+		if (event.idem === undefined) {
+			return null;
+		}
+		const idem = event.idem;
+		return committed.find((candidate) => {
+			if (candidate.idem === undefined) {
+				return false;
+			}
+			return candidate.idem.source === idem.source
+				&& candidate.idem.external_id === idem.external_id
+				&& candidate.idem.version === idem.version;
+		}) ?? null;
+	}
 }
 
 export function openEffort(effortId: string): EffortStore {
 	const store = new EffortStore(effortId);
-	store.readManifest();
+	const manifest = store.readManifest();
+	if (manifest.effort_id !== effortId) {
+		throw new DeckError("E_IO", "manifest effort_id does not match its directory", {
+			directory_effort_id: effortId,
+			manifest_effort_id: manifest.effort_id,
+		});
+	}
 	store.readCharter();
 	store.recoverTrailingTail();
 	return store;
@@ -380,17 +530,20 @@ export function openEffort(effortId: string): EffortStore {
 export function createEffort(input: CreateEffortInput): EffortStore {
 	const parsed = createEffortInputSchema.parse(input);
 	assertSafeEffortId(parsed.effort_id);
-	ensureStateDirs();
-	const directory = effortDir(parsed.effort_id);
-	try {
-		fs.mkdirSync(directory, { mode: 0o700 });
-	} catch (error) {
-		throw new DeckError("E_STATE", "effort already exists or cannot be created", {
+	if (!parsed.effort_id.startsWith(`${parsed.project}--`)) {
+		throw new DeckError("E_ARG", "effort_id must be prefixed by project", {
 			effort_id: parsed.effort_id,
-			cause: error instanceof Error ? error.message : String(error),
+			project: parsed.project,
 		});
 	}
-	ensurePrivateDir(directory);
+	ensureStateDirs();
+	const directory = effortDir(parsed.effort_id);
+	if (fs.existsSync(directory)) {
+		throw new DeckError("E_STATE", "effort already exists", { effort_id: parsed.effort_id });
+	}
+	const staging = path.join(EFFORTS_DIR, `.creating-${ulid()}`);
+	fs.mkdirSync(staging, { mode: 0o700 });
+	ensurePrivateDir(staging);
 	const now = new Date().toISOString();
 	const charter = charterSchema.parse({ ...parsed.charter, created: now, charter_changes: [] });
 	const manifest = manifestSchema.parse({
@@ -413,24 +566,40 @@ export function createEffort(input: CreateEffortInput): EffortStore {
 		decisions: [],
 		digest: null,
 	});
-	const store = new EffortStore(parsed.effort_id);
-	atomicWriteJson(store.charterPath, charter, charterSchema);
-	atomicWriteJson(store.manifestPath, manifest, manifestSchema, `${store.manifestPath}.tmp`);
-	fs.writeFileSync(store.tailPath, "", { mode: 0o600 });
-	fs.writeFileSync(store.inboxPath, "", { mode: 0o600 });
-	store.appendEvent({
-		plane: "lifecycle",
-		type: "lifecycle.effort_created",
-		actor: "store",
-		data: { effort_id: parsed.effort_id },
-	});
+	try {
+		const charterPath = path.join(staging, EFFORT_FILES.charter);
+		const manifestPath = path.join(staging, EFFORT_FILES.manifest);
+		const tailPath = path.join(staging, EFFORT_FILES.tail);
+		const inboxPath = path.join(staging, EFFORT_FILES.inbox);
+		atomicWriteJson(charterPath, charter, charterSchema);
+		atomicWriteJson(manifestPath, manifest, manifestSchema, `${manifestPath}.tmp`);
+		fs.writeFileSync(tailPath, "", { mode: 0o600 });
+		fs.writeFileSync(inboxPath, "", { mode: 0o600 });
+		appendJsonLine(tailPath, normalizeEvent({
+			plane: "lifecycle",
+			type: "lifecycle.effort_created",
+			actor: "store",
+			data: { effort_id: parsed.effort_id },
+		}), eventSchema);
+		fs.renameSync(staging, directory);
+		fsyncDirectory(EFFORTS_DIR);
+	} catch (error) {
+		fs.rmSync(staging, { recursive: true, force: true });
+		if (error instanceof DeckError) {
+			throw error;
+		}
+		throw new DeckError("E_IO", "cannot create effort atomically", {
+			effort_id: parsed.effort_id,
+			cause: error instanceof Error ? error.message : String(error),
+		});
+	}
 	return openEffort(parsed.effort_id);
 }
 
 export function listEfforts(): EffortStore[] {
 	ensureStateDirs();
 	return fs.readdirSync(EFFORTS_DIR, { withFileTypes: true })
-		.filter((entry) => entry.isDirectory())
+		.filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
 		.map((entry) => entry.name)
 		.sort((left, right) => left.localeCompare(right))
 		.map((effortId) => openEffort(effortId));
@@ -446,7 +615,25 @@ function normalizeEvent(input: EventInput): DeckEvent {
 }
 
 function assertSafeEffortId(effortId: string): void {
-	if (effortId.length === 0 || effortId === "." || effortId === ".." || path.basename(effortId) !== effortId) {
-		throw new DeckError("E_ARG", "effort_id must be one path-safe segment", { effort_id: effortId });
+	const parsed = z.string()
+		.regex(/^[A-Za-z0-9._-]+--[A-Za-z0-9._-]+$/, "effort_id must match <project>--<slug>")
+		.safeParse(effortId);
+	if (!parsed.success || path.basename(parsed.data) !== parsed.data) {
+		throw new DeckError("E_ARG", "effort_id must be one safe <project>--<slug> segment", { effort_id: effortId });
+	}
+}
+
+function assertExpectedRevision(expectedRevision: number): void {
+	if (!Number.isInteger(expectedRevision) || expectedRevision < 0) {
+		throw new DeckError("E_ARG", "expectedRevision must be a nonnegative integer", { expectedRevision });
+	}
+}
+
+function assertManifestRevision(manifest: Manifest, expectedRevision: number): void {
+	if (manifest.revision !== expectedRevision) {
+		throw new DeckError("E_CAS", "manifest revision changed", {
+			expected_revision: expectedRevision,
+			actual_revision: manifest.revision,
+		});
 	}
 }

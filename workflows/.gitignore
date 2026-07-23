@@ -1,0 +1,5 @@
+node_modules/
+smithers.db
+smithers.db-*
+*.sqlite
+*.sqlite-*

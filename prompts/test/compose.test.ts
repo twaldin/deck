@@ -6,10 +6,11 @@ import {
 	composePrompt,
 	countPromptLines,
 	PROMPT_LINE_BUDGETS,
+	promptRoleSchema,
 	type PromptRole,
 } from "../compose";
 
-const promptFileSchema = z.string().min(1).transform((content) => content.trim());
+const promptFileSchema = z.string().trim().min(1);
 const ROLE_PATHS: Record<PromptRole, string> = {
 	owner: "../roles/owner.md",
 	worker: "../roles/worker.md",
@@ -39,8 +40,8 @@ describe("prompt composition", () => {
 		const base = readPrompt("../base.md");
 		const brief = "Implement the dispatched change and return command evidence.";
 
-		for (const [role, rolePath] of Object.entries(ROLE_PATHS) as Array<[PromptRole, string]>) {
-			const roleBlock = readPrompt(rolePath);
+		for (const role of promptRoleSchema.options) {
+			const roleBlock = readPrompt(ROLE_PATHS[role]);
 			const composed = composePrompt({ role, brief });
 			const expected = `${base}\n\n${roleBlock}\n\n${brief}`;
 

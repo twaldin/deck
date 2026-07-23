@@ -15,6 +15,20 @@ export function ensurePrivateDir(dir: string): void {
 	fs.chmodSync(dir, 0o700);
 }
 
+export function fsyncDirectory(dir: string): void {
+	let descriptor: number | null = null;
+	try {
+		descriptor = fs.openSync(dir, fs.constants.O_RDONLY);
+		fs.fsyncSync(descriptor);
+	} catch (error) {
+		throw ioError(`cannot fsync directory ${dir}`, error);
+	} finally {
+		if (descriptor !== null) {
+			fs.closeSync(descriptor);
+		}
+	}
+}
+
 export function parseJsonFile<T>(file: string, schema: z.ZodType<T>): T {
 	let raw: string;
 	try {
@@ -44,6 +58,7 @@ export function atomicWriteJson<T>(file: string, value: T, schema: z.ZodType<T>,
 		descriptor = null;
 		fs.renameSync(tmp, file);
 		fs.chmodSync(file, 0o600);
+		fsyncDirectory(path.dirname(file));
 		return parsed;
 	} catch (error) {
 		throw ioError(`cannot atomically write ${file}`, error);
@@ -70,6 +85,7 @@ export function atomicWriteJsonLines<T>(file: string, values: T[], schema: z.Zod
 		descriptor = null;
 		fs.renameSync(tmp, file);
 		fs.chmodSync(file, 0o600);
+		fsyncDirectory(path.dirname(file));
 		return parsed;
 	} catch (error) {
 		throw ioError(`cannot atomically rewrite ${file}`, error);
@@ -95,6 +111,86 @@ export function appendJsonLine<T>(file: string, value: T, schema: z.ZodType<T>, 
 export function appendQuarantinedLine(file: string, line: Buffer): void {
 	const suffix = line.length > 0 && line[line.length - 1] === 0x0a ? Buffer.alloc(0) : Buffer.from("\n");
 	appendBytes(file, Buffer.concat([line, suffix]), true);
+}
+
+/**
+ * Repair only the final JSONL record while no writer can append. A malformed
+ * suffix is copied to the bad file before truncation; a valid record missing
+ * its final newline is terminated so the next O_APPEND record cannot join it.
+ */
+export function repairTrailingJsonLine<T>(file: string, badFile: string, schema: z.ZodType<T>): void {
+	if (!fs.existsSync(file)) {
+		ensurePrivateDir(path.dirname(file));
+		fs.writeFileSync(file, "", { mode: 0o600 });
+		return;
+	}
+	const bytes = fs.readFileSync(file);
+	let logicalEnd = bytes.length;
+	while (logicalEnd > 0 && (bytes[logicalEnd - 1] === 0x0a || bytes[logicalEnd - 1] === 0x0d)) {
+		logicalEnd -= 1;
+	}
+	if (logicalEnd === 0) {
+		return;
+	}
+
+	const content = bytes.subarray(0, logicalEnd).toString("utf8");
+	const lines = content.split("\n");
+	const terminated = bytes[bytes.length - 1] === 0x0a;
+	let malformedLast = false;
+	for (let index = 0; index < lines.length; index += 1) {
+		const rawLine = lines[index];
+		if (rawLine === undefined) {
+			continue;
+		}
+		const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+		let decoded: unknown;
+		try {
+			decoded = JSON.parse(line);
+		} catch (error) {
+			if (index !== lines.length - 1) {
+				throw new DeckError("E_IO", `malformed non-trailing JSONL record in ${file}`, {
+					line: index + 1,
+					cause: error instanceof Error ? error.message : String(error),
+				});
+			}
+			malformedLast = true;
+			continue;
+		}
+		try {
+			schema.parse(decoded);
+		} catch (error) {
+			if (index !== lines.length - 1 || terminated) {
+				throw new DeckError("E_IO", `schema-invalid durable JSONL record in ${file}`, {
+					line: index + 1,
+					cause: error instanceof Error ? error.message : String(error),
+				});
+			}
+			malformedLast = true;
+		}
+	}
+
+	if (!malformedLast) {
+		if (bytes[bytes.length - 1] !== 0x0a) {
+			appendBytes(file, Buffer.from("\n"), true);
+		}
+		return;
+	}
+
+	const previousNewline = bytes.lastIndexOf(0x0a, logicalEnd - 1);
+	const badStart = previousNewline < 0 ? 0 : previousNewline + 1;
+	appendQuarantinedLine(badFile, bytes.subarray(badStart, logicalEnd));
+	let descriptor: number | null = null;
+	try {
+		descriptor = fs.openSync(file, fs.constants.O_WRONLY);
+		fs.ftruncateSync(descriptor, badStart);
+		fs.fsyncSync(descriptor);
+	} catch (error) {
+		throw ioError(`cannot truncate quarantined suffix in ${file}`, error);
+	} finally {
+		if (descriptor !== null) {
+			fs.closeSync(descriptor);
+		}
+	}
 }
 
 function appendBytes(file: string, bytes: Buffer, sync: boolean): void {
@@ -156,91 +252,208 @@ export function readJsonLines<T>(file: string, schema: z.ZodType<T>): T[] {
 
 /**
  * Node and Bun expose no dependency-free flock API. This is the SPEC §4.2
- * fallback: O_CREAT|O_EXCL creates the lockfile, contenders retry, and a dead
- * or timed-out holder is removed. The nonce prevents a stale owner from
- * unlinking a successor's lock.
+ * fallback: O_CREAT|O_EXCL creates the lockfile and contenders retry. A live
+ * holder is never timed out; only a dead holder or malformed stale lock is
+ * removed. A recovery lock closes the stale-removal/acquisition race.
  */
 export function withExclusiveLock<T>(lockFile: string, fn: () => T): T {
 	ensurePrivateDir(path.dirname(lockFile));
 	const deadline = Date.now() + LOCK_WAIT_MS;
 	const nonce = randomBytes(16).toString("hex");
+	const recoveryFile = `${lockFile}.recovery`;
 
 	while (true) {
-		let descriptor: number | null = null;
+		clearAbandonedRecovery(recoveryFile);
+		if (fs.existsSync(recoveryFile)) {
+			assertLockDeadline(lockFile, deadline);
+			sleepSync(LOCK_RETRY_MS);
+			continue;
+		}
+
+		let descriptor: number;
 		try {
 			descriptor = fs.openSync(lockFile, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY, 0o600);
+		} catch (error) {
+			if (!hasErrorCode(error, "EEXIST")) {
+				throw ioError(`cannot acquire ${lockFile}`, error);
+			}
+			clearStaleLock(lockFile, recoveryFile);
+			assertLockDeadline(lockFile, deadline);
+			sleepSync(LOCK_RETRY_MS);
+			continue;
+		}
+
+		if (fs.existsSync(recoveryFile)) {
+			fs.closeSync(descriptor);
+			try {
+				fs.unlinkSync(lockFile);
+			} catch (error) {
+				if (!hasErrorCode(error, "ENOENT")) {
+					throw ioError(`cannot yield ${lockFile} to recovery`, error);
+				}
+			}
+			assertLockDeadline(lockFile, deadline);
+			sleepSync(LOCK_RETRY_MS);
+			continue;
+		}
+
+		try {
 			const metadata = lockMetadataSchema.parse({ pid: process.pid, acquired: Date.now(), nonce });
 			fs.writeFileSync(descriptor, `${JSON.stringify(metadata)}\n`, "utf8");
 			fs.fsyncSync(descriptor);
-			try {
-				return fn();
-			} finally {
-				fs.closeSync(descriptor);
-				descriptor = null;
-				releaseOwnedLock(lockFile, nonce);
-			}
 		} catch (error) {
-			if (descriptor !== null) {
-				fs.closeSync(descriptor);
-				releaseOwnedLock(lockFile, nonce);
+			fs.closeSync(descriptor);
+			try {
+				fs.unlinkSync(lockFile);
+			} catch {
+				// The original initialization failure is the actionable error.
 			}
-			if (!hasErrorCode(error, "EEXIST")) {
-				throw error;
-			}
-			clearStaleLock(lockFile);
-			if (Date.now() >= deadline) {
-				throw new DeckError("E_IO", `timed out acquiring ${lockFile}`, { timeout_ms: LOCK_WAIT_MS });
-			}
-			sleepSync(LOCK_RETRY_MS);
+			throw ioError(`cannot initialize ${lockFile}`, error);
+		}
+
+		try {
+			return fn();
+		} finally {
+			fs.closeSync(descriptor);
+			releaseOwnedLock(lockFile, nonce);
 		}
 	}
 }
 
-function clearStaleLock(lockFile: string): void {
+function clearStaleLock(lockFile: string, recoveryFile: string): void {
+	let recoveryDescriptor: number | null = null;
+	const recoveryNonce = randomBytes(16).toString("hex");
+	try {
+		recoveryDescriptor = fs.openSync(
+			recoveryFile,
+			fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY,
+			0o600,
+		);
+		const metadata = lockMetadataSchema.parse({
+			pid: process.pid,
+			acquired: Date.now(),
+			nonce: recoveryNonce,
+		});
+		fs.writeFileSync(recoveryDescriptor, `${JSON.stringify(metadata)}\n`, "utf8");
+		fs.fsyncSync(recoveryDescriptor);
+	} catch (error) {
+		if (recoveryDescriptor !== null) {
+			fs.closeSync(recoveryDescriptor);
+			try {
+				fs.unlinkSync(recoveryFile);
+			} catch {
+				// Preserve the initialization error; stale recovery handles residue.
+			}
+		}
+		if (hasErrorCode(error, "EEXIST")) {
+			return;
+		}
+		throw ioError(`cannot coordinate stale recovery for ${lockFile}`, error);
+	}
+
+	try {
+		let stat: fs.Stats;
+		try {
+			stat = fs.statSync(lockFile);
+		} catch (error) {
+			if (hasErrorCode(error, "ENOENT")) {
+				return;
+			}
+			throw ioError(`cannot inspect ${lockFile}`, error);
+		}
+
+		const age = Date.now() - stat.mtimeMs;
+		let removable = false;
+		try {
+			const metadata = parseJsonFile(lockFile, lockMetadataSchema);
+			try {
+				process.kill(metadata.pid, 0);
+			} catch (error) {
+				removable = hasErrorCode(error, "ESRCH");
+			}
+		} catch {
+			removable = age >= LOCK_STALE_MS;
+		}
+		// Store callbacks are synchronous and bounded; age also defeats PID reuse after reboot.
+		removable = removable || age >= LOCK_STALE_MS;
+
+		if (removable) {
+			try {
+				fs.unlinkSync(lockFile);
+			} catch (error) {
+				if (!hasErrorCode(error, "ENOENT")) {
+					throw ioError(`cannot clear stale ${lockFile}`, error);
+				}
+			}
+		}
+	} finally {
+		if (recoveryDescriptor !== null) {
+			fs.closeSync(recoveryDescriptor);
+		}
+		releaseOwnedLock(recoveryFile, recoveryNonce);
+	}
+}
+
+function clearAbandonedRecovery(recoveryFile: string): void {
+	if (!fs.existsSync(recoveryFile)) {
+		return;
+	}
 	let stat: fs.Stats;
 	try {
-		stat = fs.statSync(lockFile);
+		stat = fs.statSync(recoveryFile);
 	} catch (error) {
 		if (hasErrorCode(error, "ENOENT")) {
 			return;
 		}
-		throw ioError(`cannot inspect ${lockFile}`, error);
+		throw ioError(`cannot inspect ${recoveryFile}`, error);
 	}
-
-	const age = Date.now() - stat.mtimeMs;
-	let holderAlive = true;
+	let removable = false;
 	try {
-		const metadata = parseJsonFile(lockFile, lockMetadataSchema);
+		const metadata = parseJsonFile(recoveryFile, lockMetadataSchema);
 		try {
 			process.kill(metadata.pid, 0);
 		} catch (error) {
-			holderAlive = !hasErrorCode(error, "ESRCH");
+			removable = hasErrorCode(error, "ESRCH");
 		}
 	} catch {
-		holderAlive = age < LOCK_STALE_MS;
+		removable = Date.now() - stat.mtimeMs >= LOCK_STALE_MS;
 	}
-
-	if (!holderAlive || age >= LOCK_STALE_MS) {
+	if (removable) {
 		try {
-			fs.unlinkSync(lockFile);
+			fs.unlinkSync(recoveryFile);
 		} catch (error) {
 			if (!hasErrorCode(error, "ENOENT")) {
-				throw ioError(`cannot clear stale ${lockFile}`, error);
+				throw ioError(`cannot clear abandoned ${recoveryFile}`, error);
 			}
 		}
 	}
 }
 
 function releaseOwnedLock(lockFile: string, nonce: string): void {
+	let decoded: unknown;
 	try {
-		const metadata = parseJsonFile(lockFile, lockMetadataSchema);
-		if (metadata.nonce === nonce) {
-			fs.unlinkSync(lockFile);
-		}
+		decoded = JSON.parse(fs.readFileSync(lockFile, "utf8"));
 	} catch (error) {
-		if (!hasErrorCode(error, "ENOENT")) {
-			throw error;
+		if (hasErrorCode(error, "ENOENT")) {
+			return;
 		}
+		throw ioError(`cannot inspect owned lock ${lockFile}`, error);
+	}
+	const metadata = lockMetadataSchema.parse(decoded);
+	if (metadata.nonce === nonce) {
+		try {
+			fs.unlinkSync(lockFile);
+		} catch (error) {
+			if (!hasErrorCode(error, "ENOENT")) {
+				throw ioError(`cannot release ${lockFile}`, error);
+			}
+		}
+	}
+}
+
+function assertLockDeadline(lockFile: string, deadline: number): void {
+	if (Date.now() >= deadline) {
+		throw new DeckError("E_IO", `timed out acquiring ${lockFile}`, { timeout_ms: LOCK_WAIT_MS });
 	}
 }
 

@@ -13,7 +13,7 @@ const composePromptInputSchema = z
 	})
 	.strict();
 
-const promptFileSchema = z.string().min(1);
+const promptFileSchema = z.string().trim().min(1);
 
 // SPEC §9 fixes these component budgets; exceeding one rejects rather than truncates (D-H).
 export const PROMPT_LINE_BUDGETS = {
@@ -64,7 +64,7 @@ function hashContent(content: string): string {
 
 function loadPromptFile(relativePath: string): string {
 	const raw = readFileSync(new URL(relativePath, import.meta.url), "utf8");
-	return promptFileSchema.parse(raw).trim();
+	return promptFileSchema.parse(raw);
 }
 
 function assertLineBudget(field: string, content: string, limit: number): void {

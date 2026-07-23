@@ -7,10 +7,12 @@ import {
 	charterSchema,
 	eventSchema,
 	inboxCommandSchema,
+	inboxRecordSchema,
 	manifestSchema,
 	type Charter,
 	type DeckEvent,
 	type InboxCommand,
+	type InboxRecord,
 	type Manifest,
 } from "@deck/core";
 import { z, type ZodType } from "zod";
@@ -38,6 +40,38 @@ function isMissing(error: unknown): boolean {
 	return error instanceof Error && "code" in error && error.code === "ENOENT";
 }
 
+function foldInbox(records: readonly InboxRecord[]): InboxCommand[] {
+	const commands = new Map<string, InboxCommand>();
+	for (const record of records) {
+		if ("cmd" in record) {
+			if (!commands.has(record.cmd_id)) commands.set(record.cmd_id, record);
+			continue;
+		}
+		const command = commands.get(record.cmd_id);
+		if (command === undefined) throw new Error(`inbox receipt precedes command ${record.cmd_id}`);
+		const updated = record.receipt === "delivered"
+			? { ...command, delivered: record.ts }
+			: { ...command, acked: record.ts };
+		commands.set(record.cmd_id, inboxCommandSchema.parse(updated));
+	}
+	return [...commands.values()];
+}
+
+function parseJsonLines<T>(text: string, file: string, schema: ZodType<T>): T[] {
+	const values: T[] = [];
+	const lines = text.split("\n");
+	for (let index = 0; index < lines.length; index += 1) {
+		const line = lines[index]?.trim() ?? "";
+		if (line.length === 0) continue;
+		try {
+			values.push(schema.parse(JSON.parse(line)));
+		} catch (error) {
+			throw new Error(`${file}:${index + 1}: ${errorMessage(error)}`);
+		}
+	}
+	return values;
+}
+
 /**
  * Lock-free reader for the atomic projections in SPEC §3-§4. Atomic rename
  * makes an unchanged (mtime,size) pair safe to reuse while writers swap files.
@@ -47,7 +81,7 @@ export class DeckStateReader {
 	private readonly manifestCache = new Map<string, CachedRead<Manifest>>();
 	private readonly charterCache = new Map<string, CachedRead<Charter>>();
 	private readonly tailCache = new Map<string, CachedRead<DeckEvent[]>>();
-	private readonly inboxCache = new Map<string, CachedRead<InboxCommand[]>>();
+	private readonly inboxCache = new Map<string, CachedRead<InboxRecord[]>>();
 	private readonly usageCache = new Map<string, CachedRead<UsageRoster>>();
 
 	constructor(paths: Partial<StatePaths> = {}) {
@@ -96,22 +130,59 @@ export class DeckStateReader {
 		return this.readCached(
 			cache,
 			file,
-			text => {
-				const values: T[] = [];
-				const lines = text.split("\n");
-				for (let index = 0; index < lines.length; index += 1) {
-					const line = lines[index]?.trim() ?? "";
-					if (line.length === 0) continue;
-					try {
-						values.push(schema.parse(JSON.parse(line)));
-					} catch (error) {
-						throw new Error(`${file}:${index + 1}: ${errorMessage(error)}`);
-					}
-				}
-				return values;
-			},
+			text => parseJsonLines(text, file, schema),
 			[],
 		);
+	}
+
+	private readRecentJsonLines<T>(
+		cache: Map<string, CachedRead<T[]>>,
+		file: string,
+		schema: ZodType<T>,
+		limit: number,
+	): ReadResult<T[]> {
+		let stat: fs.Stats;
+		try {
+			stat = fs.statSync(file);
+		} catch (error) {
+			if (isMissing(error)) return { ok: true, value: [] };
+			return { ok: false, issue: { source: file, message: errorMessage(error) } };
+		}
+		const statKey = `${stat.mtimeMs}:${stat.size}`;
+		const cached = cache.get(file);
+		if (cached?.statKey === statKey) return cached.result;
+
+		let result: ReadResult<T[]>;
+		let descriptor: number | null = null;
+		try {
+			descriptor = fs.openSync(file, "r");
+			const chunks: Buffer[] = [];
+			let position = stat.size;
+			let newlineCount = 0;
+			while (position > 0 && newlineCount < limit + 1) {
+				const length = Math.min(64 * 1024, position);
+				position -= length;
+				const buffer = Buffer.allocUnsafe(length);
+				const bytesRead = fs.readSync(descriptor, buffer, 0, length, position);
+				const chunk = bytesRead === length ? buffer : buffer.subarray(0, bytesRead);
+				chunks.push(chunk);
+				for (const byte of chunk) {
+					if (byte === 0x0a) newlineCount += 1;
+				}
+			}
+			let text = Buffer.concat(chunks.reverse()).toString("utf8");
+			if (position > 0) {
+				const firstNewline = text.indexOf("\n");
+				text = firstNewline < 0 ? "" : text.slice(firstNewline + 1);
+			}
+			result = { ok: true, value: parseJsonLines(text, `${file} (recent)`, schema).slice(-limit) };
+		} catch (error) {
+			result = { ok: false, issue: { source: file, message: errorMessage(error) } };
+		} finally {
+			if (descriptor !== null) fs.closeSync(descriptor);
+		}
+		cache.set(file, { statKey, result });
+		return result;
 	}
 
 	loadBoard(): BoardViewData {
@@ -162,19 +233,28 @@ export class DeckStateReader {
 		const directory = path.join(this.paths.effortsDir, parsedId.data);
 		const manifestResult = this.readJson(this.manifestCache, path.join(directory, EFFORT_FILES.manifest), manifestSchema);
 		const charterResult = this.readJson(this.charterCache, path.join(directory, EFFORT_FILES.charter), charterSchema);
-		const tailResult = this.readJsonLines(this.tailCache, path.join(directory, EFFORT_FILES.tail), eventSchema);
-		const inboxResult = this.readJsonLines(this.inboxCache, path.join(directory, EFFORT_FILES.inbox), inboxCommandSchema);
+		const tailResult = this.readRecentJsonLines(this.tailCache, path.join(directory, EFFORT_FILES.tail), eventSchema, 20);
+		const inboxFile = path.join(directory, EFFORT_FILES.inbox);
+		const inboxResult = this.readJsonLines(this.inboxCache, inboxFile, inboxRecordSchema);
 		const issues: LoadIssue[] = [];
 		if (!manifestResult.ok) issues.push(manifestResult.issue);
 		if (!charterResult.ok) issues.push(charterResult.issue);
 		if (!tailResult.ok) issues.push(tailResult.issue);
 		if (!inboxResult.ok) issues.push(inboxResult.issue);
+		let inbox: InboxCommand[] = [];
+		if (inboxResult.ok) {
+			try {
+				inbox = foldInbox(inboxResult.value);
+			} catch (error) {
+				issues.push({ source: inboxFile, message: errorMessage(error) });
+			}
+		}
 		return {
 			effortId: parsedId.data,
 			manifest: manifestResult.ok ? manifestResult.value : null,
 			charter: charterResult.ok ? charterResult.value : null,
-			events: tailResult.ok ? tailResult.value.slice(-20) : [],
-			inbox: inboxResult.ok ? inboxResult.value : [],
+			events: tailResult.ok ? tailResult.value : [],
+			inbox,
 			issues,
 		};
 	}

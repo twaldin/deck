@@ -1,0 +1,16 @@
+{
+	"name": "@deck/extensions",
+	"version": "0.1.0",
+	"type": "module",
+	"main": "./src/deck-lifecycle.ts",
+	"private": true,
+	"dependencies": {
+		"@deck/core": "file:../core",
+		"typebox": "^1.1.24",
+		"zod": "^4"
+	},
+	"devDependencies": {
+		"@types/bun": "latest",
+		"typescript": "^5"
+	}
+}
