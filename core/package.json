@@ -1,0 +1,14 @@
+{
+	"name": "@deck/core",
+	"version": "0.1.0",
+	"type": "module",
+	"main": "./src/index.ts",
+	"dependencies": {
+		"zod": "^4",
+		"ulid": "^3"
+	},
+	"devDependencies": {
+		"@types/bun": "latest",
+		"typescript": "^5"
+	}
+}
