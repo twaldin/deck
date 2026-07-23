@@ -1,0 +1,14 @@
+{
+	"name": "@deck/mcpx",
+	"version": "0.1.0",
+	"type": "module",
+	"bin": { "mcpx": "./src/mcpx.ts" },
+	"dependencies": {
+		"@deck/core": "file:../core",
+		"zod": "^4"
+	},
+	"devDependencies": {
+		"@types/bun": "latest",
+		"typescript": "^5"
+	}
+}

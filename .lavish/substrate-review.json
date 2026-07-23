@@ -1,0 +1,21 @@
+{
+  "overall": "escalate",
+  "source": "branch",
+  "base": "dd9ab21",
+  "intent": "Deck Phase-2 substrate built overnight: @deck/core effort store (CAS+lease+tail atomicity+inbox receipts+seed), wake router (pi RPC owner supervision, admission, pgroup discipline), pi lifecycle-tools extension (E_TOO_LONG caps, lease fencing, dispatch liveness), worktree CLI, TUI, mcpx, skills overlay, live exit-gate itests.",
+  "reviewers": [
+    {
+      "tag": "claude:claude-opus-4-6 (crash-window correctness (fsync/rename/append ordering), lease fencing races, silent message-drop paths, process-group leaks, capability-auth gaps)",
+      "harness": "claude",
+      "model": "claude-opus-4-6",
+      "focus": "crash-window correctness (fsync/rename/append ordering), lease fencing races, silent message-drop paths, process-group leaks, capability-auth gaps",
+      "verdict": "escalate",
+      "failed": true,
+      "summary": "",
+      "findings": [],
+      "suppressedFindings": [],
+      "suppressedLowCount": 0,
+      "error": "reviewer did not return parseable JSON. Raw (first 400): Prompt is too long"
+    }
+  ]
+}
