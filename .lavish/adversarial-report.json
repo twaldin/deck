@@ -1,0 +1,92 @@
+{
+  "overall": "request_changes",
+  "source": "paths",
+  "base": null,
+  "intent": "Deck: full revamp of Tim's dev workflow. Replaces firstmate (tmux-scraping agent fleet) with an all-pi, extension-only architecture: effort-owner agents + reusable workflows (Smithers) over a small substrate (manifests+event tails, wake router, credential broker, CLI tool layer, browser vault, skills overlay). PLAN.md = decisions/invariants/phases (already human-reviewed); SPEC.md = technical contracts. Review both for holes.",
+  "reviewers": [
+    {
+      "tag": "codex:gpt-5.6-sol (poke holes in this architecture plan and spec: hidden coupling, failure modes under crash/concurrency, auth assumptions (Claude plan-limits OAuth, cookie cloning), resource creep, contradictions between PLAN invariants and SPEC contracts, and anything underspecified that will bite during implementation)",
+      "harness": "codex",
+      "model": "gpt-5.6-sol",
+      "focus": "poke holes in this architecture plan and spec: hidden coupling, failure modes under crash/concurrency, auth assumptions (Claude plan-limits OAuth, cookie cloning), resource creep, contradictions between PLAN invariants and SPEC contracts, and anything underspecified that will bite during implementation",
+      "verdict": "request_changes",
+      "failed": false,
+      "summary": "The architecture has a strong direction, but its core reliability and authority claims are not yet supported by the contracts. Transactional state, owner fencing, durable workflow checkpoints, SHA-bound human approval, capability isolation, OAuth policy validation, browser confinement, and explicit resource/cutover controls are blockers before implementation should proceed beyond controlled spikes.",
+      "findings": [
+        {
+          "severity": "high",
+          "file": "SPEC.md",
+          "line": 78,
+          "issue": "The persistence model is not atomic at the operation level. Lifecycle calls update both the manifest and tail, while intake separately updates the tail, dedupe ring, and cursor. A crash can therefore lose an already-seen fact, replay a committed fact, split card/dispatch state from its event, or leave a partial/interleaved JSONL record. This contradicts I3/I6 and the claim that the tail is current after a crash.",
+          "suggestion": "Use a single serialized writer and transactional WAL—preferably SQLite WAL from v1—for events, projections, cursors, and dedupe claims. Alternatively specify a framed, fsynced journal with operation IDs and deterministic recovery. Test crashes at every write boundary."
+        },
+        {
+          "severity": "high",
+          "file": "SPEC.md",
+          "line": 125,
+          "issue": "Exactly-one-owner and exactly-once delivery are asserted but not enforced. Concurrent router wakes, TUI attach, or restart can race through ping/resume/spawn and leave two owners dispatching. There is no owner epoch, durable inbox, delivery acknowledgement, or stale-process fencing. Terminal CAS is also unusable as specified because lifecycle tools carry no expected revision, and cancellation cards have no protocol for stopping in-flight work.",
+          "suggestion": "Add an atomic per-effort lease and generation token required by every lifecycle mutation, a durable command inbox with delivery IDs and acknowledgements, idempotent dispatch keys, manifest revisions, and cancellation fencing checked before every external side effect."
+        },
+        {
+          "severity": "high",
+          "file": "PLAN.md",
+          "line": 73,
+          "issue": "Smithers is called durable and reboot-safe while its SQLite is explicitly excluded and its Gateway is ephemeral. Deck stores only coarse dispatch state, not workflow run identity, node attempts, inputs, checkpoints, approvals, or side-effect receipts. After a reboot it cannot know whether to resume, replay, or suppress a push or merge, so Smithers abandonment does cost state.",
+          "suggestion": "Either make versioned Smithers persistence authoritative behind an adapter, or define a Deck-owned workflow journal containing run/version identity, step attempts, checkpoints, approvals, side-effect receipts, cancellation, and replay rules. Require crash tests at every step and approval boundary."
+        },
+        {
+          "severity": "high",
+          "file": "SPEC.md",
+          "line": 136,
+          "issue": "There is no real privilege boundary between Tim and same-UID agent code. Mode 0600 files and 0700 sockets do not stop workers from calling the broker control socket, spoofing `X-Deck-Session`, redeeming unrelated tool tokens, invoking `mcpx`, or reaching privileged browser services. Agent-authored JSX is arbitrary executable code, and `deck wf lint` cannot reliably prohibit filesystem, process, or network access. A prompt-injected worker can therefore reach the entire credential estate.",
+          "suggestion": "Run workers under an enforced sandbox or separate OS identity and issue unforgeable, expiring per-dispatch capabilities scoped by provider, model, service, action, and domain. Proxy privileged operations instead of returning raw tokens, authenticate every broker surface, and require reviewed/signed workflows or a restricted execution format."
+        },
+        {
+          "severity": "high",
+          "file": "SPEC.md",
+          "line": 111,
+          "issue": "Tim's merge stamp is a convention rather than an enforced authorization. A `merge_word` card is not bound to repository, PR, head SHA, checks, or workflow version; raw `gh`/Graphite paths remain available; and code can change after approval. An agent can bypass the card or merge a head Tim never approved.",
+          "suggestion": "Remove merge authority from all agent credentials and expose one merge gateway protected by branch rules. Have Tim mint a single-use authorization bound to repo, PR, immutable head SHA, base, checks, and workflow run; invalidate it on any head change and consume it atomically at merge time."
+        },
+        {
+          "severity": "high",
+          "file": "SPEC.md",
+          "line": 182,
+          "issue": "The browser matrix controls concurrency, not authorization. Returning a raw CDP `ws_endpoint` or shared context lets a worker inspect storage, navigate beyond requested domains, or act through the live lindy admin session. `clone-ok` also serializes authentication state despite the later claim that cookies are never serialized outside profile directories. Functional smoke tests do not establish confinement.",
+          "suggestion": "Mediate browser operations through a policy-enforcing proxy, separate profiles by trust level, issue domain- and purpose-scoped leases, prohibit cloning privileged admin credentials, require Tim approval for privileged mutations, and test redirects, cookie scope, cross-tab isolation, revocation, and crash cleanup."
+        },
+        {
+          "severity": "high",
+          "file": "SPEC.md",
+          "line": 159,
+          "issue": "The broker go/no-go test proves quota attribution, not provider authorization or long-term support. An MIT implementation does not grant permission to impersonate its OAuth client presentation, and pooling multiple subscription accounts may violate provider policy even if usage counters move as expected. The contract also lacks single-flight, generation-fenced handling for rotated refresh tokens.",
+          "suggestion": "Before treating I8 as viable, obtain explicit provider-policy/account-ownership confirmation or record a deliberate human risk decision. Add protocol conformance tests for streaming, tools, thinking, caching, cancellation, model eligibility, revocation, and atomic refresh-token rotation—not just one prompt's quota delta."
+        },
+        {
+          "severity": "high",
+          "file": "SPEC.md",
+          "line": 128,
+          "issue": "Fresh-owner recovery still depends on lost conversation state. The digest is optional, only the last 50 events are seeded, the manifest lacks an immutable charter and accepted constraints, and SPEC omits PLAN's promised transcript segment. Watcher noise can evict the original intent, while one oversized event can overflow the context window.",
+          "suggestion": "Persist an immutable effort charter, acceptance criteria, current constraints, decision ledger, and checkpointed summary with provenance. Rehydrate by token budget while always preserving root intent, unresolved cards, active dispatches, and triggering events; define full-tail/artifact fallback and long-history crash tests."
+        },
+        {
+          "severity": "high",
+          "file": "SPEC.md",
+          "line": 117,
+          "issue": "The resource model does not address the OOM failure that motivated the rewrite. PLAN says one daemon total, SPEC requires two and also relies on browser-harness and on-demand Gateways. Poll concurrency is capped, but poll timeouts, output bounds, process-group killing, session/workflow fan-out, worktrees, browser tabs, queues, and broker affinity maps are not. Four hung CLI polls can stop intake without crashing the router, while workflows can still grow without bound.",
+          "suggestion": "Publish an accurate process inventory and add global plus per-effort admission limits, queue backpressure/coalescing, subprocess deadlines and output caps, process-group cancellation, workflow/session leases, memory budgets, and degraded-state alerts. Include OOM and hung-dependency recovery acceptance tests."
+        },
+        {
+          "severity": "medium",
+          "file": "PLAN.md",
+          "line": 115,
+          "issue": "The staged migration deliberately runs Deck alongside firstmate, including a real Phase-2 PR, but defines no exclusive ownership handoff. Both systems can watch and react to the same PR, duplicate comments or fixes, race approvals, or let the old system act after Deck assumes ownership.",
+          "suggestion": "Define a per-effort cutover protocol: freeze and drain firstmate, persist an exclusive ownership marker, import current watches/cursors/approvals, start Deck from a known boundary, verify no old workers remain, and provide a rollback procedure before credentials or grants are revoked."
+        }
+      ],
+      "suppressedFindings": [],
+      "suppressedLowCount": 0,
+      "error": null
+    }
+  ]
+}

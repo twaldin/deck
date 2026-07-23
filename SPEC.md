@@ -1,242 +1,207 @@
-# Deck SPEC v0.1 — technical contracts & implementation details
+# Deck SPEC v0.2 — technical contracts & implementation details
 
-*Companion to PLAN.md (which owns goals/invariants/phases). This document owns schemas, APIs, process models, and acceptance criteria. RFC status: draft for adversarial review.*
+*Companion to PLAN.md (goals/invariants/phases). This document owns schemas, APIs, process models, acceptance criteria. RFC draft.*
+
+**v0.2 changelog** — review-driven (codex/gpt-5.6-sol xhigh adversarial pass, 2026-07-22):
+- Honest security model: same-UID file perms are NOT a boundary (§14 rewritten); broker proxies LLM calls (no raw model tokens); tool CLIs get scoped short-lived capabilities; agent-authored workflows = trusted code, documented.
+- Merge authority mechanized (§10 new): SHA-bound single-use authorization, scoped GH tokens (no merge permission), atomic consume. I7 was prose; now it's a gateway.
+- Owner fencing (§4.5 new): per-effort lease + generation token; every mutation and every irreversible side-effect checks it. Fixes the two-owners-after-reboot race.
+- Atomicity without a DB (§4.2): ordered writes (tail-before-cursor) + idempotency keys make the crash window benign; SQLite WAL remains a measured-volume trigger, not v1.
+- Browser confinement (§8 rewritten): no raw `ws_endpoint` to workers; browser-harness mediates; privileged domains never cloned; serialization contradiction fixed.
+- Resource/OOM bounds (§5.5 new): subprocess deadlines+output caps, process-group cancel, global+per-effort admission limits, queue coalescing, memory budgets, OOM acceptance tests.
+- Broker conformance (§6.5 expanded) + single-flight refresh rotation (§6.3); TOS/policy risk recorded as a human decision (§6.7 new).
+- Effort rehydration (§4.6): immutable charter + decision ledger in manifest; token-budgeted seed preserving root intent/open cards/active dispatches/trigger; full-tail fallback.
+- Smithers durability claim corrected (PLAN §5.3 + §11): Deck records independent side-effect receipts for irreversible ops so a crash mid-push/mid-merge is recoverable even if Smithers is gone.
+- Migration cutover protocol (§16 new): per-effort exclusive-ownership handoff, drain, verify, rollback.
+
+**Rejected review asks (with reason):** duplicating Smithers's run-state journal inside Deck (redundant — Smithers is the authority for its own runs, accessed via its sanctioned Gateway RPC; Deck only mirrors *side-effect receipts* for irreversible ops, not the whole run graph); full separate-OS-identity sandbox + cryptographically signed workflows as a v1 gate (conflicts with the stated minimalism; same-UID trusted-code model is documented as the v1 boundary with a sandbox as the v2 hardening path).
 
 ## 0. Terminology & layout
 
 | Term | Meaning |
 |---|---|
-| effort | One unit of open work (ticket, PR stack, investigation). Has exactly one owner agent. |
+| effort | One unit of open work (ticket, PR stack, investigation). Exactly one owner. |
 | owner | The pi session charged with an effort. Dispatches; never implements. |
-| dispatch | A child unit of execution: a workflow run or a one-shot subagent. |
-| card | A decision request for Tim (schema §4.4). |
-| plane | Event classification: `fact` (mechanical), `judgment` (agent), `tim`, `lifecycle`. |
+| dispatch | A child unit of execution: workflow run or one-shot subagent. |
+| card | A decision request for Tim (§4.4). |
+| plane | Event class: `fact` (mechanical), `judgment` (agent), `tim`, `lifecycle`. |
 
-**Code** lives in `~/dev/deck` (git): `extensions/` (pi extensions), `router/`, `broker/`, `cli/` (`deck`, `mcpx`), `workflows/`, `prompts/`, `kit/` (`@deck/smithers-kit`).
+**Code** (`~/dev/deck`, git): `extensions/`, `router/`, `broker/`, `cli/` (`deck`, `mcpx`), `workflows/`, `prompts/`, `kit/` (`@deck/smithers-kit`).
 
-**Runtime state** lives in `~/.deck/`:
-
+**Runtime state** (`~/.deck/`, all 0600, dir 0700, owner=tim):
 ```
-~/.deck/
-  efforts/<effort_id>/manifest.json      # current state (atomic, §3)
-  efforts/<effort_id>/tail.jsonl         # append-only events (§4)
-  efforts/<effort_id>/manifest.lock      # flock for read-modify-write
-  intake/cursors.json                    # per-source poll cursors
-  intake/seen/<source>.ring              # idempotency key ring buffers
-  broker/store.json                      # credentials, 0600 (§6.4)
-  broker/usage.json                      # account roster snapshot
-  catalog/mcpx.toml                      # mcpx server catalog (§7)
-  catalog/browser-domains.json           # per-domain auth-mode matrix (§8)
-  catalog/skills.json                    # visibility overlay (§9)
-  run/broker.sock · run/router.sock      # unix sockets
+efforts/<id>/manifest.json     # atomic projection (§3)
+efforts/<id>/tail.jsonl        # append-only events (§4)
+efforts/<id>/charter.json      # immutable goal + acceptance + constraints (§3.1)
+efforts/<id>/manifest.lock     # flock for read-modify-write (single writer)
+efforts/<id>/lease             # current owner epoch token (§4.5)
+intake/cursors.json            # per-source poll cursors
+intake/seen/<source>.ring      # idempotency key ring
+broker/store.json              # credentials (§6.4)
+broker/usage.json              # account roster snapshot
+catalog/mcpx.toml · catalog/browser-domains.json · catalog/skills.json
+run/broker.sock · run/router.sock
 ```
 
 ## 1. Identifiers & addressing
+- `effort_id`: `<project>--<slug>` (e.g. `lindy--rel-10508-backstop`).
+- Event `id`: ULID.
+- Session ref: `{machine, session_id}`; rendered `mbp:0198f3…`. All refs machine-qualified (I11).
+- Dispatch `id`: `<effort_id>/<ulid8>`.
+- Manifest `revision`: monot integer, incremented on every mutation; required as expected-revision by every lifecycle write (CAS on all mutations, not just terminal).
 
-- `effort_id`: `<project>--<slug>`, lowercase kebab, e.g. `lindy--rel-10508-backstop`. Unique across projects; project = repo shortname.
-- Event `id`: ULID (sortable, collision-free across writers).
-- Session ref: `{machine, session_id}` where `machine` = short hostname; rendered `mbp:0198f3…`. All cross-component references machine-qualified (PLAN I11).
-- Dispatch `id`: `<effort_id>/<ulid-prefix8>`.
-
-## 2. Process inventory (steady state)
-
-Exactly **two** resident daemons, both launchd-managed, both crash-restart-safe:
-
+## 2. Process inventory
+Two resident launchd-managed daemons (PLAN §5.2 "one daemon" corrected — router + broker; both lightweight, <60MB RSS idle each):
 1. **router** — intake polling, event routing, session revival, orphan reaping (§5).
-2. **broker** — credentials, token refresh, LLM endpoint, usage accounting (§6).
+2. **broker** — credentials, token refresh, LLM endpoint proxy, usage accounting (§6).
 
-Everything else is ephemeral: pi sessions (owners, workers), poll subprocesses, Smithers gateway (started on demand by workflows, idles out), browser vault Chromium (on demand).
+Ephemeral: pi sessions (owners/workers), poll subprocesses, Smithers gateway (on demand, idles out), browser vault Chromium (on demand).
 
 ## 3. Effort manifest — `manifest.json`
-
 ```jsonc
 {
-  "v": 1,
+  "v": 2,
   "effort_id": "lindy--rel-10508-backstop",
   "project": "lindy",
   "title": "REL-10508 leak backstop rework",
-  "created": "2026-07-22T18:00:00Z",
-  "updated": "2026-07-22T19:42:11Z",
-  "stage": "review",              // intake | active | review | landed | watching | done | abandoned
-  "overlays": {
-    "blocked": null,               // or { "reason": "...", "since": ts, "on": "external|tim|dispatch" }
-    "needs_tim": ["01J…"]          // open card ids
-  },
-  "session": { "machine": "mbp", "session_id": "0198…", "last_heartbeat": ts },
-  "watch": { "prs": [{"repo":"lindy-ai/lindy","num":25021}], "tickets": ["REL-10508"], "slack_threads": [] },
+  "created": "…", "updated": "…",
+  "revision": 47,
+  "stage": "review",                       // intake|active|review|landed|watching|done|abandoned
+  "overlays": { "blocked": null|"…", "needs_tim": ["01J…"] },
+  "session": { "machine":"mbp", "session_id":"0198…", "lease_epoch": 3, "last_heartbeat": ts },
+  "watch": { "prs":[…], "tickets":[…], "slack_threads":[] },
   "worktrees": ["wt:lindy:7"],
-  "dispatches": [ { "id": "…", "kind": "workflow|subagent", "target": "pr-pipeline@v3", "state": "running|done|failed", "started": ts, "result_ref": "tail:01J…" } ],
-  "evidence": [ { "ts": ts, "label": "CI green", "ref": "https://github.com/…/runs/…", "by": "watch|agent" } ],
-  "cards": [ { "id": "01J…", "card": {…§4.4}, "status": "open|answered", "answer": "...", "answered_ts": ts } ],
-  "digest": "agent-written park summary or null"
+  "dispatches": [ { "id":"…", "kind":"workflow|subagent", "target":"pr-pipeline@v3", "state":"running|done|failed", "started":ts, "result_ref":"tail:01J…" } ],
+  "evidence": [ { "ts":ts, "label":"CI green", "ref":"https://…", "by":"watch|agent" } ],
+  "side_effects": [ { "id":"01J…", "kind":"push|merge|deploy|migration", "ref":"sha|run|deploy-id", "status":"attempted|confirmed|rolledback", "ts":ts, "lease_epoch":3 } ],
+  "cards": [ { "id":"01J…", "card":{…}, "status":"open|answered", "answer":"…", "answered_ts":ts, "cancel_in_flight": null|"01J…" } ],
+  "decisions": [ { "ts":ts, "card_id":"01J…", "answer":"…" } ],
+  "digest": "agent park summary or null"
 }
 ```
+- **All mutations CAS on `revision`** (expected-revision param); mismatch rejects. Terminal CAS (into done/abandoned) is a specialization.
+- **Overlays never substitute for stage.**
+- **Atomic write**: under `flock(manifest.lock)` → write `manifest.json.tmp` → fsync → rename. Readers lock-free.
+- **Only deck extension + router write.** Agents mutate only via lifecycle tools.
 
-Rules:
-- **Stage transitions**: any order allowed except into `done`/`abandoned`, which use terminal CAS — writer must supply expected current stage; mismatch rejects (from `fm-effort.sh`).
-- **Overlays never substitute for stage** — an effort is `review` AND `needs_tim`, not "stage: needs_tim".
-- **Atomic writes**: serialize under `flock(manifest.lock)` → write `manifest.json.tmp` → `fsync` → `rename`. Readers never lock (rename is atomic).
-- **Only the deck extension and router write manifests.** Agents mutate exclusively through lifecycle tools (§4.3). No hand edits by agents, ever.
+### 3.1 Charter — `charter.json` (immutable-ish)
+Set at effort creation; mutated only by explicit Tim-approved charter-change events (appended, never overwritten): `{ goal, acceptance_criteria[], constraints[], created, charter_changes:[…] }`. The seed builder (§4.6) always includes it — root intent survives any crash.
 
 ## 4. Event tail — `tail.jsonl`
-
-### 4.1 Event envelope
+### 4.1 Envelope
 ```jsonc
-{ "id": "01J…", "ts": "…", "plane": "fact|judgment|tim|lifecycle",
-  "type": "fact.pr.ci_state | judgment.assessment | tim.message | tim.decision | lifecycle.dispatch | lifecycle.turn_end | lifecycle.park | …",
-  "actor": "router:gh | owner | wf:pr-pipeline/01J… | tim",
-  "data": { …type-specific… },
-  "idem": { "source": "gh", "external_id": "pr:lindy-ai/lindy:25021:check:…", "version": "updated_at-or-hash" } // facts only
-}
+{ "id":"01J…", "ts":"…", "plane":"fact|judgment|tim|lifecycle",
+  "type":"fact.pr.ci_state | judgment.assessment | tim.message | tim.decision | lifecycle.dispatch | lifecycle.turn_end | lifecycle.park | lifecycle.side_effect | …",
+  "actor":"router:gh | owner | wf:pr-pipeline/01J… | tim",
+  "data":{…},
+  "idem":{ "source":"gh", "external_id":"pr:lindy-ai/lindy:25021:check:…", "version":"updated_at-or-hash" } }
 ```
+### 4.2 Atomicity without a DB (the crash window is benign by construction)
+- **Write order invariant**: append to `tail.jsonl` (O_APPEND, line fsynced) BEFORE advancing `intake/cursors.json` and BEFORE appending to `seen/<source>.ring`. Worst case on crash between steps: an event is duplicated on next poll. Duplicates are dropped by `idem` key (§4.3). An event is never *lost* because the cursor only advances after the tail commit.
+- Multi-field manifest mutations go through the single flock'd writer path (§3) — manifest + its own tail event are written under one lock hold; the tail event is the last line written before lock release.
+- Residual risk: a partial JSONL line (crash mid-`write`). Mitigation: O_APPEND writes are whole-line on POSIX for writes ≤ `PIPE_BUF` (4KB); longer payloads are written via a single `write()` of a pre-serialized buffer (no streaming split). Recovery: a malformed trailing line on boot is quarantined to `tail.bad` and the prior good line is the head.
+- SQLite WAL remains a **measured-volume trigger** (sustained tail-fold latency on the board, or >N writers contending), not v1.
 
-### 4.2 Idempotency (facts)
-- Router keeps per-source cursor (`intake/cursors.json`) and a ring buffer of recent `(source, external_id, version)` keys (`intake/seen/<source>.ring`, capacity 10k, fsynced batchwise). Duplicate key ⇒ drop before append.
-- Edits/deletes/status flips are **new versions**, appended as new facts. Consumers fold.
-- A judgment references the fact version it assessed (`data.assessed = <event id>`); router marks dependent judgments stale when a newer version of the same `external_id` arrives (staleness = derived, computed at read time by the TUI/owner seed builder — the substrate stores, never thinks).
+### 4.3 Idempotency (facts)
+Router keeps per-source cursor + ring buffer of recent `(source, external_id, version)` (10k cap, fsynced batchwise, ring eviction by age). Duplicate key ⇒ drop before append. Edits/deletes/status flips = new versions appended as new facts. Judgments reference assessed fact-event; staleness computed at read time (substrate stores, never thinks).
 
-### 4.3 Lifecycle tools (pi extension `deck-effort`)
+### 4.4 Lifecycle tools + card schema
+`report_progress`, `ask_tim`, `dispatch`, `park` (table in v0.1 unchanged). Card = `{ kind, question, recommendation, options[] }` (all required, options non-empty). **New:** `ask_tim` with `kind: cancellation` carries `cancel_in_flight: <dispatch_id>`; answering it triggers the fencing cancel (§4.5.3).
 
-Registered only in owner sessions; workers get a reduced set (`report_progress` only, scoped to their dispatch).
+### 4.5 Owner fencing (one owner, ever)
+- **Lease**: `session.lease_epoch` (monot int) + a random lease token in `lease`. Spawn/revive writes the new epoch and token; router kills or fences any process whose token is stale.
+- **Mutation fence**: every lifecycle tool call carries the owner's lease token; CAS check = `revision` AND `lease_epoch`. A stale owner's write is rejected (it must re-spawn).
+- **Side-effect fence** (§10): every irreversible op (push/merge/deploy/migration) checks `lease_epoch` immediately before executing AND records a `lifecycle.side_effect` receipt after.
+- **4.5.3 Cancellation**: a `cancellation` card answered, or router detecting a dead lease, issues a cancel to the dispatch's process group (§5.5.2); the dispatch id is marked `cancelled`; in-flight side-effects are fenced by epoch.
+- **Command inbox** (durable, ack'd): router→owner and Tim→owner commands go through `efforts/<id>/inbox.jsonl` with `{cmd_id, cmd, delivered, acked}`; owner acks on apply. Survives owner crash and dedupes redelivery.
 
-| Tool | Params (TypeBox) | Effect |
-|---|---|---|
-| `report_progress` | `{ status: string, stage?: Stage, evidence?: [{label, ref, note?}] }` | manifest update + `judgment.progress` event |
-| `ask_tim` | `{ kind: "scope"\|"merge_word"\|"waiver"\|"priority"\|"cancellation", question, recommendation, options: string[], context? }` | card appended, `needs_tim` overlay set, board notifies |
-| `dispatch` | `{ kind: "workflow"\|"subagent", target, brief, skills?: string[], model?, worktree?: bool }` | allocates worktree if asked, spawns (§5.4), records dispatch |
-| `park` | `{ digest?: string }` | writes digest, releases session hold; **digest optional by contract** |
-
-Involuntary capture (extension hooks, no agent action): `tim.message` on every user message into an effort session; `lifecycle.turn_end` per turn; `lifecycle.dispatch_result` when a dispatch reports; crash ⇒ nothing needed — tail is already current to the last event (PLAN §5.1 advisory).
-
-### 4.4 Decision card
-`{ kind, question, recommendation, options[] }` — all required, options non-empty (validated at tool call; inherited from fm-effort.sh). Tim's answer arrives as `tim.decision {card_id, answer}` + session message.
+### 4.6 Rehydration seed builder
+Token-budgeted (not event-counted). Always included first, in order: charter (§3.1), open cards, active dispatches + their latest result, the triggering event, digest (if present), last `tim.decision`s. Remaining budget fills with recent tail (newest backward). Full-tail fallback if budget allows. Oversized single events are summarized (not dumped) — one event can't overflow the window.
 
 ## 5. Wake router
-
 ### 5.1 Loop
-Single bun process. Scheduler tick every 30s; each watch target has `{next_poll_at, interval, level}`. Intervals (defaults, config-overridable): PR with failing CI or fresh review activity 60s → green-and-waiting 5m → quiet effort 15m → `watching`-stage fallout monitors 30m. Poll executions are short-lived subprocesses (`gh api graphql`, one query per PR-set per repo, batched — port of `watch-ci-review.ts` internals), max 4 concurrent, jittered. No persistent per-source processes. CPU/RSS budget: idle < 50MB, no browser, no SDK sessions held.
-
-### 5.2 Sources v1
-`gh` only. Linear/Slack adapters land with their CLIs (Phase 3); each adapter = `{ pollCmd(cursor) → {facts[], cursor'} }` contract, executed by the router, never self-scheduling. Sentry/prod-signal intake deferred until a workflow consumes it.
-
-### 5.3 Routing & wake policy
-Fact → effort via `watch` registration (PR/ticket/thread ⇒ effort_id index, rebuilt from manifests on boot). Each fact type classified `wake` (revive owner: CI red, review comment, merge, deploy event) or `record` (append only: CI still running). Classification is config, not code.
-
-### 5.4 Spawn/revive protocol
-1. Session alive? (rpc ping via its socket/pid) → inject message.
-2. Else `pi --mode rpc` resume `session_id` → inject.
-3. Else fresh `pi --mode rpc` with seed = system prompt (role=owner) + manifest + digest + last K=50 tail events + open cards. Update `session` ref.
-Workers/workflow steps spawn the same way with role=worker prompts, or via Smithers `DeckPiAgent`.
-
-### 5.5 Boot & reaping
-On start: re-index manifests, re-arm all watches, verify sessions' pids/sockets (dead ⇒ clear `session.last_heartbeat`, board shows stale), scan worktree pool for orphans (flag, never auto-delete with unpushed commits — firstmate 07-20 near-miss rule).
+Single bun process; 30s scheduler tick; per-target `{next_poll_at, interval, level}`. Defaults: failing-CI / fresh-review PR 60s → green-waiting 5m → quiet 15m → `watching` fallout 30m. Max 4 concurrent polls, jittered. CPU/RSS idle <50MB; no browser, no held sessions.
+### 5.2 Sources
+`gh` v1; linear/slack adapters land with their CLIs (Phase 3). Adapter contract `{ pollCmd(cursor) → {facts[], cursor'} }`, executed by router, never self-scheduling.
+### 5.3 Routing & wake
+Fact → effort via watch index (rebuilt from manifests on boot). Each fact type classified `wake`/`record` (config, not code).
+### 5.4 Spawn/revive protocol (lease-aware)
+alive (rpc ping with lease token) → inject via inbox. Else resume `session_id` → new epoch → inject. Else fresh rpc with seed (§4.6) → new epoch. **Concurrent wake race**: the CAS on `lease_epoch` means only the first writer wins a spawn; a second router tick/TUI attach sees the bumped epoch and routes to the live session instead of spawning again.
+### 5.5 Resource & OOM bounds (the motivating failure, finally bounded)
+- **5.5.1 Subprocess discipline**: every poll has a deadline (default 45s) and an output cap (default 512KB); exceeding either cancels the process group (§5.5.2) and emits a degraded-intake event. No poll can hang the router.
+- **5.5.2 Process-group cancellation**: router spawns polls/owners/workflows in their own process group; cancel = `kill(-pgid, SIGTERM)` then SIGKILL after grace; reaps children so none orphan (the firstmate reaper lesson).
+- **5.5.3 Admission limits (global + per-effort)**: `max_concurrent_polls=4`, `max_dispatches_per_effort=8`, `max_worktrees_global=24`, `max_browser_tabs_global=16`, `max_workflow_nodes_per_run=200` (config). Over-limit ⇒ queue with backpressure + coalescing.
+- **5.5.4 Queue coalescing**: multiple facts for one effort within a 5s window coalesce into one wake with a folded summary (no 10× wake for 10 CI events).
+- **5.5.5 Memory budgets + degraded alerts**: per-process RSS cap with graceful shed; broker/router report degraded state into a system effort visible on the board.
+- **5.5.6 Acceptance tests**: (a) kill -9 the router mid-poll ⇒ on restart, no orphan polls, no lost facts (idempotency), no duplicate owners (lease CAS); (b) simulate swap pressure ⇒ graceful shed, not OOM; (c) 4 deliberately-hung CLIs ⇒ router stays responsive, degraded-intake card raised.
 
 ## 6. Credential broker
-
 ### 6.1 Process & surfaces
-Bun daemon. Two listeners: unix socket (control: store CRUD, usage snapshot, health) and `127.0.0.1:<port>` HTTP exposing **OpenAI-compatible** `/v1/chat/completions` + `/v1/models` (and an Anthropic-messages endpoint if the Claude module needs native shape). pi wiring: deck extension calls `pi.registerProvider("deck", { baseUrl, models: fetched from broker })`.
-
+Bun daemon: unix socket (control, capability-auth'd) + `127.0.0.1:<port>` HTTP exposing OpenAI-compat `/v1/*` and (recommended, see §15 Q2) a native Anthropic-messages endpoint. pi wiring: `pi.registerProvider("deck", { baseUrl, models })`. **Broker proxies LLM calls — it never returns raw provider tokens to any worker.** Workers point at the broker; the broker holds upstream creds.
 ### 6.2 Provider module interface
-```ts
-interface ProviderModule {
-  id: "claude" | "codex" | "zai" | …;
-  accounts(): Account[];                       // from store
-  refresh(a: Account): Promise<Tokens>;        // OAuth refresh
-  execute(req, a): Promise<Response>;          // upstream call w/ correct headers/client-id
-  classify(resp): "ok" | "rate_limited" | "auth_dead" | "server_err";
-  probeUsage(a): Promise<UsageSnapshot>;       // plan window, % used, resets_at
-}
-```
-
-### 6.3 Selection & rotation
-- **Sticky by session**: requests carry `X-Deck-Session`; an account is pinned per session while healthy — **prompt-cache affinity matters more than round-robin fairness**; naive rotation would cold-cache every turn.
-- On `rate_limited`: account → `cooling(until)` (from headers or backoff), session re-pins to next healthy account, event `fact.broker.rotated` appended to a global tail; board shows it.
-- On `auth_dead`: account flagged, board card raised to Tim.
-
+`{ id, accounts(), refresh(a), execute(req,a), classify(resp), probeUsage(a) }` (unchanged from v0.1).
+### 6.3 Selection, rotation, single-flight refresh
+- Sticky by session (prompt-cache affinity > fairness).
+- `rate_limited` → account cooling, session re-pins, `fact.broker.rotated` event.
+- **Single-flight refresh**: two concurrent requests needing the same expiring refresh token share ONE in-flight refresh (dedup on `(account_id)`); losers await the winner's result. Prevents the refresh-token-rotation race that invalidates tokens.
 ### 6.4 Store & security
-`broker/store.json` mode 0600, owner-only dir. Namespaces `llm/<provider>/<email>` and `tool/<service>/<label>` (schema present in v1; tool tokens populated Phase 3+). Values: refresh token, access token + expiry, client metadata. Broker is the sole reader; CLIs (`mcpx`, slack CLI) obtain short-lived tokens over the unix socket, never read the store. macOS keychain migration is an optional later hardening, not v1.
-
-### 6.5 Claude plan-limits module — go/no-go acceptance
-Extract from omp source (MIT) the exact client presentation (client id, headers, beta flags, token exchange) that makes subscription OAuth usage bill to **plan limits** rather than extra-usage. Acceptance test: same prompt via (a) omp, (b) broker → both consume plan quota identically (verified against the account usage surface omp's `/usage` reads); a control via pi-native OAuth shows the extra-usage path we're avoiding. Failure after a timeboxed spike (suggest: 3 working days) ⇒ PLAN D7 escalation to Tim. **No fallback is pre-accepted.**
-
+`broker/store.json` 0600. **The broker is the sole reader of the store.** CLIs/tools obtain scoped short-lived access tokens over the capability-auth'd unix socket (§14). macOS keychain = optional v2 hardening.
+### 6.5 Claude plan-limits module — acceptance (expanded)
+Extract omp's client presentation (client id, headers, beta flags, token exchange). **Conformance battery** (not just one prompt): (1) quota attribution matches omp on the account usage surface (the original test); (2) streaming; (3) tool-calls; (4) thinking blocks; (5) prompt caching headers honored; (6) mid-stream cancellation; (7) model-eligibility (only plan-covered models routed); (8) token revocation handling; (9) atomic refresh rotation under concurrency. Failure after timeboxed spike (3 working days) ⇒ D7 escalation.
 ### 6.6 Usage roster
-`broker/usage.json` refreshed on probe (per account: plan, window %, resets_at, last_rotated, state). TUI accounts view renders it; deltas appended as events for history.
+`broker/usage.json` refreshed on probe; TUI renders; deltas as events.
+### 6.7 Provider-policy / TOS risk — explicit human decision (new)
+Spoofing the official client presentation to pool multiple Claude/Codex subscription accounts may violate provider TOS even when quota attribution succeeds; MIT-licensed omp source is not authorization to impersonate. I8 marks multi-account pooling non-negotiable, but Tim signs off **knowing** the TOS/termination risk. Mitigations: prefer official API-key billing where a plan offers it; never expose this surface outside Tim's machines; keep a single-account fallback path documented. This is a deliberate risk acceptance, recorded.
 
-## 7. `mcpx` — MCP-as-CLI bridge
+## 7. `mcpx` — MCP-as-CLI bridge (unchanged from v0.1)
+Catalog `catalog/mcpx.toml`; `mcpx <server> list-tools` / `call <tool> --args`; hosted = HTTPS, stdio = spawn-per-invocation; tokens via broker capability; axi-convention output.
 
-Catalog `catalog/mcpx.toml`:
-```toml
-[servers.linear]
-kind = "http"                       # hosted MCP endpoint
-url  = "https://mcp.linear.app/mcp"
-auth = "tool/linear/tim"            # broker ref
+## 8. Browser vault (rewritten for confinement)
+- browser-harness daemon owns vault Chromium (dedicated profile, on-demand, idle-shutdown). **API is mediated, not passthrough:** workers call `deck browser act --domains <d> --purpose <p> --actions <a>` describing intent; the harness drives and returns screenshots/DOM/results. **Workers never receive a raw CDP `ws_endpoint` or shared context handle.**
+- `catalog/browser-domains.json` per-domain: `{ mode, last_verified, source, trust }`.
+- Modes: `clone-ok` (in-memory storage-state snapshot, ephemeral context, per-dispatch, destroyed after, never persisted to disk — fixes the v0.1 contradiction), `tabs-in-vault` (shared session, bounded), `serialized` (queue), `needs-reauth` (card).
+- **Privileged/trust=high domains (e.g. lindy admin, anything with `lsid`) NEVER cloned** — vault-tabs-only, mediated actions, Tim-approval for mutations.
+- Smoke test (`deck browser verify <domain>`) probes clone+concurrency and writes the matrix; also tests redirect scope, cookie scope, cross-tab isolation, revocation, crash cleanup. Nothing assumed.
+- Zen bootstrap: read-only import from `cookies.sqlite` for allowlisted domains into vault only.
+- **Day-one**: lindy `lsid` onboarded to vault (trust=high, mediated-only); robotim chrome-debug retired after verify.
 
-[servers.somelocal]
-kind = "stdio"
-cmd  = ["bunx", "some-mcp-server"]  # spawned per invocation, killed after
-```
-Invocation: `mcpx <server> list-tools` · `mcpx <server> call <tool> --args '<json>'` → JSON on stdout, nonzero exit on error. No resident processes; hosted = one HTTPS exchange, stdio = spawn/handshake/call/exit. Output follows axi conventions (structured, agent-parseable, self-describing `--help`).
+## 9. Skills overlay & prompts (unchanged structure)
+Local visibility manifest (`auto`/`name-only`/`user-only`/`off`; unknown⇒`name-only`) ∩ scope; content-hash auto-dedup; per-skill source policy (worktree-pinned vs main-fetched); composed prompts (base ≤50 lines + role block ≤40 + brief); owner model = best available (PLAN D5); doctrine-mining pass seeds role blocks.
 
-## 8. Browser vault
+## 10. Merge & side-effect gateway (new)
+I7 mechanized — the merge stamp is no longer prose.
+- **Scoped credentials**: broker-issued GH tokens for agents are read + branch-push only — **no `merge`/`administration`/`delete_repo` scopes.** Agents physically cannot merge via raw `gh`.
+- **Single merge gateway** `deck merge --pr <n> --auth <token>`: Tim mints a single-use authorization bound to `{repo, pr, head_sha, base, required_checks[], workflow_run_id?}`. Head change (new push) invalidates it. Checks must be green. Consumed atomically at merge (revision CAS + lease fence). A head SHA Tim never approved cannot be merged.
+- **Side-effect receipts** (push/merge/deploy/migration): recorded in `manifest.side_effects` AND as `lifecycle.side_effect` tail events, independent of Smithers — so a crash mid-side-effect is recoverable from Deck state alone (the Smithers-durability gap, closed).
 
-- browser-harness daemon owns the vault Chromium (dedicated profile dir, launched on demand, idle-shutdown).
-- API (unix socket / localhost): `acquire(domains[], purpose) → {mode, ws_endpoint | context_id}` honoring `catalog/browser-domains.json`:
-```jsonc
-{ "admin.lindy.ai": { "mode": "tabs-in-vault", "last_verified": ts, "source": "vault", "notes": "lsid; replaces robotim chrome-debug profile" },
-  "github.com":     { "mode": "clone-ok",      "last_verified": ts, "source": "zen-import" } }
-```
-- Modes: `clone-ok` (storage-state snapshot → ephemeral context, parallel), `tabs-in-vault` (shared session, bounded tabs), `serialized` (queue), `needs-reauth` (board card).
-- Domain classification is empirical: a smoke-test job (`deck browser verify <domain>`) runs the clone+concurrency probe and writes the matrix; nothing is assumed (Zen-import domains especially).
-- Zen bootstrap: read-only import from `cookies.sqlite` for allowlisted domains, only into vault; never writes back to Zen.
-- **Day-one migration**: lindy `lsid` admin cookie domain onboarded to vault; robotim's chrome-debug profile retired after verification.
+## 11. `@deck/smithers-kit` (corrected durability claim)
+`DeckPiAgent` (provider=deck, composed prompts, dispatch skills, emits via `deck emit`), `DeckWorktree` (over `deck wt`), `DeckApproval` (mirrors to a deck card; Tim answers on the board). **Honesty on durability**: Smithers is the authority for its own run state (checkpoints, nodes, approvals) via its Gateway; Deck does NOT duplicate that graph. If Smithers disappears, in-flight runs are lost UNLESS the run performed an irreversible side-effect — those are independently receipted in Deck (§10) and the owner re-derives next steps from receipts + charter. This is the real cost of Smithers abandonment: not transparent, bounded by side-effect receipts.
 
-## 9. Skills overlay & prompts
+## 12. Multi-machine seams (design-now)
+Machine-qualified ids; sockets v1 → tailnet TCP + token auth later; effort sync deferred (v1 single machine; every effort records home machine).
 
-### 9.1 Resolution
-Loader scan order: global `~/.agent/skills` → worktree repo `.agent/skills` → `~/dev/deck/skills`. For each SKILL.md: `content_hash = sha256(body)`.
-- Same hash, multiple roots ⇒ one entry (global root wins for attribution; all paths recorded).
-- Same name, different hash ⇒ near-dupe: TUI flags for a manual visibility/source call.
-- Effective visibility = `catalog/skills.json` overlay (`auto|name-only|user-only|off`; unknown ⇒ `name-only`) ∩ scope (owner set / dispatch-declared worker set / Tim: all).
-- Source policy per skill: `worktree-pinned` (default for code-coupled) or `main-fetched` (SOP skills; router refreshes a cached copy of target-repo main). Source commit + age surfaced in TUI.
+## 13. Security model (rewritten — honest)
+- **Same-UID is NOT a security boundary.** v0.1's "0600/0700 stops workers" was wrong — any process as `tim` can read the store. v1 accepts a **trusted-code model**: workflows Tim authors/approves run as tim; agent-ad-hoc-authored workflows are trusted by default (like firstmate). Documented boundary, not a silent assumption.
+- **Broker proxies LLM calls** — workers never see provider tokens.
+- **Tool CLIs** obtain scoped, short-lived (≤15m), action-bounded capabilities from the broker socket over an authenticated (capability-token) channel; raw refresh tokens never leave the broker.
+- **Broker control socket** requires a capability token; same-UID alone doesn't grant.
+- **v2 hardening path** (not v1): per-worker sandbox (`sandbox-exec`/container), separate browser trust levels enforced by OS, signed/reviewed workflows, restricted workflow execution format. Called out so the gap is explicit, not hidden.
 
-### 9.2 Prompt composition (spawn-time)
-`prompts/base.md` (≤50 lines: engineering invariants, comms doctrine) + `prompts/roles/{owner,worker,reviewer}.md` (≤40 lines each) + dispatch brief. Owner role block carries model-selection + escalation/concision doctrine (seeded from the doctrine-mining pass over firstmate learnings/captain/AGENTS + brain inbox; mined rules land as PR-reviewed diffs to these files, adopted only with Tim's review).
-Owner model: **best available** (fable / gpt-5.6 class) — PLAN D5.
+## 14. Deck TUI (view-level; unchanged)
+Board / effort / accounts / domains / skills views — pure renders of files+sockets. Drilldown attaches via router (which owns owner process groups, §15 Q3).
 
-## 10. Worktree primitive
+## 15. Open technical questions
+1. Rehydration: token-budget (chosen) vs count — confirm K budget per owner model.
+2. Broker HTTP: single OpenAI-compat vs + native Anthropic endpoint (caching/thinking favor native) — leaning both.
+3. Router owns all owner processes as children (so it can inject via stdin + fence via pgid) vs per-session socket shim — leaning router-owns.
+4. `watching` fallout monitors: per-effort vs per-deploy (leaning per-deploy, fans back to touched efforts).
+5. Smithers Gateway: per-project-on-demand vs global (leaning per-project).
 
-`deck wt acquire --repo ~/work/lindy --branch twaldin/<slug> [--base origin/main]` → `{id, path}`; `deck wt release <id>`; `deck wt audit` (boot). Backend: treehouse adapter if probe passes (CLI present, allocate/release/list semantics confirmed — 20-min inspection is Phase-2 task); else plain `git worktree` under `~/.deck/wt/<repo>/<n>`. Invariants: allocation records owner dispatch; release requires clean-or-pushed (else flags); Smithers `DeckWorktree` calls the same CLI. Base freshness: acquire always fetches base ref first (skill-staleness advisory).
-
-## 11. Deck TUI
-
-pi-tui application (runs inside a pi session or standalone bun TUI — decide in Phase 2 spike; contract below is view-level and holds either way):
-- **Board**: efforts grouped by project; columns: stage, overlays (loud), last-heartbeat age (loud when > threshold), open cards count, running dispatches. Sort: needs_tim → stale → active.
-- **Effort view**: manifest + folded tail; cards answerable inline (writes `tim.decision`, injects to session); attach ⇒ live session (revive per §5.4); Smithers dispatches show Gateway stream rows; `hijack` for running workflow nodes.
-- **Accounts view**: broker roster (§6.6). **Domains view**: browser matrix. **Skills view**: overlay toggles + dupe flags + source age.
-- All views are pure renders of files/sockets — TUI holds no state.
-
-## 12. `@deck/smithers-kit`
-
-- `DeckPiAgent extends PiAgent`: injects `--provider deck` (broker), composed prompts (role=worker unless overridden), dispatch-declared skills; emits `lifecycle.*` events by shelling `deck emit` (public CLI, so kit works from any Smithers process).
-- `DeckWorktree`: wraps `<Worktree>` over `deck wt` allocator.
-- `DeckApproval`: wraps `<Approval>` AND mirrors the request as a deck card, so Tim answers on the deck board, not a second UI; answer forwarded to Gateway.
-- Workflows authored by agents must pass `deck wf lint`: uses kit components only (no raw creds/paths), stable task ids, declares consumed skills.
-
-## 13. Multi-machine seams (design-now, build-later)
-
-Machine-qualified ids everywhere (§1); router/broker listen on unix sockets v1, flip to tailnet-bound TCP + token auth later; `~/.deck/efforts` sync strategy (git vs rsync vs single-writer-per-effort pinning) explicitly deferred — v1 asserts single machine, and every effort records its home machine so the later split is additive.
-
-## 14. Security notes
-
-- Broker store 0600; unix sockets 0700 dir; no tokens in env vars of spawned workers (they get broker refs, not values) except where a CLI requires env (then short-lived access tokens only).
-- Slack CLI: send subcommand hard-disabled for agent contexts (build-time flag), draft/read only — I7.
-- Browser vault cookies never serialized outside `~/.deck`/profile dirs; clone snapshots are tmpfs-backed and per-dispatch.
-- Reviewer/adversarial sessions run read-only (existing skill sandbox conventions).
-
-## 15. Open technical questions (for review)
-
-1. Owner seed: is last-K=50 tail events the right rehydration window, or size-budgeted (tokens) instead?
-2. Broker HTTP shape: single OpenAI-compat endpoint for all providers vs native Anthropic endpoint alongside (Claude prompt caching + thinking blocks favor native shape)?
-3. Router↔extension transport for "inject message into live session": pi RPC stdin is owned by the spawning process — does the router own ALL owner sessions' stdio (sessions as router children), or do we need a per-session socket shim? (Leaning: router owns all owner processes as children; TUI attaches through router.)
-4. `watching` stage fallout monitors: per-effort or merged per-deploy? (Leaning: per-deploy workflow that fans results back to touched efforts.)
-5. Smithers Gateway lifecycle: one workspace gateway per project repo or one global? (Leaning: per project, started on demand.)
+## 16. Migration cutover protocol (new — closes Finding 2)
+Per-effort, not big-bang. For each effort moving firstmate→deck:
+1. **Freeze**: mark effort `migrating` in both systems; firstmate stops accepting new dispatches for it.
+2. **Drain**: let in-flight firstmate work finish or transfer; capture current state (PRs, approvals, watches, cursors) into the deck manifest + charter.
+3. **Exclusive ownership marker**: `efforts/<id>/owner_system = deck`; firstmate watcher checks this and skips; deck router arms watches from the imported cursor.
+4. **Verify no old workers**: confirm no firstmate-spawned pane/process holds the effort's worktree/branch (the 07-20 near-miss check).
+5. **Rollback path**: marker flipped back to `firstmate` re-enables the old watcher; deck pauses. Tested before any grant revocation.
+6. Only after the whole fleet is migrated: revoke old grants, delete config sprawl (PLAN Phase 4).
