@@ -1,0 +1,15 @@
+{
+	"name": "@deck/prompts",
+	"version": "0.1.0",
+	"type": "module",
+	"main": "./compose.ts",
+	"private": true,
+	"dependencies": {
+		"@deck/core": "file:../core",
+		"zod": "^4"
+	},
+	"devDependencies": {
+		"@types/bun": "latest",
+		"typescript": "^5"
+	}
+}

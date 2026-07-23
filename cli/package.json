@@ -1,0 +1,20 @@
+{
+	"name": "@deck/cli",
+	"version": "0.1.0",
+	"type": "module",
+	"bin": {
+		"deck": "./bin/deck"
+	},
+	"scripts": {
+		"test": "bun test",
+		"typecheck": "tsc --noEmit"
+	},
+	"dependencies": {
+		"@deck/core": "file:../core",
+		"zod": "^4"
+	},
+	"devDependencies": {
+		"@types/bun": "latest",
+		"typescript": "^5"
+	}
+}
