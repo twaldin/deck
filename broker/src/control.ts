@@ -20,6 +20,8 @@ import { refreshUsageRoster } from "./usage";
 
 interface ControlDeps {
 	storage: AuthStorage;
+	/** Drop cached usage reports so the next probe hits upstream (battery §6.5.1). */
+	invalidateUsageCache: () => void;
 	capability: string;
 	gatewayUrl: string;
 	version: string;
@@ -32,6 +34,7 @@ interface ControlRequest {
 	op?: unknown;
 	provider?: unknown;
 	credentialId?: unknown;
+	force?: unknown;
 	reply?: unknown;
 }
 
@@ -155,6 +158,7 @@ export function startControlSocket(sockPath: string, deps: ControlDeps): { close
 					return;
 				}
 				case "usage": {
+					if (request.force === true) deps.invalidateUsageCache();
 					const roster = await refreshUsageRoster(deps.storage);
 					send(socket, { id, ok: true, data: roster });
 					return;

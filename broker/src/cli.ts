@@ -44,6 +44,9 @@ async function run(): Promise<void> {
 	if (op === "refresh") {
 		request.credentialId = Number(arg);
 	}
+	if (op === "usage" && arg === "--force") {
+		request.force = true;
+	}
 
 	let buffer = "";
 	let done = false;
