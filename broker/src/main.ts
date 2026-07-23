@@ -60,9 +60,7 @@ async function main(): Promise<void> {
 
 	const control = startControlSocket(BROKER_SOCK, {
 		storage,
-		// "usage_cache:" is pi-ai's stable on-disk key prefix (auth-storage.ts
-		// USAGE_CACHE_PREFIX, module-private; format verified against live omp DB).
-		invalidateUsageCache: () => store.deleteCachePrefix("usage_cache:"),
+		invalidateUsageCache: () => storage.invalidateUsageCache(),
 		capability: controlCapability,
 		gatewayUrl: gateway.url,
 		version: BROKER_VERSION,
