@@ -15,11 +15,13 @@
  */
 import * as fs from "node:fs";
 import { timingSafeEqual } from "node:crypto";
-import type { AuthStorage } from "@oh-my-pi/pi-ai";
+import type { AuthStorage, StoredCredentialBlock } from "@oh-my-pi/pi-ai";
 import { refreshUsageRoster } from "./usage";
 
 interface ControlDeps {
 	storage: AuthStorage;
+	/** Non-expired usage-limit blocks for the given credential rows (store-backed). */
+	listBlocks: (credentialIds: readonly number[]) => StoredCredentialBlock[];
 	/** Drop cached usage reports so the next probe hits upstream (battery §6.5.1). */
 	invalidateUsageCache: () => Promise<void>;
 	capability: string;
@@ -49,8 +51,9 @@ function capMatches(expected: string, supplied: unknown): boolean {
 }
 
 /** Identity-only projection of stored credentials — no token bytes. */
-function describeAccounts(storage: AuthStorage) {
+function describeAccounts(storage: AuthStorage, listBlocks: ControlDeps["listBlocks"]) {
 	const snapshot = storage.exportSnapshot();
+	const blocks = listBlocks(snapshot.credentials.map(entry => entry.id));
 	return snapshot.credentials.map(entry => {
 		const cred = entry.credential;
 		return {
@@ -61,6 +64,10 @@ function describeAccounts(storage: AuthStorage) {
 			accountId: cred.type === "oauth" ? (cred.accountId ?? null) : null,
 			orgName: cred.type === "oauth" ? (cred.orgName ?? null) : null,
 			expires: cred.type === "oauth" ? cred.expires : null,
+			// Cooling state (SPEC §6.3): non-expired usage-limit blocks on this row.
+			blocks: blocks
+				.filter(block => block.credentialId === entry.id)
+				.map(block => ({ providerKey: block.providerKey, blockScope: block.blockScope, blockedUntilMs: block.blockedUntilMs })),
 		};
 	});
 }
@@ -152,7 +159,7 @@ export function startControlSocket(sockPath: string, deps: ControlDeps): { close
 							pid: process.pid,
 							uptimeMs: Date.now() - deps.startedAt,
 							gateway: deps.gatewayUrl,
-							accounts: describeAccounts(deps.storage),
+							accounts: describeAccounts(deps.storage, deps.listBlocks),
 						},
 					});
 					return;
@@ -186,7 +193,7 @@ export function startControlSocket(sockPath: string, deps: ControlDeps): { close
 							onPrompt: prompt => askClient(socket, `${id}#p${++promptSeq}`, { event: "prompt", message: prompt.message, placeholder: prompt.placeholder ?? null }),
 							onManualCodeInput: () => askClient(socket, `${id}#c${++promptSeq}`, { event: "code" }),
 						});
-						send(socket, { id, ok: true, data: { identity: identity ?? null, accounts: describeAccounts(deps.storage) } });
+						send(socket, { id, ok: true, data: { identity: identity ?? null, accounts: describeAccounts(deps.storage, deps.listBlocks) } });
 					} finally {
 						socket.data.loginActive = false;
 					}
@@ -199,7 +206,7 @@ export function startControlSocket(sockPath: string, deps: ControlDeps): { close
 						return;
 					}
 					await deps.storage.remove(provider);
-					send(socket, { id, ok: true, data: { accounts: describeAccounts(deps.storage) } });
+					send(socket, { id, ok: true, data: { accounts: describeAccounts(deps.storage, deps.listBlocks) } });
 					return;
 				}
 				case "refresh": {

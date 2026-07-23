@@ -60,6 +60,7 @@ async function main(): Promise<void> {
 
 	const control = startControlSocket(BROKER_SOCK, {
 		storage,
+		listBlocks: ids => store.listCredentialBlocks(ids),
 		invalidateUsageCache: () => storage.invalidateUsageCache(),
 		capability: controlCapability,
 		gatewayUrl: gateway.url,
