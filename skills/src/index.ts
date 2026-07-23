@@ -59,7 +59,12 @@ function parseFrontmatter(text: string): { name: string | null; description: str
 	const end = text.indexOf("\n---", 4);
 	if (end === -1) return { name: null, description: null, body: text };
 	const header = text.slice(4, end);
-	const body = text.slice(text.indexOf("\n", end + 4) + 1);
+	// Body starts after the newline ending the closing `---` line. If the fence
+	// sits at EOF with no trailing newline, indexOf returns -1 and there is no
+	// body — guard it, or slice(-1 + 1) would return the ENTIRE file (fence
+	// markers included) as body.
+	const bodyNewline = text.indexOf("\n", end + 4);
+	const body = bodyNewline === -1 ? "" : text.slice(bodyNewline + 1);
 	let name: string | null = null;
 	let description: string | null = null;
 	for (const line of header.split("\n")) {

@@ -9,6 +9,8 @@ import type { McpxServer } from "./catalog";
 
 const PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26"] as const;
 const STDIO_DEADLINE_MS = 45_000;
+const HTTP_TIMEOUT_MS = 45_000;
+const KILL_GRACE_MS = 2_000;
 
 const rpcResponseSchema = z.looseObject({
 	jsonrpc: z.literal("2.0"),
@@ -43,12 +45,22 @@ interface Transport {
 function parseHttpBody(contentType: string, text: string): RpcResponse {
 	if (contentType.includes("text/event-stream")) {
 		// Take the LAST data: payload carrying a jsonrpc response (spec allows
-		// servers to interleave notifications before the response).
+		// servers to interleave notifications before the response). Malformed
+		// data lines (keepalive comments, empty data, debug bleed) are SKIPPED,
+		// never fatal — untrusted server output must not crash the parse.
 		let last: RpcResponse | undefined;
 		for (const block of text.split("\n\n")) {
 			for (const line of block.split("\n")) {
 				if (!line.startsWith("data: ")) continue;
-				const parsed = rpcResponseSchema.safeParse(JSON.parse(line.slice(6)));
+				const raw = line.slice(6).trim();
+				if (raw.length === 0) continue;
+				let value: unknown;
+				try {
+					value = JSON.parse(raw);
+				} catch {
+					continue;
+				}
+				const parsed = rpcResponseSchema.safeParse(value);
 				if (parsed.success && (parsed.data.result !== undefined || parsed.data.error !== undefined)) {
 					last = parsed.data;
 				}
@@ -57,7 +69,13 @@ function parseHttpBody(contentType: string, text: string): RpcResponse {
 		if (last === undefined) throw new DeckError("E_IO", "SSE stream carried no JSON-RPC response");
 		return last;
 	}
-	return rpcResponseSchema.parse(JSON.parse(text));
+	let value: unknown;
+	try {
+		value = JSON.parse(text);
+	} catch {
+		throw new DeckError("E_IO", "MCP server returned non-JSON body", { body: text.slice(0, 200) });
+	}
+	return rpcResponseSchema.parse(value);
 }
 
 function httpTransport(server: McpxServer, token: string | null): Transport {
@@ -73,7 +91,13 @@ function httpTransport(server: McpxServer, token: string | null): Transport {
 		};
 		if (token !== null) headers.authorization = `Bearer ${token}`;
 		if (sessionId !== null) headers["mcp-session-id"] = sessionId;
-		const response = await fetch(url as string, { method: "POST", headers, body: JSON.stringify(body) });
+		// A non-responding MCP server must not hang the CLI forever.
+		const response = await fetch(url as string, {
+			method: "POST",
+			headers,
+			body: JSON.stringify(body),
+			signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
+		});
 		const newSession = response.headers.get("mcp-session-id");
 		if (newSession !== null) sessionId = newSession;
 		if (response.status === 202) return null;
@@ -102,10 +126,13 @@ function httpTransport(server: McpxServer, token: string | null): Transport {
 function stdioTransport(server: McpxServer): Transport {
 	const command = server.command;
 	if (command === undefined) throw new DeckError("E_STATE", "stdio transport requires command");
+	// Own process group so teardown can reap the server AND any children it
+	// spawns (SPEC §5.5.2); killing only the direct pid can orphan a subtree.
 	const proc = Bun.spawn([command, ...server.args], {
 		stdin: "pipe",
 		stdout: "pipe",
 		stderr: "ignore",
+		detached: true,
 	});
 	const reader = proc.stdout.getReader();
 	let buffer = "";
@@ -124,7 +151,15 @@ function stdioTransport(server: McpxServer): Transport {
 				buffer = buffer.slice(newline + 1);
 				newline = buffer.indexOf("\n");
 				if (line.length === 0) continue;
-				const parsed = rpcResponseSchema.safeParse(JSON.parse(line));
+				// Untrusted server output: a malformed line (stderr bleed, debug
+				// log, partial JSON) is SKIPPED, never fatal to the read loop.
+				let value: unknown;
+				try {
+					value = JSON.parse(line);
+				} catch {
+					continue;
+				}
+				const parsed = rpcResponseSchema.safeParse(value);
 				if (!parsed.success || parsed.data.id === null || parsed.data.id === undefined) continue;
 				const id = typeof parsed.data.id === "string" ? Number.parseInt(parsed.data.id, 10) : parsed.data.id;
 				const waiter = pending.get(id);
@@ -139,9 +174,41 @@ function stdioTransport(server: McpxServer): Transport {
 	})();
 	void pump;
 
-	const deadline = setTimeout(() => {
-		proc.kill("SIGKILL");
-	}, STDIO_DEADLINE_MS);
+	let terminated = false;
+	function terminate(): void {
+		if (terminated) {
+			return;
+		}
+		terminated = true;
+		clearTimeout(deadline);
+		for (const waiter of pending.values()) waiter.reject(new DeckError("E_IO", "MCP stdio session torn down"));
+		pending.clear();
+		try {
+			proc.stdin.end();
+		} catch {
+			// already closed
+		}
+		// Graceful then forceful, targeting the process group (negative pid).
+		const pgid = -proc.pid;
+		try {
+			process.kill(pgid, "SIGTERM");
+		} catch {
+			try {
+				proc.kill();
+			} catch {
+				// already gone
+			}
+		}
+		setTimeout(() => {
+			try {
+				process.kill(pgid, "SIGKILL");
+			} catch {
+				// already reaped
+			}
+		}, KILL_GRACE_MS).unref();
+	}
+
+	const deadline = setTimeout(terminate, STDIO_DEADLINE_MS);
 
 	function send(payload: Record<string, unknown>): void {
 		proc.stdin.write(`${JSON.stringify(payload)}\n`);
@@ -160,13 +227,7 @@ function stdioTransport(server: McpxServer): Transport {
 			send({ jsonrpc: "2.0", method, params });
 		},
 		close() {
-			clearTimeout(deadline);
-			try {
-				proc.stdin.end();
-			} catch {
-				// already closed
-			}
-			proc.kill();
+			terminate();
 		},
 	};
 }
@@ -185,9 +246,13 @@ async function resolveToken(server: McpxServer): Promise<string | null> {
 
 async function openSession(server: McpxServer): Promise<Transport> {
 	const token = await resolveToken(server);
-	const transport = server.transport === "http" ? httpTransport(server, token) : stdioTransport(server);
 	let lastError: unknown;
+	// A rejected `initialize` leaves the MCP session state machine unusable, so
+	// each protocol-version attempt gets a FRESH transport (new stdio process /
+	// new HTTP session) — reusing one across attempts violates the spec and, for
+	// stdio, re-initializes a server that already refused.
 	for (const version of PROTOCOL_VERSIONS) {
+		const transport = server.transport === "http" ? httpTransport(server, token) : stdioTransport(server);
 		try {
 			const init = await transport.request("initialize", {
 				protocolVersion: version,
@@ -196,15 +261,16 @@ async function openSession(server: McpxServer): Promise<Transport> {
 			});
 			if (init.error !== undefined) {
 				lastError = new DeckError("E_IO", `initialize rejected: ${init.error.message}`);
+				transport.close();
 				continue;
 			}
 			await transport.notify("notifications/initialized", {});
 			return transport;
 		} catch (error) {
 			lastError = error;
+			transport.close();
 		}
 	}
-	transport.close();
 	throw lastError instanceof Error ? lastError : new DeckError("E_IO", "MCP initialize failed");
 }
 

@@ -59,4 +59,22 @@ describe("skills overlay", () => {
 		writeSkill(a, "big", "big", "Too big", "x".repeat(5_000));
 		expect(() => renderSkillsBlock(resolveSkills(catalog))).toThrow(/E_TOO_LONG/);
 	});
+
+	test("frontmatter with the closing --- at EOF (no trailing newline) yields an empty body, not the whole file", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "skills-eof-"));
+		const dir = path.join(root, "eofskill");
+		fs.mkdirSync(dir, { recursive: true });
+		// No body and no trailing newline after the closing fence.
+		fs.writeFileSync(path.join(dir, "SKILL.md"), "---\nname: eof\ndescription: Ends at fence\n---");
+		const catalog = skillsCatalogSchema.parse({
+			sources: [{ name: "s", path: root, policy: "worktree-pinned" }],
+			visibility: { eof: "auto" },
+		});
+		const skills = resolveSkills(catalog);
+		const eof = skills.find(skill => skill.name === "eof");
+		expect(eof?.description).toBe("Ends at fence");
+		// The bug returned the ENTIRE file (fence markers + frontmatter) as body.
+		expect(eof?.content ?? "").not.toContain("name: eof");
+		expect(eof?.content ?? "").not.toContain("---");
+	});
 });

@@ -1,0 +1,64 @@
+{
+  "overall": "request_changes",
+  "source": "paths",
+  "base": null,
+  "intent": "Deck Phase-3 mcpx (one-shot MCP-as-CLI bridge: http streamable + stdio JSON-RPC, capability token seam) and skills overlay (visibility manifest, content-hash dedup, prompt block with per-skill byte cap). SPEC §7 and §9 of ~/dev/deck/SPEC.md.",
+  "reviewers": [
+    {
+      "tag": "claude:claude-opus-4-6 (MCP client protocol correctness (JSON-RPC framing, SSE parse, stdio process-group cleanup/deadline, session-id handling), zod boundary gaps on untrusted server responses, catalog/frontmatter parsing safety, content-hash dedup correctness, skills visibility (user-only/off never leaking to agents), oversized-skill rejection)",
+      "harness": "claude",
+      "model": "claude-opus-4-6",
+      "focus": "MCP client protocol correctness (JSON-RPC framing, SSE parse, stdio process-group cleanup/deadline, session-id handling), zod boundary gaps on untrusted server responses, catalog/frontmatter parsing safety, content-hash dedup correctness, skills visibility (user-only/off never leaking to agents), oversized-skill rejection",
+      "verdict": "request_changes",
+      "failed": false,
+      "summary": "Three high-severity MCP protocol correctness issues: both transports call JSON.parse on untrusted server output without try/catch (stdio: one bad line hangs 45s then SIGKILLs; SSE: skips valid events after a bad one), and protocol version negotiation reuses the same stdio transport for multiple initialize requests, violating the MCP state machine. Two medium issues in the transport layer: no HTTP request timeout (asymmetric with stdio's 45s deadline), and process cleanup that doesn't match SPEC §5.5.2's process-group SIGTERM→SIGKILL protocol. One medium issue in skills: frontmatter parser corrupts body extraction when no trailing newline after closing ---, breaking content-hash dedup and potentially injecting markers into auto-mode prompts. The zod boundary design (looseObject for server responses, strict for catalog) is sound; visibility filtering correctly excludes user-only/off from agent view; oversized-skill rejection works correctly at render time.",
+      "findings": [
+        {
+          "severity": "high",
+          "file": "mcpx/src/client.ts",
+          "line": 127,
+          "issue": "Unguarded JSON.parse on untrusted MCP server output in stdio pump. If the server writes a malformed line (partial JSON, debug log, stderr bleed), JSON.parse throws a SyntaxError that escapes the async pump IIFE. The pump dies, `void pump` means nobody catches the rejection (unhandled promise rejection), and every pending request in the `pending` map hangs silently until the 45s deadline fires SIGKILL. One bad line → 45s hang + opaque crash.",
+          "suggestion": "Wrap JSON.parse in try/catch inside the pump loop: on SyntaxError, `continue` (skip the malformed line). Same pattern the fixture-stdio-server uses implicitly by only processing recognized methods."
+        },
+        {
+          "severity": "high",
+          "file": "mcpx/src/client.ts",
+          "line": 51,
+          "issue": "Unguarded JSON.parse on untrusted SSE data lines. If an MCP server emits a `data: ` line with invalid JSON (common: heartbeat comments, empty keep-alive data, debug output), JSON.parse throws a SyntaxError that blows past the SSE loop, killing parseHttpBody entirely — even if later SSE events carry a valid JSON-RPC response. The error surfaces as a generic TypeError, not a DeckError.",
+          "suggestion": "Wrap the JSON.parse + safeParse in a try/catch inside the inner loop; on parse failure, `continue` to the next line. This matches the resilient intent already expressed by using safeParse for zod validation — the JSON.parse before it should have the same tolerance."
+        },
+        {
+          "severity": "high",
+          "file": "mcpx/src/client.ts",
+          "line": 190,
+          "issue": "Protocol version negotiation reuses the same stdio transport for multiple initialize attempts. If the first protocolVersion is rejected (error response), the loop sends a second `initialize` on the same stdin/stdout pipe. The MCP spec defines `initialize` as the first client request; after responding (even with an error), many servers transition their state machine and will reject or misbehave on a second `initialize`. The HTTP transport is borderline (server may track session state from the first attempt via mcp-session-id), but stdio is a clear protocol violation — the stream has already been used.",
+          "suggestion": "For stdio: close the transport and spawn a fresh process for each version attempt. For HTTP: clear `sessionId` between attempts so a failed initialize's session doesn't pollute the retry. Alternatively, negotiate version once (try newest, accept the server's counter-proposal per the MCP spec's version negotiation flow) instead of serially retrying."
+        },
+        {
+          "severity": "medium",
+          "file": "mcpx/src/client.ts",
+          "line": 76,
+          "issue": "HTTP transport has no request timeout. fetch() is called with no AbortController or timeout option. A non-responding MCP server hangs the CLI process forever. The stdio transport has STDIO_DEADLINE_MS = 45_000 but HTTP has no equivalent, creating an asymmetric reliability gap.",
+          "suggestion": "Add an AbortController with a timeout (matching STDIO_DEADLINE_MS or a separate HTTP_DEADLINE_MS) to each fetch() call: `signal: AbortSignal.timeout(HTTP_DEADLINE_MS)`."
+        },
+        {
+          "severity": "medium",
+          "file": "mcpx/src/client.ts",
+          "line": 142,
+          "issue": "stdio cleanup doesn't kill the process group and the two teardown paths are inconsistent with SPEC §5.5.2. The deadline (line 142) fires SIGKILL with no SIGTERM grace period. close() (line 169) fires SIGTERM via proc.kill() with no follow-up SIGKILL if the process ignores SIGTERM. Neither path kills the process group — if the MCP server spawns children, they leak. SPEC §5.5.2 mandates: kill(-pgid, SIGTERM) → grace → SIGKILL → reap.",
+          "suggestion": "Spawn with a new process group (Bun doesn't expose this directly — consider `Bun.spawn(['setsid', command, ...args])` or use node:child_process with `detached: true`). Change both paths to SIGTERM the group → setTimeout grace → SIGKILL the group."
+        },
+        {
+          "severity": "medium",
+          "file": "skills/src/index.ts",
+          "line": 62,
+          "issue": "parseFrontmatter body extraction returns the entire file (including frontmatter markers) when the closing `---` has no trailing newline. `text.indexOf('\\n', end + 4)` returns -1 when there's no newline after `---`, so `text.slice(-1 + 1)` = `text.slice(0)` = full file. Consequences: (1) content hash includes `---\\nname: ...\\n---`, so the same skill won't dedup against itself if one copy has a trailing newline and the other doesn't; (2) an auto-mode skill would inject raw frontmatter markers into the agent prompt.",
+          "suggestion": "Handle the -1 case: `const bodyStart = text.indexOf('\\n', end + 4); const body = bodyStart === -1 ? '' : text.slice(bodyStart + 1);`"
+        }
+      ],
+      "suppressedFindings": [],
+      "suppressedLowCount": 0,
+      "error": null
+    }
+  ]
+}
