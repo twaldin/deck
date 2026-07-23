@@ -595,6 +595,74 @@ void describe("deck lifecycle extension", () => {
 		expect(store.readTail().filter((event) => event.type === "lifecycle.ack")).toHaveLength(1);
 	});
 
+	test("a SUCCESSFUL tool-use turn stays unacked until the terminal stop turn", async () => {
+		const { harness, store } = await setupOwner();
+		store.inboxAppend({ cmd_id: "cmd-toolloop", cmd: { action: "advance" }, from: "router", ts: Date.now() });
+		await harness.emit("message_start", {
+			type: "message_start",
+			message: { role: "user", content: "[deck:cmd cmd-toolloop]\nAdvance the effort.", timestamp: Date.now() },
+		});
+		// A clean tool-use turn (no error) — the owner is mid-loop, NOT done.
+		await harness.emit("turn_end", {
+			type: "turn_end",
+			turnIndex: 0,
+			message: { role: "assistant", stopReason: "toolUse", usage: { input: 5, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 7 } },
+			toolResults: [{ isError: false }],
+		});
+		// Must remain unacked: a crash here would otherwise silently drop the effect.
+		expect(store.inboxState()[0]?.acked).toBeNull();
+		expect(store.readTail().filter((event) => event.type === "lifecycle.ack")).toHaveLength(0);
+		// Terminal stop turn applies it.
+		await harness.emit("turn_end", {
+			type: "turn_end",
+			turnIndex: 1,
+			message: { role: "assistant", stopReason: "stop", usage: { input: 2, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 4 } },
+			toolResults: [],
+		});
+		expect(store.inboxState()[0]?.acked).not.toBeNull();
+		expect(store.readTail().filter((event) => event.type === "lifecycle.ack")).toHaveLength(1);
+	});
+
+	test("session_start during the reserve→bind window does not permanently fence the owner", async () => {
+		effortSequence += 1;
+		const effortId = `deck--extension-unbound-${effortSequence}`;
+		const store = core.createEffort({
+			effort_id: effortId,
+			project: "deck",
+			title: "Unbound window",
+			charter: { goal: "startup window", acceptance_criteria: ["no false fence"], constraints: [] },
+		});
+		// Reserve WITHOUT binding: token is valid but manifest.session lags (epoch
+		// divergence) — exactly the state a fresh owner's session_start sees.
+		const reserved = store.reserveLease(store.readManifest().revision);
+		process.env.DECK_EFFORT = effortId;
+		process.env.DECK_LEASE_TOKEN = reserved.token;
+		delete process.env.DECK_ACTOR;
+		const harness = new ExtensionHarness();
+		registerDeckLifecycle(harness);
+		await harness.emit("session_start", { type: "session_start", reason: "startup" });
+
+		// The router now binds the session (as it does after first heartbeat).
+		store.bindLeaseSession(store.readManifest().revision, reserved.token, {
+			machine: "test-machine",
+			session_id: `unbound-${effortSequence}`,
+			last_heartbeat: Date.now(),
+		});
+		// The owner must NOT have latched itself stale: a command now acks normally.
+		store.inboxAppend({ cmd_id: "cmd-postbind", cmd: { action: "go" }, from: "router", ts: Date.now() });
+		await harness.emit("message_start", {
+			type: "message_start",
+			message: { role: "user", content: "[deck:cmd cmd-postbind]\nProceed.", timestamp: Date.now() },
+		});
+		await harness.emit("turn_end", {
+			type: "turn_end",
+			turnIndex: 0,
+			message: { role: "assistant", stopReason: "stop", usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2 } },
+			toolResults: [],
+		});
+		expect(store.inboxState()[0]?.acked).not.toBeNull();
+	});
+
 	test("attributes lifecycle events to the router-provided actor", async () => {
 		const { harness, store } = await setupOwner("wf:reviewer/dispatch-1");
 		await requireTool(harness, "report_progress").execute(

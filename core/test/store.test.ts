@@ -99,6 +99,30 @@ describe("EffortStore", () => {
 		expect(store.readManifest().session?.lease_epoch).toBe(reserved.epoch);
 	});
 
+	test("leaseMatches fences the reserve→bind epoch divergence that verifyLease misses", () => {
+		const store = deck.createEffort({ effort_id: "test--lease-matches", project: "test", title: "Matches", charter });
+		const reserved = store.reserveLease(store.readManifest().revision);
+		// Reserve bumps the lease epoch+token but NOT manifest.session — so a
+		// token-only check passes while the store's mutation fence would reject.
+		expect(store.verifyLease(reserved.token)).toBe(true);
+		expect(store.leaseMatches(reserved.token)).toBe(false); // divergence caught
+
+		store.bindLeaseSession(store.readManifest().revision, reserved.token, {
+			machine: "m1",
+			session_id: "real-session",
+			last_heartbeat: null,
+		});
+		expect(store.leaseMatches(reserved.token)).toBe(true); // manifest now agrees
+
+		// A newer generation reserved on top: the old token is fenced by BOTH
+		// checks; the new token passes verifyLease but leaseMatches rejects until
+		// it too is bound.
+		const next = store.reserveLease(store.readManifest().revision);
+		expect(store.leaseMatches(reserved.token)).toBe(false);
+		expect(store.verifyLease(next.token)).toBe(true);
+		expect(store.leaseMatches(next.token)).toBe(false);
+	});
+
 	test("requires deploy evidence and a fallout verdict before done", () => {
 		const store = deck.createEffort({ effort_id: "test--done", project: "test", title: "Done", charter });
 		const attemptDone = () => store.mutate(store.readManifest().revision, null, (manifest) => {

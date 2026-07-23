@@ -298,12 +298,19 @@ export default function registerDeckLifecycle(pi: DeckExtensionApi): void {
 		if (fenced) {
 			return false;
 		}
+		// Truly stale = the token rotated (a newer generation exists). Latch +
+		// warn-exit only here. A matching token whose manifest epoch merely lags
+		// (the transient reserve→bind startup window) is NOT stale — it's not-yet-
+		// ready, so we return false WITHOUT latching and let a later call succeed
+		// once the router binds the session.
 		if (!store.verifyLease(leaseToken)) {
 			fenced = true;
 			warnStaleOwner();
 			return false;
 		}
-		return true;
+		// Ready to mutate only when the manifest projection agrees on the epoch —
+		// the exact predicate the store's mutation fence enforces (no divergence).
+		return store.leaseMatches(leaseToken);
 	};
 
 	const assertOwnerLease = (): void => {
@@ -357,9 +364,13 @@ export default function registerDeckLifecycle(pi: DeckExtensionApi): void {
 		if (toolCallFailed) {
 			pendingToolFailed = true;
 		}
+		// Ack ONLY on the terminal turn (stopReason "stop"): a command is "applied"
+		// when the owner completes its turn cycle, not mid-tool-loop. Acking on an
+		// intermediate toolUse turn would mark it applied before the owner finishes
+		// — a crash after that turn would silently drop the un-applied effect (D-A).
 		const turnApplied = outcome.role === "assistant"
-			&& ((outcome.stopReason === "stop" && !pendingToolFailed)
-				|| (outcome.stopReason === "toolUse" && !toolCallFailed));
+			&& outcome.stopReason === "stop"
+			&& !pendingToolFailed;
 		if (turnApplied) {
 			for (const commandId of commandIds) {
 				store.appendEvent({

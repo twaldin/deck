@@ -319,6 +319,25 @@ export class EffortStore {
 		return lease !== null && lease.token === token;
 	}
 
+	/**
+	 * True iff `token` is the current lease AND the manifest projection agrees on
+	 * the epoch — the EXACT predicate the mutation fence (assertLeaseMatches)
+	 * enforces. Fast-fail callers (the lifecycle extension) MUST use this, not
+	 * verifyLease: during the reserve→bind window the lease epoch leads
+	 * manifest.session, so a token-only check passes while a real mutation would
+	 * reject. Fencing on both keeps the fast-fail consistent with the authority.
+	 */
+	leaseMatches(token: string): boolean {
+		if (token.length === 0) {
+			return false;
+		}
+		const lease = this.readLease();
+		if (lease === null || lease.token !== token) {
+			return false;
+		}
+		return this.readManifest().session?.lease_epoch === lease.epoch;
+	}
+
 	inboxAppend(input: InboxCommandInput): InboxCommand {
 		const parsedInput = inboxCommandInputSchema.parse(input);
 		return withExclusiveLock(this.lockPath, () => {
