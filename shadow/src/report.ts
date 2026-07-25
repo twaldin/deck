@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { EffortActivity, WatchedEffort, WatcherLiveness } from "./firstmate.ts";
 import type { PrFact } from "./poll.ts";
+import { SessionFindingSchema, type SessionFinding } from "./sessions.ts";
 
 export const REPORT_HEADER =
 	"Deck shadow validates ingestion/watch parity and corroborates watcher stalls only; it does not run deck owners and does not claim deck drives work better.";
@@ -65,13 +66,27 @@ export const DivergenceReportSchema = z.object({
 		beaconAgeSec: z.number().finite().nonnegative().nullable(),
 		ageSinceLatestMs: z.number().finite().nullable(),
 	}),
+	sessions: z.object({
+		scannedFiles: z.number().int().nonnegative(),
+		windowMs: z.number().finite().nonnegative(),
+		findings: z.array(SessionFindingSchema),
+	}),
 });
 
 export type DivergenceReport = z.infer<typeof DivergenceReportSchema>;
 
+export interface SessionsSection {
+	scannedFiles: number;
+	windowMs: number;
+	findings: SessionFinding[];
+}
+
+const EMPTY_SESSIONS: SessionsSection = { scannedFiles: 0, windowMs: 0, findings: [] };
+
 export interface ReportOptions {
 	nowMs?: number;
 	statusStaleThresholdMs?: number;
+	sessions?: SessionsSection;
 }
 
 function isActionable(fact: PrFact): boolean {
@@ -183,6 +198,7 @@ export function buildDivergenceReport(
 		efforts,
 		watcherStall,
 		liveness,
+		sessions: options.sessions ?? EMPTY_SESSIONS,
 	});
 }
 
@@ -226,6 +242,20 @@ export function formatHumanReport(report: DivergenceReport): string {
 	}
 	if (report.watcherStall !== null) {
 		lines.push("", `WATCHER STALL: ${report.watcherStall.message}`);
+	}
+	if (report.sessions.scannedFiles > 0 || report.sessions.findings.length > 0) {
+		lines.push(
+			"",
+			`SESSION EVIDENCE: ${report.sessions.scannedFiles} mate session logs scanned (claude/codex/omp), ${report.sessions.findings.length} findings`,
+		);
+		for (const finding of report.sessions.findings) {
+			lines.push(
+				`  [${finding.severity.toUpperCase()}] ${finding.kind}${finding.effortId !== null ? ` ${finding.effortId}` : ""}: ${finding.detail}`,
+			);
+			for (const path of finding.evidencePaths.slice(0, 3)) {
+				lines.push(`    evidence: ${path}`);
+			}
+		}
 	}
 	return lines.join("\n");
 }

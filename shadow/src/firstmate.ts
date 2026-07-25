@@ -136,8 +136,8 @@ const BACKLOG_BULLET = /^- \[ \]\s+(\S+)(?:\s+-\s+(.*))?$/;
 const REPO_TOKEN = /\(repo:\s*([^)]+)\)/;
 const KIND_TOKEN = /\(kind:\s*(ship|scout)\)/;
 const SINCE_TOKEN = /\(since:?\s*([^)]+)\)/;
-const PR_URL_TOKEN = /https:\/\/github\.com\/[^/\s)\]>]+\/[^/\s)\]>]+\/pull\/[^\s)\]>]+/g;
-const LINEAR_ID = /\b(?:REL|ENG|ONC)-\d+\b/g;
+export const PR_URL_TOKEN = /https:\/\/github\.com\/[^/\s)\]>]+\/[^/\s)\]>]+\/pull\/[^\s)\]>]+/g;
+export const LINEAR_ID = /\b(?:REL|ENG|ONC)-\d+\b/g;
 
 function recordIssue(issues: ShadowIssue[], source: string, error: unknown): void {
 	issues.push({

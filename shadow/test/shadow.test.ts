@@ -11,6 +11,17 @@ import {
 import { pollPr, type CommandRunner, type CommandResult } from "../src/poll.ts";
 import { DivergenceReportSchema } from "../src/report.ts";
 import { main, runShadow } from "../src/shadow.ts";
+import {
+	classifyActor,
+	deriveSessionFindings,
+	emptySessionStore,
+	indexFromStore,
+	ingestLine,
+	loadSessionStore,
+	saveSessionStore,
+	updateSessionStore,
+	type SessionRoots,
+} from "../src/sessions.ts";
 
 const NOW_MS = 2_000_000_000_000;
 const FAILING_URL = "https://github.com/lindy-ai/lindy/pull/101";
@@ -20,6 +31,20 @@ const MALFORMED_CHECK_URL = "https://github.com/lindy-ai/lindy/pull/104";
 const LANDED_URL = "https://github.com/lindy-ai/lindy/pull/105";
 const DROPPED_URL = "https://github.com/lindy-ai/lindy/pull/106";
 const tempHomes: string[] = [];
+
+/** Hermetic session scanning: empty roots + throwaway store, never the real ~/. */
+function hermeticSessions(): { sessionRoots: SessionRoots; sessionStorePath: string } {
+	const root = mkdtempSync(join(tmpdir(), "deck-sessions-"));
+	tempHomes.push(root);
+	return {
+		sessionRoots: {
+			claudeProjects: join(root, "claude"),
+			codexSessions: join(root, "codex"),
+			ompSessions: join(root, "omp"),
+		},
+		sessionStorePath: join(root, "session-index.json"),
+	};
+}
 
 interface PollDerivationCase {
 	number: number;
@@ -528,6 +553,7 @@ describe("one-pass divergence report", () => {
 			now: () => NOW_MS,
 			stdout: (value) => stdout.push(value),
 			stderr: (value) => stderr.push(value),
+			...hermeticSessions(),
 		});
 		expect(report.coverage).toEqual({
 			totalEfforts: 1,
@@ -569,6 +595,7 @@ describe("one-pass divergence report", () => {
 			"efforts",
 			"watcherStall",
 			"liveness",
+			"sessions",
 		]);
 		expect(Object.keys(report.coverage)).toEqual([
 			"totalEfforts",
@@ -610,6 +637,7 @@ describe("one-pass divergence report", () => {
 			now: () => NOW_MS,
 			stdout: (value) => stdout.push(value),
 			stderr: () => undefined,
+			...hermeticSessions(),
 		});
 		const human = stdout[0] ?? "";
 		expect(human).toContain("lint");
@@ -632,12 +660,151 @@ describe("one-pass divergence report", () => {
 		const priorExitCode = process.exitCode;
 		process.exitCode = 17;
 		try {
-			await main(["--json", "--fm-home", emptyHome]);
+			await main(["--json", "--fm-home", emptyHome, "--no-sessions"]);
 			expect(process.exitCode).toBe(0);
 		} finally {
 			process.exitCode = priorExitCode;
 			log.mockRestore();
 			error.mockRestore();
 		}
+	});
+});
+
+describe("session evidence streaming", () => {
+	const CLAUDE_TS = new Date(NOW_MS - 10 * 60_000).toISOString();
+	const NEWER_TS = new Date(NOW_MS - 5 * 60_000).toISOString();
+
+	function line(record: Record<string, unknown>): string {
+		return `${JSON.stringify(record)}\n`;
+	}
+
+	test("provenance: only work records feed the index, stamped with record ts", () => {
+		const store = emptySessionStore();
+		// Passive: hook/context injection quoting a PR (Claude startup GitHub summary).
+		ingestLine(store, "claude", "worker", "/log/a.jsonl", JSON.stringify({ type: "attachment", timestamp: CLAUDE_TS, attachment: { content: `open PRs: ${FAILING_URL}` } }));
+		// Passive: plain user prompt mentioning a Linear id.
+		ingestLine(store, "claude", "worker", "/log/a.jsonl", JSON.stringify({ type: "user", timestamp: CLAUDE_TS, message: { role: "user", content: "please fix REL-777" } }));
+		expect(Object.keys(store.prTs)).toEqual([]);
+		expect(Object.keys(store.linearTs)).toEqual([]);
+		// Active: assistant turn working the PR.
+		ingestLine(store, "claude", "worker", "/log/a.jsonl", JSON.stringify({ type: "assistant", timestamp: CLAUDE_TS, message: { role: "assistant", content: `pushing fix to ${FAILING_URL} for REL-777` } }));
+		expect(store.prTs[FAILING_URL]?.worker?.tsMs).toBe(Date.parse(CLAUDE_TS));
+		expect(store.linearTs["REL-777"]?.worker?.tsMs).toBe(Date.parse(CLAUDE_TS));
+		// Active: tool result (claude user record with toolUseResult) advances the ts.
+		ingestLine(store, "claude", "worker", "/log/a.jsonl", JSON.stringify({ type: "user", timestamp: NEWER_TS, toolUseResult: { stdout: `merged ${FAILING_URL}` } }));
+		expect(store.prTs[FAILING_URL]?.worker?.tsMs).toBe(Date.parse(NEWER_TS));
+		// codex: function_call active, user message passive.
+		ingestLine(store, "codex", "worker", "/log/c.jsonl", JSON.stringify({ type: "response_item", timestamp: NEWER_TS, payload: { type: "function_call", arguments: "gh pr view https://github.com/lindy-ai/lindy/pull/900" } }));
+		ingestLine(store, "codex", "worker", "/log/c.jsonl", JSON.stringify({ type: "response_item", timestamp: NEWER_TS, payload: { type: "message", role: "user", content: "look at https://github.com/lindy-ai/lindy/pull/901" } }));
+		expect(store.prTs["https://github.com/lindy-ai/lindy/pull/900"]?.worker).toBeDefined();
+		expect(store.prTs["https://github.com/lindy-ai/lindy/pull/901"]).toBeUndefined();
+		// omp: toolResult active; custom (system injection) passive.
+		ingestLine(store, "omp", "worker", "/log/o.jsonl", JSON.stringify({ type: "message", timestamp: NEWER_TS, message: { role: "toolResult", content: "ENG-55 test green" } }));
+		ingestLine(store, "omp", "worker", "/log/o.jsonl", JSON.stringify({ type: "custom", timestamp: NEWER_TS, data: "ENG-56 injected context" }));
+		expect(store.linearTs["ENG-55"]?.worker).toBeDefined();
+		expect(store.linearTs["ENG-56"]).toBeUndefined();
+	});
+
+	test("actor partition: firstmate transcripts never count as worker activity", () => {
+		expect(classifyActor("/Users/u/.omp/agent/sessions/-firstmate/x.jsonl")).toBe("firstmate");
+		expect(classifyActor("/Users/u/.omp/agent/sessions/-firstmate/2026-07-23T17-26-14_abc/__advisor.jsonl")).toBe("firstmate");
+		expect(classifyActor("/Users/u/.claude/projects/-Users-twaldin-firstmate/y.jsonl")).toBe("firstmate");
+		expect(classifyActor("/Users/u/.claude/projects/-Users-twaldin--treehouse-firstmate-7bab20-5-firstmate/z.jsonl")).toBe("worker");
+		expect(classifyActor("/Users/u/.codex/sessions/2026/07/24/r.jsonl")).toBe("worker");
+		const store = emptySessionStore();
+		ingestLine(store, "omp", "firstmate", "/log/fm.jsonl", JSON.stringify({ type: "message", timestamp: CLAUDE_TS, message: { role: "assistant", content: `I should follow up on ${FAILING_URL} (REL-321)` } }));
+		expect(store.prTs[FAILING_URL]?.firstmate).toBeDefined();
+		expect(store.prTs[FAILING_URL]?.worker).toBeUndefined();
+		// Firstmate-only activity produces NO fm_behind finding.
+		const index = indexFromStore(store);
+		const watchSet = [{ effortId: "alpha", description: "", repo: "", prUrls: [FAILING_URL], linearIds: ["REL-321"] }];
+		const statusMtime = new Map<string, number | null>([["alpha", NOW_MS - 5 * 60 * 60_000]]);
+		const findings = deriveSessionFindings(watchSet, statusMtime, new Map(), index, { nowMs: NOW_MS });
+		expect(findings.filter((finding) => finding.kind === "fm_behind_sessions")).toEqual([]);
+	});
+
+	test("bootstrap digests and inventory dumps never count as work", () => {
+		const store = emptySessionStore();
+		// fm-session-start invocation record.
+		ingestLine(store, "omp", "firstmate", "/log/fm.jsonl", JSON.stringify({ type: "message", timestamp: CLAUDE_TS, message: { role: "assistant", content: [{ type: "toolCall", name: "bash", arguments: { command: "bin/fm-session-start.sh" } }] } }));
+		// Fleet-wide digest: one record touching many efforts.
+		const digest = Array.from({ length: 12 }, (_, index) => `REL-${9100 + index}`).join(" ");
+		ingestLine(store, "omp", "firstmate", "/log/fm.jsonl", JSON.stringify({ type: "message", timestamp: CLAUDE_TS, message: { role: "toolResult", content: digest } }));
+		expect(Object.keys(store.linearTs)).toEqual([]);
+		expect(Object.keys(store.prTs)).toEqual([]);
+	});
+
+	test("streaming backfill + cursor: append-only reads, rotation reset", () => {
+		const root = mkdtempSync(join(tmpdir(), "deck-stream-"));
+		tempHomes.push(root);
+		const claudeDir = join(root, "claude", "proj");
+		mkdirSync(claudeDir, { recursive: true });
+		const file = join(claudeDir, "s1.jsonl");
+		writeFileSync(
+			file,
+			line({ type: "assistant", timestamp: CLAUDE_TS, message: { content: "working https://github.com/lindy-ai/lindy/pull/500" } }),
+		);
+		const roots = { claudeProjects: join(root, "claude"), codexSessions: join(root, "codex"), ompSessions: join(root, "omp") };
+		const store = emptySessionStore();
+		const issues: ShadowIssue[] = [];
+		updateSessionStore(store, issues, { roots, nowMs: NOW_MS, windowMs: NOW_MS });
+		expect(store.prTs["https://github.com/lindy-ai/lindy/pull/500"]?.worker?.tsMs).toBe(Date.parse(CLAUDE_TS));
+		const offsetAfterFirst = store.files[file]?.offset ?? 0;
+		expect(offsetAfterFirst).toBeGreaterThan(0);
+		// Append: only the new record is consumed; older token ts unchanged, new token added.
+		writeFileSync(
+			file,
+			line({ type: "assistant", timestamp: NEWER_TS, message: { content: "now on https://github.com/lindy-ai/lindy/pull/501" } }),
+			{ flag: "a" },
+		);
+		updateSessionStore(store, issues, { roots, nowMs: NOW_MS, windowMs: NOW_MS });
+		expect(store.files[file]?.offset ?? 0).toBeGreaterThan(offsetAfterFirst);
+		expect(store.prTs["https://github.com/lindy-ai/lindy/pull/501"]?.worker?.tsMs).toBe(Date.parse(NEWER_TS));
+		// Truncation/rotation: shrink the file; cursor resets and re-consumes.
+		writeFileSync(file, line({ type: "assistant", timestamp: NEWER_TS, message: { content: "rotated https://github.com/lindy-ai/lindy/pull/502" } }));
+		updateSessionStore(store, issues, { roots, nowMs: NOW_MS, windowMs: NOW_MS });
+		expect(store.prTs["https://github.com/lindy-ai/lindy/pull/502"]?.worker).toBeDefined();
+		expect(issues).toEqual([]);
+		// Store round-trips through disk.
+		const storePath = join(root, "store.json");
+		saveSessionStore(storePath, store, issues);
+		const reloaded = loadSessionStore(storePath, issues);
+		expect(reloaded).toEqual(store);
+	});
+
+	test("findings: fm_behind signal, untracked_pr fm-aware signal, stalled_effort signal", () => {
+		const store = emptySessionStore();
+		const workTs = NOW_MS - 10 * 60_000;
+		ingestLine(store, "omp", "worker", "/log/w.jsonl", JSON.stringify({ type: "message", timestamp: new Date(workTs).toISOString(), message: { role: "assistant", content: `pushed to ${FAILING_URL} for REL-321` } }));
+		ingestLine(store, "omp", "worker", "/log/w.jsonl", JSON.stringify({ type: "message", timestamp: new Date(workTs).toISOString(), message: { role: "assistant", content: "untracked work on https://github.com/lindy-ai/lindy/pull/777" } }));
+		// Firstmate ALSO mentioned the untracked PR -> known-yet-untracked signal.
+		ingestLine(store, "omp", "firstmate", "/log/fm.jsonl", JSON.stringify({ type: "message", timestamp: new Date(workTs).toISOString(), message: { role: "assistant", content: "should track https://github.com/lindy-ai/lindy/pull/777" } }));
+		// A PR co-mentioned with a WATCHED Linear ID is tracked via its effort -> no untracked finding.
+		ingestLine(store, "omp", "worker", "/log/w.jsonl", JSON.stringify({ type: "message", timestamp: new Date(workTs).toISOString(), message: { role: "assistant", content: "opened https://github.com/lindy-ai/lindy/pull/778 for REL-321" } }));
+		const index = indexFromStore(store);
+		const watchSet = [
+			{ effortId: "alpha", description: "", repo: "", prUrls: [FAILING_URL], linearIds: ["REL-321"] },
+			{ effortId: "stalled", description: "", repo: "", prUrls: [DROPPED_URL], linearIds: [] },
+		];
+		const statusMtime = new Map<string, number | null>([
+			["alpha", workTs - 2 * 60 * 60_000], // status 2h older than worker activity -> behind
+			["stalled", NOW_MS - 80 * 60 * 60_000], // stale beyond 48h window
+		]);
+		const factsByUrl = new Map([
+			[FAILING_URL, { url: FAILING_URL, state: "OPEN", landed: false, checksRollup: "failing" as const, failingChecks: ["lint"], updatedAtMs: NOW_MS, reviewDecision: undefined, landedSha: undefined, mergeStateStatus: undefined }],
+			[DROPPED_URL, { url: DROPPED_URL, state: "OPEN", landed: false, checksRollup: "pending" as const, failingChecks: [], updatedAtMs: NOW_MS, reviewDecision: undefined, landedSha: undefined, mergeStateStatus: undefined }],
+		]);
+		const findings = deriveSessionFindings(watchSet, statusMtime, factsByUrl, index, { nowMs: NOW_MS });
+		const kinds = findings.map((finding) => `${finding.kind}:${finding.severity}:${finding.effortId ?? "-"}`).sort();
+		expect(kinds).toEqual([
+			"fm_behind_sessions:signal:alpha",
+			"stalled_effort:signal:stalled",
+			"untracked_pr:signal:-",
+		]);
+		const behind = findings.find((finding) => finding.kind === "fm_behind_sessions");
+		expect(behind?.evidencePaths).toEqual(["/log/w.jsonl"]);
+		expect(behind?.latestSessionMtimeMs).toBe(workTs);
+		const untracked = findings.find((finding) => finding.kind === "untracked_pr");
+		expect(untracked?.detail).toContain("known yet untracked");
 	});
 });
