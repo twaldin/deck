@@ -851,4 +851,59 @@ describe("session evidence streaming", () => {
 		const untracked = findings.find((finding) => finding.kind === "untracked_pr");
 		expect(untracked?.detail).toContain("known yet untracked");
 	});
+
+	test("terminal cache: merged is cached forever, CLOSED-unmerged is re-polled and resurfaces on reopen", async () => {
+		const home = writeFixture();
+		const { sessionRoots, sessionStorePath } = hermeticSessions();
+		const CLOSED_THEN_OPEN = "https://github.com/lindy-ai/lindy/pull/321";
+		const MERGED_UNTRACKED = "https://github.com/lindy-ai/lindy/pull/322";
+		const freshTs = NOW_MS - 10 * 60_000;
+		// Seed the store directly: fresh worker activity on two untracked PRs.
+		writeFileSync(
+			sessionStorePath,
+			JSON.stringify({
+				v: 1,
+				files: {},
+				prTs: {
+					[CLOSED_THEN_OPEN]: { worker: { tsMs: freshTs, paths: ["/log/w1.jsonl"] } },
+					[MERGED_UNTRACKED]: { worker: { tsMs: freshTs, paths: ["/log/w2.jsonl"] } },
+				},
+				linearTs: {},
+				prLinks: {},
+				terminalPrUrls: [],
+			}),
+		);
+		let reopened = false;
+		const viewCalls = new Map<string, number>();
+		const cacheRunner: CommandRunner = async (command) => {
+			if (command[1] === "search" && command[2] === "commits") {
+				return { stdout: "[]", stderr: "", exitCode: 0 }; // nothing landed
+			}
+			const url = command[3] ?? "";
+			if (url === CLOSED_THEN_OPEN || url === MERGED_UNTRACKED) {
+				viewCalls.set(url, (viewCalls.get(url) ?? 0) + 1);
+				const state = url === MERGED_UNTRACKED ? "MERGED" : reopened ? "OPEN" : "CLOSED";
+				return {
+					stdout: JSON.stringify({ state, statusCheckRollup: [], reviews: [], updatedAt: new Date(freshTs).toISOString(), mergeStateStatus: "UNKNOWN" }),
+					stderr: "",
+					exitCode: 0,
+				};
+			}
+			return ghJson(url);
+		};
+		const quiet = { stdout: () => undefined, stderr: () => undefined };
+		// Pass 1: 321 CLOSED (suppressed, NOT cached), 322 MERGED (cached forever).
+		const first = await runShadow(["--fm-home", home], { run: cacheRunner, now: () => NOW_MS, sessionRoots, sessionStorePath, ...quiet });
+		expect(first.sessions.findings.filter((finding) => finding.kind === "untracked_pr")).toEqual([]);
+		const storedAfterFirst = loadSessionStore(sessionStorePath, []);
+		expect(storedAfterFirst.terminalPrUrls).toEqual([MERGED_UNTRACKED]);
+		// Pass 2: 321 reopened -> must resurface; 322 must NOT be re-polled.
+		reopened = true;
+		const second = await runShadow(["--fm-home", home], { run: cacheRunner, now: () => NOW_MS, sessionRoots, sessionStorePath, ...quiet });
+		const resurfaced = second.sessions.findings.filter((finding) => finding.kind === "untracked_pr");
+		expect(resurfaced).toHaveLength(1);
+		expect(resurfaced[0]?.detail).toContain(CLOSED_THEN_OPEN);
+		expect(viewCalls.get(CLOSED_THEN_OPEN)).toBe(2); // re-polled after close
+		expect(viewCalls.get(MERGED_UNTRACKED)).toBe(1); // terminal: never re-polled
+	});
 });

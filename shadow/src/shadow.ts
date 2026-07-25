@@ -157,8 +157,10 @@ export async function runShadow(
 		);
 		const derived = deriveSessionFindings(watchSet, statusMtimeByEffort, factsByUrl, index, { nowMs });
 		// Resolve untracked-PR candidates against GitHub: only an OPEN PR is
-		// "work in flight off the books". Terminal PRs (merged/landed/closed)
-		// are cached in the store and never re-polled or reported.
+		// "work in flight off the books". Only landed/merged PRs are TERMINAL
+		// (cached, never re-polled) - a CLOSED-unmerged PR can be REOPENED, so
+		// it is suppressed this tick but re-polled whenever fresh worker
+		// activity surfaces it again.
 		const terminal = new Set(store.terminalPrUrls);
 		const findings: typeof derived = [];
 		for (const finding of derived) {
@@ -175,9 +177,12 @@ export async function runShadow(
 				findings.push(finding); // poll failed: keep the finding, honest uncertainty
 				continue;
 			}
-			if (fact.landed || fact.state.toUpperCase() !== "OPEN") {
-				terminal.add(url);
+			if (fact.landed || fact.state.toUpperCase() === "MERGED") {
+				terminal.add(url); // truly irreversible: squash-landed or merged
 				continue;
+			}
+			if (fact.state.toUpperCase() !== "OPEN") {
+				continue; // closed-unmerged: not in flight NOW, but reopenable - never cache
 			}
 			findings.push(finding);
 		}
