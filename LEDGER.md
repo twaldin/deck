@@ -29,6 +29,14 @@ Total: ~80 unit/integration tests green across 9 packages; every package `tsc --
 6. **First real lindy PR through an effort owner** — the remaining Phase-2 exit criterion; needs a real ticket during your workday.
 7. **`deck emit` CLI** doesn't exist yet — Smithers kit's DeckPiAgent composes the instruction but event emission is blocked on it (small Phase-3 item, noted from the spike).
 
+
+## Shadow (agent-piloted while you were AFK, 2026-07-25)
+
+- **Continuous shadow watcher is RUNNING** (`deck-shadow-watch` hub process, 10-min ticks, persists across omp exits — not launchd; restart with `cd ~/dev/deck/shadow && bun src/shadow.ts --watch 600 --fm-home ~/firstmate` if the broker host reboots). Artifacts: `~/.deck/shadow/latest.txt|json` (current picture), `divergences.jsonl` (append-only tick trail), `session-index.json` (cursor+token store).
+- **Evidence base now includes all mate session logs** (your directive): Claude projects, Codex rollouts, omp agent sessions — 8,991 files backfilled streaming, then cursor-incremental (~2s/tick). Provenance rules: work-records only (assistant turns/tool results), per-record timestamps, actor partition (firstmate's own transcripts = awareness only, never "worker activity"), fm-session-start/inventory-digest guards, deck's own sessions excluded, PR↔Linear co-occurrence linkage, untracked candidates resolved against GitHub (only OPEN PRs report; terminal cached).
+- **Graphite correction (retracted claim):** my earlier "#25426 divergence" was FALSE — it was a Graphite lands-and-closes (squash on main), firstmate was right. Classifier now resolves CLOSED PRs against main before judging; regression test added. Lesson logged: deck must absorb firstmate's learnings.md domain knowledge or it will manufacture false "firstmate is broken" signals.
+- **Current standing findings** (see latest.txt): 2 known-yet-untracked OPEN PRs (#26153, #25523 — worked by mates + mentioned in firstmate's own transcripts, absent from backlog In-flight); 5 join-limited fm_behind observations (status keyed by window, not slug); watcher-stall corroborations while you're AFK (expected idle, recorded honestly).
+
 ## Deferred by design (not blocked, just next)
 
 - linear/slack CLI adapters + their broker tool-token namespaces (router adapter seam is ready).
