@@ -15,7 +15,7 @@ Total: ~80 unit/integration tests green across 9 packages; every package `tsc --
 
 ## Blocked on Tim (the morning queue)
 
-1. **Activate launchd daemons** — stop the dev `deck-broker` hub process first (it holds port 8377), then `cd ~/dev/deck && ./ops/install.sh --yes`. Router unit points at `router/src/main.ts` (exists now). Logs land in `~/.deck/logs/`.
+1. ~~**Activate broker launchd daemon**~~ **DONE (agent-piloted 2026-07-25).** Broker is now launchd-managed (`ai.deck.broker`, pid survives session end, KeepAlive+RunAtLoad), verified healthy on `127.0.0.1:8377` with all 3 accounts intact; log at `~/.deck/logs/broker.log`. **Router deliberately NOT loaded** — do not `./ops/install.sh` (it bootstraps both; the router would start spawning real owners before the first-effort validation). Router activation waits until after the first supervised live effort.
 2. **GitHub credentials — personal only, NO App (PLAN I12, SPEC §10):**
    - **Agent API:** a personal fine-grained PAT (`Contents:read`, `PullRequests:write`, `Metadata:read`) scoped to the repos you work on → store it in the broker utility tier (`gh/utility/`). Read-only-for-writes: it 403s on merge by design. User-scoped, invisible to lindy.
    - **Push:** your existing personal SSH key — nothing to set up.
