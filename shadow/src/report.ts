@@ -14,6 +14,8 @@ const ResolvedPrRowSchema = z.object({
 	url: z.string().url(),
 	resolved: z.literal(true),
 	state: z.string(),
+	landed: z.boolean(),
+	landedSha: z.string().nullable(),
 	checksRollup: z.enum(["passing", "failing", "pending", "none"]),
 	failingChecks: z.array(z.string()),
 	reviewDecision: z.string().nullable(),
@@ -73,11 +75,23 @@ export interface ReportOptions {
 }
 
 function isActionable(fact: PrFact): boolean {
-	return (
-		fact.checksRollup === "failing" ||
-		fact.reviewDecision?.toUpperCase().replace(/[-\s]/g, "_") === "CHANGES_REQUESTED" ||
-		fact.state.toUpperCase() === "MERGED"
-	);
+	if (fact.checksRollup === "failing") {
+		return true;
+	}
+	if (fact.reviewDecision?.toUpperCase().replace(/[-\s]/g, "_") === "CHANGES_REQUESTED") {
+		return true;
+	}
+	// Landed (merged OR Graphite lands-and-closes) while the effort is still open
+	// => should advance to done.
+	if (fact.landed) {
+		return true;
+	}
+	// Closed with NO base-branch squash commit => possibly dropped (the real
+	// divergence, now that Graphite-landed closes are resolved to landed above).
+	if (fact.state.toUpperCase() === "CLOSED" && !fact.landed) {
+		return true;
+	}
+	return false;
 }
 
 export function buildDivergenceReport(
@@ -108,6 +122,8 @@ export function buildDivergenceReport(
 				url,
 				resolved: true,
 				state: fact.state,
+				landed: fact.landed,
+				landedSha: fact.landedSha ?? null,
 				checksRollup: fact.checksRollup,
 				failingChecks: fact.failingChecks,
 				reviewDecision: fact.reviewDecision ?? null,
@@ -193,8 +209,11 @@ export function formatHumanReport(report: DivergenceReport): string {
 					lines.push(`${effort.effortId}\t${age}\t${pr.url}\tERROR\t-\t-\t-\t-\t`);
 					continue;
 				}
+				// Show LANDED for a Graphite/squash land (state=CLOSED but on main),
+				// so a landed PR never reads as a scary unmerged "CLOSED".
+				const displayState = pr.landed && pr.state.toUpperCase() !== "MERGED" ? `LANDED(${pr.state})` : pr.state;
 				lines.push(
-					`${effort.effortId}\t${age}\t${pr.url}\t${pr.state}\t${pr.mergeStateStatus ?? "-"}\t${pr.checksRollup}\t${pr.failingChecks.join(", ") || "-"}\t${pr.reviewDecision ?? "-"}\t${effort.flagged ? "FLAGGED" : ""}`,
+					`${effort.effortId}\t${age}\t${pr.url}\t${displayState}\t${pr.mergeStateStatus ?? "-"}\t${pr.checksRollup}\t${pr.failingChecks.join(", ") || "-"}\t${pr.reviewDecision ?? "-"}\t${effort.flagged ? "FLAGGED" : ""}`,
 				);
 			}
 		}

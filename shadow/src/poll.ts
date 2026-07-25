@@ -59,6 +59,10 @@ const GhPrSchema = z.object({
 export const PrFactSchema = z.object({
 	url: z.string().url(),
 	state: z.string().min(1),
+	/** True when a merged PR OR a Graphite/squash land onto the base was detected. */
+	landed: z.boolean(),
+	/** Squash commit SHA on the base branch, when a Graphite lands-and-closes was resolved. */
+	landedSha: z.string().optional(),
 	checksRollup: z.enum(["passing", "failing", "pending", "none"]),
 	failingChecks: z.array(z.string()),
 	reviewDecision: z.string().optional(),
@@ -192,6 +196,56 @@ function deriveReviews(reviews: readonly z.infer<typeof ReviewSchema>[]): string
 	}
 	return undefined;
 }
+const PR_URL_PARTS = /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)\/?$/;
+
+const CommitSearchSchema = z.array(
+	z.object({ sha: z.string().optional(), commit: z.object({ message: z.string() }).passthrough() }).passthrough(),
+);
+
+/**
+ * Graphite (and GitHub squash) LAND a change onto the base branch and CLOSE the
+ * PR — GitHub then reports state=CLOSED, mergedAt=null even though the work
+ * shipped. firstmate's own learnings.md documents this "lands-and-closes trap":
+ * the merged flag is never truth for Graphite; you must search the base branch
+ * for the `(#N)` squash commit. This resolves that before anything is flagged
+ * as a dropped/closed-unmerged PR — without it the shadow reproduces the exact
+ * false "not landed" verdict firstmate already learned to avoid.
+ */
+async function resolveGraphiteLanding(
+	url: string,
+	run: CommandRunner,
+	issues: ShadowIssue[],
+): Promise<{ landed: boolean; landedSha?: string }> {
+	const parts = PR_URL_PARTS.exec(url);
+	if (parts === null) {
+		return { landed: false };
+	}
+	const [, owner, repo, number] = parts;
+	const token = `(#${number})`;
+	try {
+		const rawResult = await run([
+			"gh",
+			"search",
+			"commits",
+			token,
+			"--repo",
+			`${owner}/${repo}`,
+			"--json",
+			"sha,commit",
+		]);
+		const result = CommandResultSchema.parse(rawResult);
+		if (result.exitCode !== 0) {
+			throw new Error(`gh exited ${result.exitCode}: ${result.stderr.trim() || "no stderr"}`);
+		}
+		const commits = CommitSearchSchema.parse(JSON.parse(result.stdout));
+		const match = commits.find((entry) => entry.commit.message.includes(token));
+		return match === undefined ? { landed: false } : { landed: true, landedSha: match.sha };
+	} catch (error) {
+		issues.push({ source: `github:${url}#landing`, message: error instanceof Error ? error.message : String(error) });
+		return { landed: false };
+	}
+}
+
 
 export async function pollPr(
 	url: string,
@@ -230,9 +284,18 @@ export async function pollPr(
 		} else {
 			checksRollup = "pending";
 		}
+		const state = gh.state.toUpperCase();
+		// MERGED => landed. CLOSED => resolve the Graphite lands-and-closes case
+		// against the base branch before treating it as unmerged. OPEN => not landed.
+		let landing: { landed: boolean; landedSha?: string } = { landed: state === "MERGED" };
+		if (state === "CLOSED") {
+			landing = await resolveGraphiteLanding(url, run, issues);
+		}
 		return PrFactSchema.parse({
 			url,
-			state: gh.state.toUpperCase(),
+			state,
+			landed: landing.landed,
+			landedSha: landing.landedSha,
 			checksRollup,
 			failingChecks,
 			reviewDecision: deriveReviews(gh.reviews),

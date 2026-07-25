@@ -17,6 +17,8 @@ const FAILING_URL = "https://github.com/lindy-ai/lindy/pull/101";
 const MERGED_URL = "https://github.com/lindy-ai/lindy/pull/102";
 const MALFORMED_URL = "https://github.com/lindy-ai/lindy/pull/103";
 const MALFORMED_CHECK_URL = "https://github.com/lindy-ai/lindy/pull/104";
+const LANDED_URL = "https://github.com/lindy-ai/lindy/pull/105";
+const DROPPED_URL = "https://github.com/lindy-ai/lindy/pull/106";
 const tempHomes: string[] = [];
 
 interface PollDerivationCase {
@@ -131,10 +133,53 @@ function ghJson(url: string): CommandResult {
 			exitCode: 0,
 		};
 	}
+	if (url === LANDED_URL) {
+		return {
+			stdout: JSON.stringify({
+				state: "CLOSED",
+				statusCheckRollup: [],
+				reviews: [{ state: "APPROVED", author: { login: "reviewer" } }],
+				updatedAt: new Date(NOW_MS - 3_000).toISOString(),
+				mergeStateStatus: "UNKNOWN",
+			}),
+			stderr: "",
+			exitCode: 0,
+		};
+	}
+	if (url === DROPPED_URL) {
+		return {
+			stdout: JSON.stringify({
+				state: "CLOSED",
+				statusCheckRollup: [],
+				reviews: [],
+				updatedAt: new Date(NOW_MS - 4_000).toISOString(),
+				mergeStateStatus: "UNKNOWN",
+			}),
+			stderr: "",
+			exitCode: 0,
+		};
+	}
 	return { stdout: "{malformed gh json", stderr: "", exitCode: 0 };
 }
 
+/** Stub the Graphite landing search: LANDED_URL has a (#105) squash commit on main, DROPPED_URL has none. */
+function ghCommitSearch(token: string): CommandResult {
+	if (token === "(#105)") {
+		return {
+			stdout: JSON.stringify([{ sha: "deadbeefcafe", commit: { message: "[REL-1] land it (#105)" } }]),
+			stderr: "",
+			exitCode: 0,
+		};
+	}
+	return { stdout: "[]", stderr: "", exitCode: 0 };
+}
+
 const runner: CommandRunner = async (command) => {
+	if (command[1] === "search" && command[2] === "commits") {
+		const token = command[3];
+		if (token === undefined) throw new Error("test runner received no search token");
+		return ghCommitSearch(token);
+	}
 	const url = command[3];
 	if (url === undefined) {
 		throw new Error("test runner received no PR URL");
@@ -431,6 +476,46 @@ describe("GitHub fact derivation", () => {
 		expect(fact).toBeNull();
 		expect(issues).toHaveLength(1);
 	});
+
+	test("Graphite lands-and-closes: CLOSED PR with a (#N) squash commit on main resolves to landed, not dropped", async () => {
+		// The #25426 class: GitHub reports CLOSED/mergedAt=null but the change was
+		// squash-landed onto main; firstmate's learnings.md documents this exact
+		// trap. A CLOSED PR must be resolved against the base branch before it is
+		// ever treated as unmerged/dropped.
+		const landingRunner: CommandRunner = async (command) => {
+			if (command[1] === "search" && command[2] === "commits") {
+				return {
+					stdout: JSON.stringify([{ sha: "0e2a9694cafe", commit: { message: "[REL-10527] Preserve daily brief calendar titles (#25426)" } }]),
+					stderr: "",
+					exitCode: 0,
+				};
+			}
+			return {
+				stdout: JSON.stringify({ state: "CLOSED", statusCheckRollup: [], reviews: [], updatedAt: new Date(NOW_MS).toISOString(), mergeStateStatus: "UNKNOWN" }),
+				stderr: "",
+				exitCode: 0,
+			};
+		};
+		const landed = await pollPr("https://github.com/lindy-ai/lindy/pull/25426", landingRunner, []);
+		expect(landed?.state).toBe("CLOSED");
+		expect(landed?.landed).toBe(true);
+		expect(landed?.landedSha).toBe("0e2a9694cafe");
+
+		// Contrast: a CLOSED PR with NO squash commit on main is genuinely dropped.
+		const droppedRunner: CommandRunner = async (command) => {
+			if (command[1] === "search" && command[2] === "commits") {
+				return { stdout: "[]", stderr: "", exitCode: 0 };
+			}
+			return {
+				stdout: JSON.stringify({ state: "CLOSED", statusCheckRollup: [], reviews: [], updatedAt: new Date(NOW_MS).toISOString(), mergeStateStatus: "UNKNOWN" }),
+				stderr: "",
+				exitCode: 0,
+			};
+		};
+		const dropped = await pollPr("https://github.com/lindy-ai/lindy/pull/99999", droppedRunner, []);
+		expect(dropped?.state).toBe("CLOSED");
+		expect(dropped?.landed).toBe(false);
+	});
 });
 
 describe("one-pass divergence report", () => {
@@ -505,6 +590,8 @@ describe("one-pass divergence report", () => {
 			"url",
 			"resolved",
 			"state",
+			"landed",
+			"landedSha",
 			"checksRollup",
 			"failingChecks",
 			"reviewDecision",
