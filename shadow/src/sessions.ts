@@ -99,6 +99,10 @@ export const SessionStoreSchema = z.object({
 			offset: z.number().int().nonnegative(),
 			source: z.enum(["claude", "codex", "omp"]),
 			actor: z.enum(["worker", "firstmate"]),
+			/** Working directory sniffed from the file's own records (session meta). Authoritative over path slugs. */
+			cwd: z.string().nullable(),
+			/** Deck's own sessions: cursor kept (offset=size) but no tokens ever ingested. */
+			excluded: z.boolean(),
 		}),
 	),
 	prTs: z.record(z.string(), TokenEntrySchema),
@@ -171,6 +175,40 @@ export function classifyActor(path: string): SessionActor {
 		}
 	}
 	return "worker";
+}
+
+export type ActorResolution = SessionActor | "excluded";
+
+/**
+ * Resolve actor from a sniffed cwd - authoritative over path slugs, which is
+ * essential for Codex whose log paths are date-only and carry no project.
+ *  - cwd under deckHome => excluded (deck's own sessions: self-contamination).
+ *  - cwd at/under fmHome => firstmate cognition (awareness only).
+ *  - anything else => worker.
+ */
+export function resolveActorFromCwd(cwd: string, fmHome: string, deckHome: string): ActorResolution {
+	if (cwd === deckHome || cwd.startsWith(`${deckHome}/`)) {
+		return "excluded";
+	}
+	if (cwd === fmHome || cwd.startsWith(`${fmHome}/`)) {
+		return "firstmate";
+	}
+	return "worker";
+}
+
+/** Pull a cwd out of any record shape that carries one (claude top-level, codex session_meta/turn_context payload, omp session record). */
+export function sniffCwd(record: Record<string, unknown>): string | null {
+	if (typeof record["cwd"] === "string") {
+		return record["cwd"] as string;
+	}
+	const payload = record["payload"];
+	if (typeof payload === "object" && payload !== null) {
+		const payloadCwd = (payload as Record<string, unknown>)["cwd"];
+		if (typeof payloadCwd === "string") {
+			return payloadCwd;
+		}
+	}
+	return null;
 }
 
 interface RecordClass {
@@ -293,13 +331,33 @@ export function ingestLine(store: SessionStore, source: SessionSource, actor: Se
  * newline). Line-safe across chunk boundaries; splits on raw 0x0A so UTF-8
  * multi-byte sequences are never cut mid-character.
  */
+interface StreamContext {
+	actor: SessionActor;
+	cwd: string | null;
+	excluded: boolean;
+	fmHome: string;
+	deckHome: string;
+}
+
+/** Apply a newly-sniffed cwd to the context; returns false when the file turns out to be excluded. */
+function applyCwd(context: StreamContext, cwd: string): boolean {
+	context.cwd = cwd;
+	const resolution = resolveActorFromCwd(cwd, context.fmHome, context.deckHome);
+	if (resolution === "excluded") {
+		context.excluded = true;
+		return false;
+	}
+	context.actor = resolution;
+	return true;
+}
+
 function streamFile(
 	store: SessionStore,
 	source: SessionSource,
-	actor: SessionActor,
 	path: string,
 	startOffset: number,
 	size: number,
+	context: StreamContext,
 ): number {
 	const descriptor = openSync(path, "r");
 	try {
@@ -325,7 +383,25 @@ function streamFile(
 			}
 			const complete = UTF8_DECODER.decode(data.subarray(0, lastNewline));
 			for (const line of complete.split("\n")) {
-				ingestLine(store, source, actor, path, line.trimEnd());
+				const trimmed = line.trimEnd();
+				// cwd is authoritative over path slugs (Codex paths are date-only).
+				// Session meta arrives in the first records, before any work
+				// records, so tokens are never ingested under a wrong actor in
+				// practice; once excluded, the file is skipped wholesale.
+				if (context.cwd === null && trimmed.length > 0) {
+					try {
+						const parsed: unknown = JSON.parse(trimmed);
+						if (typeof parsed === "object" && parsed !== null) {
+							const cwd = sniffCwd(parsed as Record<string, unknown>);
+							if (cwd !== null && !applyCwd(context, cwd)) {
+								return size; // deck's own session: consume cursor, ingest nothing
+							}
+						}
+					} catch {
+						// unparseable line: no cwd to sniff
+					}
+				}
+				ingestLine(store, source, context.actor, path, trimmed);
 			}
 			consumed += lastNewline + 1;
 			remainder = Buffer.from(data.subarray(lastNewline + 1));
@@ -423,6 +499,10 @@ export interface UpdateOptions {
 	/** Only files with mtime inside this window are (newly) tracked. Already-tracked files are always followed. */
 	windowMs?: number;
 	nowMs?: number;
+	/** Firstmate's home checkout - sessions with this cwd are firstmate cognition. */
+	fmHome?: string;
+	/** Deck's own checkout - sessions with this cwd are excluded wholesale. */
+	deckHome?: string;
 }
 
 /**
@@ -433,6 +513,8 @@ export function updateSessionStore(store: SessionStore, issues: ShadowIssue[], o
 	const roots = options.roots ?? defaultSessionRoots();
 	const windowMs = options.windowMs ?? 30 * 24 * 60 * 60 * 1000;
 	const nowMs = options.nowMs ?? Date.now();
+	const fmHome = options.fmHome ?? join(homedir(), "firstmate");
+	const deckHome = options.deckHome ?? join(homedir(), "dev", "deck");
 	const minMtimeMs = nowMs - windowMs;
 	const candidates = [
 		...collectJsonlFiles("claude", roots.claudeProjects, minMtimeMs, issues),
@@ -449,10 +531,34 @@ export function updateSessionStore(store: SessionStore, issues: ShadowIssue[], o
 		if (candidate.size <= offset) {
 			continue;
 		}
-		const actor = classifyActor(candidate.path);
+		// Known-excluded file grew: keep the cursor current, never ingest.
+		if (tracked?.excluded === true && tracked.inode === candidate.inode) {
+			store.files[candidate.path] = { ...tracked, offset: candidate.size };
+			continue;
+		}
+		const context: StreamContext = {
+			// Persisted cwd (from the file's own session meta) is authoritative;
+			// path slugs are the fallback for the first encounter.
+			actor: tracked?.cwd != null && tracked.excluded === false ? tracked.actor : classifyActor(candidate.path),
+			cwd: tracked?.cwd ?? null,
+			excluded: false,
+			fmHome,
+			deckHome,
+		};
+		if (context.cwd !== null && !applyCwd(context, context.cwd)) {
+			store.files[candidate.path] = { inode: candidate.inode, offset: candidate.size, source: candidate.source, actor: context.actor, cwd: context.cwd, excluded: true };
+			continue;
+		}
 		try {
-			const newOffset = streamFile(store, candidate.source, actor, candidate.path, offset, candidate.size);
-			store.files[candidate.path] = { inode: candidate.inode, offset: newOffset, source: candidate.source, actor };
+			const newOffset = streamFile(store, candidate.source, candidate.path, offset, candidate.size, context);
+			store.files[candidate.path] = {
+				inode: candidate.inode,
+				offset: context.excluded ? candidate.size : newOffset,
+				source: candidate.source,
+				actor: context.actor,
+				cwd: context.cwd,
+				excluded: context.excluded,
+			};
 			advanced += 1;
 		} catch (error) {
 			issues.push({

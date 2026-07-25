@@ -734,6 +734,50 @@ describe("session evidence streaming", () => {
 		expect(Object.keys(store.prTs)).toEqual([]);
 	});
 
+	test("codex cwd is authoritative: fm-cwd => firstmate, deck-cwd => excluded (paths are date-only)", () => {
+		const root = mkdtempSync(join(tmpdir(), "deck-cwd-"));
+		tempHomes.push(root);
+		const fmHome = join(root, "firstmate");
+		const deckHome = join(root, "dev", "deck");
+		const codexDay = join(root, "codex", "2026", "07", "25");
+		mkdirSync(codexDay, { recursive: true });
+		const roots = { claudeProjects: join(root, "claude"), codexSessions: join(root, "codex"), ompSessions: join(root, "omp") };
+		// File A: session_meta says cwd=~/firstmate -> firstmate cognition, despite a date-only path.
+		const fmFile = join(codexDay, "rollout-fm.jsonl");
+		writeFileSync(
+			fmFile,
+			line({ type: "session_meta", timestamp: CLAUDE_TS, payload: { cwd: fmHome } }) +
+				line({ type: "response_item", timestamp: CLAUDE_TS, payload: { type: "function_call", arguments: "gh pr view https://github.com/lindy-ai/lindy/pull/600" } }),
+		);
+		// File B: session_meta says cwd=~/dev/deck -> excluded wholesale.
+		const deckFile = join(codexDay, "rollout-deck.jsonl");
+		writeFileSync(
+			deckFile,
+			line({ type: "session_meta", timestamp: CLAUDE_TS, payload: { cwd: deckHome } }) +
+				line({ type: "response_item", timestamp: CLAUDE_TS, payload: { type: "function_call", arguments: "gh pr view https://github.com/lindy-ai/lindy/pull/601" } }),
+		);
+		const store = emptySessionStore();
+		const issues: ShadowIssue[] = [];
+		updateSessionStore(store, issues, { roots, nowMs: NOW_MS, windowMs: NOW_MS, fmHome, deckHome });
+		// A: firstmate awareness only - never worker.
+		expect(store.prTs["https://github.com/lindy-ai/lindy/pull/600"]?.firstmate).toBeDefined();
+		expect(store.prTs["https://github.com/lindy-ai/lindy/pull/600"]?.worker).toBeUndefined();
+		expect(store.files[fmFile]?.actor).toBe("firstmate");
+		expect(store.files[fmFile]?.cwd).toBe(fmHome);
+		// B: nothing ingested; cursor parked at EOF; flagged excluded.
+		expect(store.prTs["https://github.com/lindy-ai/lindy/pull/601"]).toBeUndefined();
+		expect(store.files[deckFile]?.excluded).toBe(true);
+		// B grows: still nothing ingested on the next pass.
+		writeFileSync(
+			deckFile,
+			line({ type: "response_item", timestamp: NEWER_TS, payload: { type: "function_call", arguments: "work on https://github.com/lindy-ai/lindy/pull/602" } }),
+			{ flag: "a" },
+		);
+		updateSessionStore(store, issues, { roots, nowMs: NOW_MS, windowMs: NOW_MS, fmHome, deckHome });
+		expect(store.prTs["https://github.com/lindy-ai/lindy/pull/602"]).toBeUndefined();
+		expect(issues).toEqual([]);
+	});
+
 	test("streaming backfill + cursor: append-only reads, rotation reset", () => {
 		const root = mkdtempSync(join(tmpdir(), "deck-stream-"));
 		tempHomes.push(root);

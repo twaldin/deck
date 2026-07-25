@@ -147,6 +147,9 @@ export async function runShadow(
 			roots: dependencies.sessionRoots,
 			windowMs: SESSIONS_WINDOW_MS,
 			nowMs,
+			fmHome,
+			// deck repo root = parent of this shadow package
+			deckHome: join(import.meta.dir, "..", ".."),
 		});
 		const index = indexFromStore(store);
 		const statusMtimeByEffort = new Map(
