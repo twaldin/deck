@@ -4,3 +4,4 @@ node_modules/
 /.smithers/
 /smithers.db
 /smithers.db-*
+/claude-playground/

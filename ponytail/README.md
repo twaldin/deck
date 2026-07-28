@@ -20,9 +20,26 @@ The wrapper uses pi's `session_start` model context. Claude/Anthropic-family mod
 
 Before enabling GPT by default, run matched gpt-5.6 lanes on the same representative tasks, with Ponytail off and on, identical repository snapshots and tool/model settings, and at least several repetitions. Record input/output/thinking tokens, wall-clock time, changed LOC/files, test outcomes, and security/a11y regressions. Compare medians and task success; flip the default only if Ponytail does not worsen success and its token/time/LOC tradeoff is favorable. Preserve raw run metadata and task prompts so the result is reproducible.
 
+## Upstream divergences
+
+The vendored tree differs from `DietrichGebert/ponytail` in exactly three places:
+
+1. **`pi-extension/index.js` hook paths.** Upstream requires `../hooks/*.js`, because upstream keeps `hooks/` as a sibling of `pi-extension/`. Deck's installer flattens `hooks/` *into* the installed extension directory, so the vendored copy requires `./hooks/*.js`.
+2. **`hooks/package.json` (Deck-only file).** Consequence of divergence 1, and a real shipped bug worth remembering. `pi-extension/package.json` declares `"type": "module"` (upstream needs it for its own `node --test` scripts). Once the CommonJS hooks are copied *underneath* that package.json, Node reinterprets them as ESM and they fail with `ReferenceError: require is not defined in ES module scope`, so pi refuses to load the extension. Upstream never hits this only because its `hooks/` sit outside that package scope. This one-line `{ "type": "commonjs" }` scope marker pins the hooks back to CommonJS wherever they are copied. Do not delete it, and do not "fix" it by editing the hook files to ESM: they are shared verbatim with the Claude/Codex/OpenCode hook adapters, and keeping them byte-identical to upstream is what makes re-vendoring safe.
+3. **Model-family gate.** `modelFamily` / `defaultModeForModel` in `pi-extension/index.js` default GPT/OpenAI-family sessions to `off` (see above).
+
+Upstream was checked at `16f2980` and has not changed the pi-extension shape; there is nothing to re-vendor. When re-vendoring later, reapply all three divergences and re-verify with the load check below.
+
+```sh
+# packaging regression check: hooks must load as CommonJS after install
+INSTALL_TARGET="$(mktemp -d)" ./ponytail/install.sh
+node -e 'import(process.argv[1]).then(m=>console.log(typeof m.default))' \
+  "$INSTALL_TARGET/extensions/ponytail/index.js"   # must print: function
+```
+
 ## Provenance and license
 
-Vendored from `DietrichGebert/ponytail` (MIT), including its `LICENSE`; the source repository and upstream pi entrypoint are recorded above. Deck's model-family gate is the only local behavior change to the upstream extension.
+Vendored from `DietrichGebert/ponytail` (MIT), including its `LICENSE`; the source repository and upstream pi entrypoint are recorded above. See Upstream divergences for the local changes.
 
 ## Uninstall
 

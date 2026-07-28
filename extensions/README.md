@@ -27,13 +27,31 @@ injects `/compact` keystrokes and never shells out to another pi process.
 
 ### Install
 
-From a deck checkout, symlink the entrypoint into pi's global extension folder:
+From a deck checkout, run the installer:
 
 ```bash
-mkdir -p ~/.pi/agent/extensions
-ln -s "$(pwd)/extensions/src/idle-compaction.ts" \
-  ~/.pi/agent/extensions/deck-idle-compaction.ts
+./extensions/install.sh
+# safe test target:
+INSTALL_TARGET="$(mktemp -d)" ./extensions/install.sh
 ```
+
+It installs a **directory** extension, symlinking both source files into it:
+
+```
+~/.pi/agent/extensions/deck-idle-compaction/
+├── index.ts                  -> extensions/src/idle-compaction.ts
+└── idle-compaction-policy.ts -> extensions/src/idle-compaction-policy.ts
+```
+
+The directory layout is required, not cosmetic. Pi discovers both
+`extensions/*.ts` and `extensions/*/index.ts`, so a single flat
+`deck-idle-compaction.ts` symlink resolves its relative
+`./idle-compaction-policy` import next to the *symlink* rather than next to the
+real source, and the import fails. Adding a flat sibling symlink beside it fails
+differently: pi discovers that sibling as its own top-level extension and
+rejects it with `does not export a valid factory`. Inside one extension
+directory only `index.ts` is an entrypoint, so the sibling stays a plain import
+target. Reruns of the installer converge.
 
 Then start a new pi process or run `/reload`. This repository does **not**
 install the extension automatically. For a one-off trial without installation:
@@ -107,6 +125,13 @@ that pi actually uses; the built-in value encodes the current Anthropic
 
 ### Verification
 
+`test/installers.test.ts` covers the *installed layouts* for both this extension
+and `ponytail/` by running the real installers into a temp `INSTALL_TARGET`. It
+deliberately probes through **node**, not bun: pi ships as a
+`#!/usr/bin/env node` CLI, and bun's loader is forgiving enough about CommonJS
+under a `"type": "module"` package that a bun-only assertion passes even with
+the packaging bug present. Set `DECK_TEST_NODE` to pin a specific node binary.
+
 Unit tests use an injected fake clock and fake pi lifecycle/context objects; no
 LLM is contacted:
 
@@ -124,6 +149,11 @@ and captures bounded transcript plus session-JSONL evidence:
 ```bash
 cd extensions
 bun run smoke/run-idle-compaction-smoke.ts
+
+# or against an INSTALLED layout, which also proves the installed directory's
+# relative policy import resolves inside a real pi process:
+SMOKE_EXTENSION_PATH=~/.pi/agent/extensions/deck-idle-compaction \
+  bun run smoke/run-idle-compaction-smoke.ts
 ```
 
 The committed smoke evidence in `smoke/evidence/` was produced by pi 0.82 with
