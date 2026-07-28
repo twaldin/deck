@@ -15,6 +15,13 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - Broker model allowlist: `broker/src/models.ts` (`DEFAULT_ALLOWLIST`). The pipeline's
   agent-pickable catalog (`workflows/pr-pipeline/lib/models.ts DECK_AGENT_CATALOG`)
   must stay a subset of it.
+- `fleet/` is the standalone read-only fleet dashboard TUI (`@deck/fleet`,
+  bin `deck-fleet`). It reads firstmate `state/*.meta`+`.status` tails and Smithers
+  runs via the **public read-only CLI only** (`smithers ps|inspect --json`; never the
+  private db, never Gateway lifecycle). Collectors are separable from the renderer
+  (herdr-plugin reuse); runs correlate only by a unique exact absolute
+  `rootDir==worktree`.
+  Invocation/config/herdr-embed notes in `fleet/README.md`.
 
 ## Maintaining this file
 

@@ -1,0 +1,16 @@
+{
+  "run": { "id": "oneshot-abc123", "workflow": "oneshot", "status": "running", "elapsed": "2m 4s" },
+  "runState": { "runId": "oneshot-abc123", "state": "running" },
+  "steps": [
+    { "id": "implement", "state": "in-progress", "attempt": 1, "label": "implement" },
+    { "id": "review", "state": "pending", "attempt": 0, "label": "review" }
+  ],
+  "nodes": [
+    { "nodeId": "implement", "state": "in-progress", "attempt": 2, "label": "implement" },
+    { "nodeId": "review", "state": "pending", "attempt": 0, "label": "review" }
+  ],
+  "config": {
+    "rootDir": "/tmp/fleet-fixture/alpha",
+    "maxConcurrency": 4
+  }
+}

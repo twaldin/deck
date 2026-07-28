@@ -1,0 +1,33 @@
+[1mFleet · ~/dev/fm2 · 10 tasks (2 active) · 1 runs · 21:28:27[0m
+[36m├─ ● fleet-dashboard-tui  working  gpt-5.6-sol/xhigh  ship  pi  43m[0m
+│    isolated worktree verified; implementation started
+[36m│ └─ ◐ oneshot (oneshot-ms447bsd-90e9781d)  running · @review · 41m ago[0m
+[32m│   ├─ ✓ implement — finished[0m
+[36m│   └─ ◐ review — in-progress[0m
+[36m├─ ● perf-offload-scout  working  claude-opus-5/xhigh  scout  pi  21m[0m
+│    starting baseline measurement of local machine load
+[90m├─ ○ cutover-prep  queued  since 2026-07-27[0m
+│    Prep tomorrow's cutover: disable ~/firstmate, this rig takes the day job
+[90m├─ ○ idle-compaction-extension  queued  since 2026-07-27[0m
+│    pi extension: proactive compaction at idle (cache already cold = free comp…
+[90m├─ ○ pi-domain-context-extension  queued  since 2026-07-27[0m
+│    LATER: pi extension injecting lindy domain doc into crewmate sysprompts
+[35m│    hold: later option; build only when brief-pointer path shows a concrete mi…[0m
+[90m├─ ○ ponytail-adoption  queued  since 2026-07-27[0m
+│    Adopt ponytail (minimalism skill) for crew - claude-family default-on, A/B…
+[90m├─ ○ shadow-old-fm  queued  since 2026-07-27[0m
+│    Shadow the live old firstmate before cutover (BLOCKED on captain word)
+[35m│    hold: old fm live on day job; shadow starts only on captain word[0m
+[32m├─ ✓ build-intake-poller  done[0m
+│    Durable intake list: PRs authored by / review-requested of Tim (+Linear la…
+[32m├─ ✓ build-pr-pipeline-workflow  done[0m
+│    Write the lindy PR pipeline as an executable smithers workflow
+[32m└─ ✓ crew-subagent-rig  done[0m
+     Install pi subagent extension + cross-model agent definitions for all crew
+[90m[0m
+[1mSources[0m
+[33m  MISSING  smithers:…/fm2/workflows — ps failed[0m
+[90m  ok  FM_HOME (/Users/twaldin/dev/fm2) — 2 tasks (2 meta, 2 status)[0m
+[90m  ok  backlog:tasks-axi — 10 via tasks-axi[0m
+[90m  ok  smithers:…/2/deck — 1 run (1 with rootDir)[0m
+[90m  skipped  broker — skipped (capability auth not wired — TODO seam)[0m
