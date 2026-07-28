@@ -17,6 +17,7 @@ import {
 	pendingAnswersFor,
 	queueFile,
 	queueMtimeMs,
+	readQuestions,
 	type Question,
 } from "./questions-store";
 
@@ -264,6 +265,11 @@ export function registerQuestions(
 		status: "answered" | "dismissed",
 	): boolean => {
 		const applied = recordAnswer(file, entry.id, text, status, runtime.now());
+		const stored = readQuestions(file).find((q) => q.id === entry.id)?.answer;
+		if (applied && stored !== undefined && stored !== text) {
+			// Silently clipping the captain's words would be worse than saying so.
+			ctx.ui.notify(`Answer was too long and was truncated: ${entry.question}`, "warning");
+		}
 		if (!applied) {
 			ctx.ui.notify(
 				`Already resolved elsewhere, your answer was not applied: ${entry.question}`,

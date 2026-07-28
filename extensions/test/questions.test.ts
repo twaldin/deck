@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { afterAll, describe, expect, test } from "bun:test";
@@ -89,13 +89,58 @@ describe("questions store", () => {
 
 	test("re-asking a stable id refreshes the prompt but keeps an existing answer", () => {
 		const file = freshFile();
-		ask(file, { id: "fixed", question: "first phrasing", sessionId: "s", cwd: "/" });
-		answer(file, "fixed", "yes");
+		const first = ask(file, { id: "fixed", question: "first phrasing", sessionId: "s", cwd: "/" });
+		answer(file, first.id, "yes");
 		ask(file, { id: "fixed", question: "second phrasing", sessionId: "s", cwd: "/" });
 		const [entry] = readQuestions(file);
 		expect(entry?.question).toBe("second phrasing");
 		expect(entry?.status).toBe("answered");
 		expect(openQuestions(file)).toEqual([]);
+	});
+
+	test("the same stable id from two sessions does not collide", () => {
+		// The log is shared by the whole pi home, so a bare "migration-decision"
+		// from two sessions must stay two questions: otherwise the second ask
+		// overwrites the first's asker and its answer goes to the wrong agent.
+		const file = freshFile();
+		const a = ask(file, { id: "shared", question: "A asks", sessionId: "session-a", cwd: "/a" });
+		const b = ask(file, { id: "shared", question: "B asks", sessionId: "session-b", cwd: "/b" });
+		expect(a.id).not.toBe(b.id);
+		expect(openQuestions(file)).toHaveLength(2);
+
+		answer(file, a.id, "for A only");
+		expect(pendingAnswersFor(file, "session-a").map((e) => e.answer)).toEqual(["for A only"]);
+		expect(pendingAnswersFor(file, "session-b")).toEqual([]);
+		expect(openQuestions(file).map((e) => e.question)).toEqual(["B asks"]);
+	});
+
+	test("only the winning answer is reported as applied, even when both saw it open", () => {
+		// Both captains observe `open` before either writes, so a pre-append read
+		// would tell both of them they won. The refold check must not.
+		const file = freshFile();
+		const asked = ask(file, { question: "Q", sessionId: "s", cwd: "/" });
+		const captainA = openQuestions(file)[0];
+		const captainB = openQuestions(file)[0];
+		expect(captainA?.status).toBe("open");
+		expect(captainB?.status).toBe("open");
+
+		expect(answer(file, asked.id, "from A")).toBe(true);
+		expect(answer(file, asked.id, "from B")).toBe(false);
+		expect(readQuestions(file)[0]?.answer).toBe("from A");
+	});
+
+	test("a long free-text answer is bounded by BYTES, including multibyte text", () => {
+		const file = freshFile();
+		const asked = ask(file, { question: "Q", sessionId: "s", cwd: "/" });
+		// Each of these is 4 UTF-8 bytes but 2 UTF-16 code units, so slice() would
+		// have let roughly twice MAX_EVENT_BYTES through.
+		answer(file, asked.id, "\u{1f680}".repeat(MAX_EVENT_BYTES));
+		const lines = readFileSync(file, "utf8").trimEnd().split("\n");
+		for (const line of lines) {
+			expect(Buffer.byteLength(line, "utf8")).toBeLessThanOrEqual(MAX_EVENT_BYTES);
+		}
+		// Truncation never splits a character.
+		expect(readQuestions(file)[0]?.answer).toMatch(/^\u{1f680}+$/u);
 	});
 
 	test("a corrupt line does not hide the rest of the queue", () => {
@@ -382,6 +427,21 @@ describe("questions extension", () => {
 		expect(byQuestion.get("Q3")!.status).toBe("open");
 		expect(byQuestion.get("Q4")!.status).toBe("open");
 		expect(captain.notices.at(-1)).toContain("Resolved 2 of 4");
+	});
+
+	test("a truncated captain answer is reported, not silently clipped", async () => {
+		const file = freshFile();
+		const pi = new Harness();
+		registerQuestions(pi as any, { DECK_QUESTIONS_FILE: file }, pi.runtime);
+		ask(file, { question: "Q", sessionId: "session-a", cwd: "/" });
+		const captain = fakeContext(
+			"session-captain",
+			["Write an answer..."],
+			"x".repeat(MAX_EVENT_BYTES),
+		);
+		await pi.commands.get("questions")!.handler("", captain);
+		expect(captain.notices.some((n) => n.includes("truncated"))).toBe(true);
+		expect(readQuestions(file)[0]?.status).toBe("answered");
 	});
 
 	test("/questions on an empty queue says so rather than opening a dialog", async () => {

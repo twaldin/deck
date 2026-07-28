@@ -226,6 +226,9 @@ consequences follow from the fold:
   them, because state lives in the file rather than in a session.
 - Re-asking a stable `id` refreshes the prompt text but preserves an existing
   answer, so a retrying agent cannot erase a decision the captain already made.
+  Supplied ids are **scoped to the asking session** (`sessionId:id`): the log is
+  shared by the whole home, so a bare `migration-decision` from two sessions
+  would otherwise collide in the fold and hand one agent the other's answer.
 - A corrupt line is skipped instead of hiding the rest of the queue, and an
   unrecognized `urgency` degrades to `normal` instead of dropping the question.
 
@@ -236,15 +239,23 @@ that is no longer open, and the losing captain is told their answer was not
 applied. Without that rule the durable record would end up disagreeing with what
 the agent was actually told, which is worse than either answer winning.
 
+Each answer event carries a unique `eventId`, and `answer()` re-folds *after*
+appending to see whether its own event is the one the fold kept. A pre-append
+read cannot decide this: two captains can both observe `open` before either
+writes, and would then both be told they won.
+
 **Delivery sends first, then marks.** Both orderings can fail; they fail
 differently. Marking first and then crashing drops that answer permanently and
 silently parks the agent forever, which is precisely the failure this extension
 exists to kill. Sending first and then crashing re-delivers one answer, which is
 merely noisy. The noisy failure is the correct one to choose.
 
-Events are capped at 8KB each (`MAX_EVENT_BYTES`), bounded both at the tool
-schema and again in the store, because every reader folds the entire log: one
-multi-MB question would degrade sessions that never asked anything.
+Events are capped at 8KB each (`MAX_EVENT_BYTES`), bounded at the tool schema
+and again for **every** event in the store, because every reader folds the entire
+log: one multi-MB question would degrade sessions that never asked anything. Long
+free-text captain answers are truncated by UTF-8 **byte** length rather than by
+`slice()` (which counts UTF-16 code units and so does not bound the appended
+line at all), never mid-character, and the captain is told it happened.
 
 Dismissal is a resolution, not a deletion: the asking agent is told the captain
 declined to answer, so it stops waiting instead of parking again.

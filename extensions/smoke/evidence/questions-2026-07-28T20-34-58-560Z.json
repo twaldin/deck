@@ -1,13 +1,13 @@
 {
-  "runAt": "2026-07-28T20:29:24.420Z",
+  "runAt": "2026-07-28T20:34:58.560Z",
   "piVersion": "0.82.0",
   "model": "deck/claude-haiku-4-5",
   "extensionPath": "/Users/twaldin/.treehouse/deck-bd7953/1/deck/extensions/src/questions.ts",
   "queueFile": "queue.jsonl",
-  "askerSessionId": "019faa6a-bb0a-7879-a434-faa3050578d5",
+  "askerSessionId": "019faa6f-d465-7488-8c53-3d13e8c642df",
   "queued": {
     "kind": "ask",
-    "id": "questions_extension_flag",
+    "id": "q-ms546x43-u000qh",
     "question": "Ship the questions extension behind a flag?",
     "options": [
       "flag",
@@ -15,14 +15,14 @@
     ],
     "recommendation": "flag",
     "urgency": "high",
-    "sessionId": "019faa6a-bb0a-7879-a434-faa3050578d5",
+    "sessionId": "019faa6f-d465-7488-8c53-3d13e8c642df",
     "cwd": "/Users/twaldin/.treehouse/deck-bd7953/1/deck/extensions",
-    "askedAt": 1785270553568,
+    "askedAt": 1785270887715,
     "status": "open",
     "delivered": false
   },
   "captainDialog": {
-    "title": "(1/1) [high] asked 5s ago by session 019faa6a-bb0a-7879-a434-faa3050578d5\ncwd: /Users/twaldin/.treehouse/deck-bd7953/1/deck/extensions\n\nShip the questions extension behind a flag?\n\nagent recommends: flag",
+    "title": "(1/1) [high] asked 4s ago by session 019faa6f-d465-7488-8c53-3d13e8c642df\ncwd: /Users/twaldin/.treehouse/deck-bd7953/1/deck/extensions\n\nShip the questions extension behind a flag?\n\nagent recommends: flag",
     "options": [
       "flag",
       "unguarded",
@@ -33,10 +33,10 @@
     ]
   },
   "captainSummary": "Resolved 1 of 1 question(s); 0 still open.",
-  "deliveredToAsker": "Captain answered your queued question (questions_extension_flag):\nQ: Ship the questions extension behind a flag?\nA: flag",
+  "deliveredToAsker": "Captain answered your queued question (q-ms546x43-u000qh):\nQ: Ship the questions extension behind a flag?\nA: flag",
   "finalRecord": {
     "kind": "ask",
-    "id": "questions_extension_flag",
+    "id": "q-ms546x43-u000qh",
     "question": "Ship the questions extension behind a flag?",
     "options": [
       "flag",
@@ -44,12 +44,13 @@
     ],
     "recommendation": "flag",
     "urgency": "high",
-    "sessionId": "019faa6a-bb0a-7879-a434-faa3050578d5",
+    "sessionId": "019faa6f-d465-7488-8c53-3d13e8c642df",
     "cwd": "/Users/twaldin/.treehouse/deck-bd7953/1/deck/extensions",
-    "askedAt": 1785270553568,
+    "askedAt": 1785270887715,
     "status": "answered",
     "delivered": true,
     "answer": "flag",
-    "answeredAt": 1785270558183
+    "answeredAt": 1785270891223,
+    "resolvedBy": "a-ms546ztj-y6nb28"
   }
 }

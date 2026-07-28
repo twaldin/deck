@@ -30,6 +30,8 @@ export interface AskEvent {
 interface AnswerEvent {
 	kind: "answer";
 	id: string;
+	/** Unique per append, so a writer can refold and see whether its own answer won. */
+	eventId: string;
 	answer: string;
 	status: "answered" | "dismissed";
 	answeredAt: number;
@@ -47,6 +49,8 @@ export interface Question extends AskEvent {
 	status: QuestionStatus;
 	answer?: string;
 	answeredAt?: number;
+	/** `eventId` of the answer that won the fold. */
+	resolvedBy?: string;
 	delivered: boolean;
 }
 
@@ -62,9 +66,41 @@ export function queueFile(env: Record<string, string | undefined> = process.env)
 	return path.join(home, "questions", "queue.jsonl");
 }
 
+/**
+ * Per-event size ceiling. The append-atomicity this store relies on holds for
+ * small writes, and every reader folds the whole log, so one multi-MB event
+ * would degrade every session sharing the queue and make the captain's dialog
+ * unusable. EVERY event goes through here, not just asks.
+ */
+export const MAX_EVENT_BYTES = 8 * 1024;
+
 function append(file: string, event: QueueEvent): void {
+	const line = JSON.stringify(event);
+	const bytes = Buffer.byteLength(line, "utf8");
+	if (bytes > MAX_EVENT_BYTES) {
+		throw new Error(
+			`queue event is too large (${bytes} bytes > ${MAX_EVENT_BYTES}); shorten the text`,
+		);
+	}
 	mkdirSync(path.dirname(file), { recursive: true });
-	appendFileSync(file, `${JSON.stringify(event)}\n`, "utf8");
+	appendFileSync(file, `${line}\n`, "utf8");
+}
+
+/**
+ * Truncates to a UTF-8 BYTE budget without splitting a character. `slice()`
+ * counts UTF-16 code units, so it does not bound the bytes actually appended.
+ */
+export function truncateBytes(text: string, maxBytes: number): string {
+	if (Buffer.byteLength(text, "utf8") <= maxBytes) return text;
+	let bytes = 0;
+	let out = "";
+	for (const char of text) {
+		const size = Buffer.byteLength(char, "utf8");
+		if (bytes + size > maxBytes) break;
+		bytes += size;
+		out += char;
+	}
+	return out;
 }
 
 /** Milliseconds of the last write, or null when the queue does not exist yet. */
@@ -109,6 +145,7 @@ export function readQuestions(file: string): Question[] {
 			existing.status = event.status;
 			existing.answer = event.answer;
 			existing.answeredAt = event.answeredAt;
+			existing.resolvedBy = event.eventId;
 		} else if (event.kind === "deliver") {
 			const existing = byId.get(event.id);
 			if (existing !== undefined) existing.delivered = true;
@@ -123,28 +160,13 @@ function pick(existing: Question | undefined): Partial<Question> {
 		status: existing.status,
 		answer: existing.answer,
 		answeredAt: existing.answeredAt,
+		resolvedBy: existing.resolvedBy,
 		delivered: existing.delivered,
 	};
 }
 
-/**
- * Per-event size ceiling. The append-atomicity this store relies on holds for
- * small writes, and every reader folds the whole log, so one multi-MB event
- * would degrade every session sharing the queue and make the captain's dialog
- * unusable. Enforced here as well as in the tool schema: the store is the
- * boundary every writer crosses.
- */
-export const MAX_EVENT_BYTES = 8 * 1024;
-
-function appendBounded(file: string, event: AskEvent): void {
-	const line = JSON.stringify(event);
-	const bytes = Buffer.byteLength(line, "utf8");
-	if (bytes > MAX_EVENT_BYTES) {
-		throw new Error(
-			`question is too large to queue (${bytes} bytes > ${MAX_EVENT_BYTES}); shorten question/context/recommendation`,
-		);
-	}
-	append(file, event);
+function randomSuffix(): string {
+	return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
 export function ask(
@@ -163,9 +185,19 @@ export function ask(
 ): AskEvent {
 	const question = input.question.trim();
 	if (question === "") throw new Error("question must not be empty");
+	const supplied = input.id?.trim();
 	const event: AskEvent = {
 		kind: "ask",
-		id: input.id?.trim() || `q-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+		// Caller-supplied ids are SCOPED TO THE ASKING SESSION. The log is shared by
+		// every session in the pi home, so a bare "migration-decision" from two
+		// sessions would collide in the fold: the second ask would overwrite the
+		// first's sessionId and could hand its answer to the wrong agent. Only the
+		// same session can refresh its own stable id, which is what "stable" means
+		// to the agent using it.
+		id:
+			supplied === undefined || supplied === ""
+				? `q-${randomSuffix()}`
+				: `${input.sessionId}:${supplied}`,
 		question,
 		...(input.context === undefined ? {} : { context: input.context }),
 		...(input.options === undefined || input.options.length === 0
@@ -177,14 +209,22 @@ export function ask(
 		cwd: input.cwd,
 		askedAt: input.now ?? Date.now(),
 	};
-	appendBounded(file, event);
+	append(file, event);
 	return event;
 }
 
 /**
- * Records the captain's resolution. Returns false when the question was already
- * resolved by another captain session, so the caller can say so instead of
- * pretending the second answer took effect.
+ * Budget for answer text. The rest of MAX_EVENT_BYTES covers the JSON envelope
+ * (kind, ids, status, timestamp), so bounding only the free text still bounds
+ * the appended line.
+ */
+const MAX_ANSWER_BYTES = MAX_EVENT_BYTES - 1024;
+
+/**
+ * Records the captain's resolution and reports whether THIS answer is the one
+ * the fold kept. It answers by re-folding after the append rather than trusting
+ * a pre-append read: two captains can both observe `open` before either writes,
+ * and a pre-append read would then tell both of them they won.
  */
 export function answer(
 	file: string,
@@ -193,17 +233,16 @@ export function answer(
 	status: "answered" | "dismissed" = "answered",
 	now = Date.now(),
 ): boolean {
-	const current = readQuestions(file).find((entry) => entry.id === id);
+	const eventId = `a-${randomSuffix()}`;
 	append(file, {
 		kind: "answer",
 		id,
-		answer: text.slice(0, MAX_EVENT_BYTES),
+		eventId,
+		answer: truncateBytes(text, MAX_ANSWER_BYTES),
 		status,
 		answeredAt: now,
 	});
-	// Advisory only: the fold is what actually enforces first-answer-wins, since
-	// a concurrent captain can resolve the question between this read and append.
-	return current?.status === "open";
+	return readQuestions(file).find((entry) => entry.id === id)?.resolvedBy === eventId;
 }
 
 /** Marks an answer as handed back to the asking agent so it is not re-delivered. */
