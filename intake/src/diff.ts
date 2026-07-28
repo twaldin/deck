@@ -118,32 +118,39 @@ export function normalizePrUrl(url: string): string {
 	return url.trim().replace(/[/]+$/, "").toLowerCase();
 }
 
-/** One compact machine-parseable line per change (tab-separated). */
+/**
+ * One compact machine-parseable line per change (tab-separated):
+ *   <kind>\t<signal>\t<url>\t<detail...>
+ * <kind> is always the stable schema kind, so column shapes are decidable
+ * from column 1 alone. <signal> is "REVIEW-REQUESTED" when the polled login
+ * was newly asked for review (the high-signal wake condition), else "-".
+ * Watchers wake on: cut -f2 == REVIEW-REQUESTED (or any output at all).
+ */
 export function formatChangeLine(change: DiffChange): string {
 	switch (change.kind) {
 		case "new": {
-			const signal = change.reviewRequested ? "REVIEW-REQUESTED" : "new";
-			return `${signal}\t${change.url}\t${change.buckets.join(",")}\t${change.title}`;
+			const signal = change.reviewRequested ? "REVIEW-REQUESTED" : "-";
+			return `new\t${signal}\t${change.url}\t${change.buckets.join(",")}\t${change.title}`;
 		}
 		case "removed":
-			return `removed\t${change.url}\t${change.resolution}\t${change.title}`;
+			return `removed\t-\t${change.url}\t${change.resolution}\t${change.title}`;
 		case "ci":
-			return `ci\t${change.url}\t${change.from}->${change.to}`;
+			return `ci\t-\t${change.url}\t${change.from}->${change.to}`;
 		case "review-decision":
-			return `review-decision\t${change.url}\t${change.from}->${change.to}`;
+			return `review-decision\t-\t${change.url}\t${change.from}->${change.to}`;
 		case "reviewers": {
-			const signal = change.selfRequested ? "REVIEW-REQUESTED" : "reviewers";
+			const signal = change.selfRequested ? "REVIEW-REQUESTED" : "-";
 			const parts = [
 				...change.added.map((reviewer) => `+${reviewer}`),
 				...change.removed.map((reviewer) => `-${reviewer}`),
 			];
-			return `${signal}\t${change.url}\t${parts.join(",")}`;
+			return `reviewers\t${signal}\t${change.url}\t${parts.join(",")}`;
 		}
 		case "buckets": {
-			const signal = change.reviewRequested ? "REVIEW-REQUESTED" : "buckets";
-			return `${signal}\t${change.url}\t${change.from.join(",")}->${change.to.join(",")}`;
+			const signal = change.reviewRequested ? "REVIEW-REQUESTED" : "-";
+			return `buckets\t${signal}\t${change.url}\t${change.from.join(",")}->${change.to.join(",")}`;
 		}
 		case "untracked":
-			return `untracked\t${change.url}\t${change.title}`;
+			return `untracked\t-\t${change.url}\t${change.title}`;
 	}
 }

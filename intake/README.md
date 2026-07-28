@@ -39,25 +39,33 @@ Auth: rides the ambient `gh` login (`gh auth status`). Read-only: only
 GraphQL search/lookup and the commit-search REST endpoint are used.
 
 Exit codes: `0` ok (empty diff = quiet run), `1` usage error, `2` poll/IO
-failure (state file is NOT advanced on failure, so no changes are lost).
+failure. The state file is advanced LAST, after the diff has been printed
+and the markdown written, and API failures during removal resolution abort
+the run — re-detection happens on the next poll. A change is never
+silently consumed.
 
 ## Output contract (stdout)
 
-One line per change. Default form is tab-separated:
+One line per change. Default form is tab-separated with fixed leading columns:
 
 ```
-<kind>\t<url>\t<detail...>
+<kind>\t<signal>\t<url>\t<detail...>
 ```
 
-| kind | detail | meaning |
+`<kind>` is always one of the stable schema kinds below, so a parser can
+decide the column shape from column 1 alone. `<signal>` is
+`REVIEW-REQUESTED` when the polled login was newly asked for review (the
+high-signal wake condition) and `-` otherwise. A watcher wakes a supervisor
+on any output; it escalates on `cut -f2 == REVIEW-REQUESTED`.
+
+| kind | detail columns | meaning |
 |---|---|---|
 | `new` | `<buckets>\t<title>` | PR newly in scope |
-| `REVIEW-REQUESTED` | (varies) | high-signal: replaces `new`/`reviewers`/`buckets` when the polled login was newly asked for review |
 | `removed` | `<resolution>\t<title>` | PR left scope; resolution below |
 | `ci` | `<from>-><to>` | CI rollup change (`passing`/`failing`/`pending`/`none`) |
 | `review-decision` | `<from>-><to>` | `approved`/`changes-requested`/`review-required`/`none` |
-| `reviewers` | `+alice,-bob` | requested-reviewer set changed |
-| `buckets` | `my-pr->my-pr,review-owed` | membership changed between sections |
+| `reviewers` | `+alice,-bob` | requested-reviewer set changed (signal set when we were added) |
+| `buckets` | `my-pr->my-pr,review-owed` | membership changed between sections (signal set on entering review-owed) |
 | `untracked` | `<title>` | in scope but absent from the `--tracked` file |
 
 Removal resolutions:

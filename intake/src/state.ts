@@ -29,6 +29,12 @@ export function writeFileAtomic(filePath: string, content: string): void {
 		fs.closeSync(descriptor);
 		descriptor = undefined;
 		fs.renameSync(temporary, filePath);
+		const directoryDescriptor = fs.openSync(path.dirname(filePath), "r");
+		try {
+			fs.fsyncSync(directoryDescriptor);
+		} finally {
+			fs.closeSync(directoryDescriptor);
+		}
 	} catch (error) {
 		if (descriptor !== undefined) {
 			fs.closeSync(descriptor);

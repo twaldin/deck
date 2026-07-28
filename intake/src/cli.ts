@@ -27,10 +27,10 @@ Options:
 Exit codes: 0 ok (diff may be empty), 1 usage error, 2 poll/IO failure.
 
 Output contract (stdout, one line per change):
-  tab-separated: <kind>\\t<url>\\t<detail...>
-  kinds: new | REVIEW-REQUESTED | removed | ci | review-decision | reviewers | buckets | untracked
-  REVIEW-REQUESTED replaces the kind on new/reviewers/buckets lines when the
-  polled login was newly asked for review — the high-signal wake condition.
+  tab-separated: <kind>\\t<signal>\\t<url>\\t<detail...>
+  kinds: new | removed | ci | review-decision | reviewers | buckets | untracked
+  signal: REVIEW-REQUESTED when the polled login was newly asked for review
+  (the high-signal wake condition), else "-".
   removed lines carry a resolution: merged | landed-squash | closed-without-landing | descoped | vanished
   (landed-squash = Graphite trap resolved: closed+unmerged but the squash
   commit "(#N)" exists on the default branch).
@@ -145,7 +145,13 @@ export async function runCli(argv: string[]): Promise<number> {
 		const client = new GhCliClient();
 		const result = await poll(previous, { login: options.login, scopes, tracked }, client);
 
-		writeIntakeState(options.stateFile, result.state);
+		// Emit outputs BEFORE advancing state: if the markdown write or stdout
+		// fails, the state file stays put and the next run re-detects the same
+		// diff — a change is never silently consumed.
+		const allChanges = [...result.changes, ...result.untracked];
+		for (const change of allChanges) {
+			console.log(options.json ? JSON.stringify(change) : formatChangeLine(change));
+		}
 		writeFileAtomic(
 			options.outFile,
 			renderMarkdown({
@@ -157,11 +163,7 @@ export async function runCli(argv: string[]): Promise<number> {
 				linear: null,
 			}),
 		);
-
-		const allChanges = [...result.changes, ...result.untracked];
-		for (const change of allChanges) {
-			console.log(options.json ? JSON.stringify(change) : formatChangeLine(change));
-		}
+		writeIntakeState(options.stateFile, result.state);
 		return 0;
 	} catch (error) {
 		console.error(error instanceof Error ? error.message : String(error));

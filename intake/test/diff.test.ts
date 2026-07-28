@@ -56,7 +56,7 @@ describe("diff engine", () => {
 			},
 		]);
 		expect(formatChangeLine(changes[0]!)).toBe(
-			"new\thttps://github.com/lindy-ai/lindy/pull/1\tmy-pr\ta change",
+			"new\t-\thttps://github.com/lindy-ai/lindy/pull/1\tmy-pr\ta change",
 		);
 	});
 
@@ -72,7 +72,7 @@ describe("diff engine", () => {
 		const changes = await diffStates(makeState([]), current, LOGIN, mockClient());
 		expect(changes).toHaveLength(1);
 		expect(changes[0]).toMatchObject({ kind: "new", reviewRequested: true });
-		expect(formatChangeLine(changes[0]!)).toStartWith("REVIEW-REQUESTED\t");
+		expect(formatChangeLine(changes[0]!)).toStartWith("new\tREVIEW-REQUESTED\t");
 	});
 
 	test("ci, review-decision, reviewer and bucket transitions each emit one line", async () => {
@@ -110,7 +110,7 @@ describe("diff engine", () => {
 		const changes = await diffStates(before, after, LOGIN, mockClient());
 		expect(changes).toHaveLength(1);
 		expect(changes[0]).toMatchObject({ kind: "reviewers", selfRequested: true });
-		expect(formatChangeLine(changes[0]!)).toBe(`REVIEW-REQUESTED\t${url}\t+${LOGIN}`);
+		expect(formatChangeLine(changes[0]!)).toBe(`reviewers\tREVIEW-REQUESTED\t${url}\t+${LOGIN}`);
 	});
 
 	test("no changes on identical states", async () => {
@@ -164,6 +164,25 @@ describe("removal resolution (Graphite trap)", () => {
 		expect(await resolveRemoval(item, mockClient())).toBe("vanished");
 	});
 
+	test("squash-search API failure propagates \u2014 never becomes closed-without-landing", async () => {
+		const client = mockClient({
+			lookupPr: async () => ({ state: "closed", mergedAt: null }),
+			findSquashCommit: async () => {
+				throw new Error("rate limited");
+			},
+		});
+		expect(resolveRemoval(item, client)).rejects.toThrow("rate limited");
+	});
+
+	test("lookup API failure propagates \u2014 never becomes vanished", async () => {
+		const client = mockClient({
+			lookupPr: async () => {
+				throw new Error("gh api failed");
+			},
+		});
+		expect(resolveRemoval(item, client)).rejects.toThrow("gh api failed");
+	});
+
 	test("diffStates routes disappeared items through resolution", async () => {
 		const before = makeState([item]);
 		const client = mockClient({
@@ -174,7 +193,45 @@ describe("removal resolution (Graphite trap)", () => {
 		expect(changes).toEqual([
 			{ kind: "removed", url: item.url, resolution: "landed-squash", title: item.title },
 		]);
-		expect(formatChangeLine(changes[0]!)).toBe(`removed\t${item.url}\tlanded-squash\ta change`);
+		expect(formatChangeLine(changes[0]!)).toBe(`removed\t-\t${item.url}\tlanded-squash\ta change`);
+	});
+});
+
+describe("line format fixtures (watcher parser contract)", () => {
+	const url = "https://github.com/lindy-ai/lindy/pull/7";
+	const cases: Array<[DiffChange, string]> = [
+		[
+			{ kind: "new", url, buckets: ["my-pr"], reviewRequested: false, title: "t" },
+			`new\t-\t${url}\tmy-pr\tt`,
+		],
+		[
+			{ kind: "new", url, buckets: ["review-owed"], reviewRequested: true, title: "t" },
+			`new\tREVIEW-REQUESTED\t${url}\treview-owed\tt`,
+		],
+		[
+			{ kind: "removed", url, resolution: "closed-without-landing", title: "t" },
+			`removed\t-\t${url}\tclosed-without-landing\tt`,
+		],
+		[{ kind: "ci", url, from: "passing", to: "failing" }, `ci\t-\t${url}\tpassing->failing`],
+		[
+			{ kind: "review-decision", url, from: "none", to: "approved" },
+			`review-decision\t-\t${url}\tnone->approved`,
+		],
+		[
+			{ kind: "reviewers", url, added: ["a"], removed: ["b"], selfRequested: false },
+			`reviewers\t-\t${url}\t+a,-b`,
+		],
+		[
+			{ kind: "buckets", url, from: ["my-pr"], to: ["my-pr", "review-owed"], reviewRequested: true },
+			`buckets\tREVIEW-REQUESTED\t${url}\tmy-pr->my-pr,review-owed`,
+		],
+		[{ kind: "untracked", url, title: "t" }, `untracked\t-\t${url}\tt`],
+	];
+
+	test.each(cases)("stable columns: %#", (change, expected) => {
+		expect(formatChangeLine(change)).toBe(expected);
+		// column 1 = stable schema kind, column 2 = signal
+		expect(formatChangeLine(change).split("\t")[0]).toBe(change.kind);
 	});
 });
 

@@ -20,6 +20,10 @@ export interface GithubClient {
 	 * carries the "(#N)" suffix Graphite/GitHub squash-merges append. GitHub
 	 * commit search only indexes the default branch, which is exactly the
 	 * landing target we need to check.
+	 *
+	 * MUST throw on API failure (auth, rate limit, network): null means
+	 * "confirmed absent", never "could not check" — conflating the two turns
+	 * transient API errors into false closed-without-landing alarms.
 	 */
 	findSquashCommit(repo: string, number: number): Promise<string | null>;
 }
@@ -177,6 +181,20 @@ function mapReviewDecision(decision: string | null): ReviewDecision {
 	}
 }
 
+/**
+ * gh subprocess failure; carries any JSON stdout payload so callers can
+ * distinguish GraphQL NOT_FOUND (well-formed data payload) from
+ * transport/auth failures.
+ */
+export class GhError extends Error {
+	readonly payload: unknown;
+
+	constructor(message: string, payload: unknown) {
+		super(message);
+		this.payload = payload;
+	}
+}
+
 async function runGh(args: string[], stdin?: string): Promise<string> {
 	const processHandle = Bun.spawn(["gh", ...args], {
 		stdin: stdin === undefined ? "ignore" : new TextEncoder().encode(stdin),
@@ -189,7 +207,13 @@ async function runGh(args: string[], stdin?: string): Promise<string> {
 		processHandle.exited,
 	]);
 	if (exitCode !== 0) {
-		throw new Error(`gh ${args[0]} failed (exit ${exitCode}): ${stderr.trim() || stdout.trim()}`);
+		let payload: unknown = null;
+		try {
+			payload = JSON.parse(stdout);
+		} catch {
+			// not JSON — transport-level failure
+		}
+		throw new GhError(`gh ${args[0]} failed (exit ${exitCode}): ${stderr.trim() || stdout.trim()}`, payload);
 	}
 	return stdout;
 }
@@ -248,17 +272,28 @@ export class GhCliClient implements GithubClient {
 
 	async lookupPr(repo: string, number: number): Promise<PrLookup | null> {
 		const [owner, name] = repo.split("/");
+		// Errors propagate: a failed lookup must fail the poll, not report
+		// "vanished". Only a well-formed "this PR/repo does not exist" response
+		// returns null. gh exits non-zero on GraphQL NOT_FOUND errors, so
+		// distinguish that case by parsing its stdout payload.
 		let raw: unknown;
 		try {
 			raw = await graphql(LOOKUP_QUERY, { owner, name, number });
-		} catch {
-			return null;
+		} catch (error) {
+			if (error instanceof GhError && error.payload !== null) {
+				const parsedError = lookupResponseSchema.safeParse(error.payload);
+				if (parsedError.success) {
+					// Valid response shape with repository/pullRequest null: genuinely gone.
+					raw = error.payload;
+				} else {
+					throw error;
+				}
+			} else {
+				throw error;
+			}
 		}
-		const parsed = lookupResponseSchema.safeParse(raw);
-		if (!parsed.success) {
-			return null;
-		}
-		const pr = parsed.data.data.repository?.pullRequest ?? null;
+		const parsed = lookupResponseSchema.parse(raw);
+		const pr = parsed.data.repository?.pullRequest ?? null;
 		if (pr === null) {
 			return null;
 		}
@@ -268,22 +303,27 @@ export class GhCliClient implements GithubClient {
 
 	async findSquashCommit(repo: string, number: number): Promise<string | null> {
 		// GitHub commit search only indexes the default branch — exactly the
-		// question we are asking ("did (#N) land on main?").
+		// question we are asking ("did (#N) land on main?"). Errors propagate
+		// (see interface contract). Paginated: null is only returned after every
+		// page has been inspected, so "confirmed absent" really is confirmed.
 		const query = encodeURIComponent(`repo:${repo} "(#${number})"`);
-		let stdout: string;
-		try {
-			stdout = await runGh(["api", `/search/commits?q=${query}&per_page=30`]);
-		} catch {
-			return null;
+		const perPage = 50;
+		const maxPages = 10; // 500 commits mentioning (#N); far beyond any real case
+		for (let page = 1; page <= maxPages; page += 1) {
+			const stdout = await runGh(["api", `/search/commits?q=${query}&per_page=${perPage}&page=${page}`]);
+			const parsed = commitSearchResponseSchema.parse(JSON.parse(stdout));
+			const sha = pickSquashCommit(
+				parsed.items.map((item) => ({ sha: item.sha, message: item.commit.message })),
+				number,
+			);
+			if (sha !== null) {
+				return sha;
+			}
+			if (parsed.items.length < perPage) {
+				return null;
+			}
 		}
-		const parsed = commitSearchResponseSchema.safeParse(JSON.parse(stdout));
-		if (!parsed.success) {
-			return null;
-		}
-		return pickSquashCommit(
-			parsed.data.items.map((item) => ({ sha: item.sha, message: item.commit.message })),
-			number,
-		);
+		return null;
 	}
 }
 
