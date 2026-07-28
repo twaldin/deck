@@ -31,15 +31,17 @@ interface Line {
 
 type DisplayState = StatusState | TaskState;
 
-const STATUS_COLOR: Record<DisplayState, keyof typeof SGR> = {
+// `null` means "no color applied" (terminal default / white), used for
+// idle/queued tasks so grey unambiguously means "held".
+const STATUS_COLOR: Record<DisplayState, keyof typeof SGR | null> = {
 	working: "cyan",
 	in_flight: "cyan",
 	"needs-decision": "yellow",
 	blocked: "red",
 	failed: "red",
 	paused: "magenta",
-	held: "yellow",
-	queued: "gray",
+	held: "gray",
+	queued: null,
 	resolved: "green",
 	done: "green",
 	unknown: "gray",
@@ -165,10 +167,11 @@ function renderTask(task: FleetTask, last: boolean, now: number, compact: boolea
 
 	out.push({ color, text: `${branch} ${glyph} ${task.id}  ${SGR_META(bits)}` });
 
-	// Detail line: last status message, else backlog title/detail.
+	// Detail line: last status message, else backlog title/detail. Continuation
+	// lines share the task's state color so the whole entry reads as one unit.
 	const detail = status?.message || task.backlog?.title || task.backlog?.detail;
-	if (!compact && detail) out.push({ color: state === "unknown" ? "gray" : null, text: `${pipe}   ${detail}` });
-	if (!compact && task.backlog?.hold) out.push({ color: "magenta", text: `${pipe}   hold: ${task.backlog.hold}` });
+	if (!compact && detail) out.push({ color, text: `${pipe}   ${detail}` });
+	if (!compact && task.backlog?.hold) out.push({ color, text: `${pipe}   hold: ${task.backlog.hold}` });
 
 	// Correlated runs.
 	task.runs.forEach((run, i) => {

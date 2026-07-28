@@ -199,6 +199,83 @@ describe("renderModel", () => {
 	});
 });
 
+describe("state color semantics", () => {
+	const SGR = { gray: "\x1b[90m", reset: "\x1b[0m" };
+
+	function heldQueuedModel(): FleetModel {
+		return baseModel({
+			tasks: [
+				{
+					id: "queued-task",
+					meta: null,
+					status: null,
+					backlog: {
+						id: "queued-task",
+						title: "waiting for a slot",
+						state: "queued",
+						repo: null,
+						detail: null,
+						since: null,
+						hold: null,
+					},
+					runs: [],
+				},
+				{
+					id: "held-task",
+					meta: null,
+					status: null,
+					backlog: {
+						id: "held-task",
+						title: "waiting on captain",
+						state: "held",
+						repo: null,
+						detail: null,
+						since: null,
+						hold: "captain",
+					},
+					runs: [],
+				},
+			],
+		});
+	}
+
+	test("queued tasks render with no color (default/white), held tasks render gray", () => {
+		const lines = renderModel(heldQueuedModel(), { width: 100, minWidth: 40, color: true });
+		const queuedLine = lines.find((l) => l.includes("queued-task"));
+		const heldLine = lines.find((l) => l.includes("held-task"));
+		expect(queuedLine).toBeDefined();
+		expect(heldLine).toBeDefined();
+		expect(queuedLine).not.toContain(SGR.gray);
+		expect(heldLine).toContain(SGR.gray);
+	});
+
+	test("held task's detail and hold-reason continuation lines are also gray", () => {
+		const lines = renderModel(heldQueuedModel(), { width: 100, minWidth: 40, color: true });
+		const detailLine = lines.find((l) => l.includes("waiting on captain"));
+		const holdLine = lines.find((l) => l.includes("hold: captain"));
+		expect(detailLine).toBeDefined();
+		expect(holdLine).toBeDefined();
+		expect(detailLine).toContain(SGR.gray);
+		expect(holdLine).toContain(SGR.gray);
+	});
+
+	test("queued task's detail continuation line has no color", () => {
+		const lines = renderModel(heldQueuedModel(), { width: 100, minWidth: 40, color: true });
+		const detailLine = lines.find((l) => l.includes("waiting for a slot"));
+		expect(detailLine).toBeDefined();
+		expect(detailLine).not.toContain(SGR.gray);
+		expect(detailLine?.includes("\x1b[")).toBe(false);
+	});
+
+	test("plain (no-color) render is unaffected by the color swap", () => {
+		const lines = renderModel(heldQueuedModel(), { width: 100, minWidth: 40, color: false });
+		const text = lines.join("\n");
+		expect(text).toContain("○ queued-task  queued");
+		expect(text).toContain("❚ held-task  held");
+		expect(text).toContain("hold: captain");
+	});
+});
+
 describe("helpers", () => {
 	test("age formats compactly", () => {
 		expect(age(5_000)).toBe("5s");
