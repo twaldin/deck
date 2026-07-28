@@ -172,8 +172,8 @@ describe("idle-compaction installer", () => {
 	test("no flat sibling that pi would discover as its own extension", () => {
 		// pi discovers extensions/*.ts as top-level extensions, so a stray
 		// policy symlink beside the directory gets loaded and rejected.
-		const entries = readdirSync(path.join(target, "extensions"));
-		expect(entries).toEqual(["deck-idle-compaction"]);
+		const entries = readdirSync(path.join(target, "extensions")).sort();
+		expect(entries).toEqual(["deck-idle-compaction", "deck-questions"]);
 	});
 
 	test("the installed entrypoint exports a factory", async () => {
@@ -186,6 +186,27 @@ describe("idle-compaction installer", () => {
 		const result = runInstaller("extensions/install.sh", target);
 		expect(result.exitCode).toBe(0);
 		expect(readdirSync(extensionDir).sort()).toEqual(before);
+	});
+});
+
+describe("questions installer", () => {
+	const target = install("extensions/install.sh");
+	const extensionDir = path.join(target, "extensions", "deck-questions");
+
+	test("installs a directory extension whose sibling store import resolves", () => {
+		expect(lstatSync(extensionDir).isDirectory()).toBe(true);
+		// index.ts imports "./questions-store", so both must sit together.
+		expect(realpathSync(path.join(extensionDir, "index.ts"))).toBe(
+			realpathSync(path.join(repoRoot, "extensions/src/questions.ts")),
+		);
+		expect(realpathSync(path.join(extensionDir, "questions-store.ts"))).toBe(
+			realpathSync(path.join(repoRoot, "extensions/src/questions-store.ts")),
+		);
+	});
+
+	test("the installed entrypoint exports a factory", async () => {
+		const loaded = await import(path.join(extensionDir, "index.ts"));
+		expect(typeof loaded.default).toBe("function");
 	});
 });
 
@@ -211,7 +232,7 @@ describe("idle-compaction installer migration from the old flat layout", () => {
 		const result = runInstaller("extensions/install.sh", target);
 		expect(result.stderr).toBe("");
 		expect(result.exitCode).toBe(0);
-		expect(readdirSync(extensions)).toEqual(["deck-idle-compaction"]);
+		expect(readdirSync(extensions).sort()).toEqual(["deck-idle-compaction", "deck-questions"]);
 	});
 
 	test("refuses to delete a user-owned file it cannot prove is ours", () => {

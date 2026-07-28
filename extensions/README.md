@@ -1,5 +1,13 @@
 # Deck pi extensions
 
+| Extension | Installed as | Entry point | What it does |
+|---|---|---|---|
+| Idle compaction | `~/.pi/agent/extensions/deck-idle-compaction/` | `src/idle-compaction.ts` | Compacts a parked session while the provider prompt cache is still warm. |
+| Questions | `~/.pi/agent/extensions/deck-questions/` | `src/questions.ts` | Durable captain-facing question queue: `ask_captain` tool plus `/questions` review command. |
+
+Both are installed by `./extensions/install.sh` and are inert until pi loads
+them (new process or `/reload`).
+
 ## Idle compaction
 
 `src/idle-compaction.ts` proactively compacts a parked pi session while its
@@ -35,12 +43,17 @@ From a deck checkout, run the installer:
 INSTALL_TARGET="$(mktemp -d)" ./extensions/install.sh
 ```
 
-It installs a **directory** extension, symlinking both source files into it:
+It installs **directory** extensions, symlinking each extension's source files
+into its own directory:
 
 ```
-~/.pi/agent/extensions/deck-idle-compaction/
-├── index.ts                  -> extensions/src/idle-compaction.ts
-└── idle-compaction-policy.ts -> extensions/src/idle-compaction-policy.ts
+~/.pi/agent/extensions/
+├── deck-idle-compaction/
+│   ├── index.ts                  -> extensions/src/idle-compaction.ts
+│   └── idle-compaction-policy.ts -> extensions/src/idle-compaction-policy.ts
+└── deck-questions/
+    ├── index.ts            -> extensions/src/questions.ts
+    └── questions-store.ts  -> extensions/src/questions-store.ts
 ```
 
 The directory layout is required, not cosmetic. Pi discovers both
@@ -170,6 +183,86 @@ The committed smoke evidence in `smoke/evidence/` was produced by pi 0.82 with
 `compaction_end`, the before/after estimates, and the actual `compaction` and
 `deck.idle-compaction.v1` JSONL entries. The disposable full session file is
 excluded.
+
+## Questions
+
+`src/questions.ts` kills a specific failure mode: an agent asks the captain a
+decision question in chat, the captain misses it, and the effort parks silently
+until someone notices days later. Instead the agent queues the question durably
+and keeps working; the captain drains the whole backlog in one sitting whenever
+they like; the answer finds its way back to the asking session on its own.
+
+Three pieces:
+
+- **`ask_captain` tool** — any agent in any session calls it with
+  `{question, id?, context?, options?, recommendation?, urgency?}`. It returns
+  immediately; the agent is told not to block on it.
+- **`/questions` command** — from **any** pi session in the same pi home, lists
+  every open question (urgency, age, asking session, cwd, context,
+  recommendation) and walks the captain through them. The agent's own `options`
+  become direct picks, alongside `Write an answer...`, `Dismiss`, `Skip`, and
+  `Stop reviewing`.
+- **Delivery back** — answers reach the asking session on `session_start`, on
+  `agent_settled`, and via a 15s queue-mtime poll. The poll matters: an agent
+  that queued a question and parked emits no further lifecycle events, so
+  without it the answer would sit unread. Delivery uses `pi.sendMessage(...,
+  { triggerTurn: true })` to wake that parked agent.
+
+### Storage
+
+One append-only JSONL event log, by default
+`~/.pi/agent/questions/queue.jsonl` (`$PI_CONFIG_DIR` is honored;
+`DECK_QUESTIONS_FILE` overrides it outright, which is how the tests and smoke
+stay off the live queue).
+
+Events are `ask`, `answer`, and `deliver`, folded into current state on read.
+Append-only is load-bearing rather than stylistic: several pi processes write
+this file concurrently, and a single sub-4KB `appendFileSync` line is atomic on
+the platforms pi runs on, whereas a read-modify-write of a records file would
+silently drop a question asked by another session in the same instant. Three
+consequences follow from the fold:
+
+- Unanswered questions survive pi restarts, and any session in the home sees
+  them, because state lives in the file rather than in a session.
+- Re-asking a stable `id` refreshes the prompt text but preserves an existing
+  answer, so a retrying agent cannot erase a decision the captain already made.
+- A corrupt line is skipped instead of hiding the rest of the queue, and an
+  unrecognized `urgency` degrades to `normal` instead of dropping the question.
+
+`deliver` records are written *before* the message is sent. A duplicate
+delivery would show an agent the same decision twice; a lost mark would replay
+it on every poll forever.
+
+Dismissal is a resolution, not a deletion: the asking agent is told the captain
+declined to answer, so it stops waiting instead of parking again.
+
+### Verification
+
+Unit tests use a temp queue file and a fake pi API/clock; no LLM is contacted:
+
+```bash
+cd extensions
+bun test test/questions.test.ts
+```
+
+The opt-in real smoke spans **two** pi processes sharing only the queue file,
+which is the property that matters and cannot be shown inside one runtime:
+
+```bash
+cd extensions
+bun run smoke/run-questions-smoke.ts
+
+# or against the INSTALLED layout:
+SMOKE_EXTENSION_PATH=~/.pi/agent/extensions/deck-questions \
+  bun run smoke/run-questions-smoke.ts
+```
+
+It drives the full cycle: the asking agent calls `ask_captain` through the LLM,
+a second process lists the question through `/questions` (its dialogs arrive as
+RPC `extension_ui_request`s, so the captain side needs no LLM), answers it with
+one of the agent's own options, and the first process receives the answer
+through the extension's own poll with no further prompting. Evidence lands in
+`smoke/evidence/questions-*.json`.
 
 ## Investigation: provider-native compaction engine
 

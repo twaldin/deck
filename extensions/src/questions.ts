@@ -1,0 +1,273 @@
+/**
+ * Captain-facing pending-questions queue.
+ *
+ * Failure mode this kills: an agent asks a decision question in chat, the
+ * captain never sees it, and the effort parks silently forever. Agents call
+ * `ask_captain` instead, which writes to a durable shared queue; the captain
+ * runs `/questions` in ANY pi session in the same home and clears the backlog
+ * in one sitting; the asking session picks its answers back up.
+ */
+import { Type } from "typebox";
+import {
+	answer as recordAnswer,
+	ask,
+	formatAge,
+	markDelivered,
+	openQuestions,
+	pendingAnswersFor,
+	queueFile,
+	queueMtimeMs,
+	type Question,
+} from "./questions-store";
+
+const POLL_INTERVAL_MS = 15_000;
+
+interface Ui {
+	notify(message: string, level?: "info" | "warning" | "error"): void;
+	select(title: string, options: string[]): Promise<string | undefined>;
+	editor(title: string, prefill?: string): Promise<string | undefined>;
+}
+
+interface QuestionsContext {
+	hasUI: boolean;
+	cwd: string;
+	ui: Ui;
+	sessionManager: { getSessionId(): string };
+}
+
+export interface QuestionsExtensionApi {
+	registerTool(tool: {
+		name: string;
+		label: string;
+		description: string;
+		promptSnippet?: string;
+		promptGuidelines?: string[];
+		parameters: unknown;
+		execute(
+			toolCallId: string,
+			params: any,
+			signal: AbortSignal | undefined,
+			onUpdate: unknown,
+			ctx: QuestionsContext,
+		): Promise<{ content: Array<{ type: "text"; text: string }>; details: unknown }>;
+	}): void;
+	registerCommand(
+		name: string,
+		options: { description: string; handler(args: string, ctx: QuestionsContext): Promise<void> },
+	): void;
+	on(event: string, handler: (event: any, ctx: QuestionsContext) => Promise<void> | void): void;
+	sendMessage(
+		message: { customType: string; content: string; display: boolean; details?: unknown },
+		options?: { deliverAs?: "steer" | "followUp" | "nextTurn"; triggerTurn?: boolean },
+	): void;
+}
+
+export interface QuestionsRuntime {
+	now(): number;
+	setInterval(callback: () => void, ms: number): ReturnType<typeof setInterval>;
+	clearInterval(handle: ReturnType<typeof setInterval>): void;
+}
+
+const defaultRuntime: QuestionsRuntime = {
+	now: Date.now,
+	setInterval: (callback, ms) => setInterval(callback, ms),
+	clearInterval,
+};
+
+const DISMISSED = "(dismissed by the captain without an answer)";
+
+/** One question rendered for the captain: everything needed to decide, nothing more. */
+export function describe(entry: Question, nowMs: number): string {
+	const lines = [
+		`[${entry.urgency}] asked ${formatAge(nowMs - entry.askedAt)} ago by session ${entry.sessionId}`,
+		`cwd: ${entry.cwd}`,
+		"",
+		entry.question,
+	];
+	if (entry.context !== undefined) lines.push("", `context: ${entry.context}`);
+	if (entry.recommendation !== undefined) lines.push("", `agent recommends: ${entry.recommendation}`);
+	return lines.join("\n");
+}
+
+/** Text handed back to the asking agent for one resolved question. */
+export function answerMessage(entry: Question): string {
+	return [
+		`Captain answered your queued question (${entry.id}):`,
+		`Q: ${entry.question}`,
+		`A: ${entry.status === "dismissed" ? DISMISSED : entry.answer ?? ""}`,
+	].join("\n");
+}
+
+export function registerQuestions(
+	pi: QuestionsExtensionApi,
+	env: Record<string, string | undefined> = process.env,
+	runtime: QuestionsRuntime = defaultRuntime,
+): void {
+	const file = queueFile(env);
+	let poll: ReturnType<typeof setInterval> | undefined;
+	let lastSeenMtimeMs: number | null = null;
+
+	/** Hands every undelivered answer for this session back to its agent, once. */
+	const deliverAnswers = (ctx: QuestionsContext, triggerTurn: boolean): number => {
+		const sessionId = ctx.sessionManager.getSessionId();
+		const pending = pendingAnswersFor(file, sessionId);
+		for (const entry of pending) {
+			// Mark before sending: a duplicate delivery is a confusing double answer,
+			// while a lost mark would replay the same answer on every poll.
+			markDelivered(file, entry.id, runtime.now());
+			pi.sendMessage(
+				{
+					customType: "deck.captain-answer",
+					content: answerMessage(entry),
+					display: true,
+					details: { id: entry.id, status: entry.status },
+				},
+				{ deliverAs: "followUp", triggerTurn },
+			);
+		}
+		return pending.length;
+	};
+
+	pi.registerTool({
+		name: "ask_captain",
+		label: "Ask Captain",
+		description:
+			"Queue a decision question for the captain in a durable shared queue instead of asking in chat. " +
+			"The captain reviews all queued questions with /questions from any pi session; the answer is " +
+			"delivered back into this session when they answer. Returns immediately - do not block on it. " +
+			"Prefer continuing on any work that does not depend on the answer.",
+		promptSnippet: "Queue a decision question for the captain without blocking this session",
+		promptGuidelines: [
+			"Use ask_captain when a decision needs the captain and the chat message would otherwise be missed; keep working on independent parts instead of waiting.",
+		],
+		parameters: Type.Object({
+			question: Type.String({ description: "The decision to make, phrased for a human" }),
+			id: Type.Optional(
+				Type.String({ description: "Stable id; reusing one refreshes that question" }),
+			),
+			context: Type.Optional(Type.String({ description: "Background the captain needs" })),
+			options: Type.Optional(
+				Type.Array(Type.String(), { description: "Concrete choices the captain can pick" }),
+			),
+			recommendation: Type.Optional(
+				Type.String({ description: "What you would do absent an answer" }),
+			),
+			// Plain string, normalized in the store: an enum here would need
+			// pi-ai's StringEnum for Google compatibility, and one severity word is
+			// not worth a second import to resolve at extension load.
+			urgency: Type.Optional(Type.String({ description: "low | normal | high (default normal)" })),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const event = ask(file, {
+				id: params.id,
+				question: params.question,
+				context: params.context,
+				options: params.options,
+				recommendation: params.recommendation,
+				urgency: params.urgency,
+				sessionId: ctx.sessionManager.getSessionId(),
+				cwd: ctx.cwd,
+				now: runtime.now(),
+			});
+			const waiting = openQuestions(file).length;
+			if (ctx.hasUI) ctx.ui.notify(`Queued question for the captain (${waiting} open)`, "info");
+			return {
+				content: [
+					{
+						type: "text",
+						text: `Queued question ${event.id} for the captain (${waiting} open in the queue). The answer arrives in this session once they run /questions.`,
+					},
+				],
+				details: { id: event.id, open: waiting, file },
+			};
+		},
+	});
+
+	pi.registerCommand("questions", {
+		description: "Review and answer all queued agent questions",
+		handler: async (_args, ctx) => {
+			if (!ctx.hasUI) return;
+			const delivered = deliverAnswers(ctx, false);
+			const open = openQuestions(file);
+			if (open.length === 0) {
+				ctx.ui.notify(
+					delivered > 0
+						? `No open questions; delivered ${delivered} answer(s) to this session.`
+						: `No open questions. Queue: ${file}`,
+					"info",
+				);
+				return;
+			}
+
+			let answered = 0;
+			for (const [index, entry] of open.entries()) {
+				const choices = [
+					...(entry.options ?? []),
+					"Write an answer...",
+					"Dismiss",
+					"Skip",
+					"Stop reviewing",
+				];
+				const picked = await ctx.ui.select(
+					`(${index + 1}/${open.length}) ${describe(entry, runtime.now())}`,
+					choices,
+				);
+				if (picked === undefined || picked === "Stop reviewing") break;
+				if (picked === "Skip") continue;
+				if (picked === "Dismiss") {
+					recordAnswer(file, entry.id, DISMISSED, "dismissed", runtime.now());
+					answered += 1;
+					continue;
+				}
+				let text = picked;
+				if (picked === "Write an answer...") {
+					const written = await ctx.ui.editor(entry.question, entry.recommendation ?? "");
+					if (written === undefined || written.trim() === "") continue;
+					text = written.trim();
+				}
+				recordAnswer(file, entry.id, text, "answered", runtime.now());
+				answered += 1;
+			}
+
+			// Answers to questions this very session asked are deliverable right away.
+			deliverAnswers(ctx, false);
+			ctx.ui.notify(
+				`Resolved ${answered} of ${open.length} question(s); ${openQuestions(file).length} still open.`,
+				"info",
+			);
+		},
+	});
+
+	const startPolling = (ctx: QuestionsContext): void => {
+		if (poll !== undefined) return;
+		lastSeenMtimeMs = queueMtimeMs(file);
+		poll = runtime.setInterval(() => {
+			const mtime = queueMtimeMs(file);
+			if (mtime === lastSeenMtimeMs) return;
+			lastSeenMtimeMs = mtime;
+			// triggerTurn wakes a parked agent: without it, an agent that queued a
+			// question and stopped would never learn the answer arrived.
+			deliverAnswers(ctx, true);
+		}, POLL_INTERVAL_MS);
+	};
+
+	pi.on("session_start", (_event, ctx) => {
+		// Answers that landed while this session was not running.
+		deliverAnswers(ctx, false);
+		startPolling(ctx);
+	});
+
+	pi.on("agent_settled", (_event, ctx) => {
+		lastSeenMtimeMs = queueMtimeMs(file);
+		deliverAnswers(ctx, true);
+	});
+
+	pi.on("session_shutdown", () => {
+		if (poll !== undefined) runtime.clearInterval(poll);
+		poll = undefined;
+	});
+}
+
+export default function questionsExtension(pi: QuestionsExtensionApi): void {
+	registerQuestions(pi);
+}

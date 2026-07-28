@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Install Deck's idle-compaction pi extension as a DIRECTORY extension.
+# Install Deck's pi extensions (idle-compaction, questions) as DIRECTORY extensions.
 # INSTALL_TARGET is intentionally overridable so tests never touch live ~/.pi.
 #
 # Why a directory and not a single symlinked file: pi discovers
@@ -16,6 +16,7 @@ INSTALL_TARGET="${INSTALL_TARGET:-$HOME/.pi/agent}"
 SOURCE_DIR="$(cd "$(dirname "$0")" && pwd)/src"
 EXTENSIONS_DIR="$INSTALL_TARGET/extensions"
 DEST="$EXTENSIONS_DIR/deck-idle-compaction"
+QUESTIONS_DEST="$EXTENSIONS_DIR/deck-questions"
 
 mkdir -p "$EXTENSIONS_DIR"
 
@@ -54,4 +55,10 @@ mkdir -p "$DEST"
 ln -sfn "$SOURCE_DIR/idle-compaction.ts" "$DEST/index.ts"
 ln -sfn "$SOURCE_DIR/idle-compaction-policy.ts" "$DEST/idle-compaction-policy.ts"
 
+mkdir -p "$QUESTIONS_DEST"
+ln -sfn "$SOURCE_DIR/questions.ts" "$QUESTIONS_DEST/index.ts"
+ln -sfn "$SOURCE_DIR/questions-store.ts" "$QUESTIONS_DEST/questions-store.ts"
+
 printf 'installed Deck idle-compaction pi extension in %s\n' "$DEST"
+printf 'installed Deck questions pi extension in %s\n' "$QUESTIONS_DEST"
+# `typebox` needs no vendoring here: pi provides it to extensions itself.
