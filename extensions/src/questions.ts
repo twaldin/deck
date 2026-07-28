@@ -76,6 +76,8 @@ const defaultRuntime: QuestionsRuntime = {
 };
 
 const DISMISSED = "(dismissed by the captain without an answer)";
+/** Control actions, always after the agent's own options and matched by position. */
+const CONTROLS = ["Write an answer...", "Dismiss", "Skip", "Stop reviewing"] as const;
 
 /** One question rendered for the captain: everything needed to decide, nothing more. */
 export function describe(entry: Question, nowMs: number): string {
@@ -222,25 +224,31 @@ export function registerQuestions(
 
 			let answered = 0;
 			for (const [index, entry] of open.entries()) {
+				// Choices are matched by POSITION, never by display string: an agent is
+				// free to offer an option literally named "Dismiss" or "Skip", and
+				// comparing labels would silently turn picking it into a control action.
+				// Numbering the agent's options also keeps duplicate options selectable.
+				const options = entry.options ?? [];
 				const choices = [
-					...(entry.options ?? []),
-					"Write an answer...",
-					"Dismiss",
-					"Skip",
-					"Stop reviewing",
+					...options.map((option, position) => `${position + 1}. ${option}`),
+					...CONTROLS,
 				];
 				const picked = await ctx.ui.select(
 					`(${index + 1}/${open.length}) ${describe(entry, runtime.now())}`,
 					choices,
 				);
-				if (picked === undefined || picked === "Stop reviewing") break;
-				if (picked === "Skip") continue;
-				if (picked === "Dismiss") {
+				if (picked === undefined) break;
+				const choice = choices.indexOf(picked);
+				if (choice < 0) break;
+				const control = choice < options.length ? undefined : CONTROLS[choice - options.length];
+				if (control === "Stop reviewing") break;
+				if (control === "Skip") continue;
+				if (control === "Dismiss") {
 					if (resolve(ctx, entry, DISMISSED, "dismissed")) answered += 1;
 					continue;
 				}
-				let text = picked;
-				if (picked === "Write an answer...") {
+				let text = options[choice] ?? "";
+				if (control === "Write an answer...") {
 					const written = await ctx.ui.editor(entry.question, entry.recommendation ?? "");
 					if (written === undefined || written.trim() === "") continue;
 					text = written.trim();
@@ -281,7 +289,6 @@ export function registerQuestions(
 
 	const startPolling = (ctx: QuestionsContext): void => {
 		if (poll !== undefined) return;
-		lastSeenMtimeMs = queueMtimeMs(file);
 		poll = runtime.setInterval(() => {
 			const mtime = queueMtimeMs(file);
 			if (mtime === lastSeenMtimeMs) return;
@@ -293,6 +300,11 @@ export function registerQuestions(
 	};
 
 	pi.on("session_start", (_event, ctx) => {
+		// Snapshot the poll baseline BEFORE the delivery read. The other order
+		// loses a wake-up: an answer appended between the read and the snapshot
+		// would be baked into the baseline as already-seen, so the poll would not
+		// fire and a parked asker would wait for an unrelated queue write.
+		lastSeenMtimeMs = queueMtimeMs(file);
 		// Answers that landed while this session was not running.
 		deliverAnswers(ctx, false);
 		startPolling(ctx);

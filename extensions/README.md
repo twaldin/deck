@@ -200,10 +200,15 @@ Three pieces:
 - **`/questions` command** — from **any** pi session in the same pi home, lists
   every open question (urgency, age, asking session, cwd, context,
   recommendation) and walks the captain through them. The agent's own `options`
-  become direct picks, alongside `Write an answer...`, `Dismiss`, `Skip`, and
-  `Stop reviewing`.
+  become direct picks (numbered `1.`, `2.`, ...), followed by `Write an
+  answer...`, `Dismiss`, `Skip`, and `Stop reviewing`. Choices are matched by
+  **position, never by label**: an agent may legitimately offer an option named
+  `Dismiss`, and comparing display strings would silently turn picking it into a
+  control action.
 - **Delivery back** — answers reach the asking session on `session_start`, on
-  `agent_settled`, and via a 15s queue-mtime poll. The poll matters: an agent
+  `agent_settled`, and via a 15s queue-mtime poll. Both handlers snapshot the
+  poll baseline *before* their delivery read, so an answer landing in between is
+  not baked into the baseline as already-seen. The poll matters: an agent
   that queued a question and parked emits no further lifecycle events, so
   without it the answer would sit unread. Delivery uses `pi.sendMessage(...,
   { triggerTurn: true })` to wake that parked agent.

@@ -188,7 +188,8 @@ try {
 	if (!title.includes(askerState.data?.sessionId ?? "\u0000")) {
 		throw new Error(`Captain dialog did not attribute the asking session: ${title}`);
 	}
-	if (!(dialog.options ?? []).includes("flag")) {
+	// Agent options are numbered so they can never collide with control labels.
+	if (!(dialog.options ?? []).includes("1. flag")) {
 		throw new Error(`Captain dialog lost the agent's options: ${JSON.stringify(dialog.options)}`);
 	}
 
@@ -199,7 +200,7 @@ try {
 			record.method === "notify" &&
 			String(record.message ?? "").includes("Resolved"),
 	);
-	await captain.send({ type: "extension_ui_response", id: dialog.id, value: "flag" });
+	await captain.send({ type: "extension_ui_response", id: dialog.id, value: "1. flag" });
 	const summary = await captainDone;
 	const answered = readQuestions(queuePath);
 	if (answered[0]?.status !== "answered" || answered[0]?.answer !== "flag") {

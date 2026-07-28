@@ -321,8 +321,9 @@ describe("questions extension", () => {
 			.get("ask_captain")!
 			.execute("c1", { question: "Flag or not?", options: ["flag", "no flag"] }, undefined, undefined, asker);
 
-		// The captain reviews from a DIFFERENT session.
-		const captain = fakeContext("session-captain", ["flag"]);
+		// The captain reviews from a DIFFERENT session. Agent options are numbered
+		// so they can never collide with the control labels.
+		const captain = fakeContext("session-captain", ["1. flag"]);
 		await pi.commands.get("questions")!.handler("", captain);
 		expect(captain.prompts[0]).toContain("Flag or not?");
 		expect(openQuestions(file)).toHaveLength(0);
@@ -391,9 +392,14 @@ describe("questions extension", () => {
 		const file = freshFile();
 		const pi = new Harness();
 		registerQuestions(pi as any, { DECK_QUESTIONS_FILE: file }, pi.runtime);
-		const asked = ask(file, { question: "Flag?", sessionId: "session-a", cwd: "/" });
+		const asked = ask(file, {
+			question: "Flag?",
+			options: ["flag"],
+			sessionId: "session-a",
+			cwd: "/",
+		});
 		// Another captain session resolved it after this one listed it.
-		const captain = fakeContext("session-captain", ["flag"]);
+		const captain = fakeContext("session-captain", ["1. flag"]);
 		const originalSelect = captain.ui.select;
 		captain.ui.select = async (title: string) => {
 			answer(file, asked.id, "unguarded");
@@ -427,6 +433,36 @@ describe("questions extension", () => {
 		expect(byQuestion.get("Q3")!.status).toBe("open");
 		expect(byQuestion.get("Q4")!.status).toBe("open");
 		expect(captain.notices.at(-1)).toContain("Resolved 2 of 4");
+	});
+
+	test("an agent option named like a control is still selectable as an answer", async () => {
+		// Matching choices by display string would turn picking the agent's own
+		// "Dismiss" option into a dismissal.
+		const file = freshFile();
+		const pi = new Harness();
+		registerQuestions(pi as any, { DECK_QUESTIONS_FILE: file }, pi.runtime);
+		ask(file, {
+			question: "Q",
+			options: ["Dismiss", "Skip", "Stop reviewing", "Write an answer..."],
+			sessionId: "session-a",
+			cwd: "/",
+		});
+
+		const captain = fakeContext("session-captain", ["1. Dismiss"]);
+		await pi.commands.get("questions")!.handler("", captain);
+		const [entry] = readQuestions(file);
+		expect(entry?.status).toBe("answered");
+		expect(entry?.answer).toBe("Dismiss");
+	});
+
+	test("the real controls still work when the agent shadows their labels", async () => {
+		const file = freshFile();
+		const pi = new Harness();
+		registerQuestions(pi as any, { DECK_QUESTIONS_FILE: file }, pi.runtime);
+		ask(file, { question: "Q", options: ["Dismiss"], sessionId: "session-a", cwd: "/" });
+		const captain = fakeContext("session-captain", ["Dismiss"]);
+		await pi.commands.get("questions")!.handler("", captain);
+		expect(readQuestions(file)[0]?.status).toBe("dismissed");
 	});
 
 	test("a truncated captain answer is reported, not silently clipped", async () => {
