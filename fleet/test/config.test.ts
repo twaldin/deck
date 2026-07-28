@@ -9,6 +9,7 @@ describe("parseArgs", () => {
 		expect(config.smithersWorkspaces).toContain("/work");
 		expect(config.smithersWorkspaces).toContain("/x/fm2/workflows");
 		expect(config.color).toBe(false); // not a tty
+		expect(config.verbose).toBe(false);
 	});
 
 	test("clamps interval into the 1-5s band", () => {
@@ -19,13 +20,14 @@ describe("parseArgs", () => {
 
 	test("--once and --no-color and repeated --workspace", () => {
 		const { config } = parseArgs(
-			["--once", "--no-color", "--workspace", "/a", "--workspace", "/b"],
+			["--once", "--verbose", "--no-color", "--workspace", "/a", "--workspace", "/b"],
 			{},
 			"/w",
 			true,
 		);
 		expect(config.once).toBe(true);
 		expect(config.color).toBe(false);
+		expect(config.verbose).toBe(true);
 		expect(config.smithersWorkspaces).toEqual(["/a", "/b"]);
 	});
 

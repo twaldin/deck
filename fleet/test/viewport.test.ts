@@ -23,18 +23,16 @@ describe("fitFrame", () => {
 		expect(Bun.stringWidth(frame[1]!)).toBeLessThanOrEqual(5);
 	});
 
-	test("preserves the diagnostics footer when fitting a dashboard", () => {
+	test("preserves the compact source-health footer when fitting a dashboard", () => {
 		const frame = fitFrame(
-			["Fleet", "task 1", "task 2", "task 3", "", "Sources", "MISSING smithers", "ok backlog"],
-			6,
+			["Fleet", "task 1", "task 2", "task 3", "sources: fm ok · backlog ok · smithers absent · broker skipped"],
+			4,
 		);
 		expect(frame).toEqual([
 			"Fleet",
 			"task 1",
-			"task 2",
-			"… 3 lines omitted",
-			"Sources",
-			"MISSING smithers",
+			"… 2 lines omitted",
+			"sources: fm ok · backlog ok · smithers absent · broker skipped",
 		]);
 	});
 });

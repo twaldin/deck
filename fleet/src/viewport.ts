@@ -10,7 +10,7 @@ export function fitFrame(lines: readonly string[], rows: number, width?: number)
 	if (rowBudget === 0) return [];
 	if (lines.length <= rowBudget) return [...lines];
 
-	const sourcesIndex = lines.findIndex((line) => stripAnsi(line).trim() === "Sources");
+	const sourcesIndex = lines.findIndex((line) => stripAnsi(line).trim().startsWith("sources:"));
 	let headCount = rowBudget - 1;
 	let tail: readonly string[] = [];
 	if (sourcesIndex > 0 && rowBudget >= 3) {

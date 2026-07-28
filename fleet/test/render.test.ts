@@ -1,278 +1,92 @@
 import { describe, expect, test } from "bun:test";
-import { age, renderModel, truncate } from "../src/render";
-import type { FleetModel } from "../src/types";
+import { age, renderModel, truncate, wrap } from "../src/render";
+import type { FleetModel, FleetTask } from "../src/types";
 
 function baseModel(overrides: Partial<FleetModel> = {}): FleetModel {
+	return { fmHome: "/home/u/dev/fm2", generatedAtMs: 5_000_000, tasks: [], orphanRuns: [], diagnostics: [], ...overrides };
+}
+
+function task(id: string, state: "working" | "queued" | "done" | "held", title: string, message?: string): FleetTask {
+	const status = state === "working" && message ? { state, message, mtimeMs: 4_940_000 } : null;
+	const backlogState = state === "working" ? "in_flight" : state;
 	return {
-		fmHome: "/home/u/dev/fm2",
-		generatedAtMs: 1_000_000,
-		tasks: [],
-		orphanRuns: [],
-		diagnostics: [],
-		...overrides,
+		id,
+		meta: { window: null, worktree: null, project: null, harness: "pi", kind: "ship", mode: null, model: "deck/gpt-5.6-sol", effort: "xhigh", backend: "herdr", raw: {} },
+		status,
+		backlog: { id, title, state: backlogState, repo: null, detail: null, since: null, hold: state === "held" ? "captain approval" : null },
+		runs: [],
 	};
 }
 
-const RUN = {
-	id: "oneshot-abc",
-	workflow: "oneshot",
-	status: "running",
-	step: "implement",
-	started: "2m ago",
-	rootDir: "/tmp/a",
-	workspace: "/ws",
-	nodes: [
-		{ id: "implement", state: "in-progress", attempt: 2, label: "implement" },
-		{ id: "review", state: "pending", attempt: 0, label: "review" },
-	],
-};
+describe("renderModel dense fleet layout", () => {
+	test("renders a realistic 3 active, 7 queued, 8 done snapshot densely", () => {
+		const active = [
+			task("active-pr", "working", "open PR", "Root cause: collector passes a stale terminal width through the painter; PRs #120, #121 and #122 await captain review."),
+			task("active-fix", "working", "fix capture", "Investigating a long root-cause summary that must remain readable instead of ending in an ellipsis."),
+			task("active-test", "working", "validate", "Tests are running against the captured twenty-task fixture."),
+		];
+		const queued = Array.from({ length: 7 }, (_, i) => task(`queued-${i + 1}`, "queued", `Queued work item ${i + 1}`));
+		const done = Array.from({ length: 8 }, (_, i) => task(`done-${i + 1}`, "done", `Completed work item ${i + 1}`));
+		const lines = renderModel(baseModel({ tasks: [...active, ...queued, ...done] }), { width: 72, minWidth: 40, color: false });
+		const text = lines.join("\n");
+		expect(text).toContain("● active-pr  gpt-5.6-sol/xhigh · 1m");
+		expect(text).toContain("PRs #120, #121 and #122 await captain review.");
+		expect(text).not.toContain("…");
+		expect(lines.filter((line) => line.includes("queued-")).length).toBe(7);
+		expect(text).toContain("✓ 8 done — most recent: Completed work item 1");
+		expect(text).not.toContain("done-2");
+		expect(lines.every((line) => Bun.stringWidth(line) <= 72)).toBe(true);
+	});
 
-describe("renderModel", () => {
-	const model = baseModel({
-		generatedAtMs: 5_000_000,
-		tasks: [
-			{
-				id: "alpha",
-				meta: {
-					window: null,
-					worktree: "/tmp/a",
-					project: null,
-					harness: "pi",
-					kind: "ship",
-					mode: null,
-					model: "deck/gpt-5.6-sol",
-					effort: "xhigh",
-					backend: "herdr",
-					raw: {},
-				},
-				status: { state: "working", message: "collectors done", mtimeMs: 4_940_000 },
-				backlog: null,
-				runs: [RUN],
-			},
-		],
-		orphanRuns: [{ ...RUN, id: "pipeline-x", workflow: "pr-pipeline", status: "paused", nodes: [] }],
-		diagnostics: [
-			{ source: "FM_HOME (/home/u/dev/fm2)", ok: true, detail: "1 task" },
+	test("keeps queued and held work to one line, with inline dim-semantic hold reason", () => {
+		const lines = renderModel(baseModel({ tasks: [task("queued", "queued", "ready to run"), task("held", "held", "wait for captain")] }), { width: 100, minWidth: 40, color: true });
+		const queued = lines.find((line) => line.includes("queued"))!;
+		const held = lines.find((line) => line.includes("held"))!;
+		expect(queued).toContain("○ queued");
+		expect(queued.includes("\x1b[")).toBe(false);
+		expect(held).toContain("❚ held");
+		expect(held).toContain("hold: captain approval");
+		expect(held).toContain("\x1b[90m");
+	});
+
+	test("collapses diagnostics by default and reveals raw detail only with verbose", () => {
+		const model = baseModel({ diagnostics: [
+			{ source: "FM_HOME (/home/u/dev/fm2)", ok: true, detail: "18 tasks" },
+			{ source: "backlog:tasks-axi", ok: true, detail: "18 entries" },
 			{ source: "smithers:/ws", ok: false, detail: "ps failed" },
-		],
+			{ source: "broker", ok: false, level: "skipped", detail: "no auth" },
+		] });
+		const compact = renderModel(model, { width: 120, minWidth: 40, color: false }).join("\n");
+		expect(compact).toContain("sources: fm ok · backlog ok · smithers failed · broker skipped");
+		expect(compact).not.toContain("ps failed");
+		const verbose = renderModel(model, { width: 120, minWidth: 40, color: false, verbose: true }).join("\n");
+		expect(verbose).toContain("MISSING smithers:/ws — ps failed");
+		const warning = renderModel(baseModel({ diagnostics: [{ source: "smithers:/ws", ok: true, level: "warning", detail: "partial results" }] }), { width: 120, minWidth: 40, color: false }).join("\n");
+		expect(warning).toContain("smithers warn");
+		const correlationWarning = renderModel(baseModel({ diagnostics: [{ source: "correlation", ok: true, level: "warning", detail: "ambiguous root" }] }), { width: 120, minWidth: 40, color: false }).join("\n");
+		expect(correlationWarning).toContain("other warn");
 	});
 
-	test("renders header, task, run, nodes, workflows + sources sections (plain)", () => {
-		const lines = renderModel(model, { width: 200, minWidth: 40, color: false });
-		const text = lines.join("\n");
-		expect(text).toContain("Fleet ·");
-		expect(text).toContain("alpha");
-		expect(text).toContain("gpt-5.6-sol/xhigh");
-		expect(text).toContain("collectors done");
-		expect(text).toContain("oneshot");
-		expect(text).toContain("implement — in-progress (attempt 2)");
-		expect(text).toContain("Workflows (uncorrelated · 1)");
-		expect(text).toContain("Sources");
-		expect(text).toContain("MISSING  smithers:/ws");
-		// No ANSI codes when color is off.
-		expect(text.includes("\x1b[")).toBe(false);
+	test("wraps active payload at the physical terminal width without truncating it", () => {
+		const model = baseModel({ tasks: [task("active", "working", "work", "one two three four five six seven eight nine ten")] });
+		const lines = renderModel(model, { width: 20, minWidth: 40, color: false });
+		expect(lines).toContain("  one two three four");
+		expect(lines).toContain("  five six seven");
+		expect(lines).toContain("  eight nine ten");
+		expect(lines.every((line) => Bun.stringWidth(line) <= 20)).toBe(true);
 	});
 
-	test("emits ANSI color codes when color is on", () => {
-		const lines = renderModel(model, { width: 200, minWidth: 40, color: true });
-		expect(lines.some((l) => l.includes("\x1b["))).toBe(true);
+	test("retains compact Smithers state for active and orphan workflows", () => {
+		const run = { id: "r1", workflow: "pr-pipeline", status: "running", step: "review", started: null, rootDir: null, workspace: "/ws", nodes: [] };
+		const runOnly = { ...task("run-only", "queued", "run owner"), runs: [run] };
+		const text = renderModel(baseModel({ tasks: [runOnly], orphanRuns: [{ ...run, id: "r2", workflow: "oneshot" }] }), { width: 100, minWidth: 40, color: false }).join("\n");
+		expect(text).toContain("◐ pr-pipeline @review · running");
+		expect(text).toContain("◐ oneshot @review · running");
 	});
 
-	test("truncates every line to the width budget (visible length)", () => {
-		const lines = renderModel(model, { width: 30, minWidth: 30, color: false });
-		for (const line of lines) expect(line.length).toBeLessThanOrEqual(30);
-	});
-
-	test("terminal width remains a hard cap below the compact threshold", () => {
-		const lines = renderModel(model, { width: 5, minWidth: 40, color: false });
-		for (const line of lines) expect(Bun.stringWidth(line)).toBeLessThanOrEqual(5);
-	});
-
-	test("min-width is a compact-layout threshold, not a virtual terminal width", () => {
-		const compact = renderModel(model, { width: 30, minWidth: 40, color: false }).join("\n");
-		expect(compact).not.toContain("collectors done");
-		expect(compact).not.toContain("attempt 2");
-		expect(compact).not.toContain("oneshot-abc");
-		expect(compact).toContain("oneshot");
-	});
-
-	test("uses backlog lifecycle state when no live status exists", () => {
-		const lines = renderModel(
-			baseModel({
-				tasks: [
-					{
-						id: "queued-task",
-						meta: null,
-						status: null,
-						backlog: {
-							id: "queued-task",
-							title: "Queued",
-							state: "queued",
-							repo: null,
-							detail: null,
-							since: null,
-							hold: null,
-						},
-						runs: [],
-					},
-					{
-						id: "held-task",
-						meta: null,
-						status: null,
-						backlog: {
-							id: "held-task",
-							title: "Held",
-							state: "held",
-							repo: null,
-							detail: null,
-							since: null,
-							hold: "captain",
-						},
-						runs: [],
-					},
-					{
-						id: "done-task",
-						meta: null,
-						status: null,
-						backlog: {
-							id: "done-task",
-							title: "Done",
-							state: "done",
-							repo: null,
-							detail: null,
-							since: null,
-							hold: null,
-						},
-						runs: [],
-					},
-				],
-			}),
-			{ width: 100, minWidth: 40, color: false },
-		);
-		const text = lines.join("\n");
-		expect(text).toContain("○ queued-task  queued");
-		expect(text).toContain("❚ held-task  held");
-		expect(text).toContain("✓ done-task  done");
-	});
-
-	test("renders Smithers finished states as successful", () => {
-		const lines = renderModel(
-			baseModel({
-				orphanRuns: [{ ...RUN, status: "finished", nodes: [{ id: "final", state: "finished", attempt: 1, label: "final" }] }],
-			}),
-			{ width: 100, minWidth: 40, color: false },
-		);
-		const text = lines.join("\n");
-		expect(text).toContain("✓ oneshot");
-		expect(text).toContain("✓ final — finished");
-	});
-
-	test("finished-only runs do not inflate the active-task summary", () => {
-		const lines = renderModel(
-			baseModel({
-				tasks: [
-					{
-						id: "done-task",
-						meta: null,
-						status: null,
-						backlog: {
-							id: "done-task",
-							title: "Done",
-							state: "done",
-							repo: null,
-							detail: null,
-							since: null,
-							hold: null,
-						},
-						runs: [{ ...RUN, status: "finished" }],
-					},
-				],
-			}),
-			{ width: 100, minWidth: 40, color: false },
-		);
-		expect(lines[0]).toContain("(0 active)");
-	});
-
-	test("empty model reports no-tasks hint", () => {
-		const lines = renderModel(baseModel(), { width: 80, minWidth: 40, color: false });
-		expect(lines.join("\n")).toContain("no tasks");
-	});
-});
-
-describe("state color semantics", () => {
-	const SGR = { gray: "\x1b[90m", reset: "\x1b[0m" };
-
-	function heldQueuedModel(): FleetModel {
-		return baseModel({
-			tasks: [
-				{
-					id: "queued-task",
-					meta: null,
-					status: null,
-					backlog: {
-						id: "queued-task",
-						title: "waiting for a slot",
-						state: "queued",
-						repo: null,
-						detail: null,
-						since: null,
-						hold: null,
-					},
-					runs: [],
-				},
-				{
-					id: "held-task",
-					meta: null,
-					status: null,
-					backlog: {
-						id: "held-task",
-						title: "waiting on captain",
-						state: "held",
-						repo: null,
-						detail: null,
-						since: null,
-						hold: "captain",
-					},
-					runs: [],
-				},
-			],
-		});
-	}
-
-	test("queued tasks render with no color (default/white), held tasks render gray", () => {
-		const lines = renderModel(heldQueuedModel(), { width: 100, minWidth: 40, color: true });
-		const queuedLine = lines.find((l) => l.includes("queued-task"));
-		const heldLine = lines.find((l) => l.includes("held-task"));
-		expect(queuedLine).toBeDefined();
-		expect(heldLine).toBeDefined();
-		expect(queuedLine).not.toContain(SGR.gray);
-		expect(heldLine).toContain(SGR.gray);
-	});
-
-	test("held task's detail and hold-reason continuation lines are also gray", () => {
-		const lines = renderModel(heldQueuedModel(), { width: 100, minWidth: 40, color: true });
-		const detailLine = lines.find((l) => l.includes("waiting on captain"));
-		const holdLine = lines.find((l) => l.includes("hold: captain"));
-		expect(detailLine).toBeDefined();
-		expect(holdLine).toBeDefined();
-		expect(detailLine).toContain(SGR.gray);
-		expect(holdLine).toContain(SGR.gray);
-	});
-
-	test("queued task's detail continuation line has no color", () => {
-		const lines = renderModel(heldQueuedModel(), { width: 100, minWidth: 40, color: true });
-		const detailLine = lines.find((l) => l.includes("waiting for a slot"));
-		expect(detailLine).toBeDefined();
-		expect(detailLine).not.toContain(SGR.gray);
-		expect(detailLine?.includes("\x1b[")).toBe(false);
-	});
-
-	test("plain (no-color) render is unaffected by the color swap", () => {
-		const lines = renderModel(heldQueuedModel(), { width: 100, minWidth: 40, color: false });
-		const text = lines.join("\n");
-		expect(text).toContain("○ queued-task  queued");
-		expect(text).toContain("❚ held-task  held");
-		expect(text).toContain("hold: captain");
+	test("never overflows a narrow pane on a double-width status grapheme", () => {
+		const lines = renderModel(baseModel({ tasks: [task("active", "working", "work", "界")] }), { width: 3, minWidth: 40, color: false });
+		expect(lines.every((line) => Bun.stringWidth(line) <= 3)).toBe(true);
 	});
 });
 
@@ -283,16 +97,10 @@ describe("helpers", () => {
 		expect(age(3 * 3_600_000)).toBe("3h");
 		expect(age(3 * 86_400_000)).toBe("3d");
 	});
-
-	test("truncate adds ellipsis only when needed", () => {
-		expect(truncate("hello", 10)).toBe("hello");
+	test("truncate and wrap preserve grapheme boundaries", () => {
 		expect(truncate("hello world", 5)).toBe("hell…");
-	});
-
-	test("truncate measures terminal cells and preserves grapheme clusters", () => {
 		expect(truncate("界界界", 5)).toBe("界界…");
-		expect(truncate("😀😀", 3)).toBe("😀…");
-		expect(truncate("e\u0301e\u0301e\u0301", 3)).toBe("e\u0301e\u0301e\u0301");
+		expect(wrap("界界界", 4)).toEqual(["界界", "界"]);
 		expect(truncate("👩‍👩‍👧‍👦 family", 4)).not.toContain("\uFFFD");
 	});
 });

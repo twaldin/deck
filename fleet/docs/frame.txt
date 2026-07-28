@@ -1,33 +1,22 @@
-Fleet · ~/dev/fm2 · 10 tasks (2 active) · 1 runs · 21:28:26
-├─ ● fleet-dashboard-tui  working  gpt-5.6-sol/xhigh  ship  pi  43m
-│    isolated worktree verified; implementation started
-│ └─ ◐ oneshot (oneshot-ms447bsd-90e9781d)  running · @review · 41m ago
-│   ├─ ✓ implement — finished
-│   └─ ◐ review — in-progress
-├─ ● perf-offload-scout  working  claude-opus-5/xhigh  scout  pi  21m
-│    starting baseline measurement of local machine load
-├─ ○ cutover-prep  queued  since 2026-07-27
-│    Prep tomorrow's cutover: disable ~/firstmate, this rig takes the day job
-├─ ○ idle-compaction-extension  queued  since 2026-07-27
-│    pi extension: proactive compaction at idle (cache already cold = free comp…
-├─ ○ pi-domain-context-extension  queued  since 2026-07-27
-│    LATER: pi extension injecting lindy domain doc into crewmate sysprompts
-│    hold: later option; build only when brief-pointer path shows a concrete mi…
-├─ ○ ponytail-adoption  queued  since 2026-07-27
-│    Adopt ponytail (minimalism skill) for crew - claude-family default-on, A/B…
-├─ ○ shadow-old-fm  queued  since 2026-07-27
-│    Shadow the live old firstmate before cutover (BLOCKED on captain word)
-│    hold: old fm live on day job; shadow starts only on captain word
-├─ ✓ build-intake-poller  done
-│    Durable intake list: PRs authored by / review-requested of Tim (+Linear la…
-├─ ✓ build-pr-pipeline-workflow  done
-│    Write the lindy PR pipeline as an executable smithers workflow
-└─ ✓ crew-subagent-rig  done
-     Install pi subagent extension + cross-model agent definitions for all crew
-
-Sources
-  MISSING  smithers:…/fm2/workflows — ps failed
-  ok  FM_HOME (/Users/twaldin/dev/fm2) — 2 tasks (2 meta, 2 status)
-  ok  backlog:tasks-axi — 10 via tasks-axi
-  ok  smithers:…/2/deck — 1 run (1 with rootDir)
-  skipped  broker — skipped (capability auth not wired — TODO seam)
+Fleet · ~/dev/fm2 · 19 tasks (4 active) · 0 runs · 12:15:07
+● eval-action-disabled  claude-opus-5/medium · 1h
+  root cause found — agentActionExecutor reads LIVE account/workspace
+  tool-action policy during eval replay (no policy snapshot is frozen on
+  subTask.evalRun), so an action the real user has since disabled throws
+  ValidatorRejectionError "That action is turned off for the selected
+● eval-compare-crash  claude-opus-5/medium · 17m
+  setup done, base pinned 728f0b6586; tracing ComparisonRunCard render fault
+● eval-stack-recovery  gpt-5.6-sol/xhigh · 14s
+  CI triaged on current heads; propagated typecheck fixes to the lowest owning
+  PRs (#26431/#26487/#26488) and comparison tool-call projection fix to #26414,
+  then restacked/pushed descendants; #25361 Danger findings are under focused
+  verification because they include contract choices
+● fleet-tui-layout  gpt-5.6-terra/medium · 12m
+  isolated branch created; inspecting fleet TUI
+○ box-setup  since 2026-07-27  ReliableSite box: full fleet-host setup (tailnet…
+○ eval-model-comparison-tool  since 2026-07-28  lindy: eval model-comparison to…
+○ eval-slack-llm-mock  since 2026-07-28  lindy (later): slack mocking via LLM c…
+○ pi-domain-context-extension  since 2026-07-27  LATER: pi extension injecting …
+○ takeover-loose-ends  since 2026-07-28  lindy takeover loose ends: Linear writ…
+✓ 10 done — most recent: Prep tomorrow's cutover: disable ~/firstmate, this rig…
+sources: fm ok · backlog ok · smithers failed · broker skipped

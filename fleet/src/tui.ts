@@ -25,7 +25,7 @@ export async function renderFrame(
 	signal?: AbortSignal,
 ): Promise<string[]> {
 	const model = await buildModel(config, deps, signal);
-	return renderModel(model, { width, minWidth: config.minWidth, color: config.color });
+	return renderModel(model, { width, minWidth: config.minWidth, color: config.color, verbose: config.verbose });
 }
 
 /**
