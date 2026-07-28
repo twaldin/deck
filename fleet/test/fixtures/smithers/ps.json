@@ -1,0 +1,21 @@
+{
+  "runs": [
+    {
+      "id": "oneshot-abc123",
+      "workflow": "oneshot",
+      "workflowId": "oneshot",
+      "status": "running",
+      "dbStatus": "running",
+      "state": "running",
+      "step": "implement",
+      "started": "2m ago"
+    },
+    {
+      "id": "pr-pipeline-def456",
+      "workflow": "pr-pipeline",
+      "status": "paused",
+      "step": "review",
+      "started": "10m ago"
+    }
+  ]
+}

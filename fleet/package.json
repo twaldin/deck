@@ -1,0 +1,19 @@
+{
+	"name": "@deck/fleet",
+	"version": "0.1.0",
+	"type": "module",
+	"private": true,
+	"module": "./src/main.ts",
+	"bin": {
+		"deck-fleet": "./bin/deck-fleet"
+	},
+	"scripts": {
+		"start": "bun run bin/deck-fleet",
+		"test": "bun test",
+		"typecheck": "bunx tsc --noEmit"
+	},
+	"devDependencies": {
+		"@types/bun": "latest",
+		"typescript": "^5"
+	}
+}

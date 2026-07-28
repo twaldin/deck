@@ -1,0 +1,33 @@
+Fleet · ~/dev/fm2 · 10 tasks (2 active) · 1 runs · 21:28:26
+├─ ● fleet-dashboard-tui  working  gpt-5.6-sol/xhigh  ship  pi  43m
+│    isolated worktree verified; implementation started
+│ └─ ◐ oneshot (oneshot-ms447bsd-90e9781d)  running · @review · 41m ago
+│   ├─ ✓ implement — finished
+│   └─ ◐ review — in-progress
+├─ ● perf-offload-scout  working  claude-opus-5/xhigh  scout  pi  21m
+│    starting baseline measurement of local machine load
+├─ ○ cutover-prep  queued  since 2026-07-27
+│    Prep tomorrow's cutover: disable ~/firstmate, this rig takes the day job
+├─ ○ idle-compaction-extension  queued  since 2026-07-27
+│    pi extension: proactive compaction at idle (cache already cold = free comp…
+├─ ○ pi-domain-context-extension  queued  since 2026-07-27
+│    LATER: pi extension injecting lindy domain doc into crewmate sysprompts
+│    hold: later option; build only when brief-pointer path shows a concrete mi…
+├─ ○ ponytail-adoption  queued  since 2026-07-27
+│    Adopt ponytail (minimalism skill) for crew - claude-family default-on, A/B…
+├─ ○ shadow-old-fm  queued  since 2026-07-27
+│    Shadow the live old firstmate before cutover (BLOCKED on captain word)
+│    hold: old fm live on day job; shadow starts only on captain word
+├─ ✓ build-intake-poller  done
+│    Durable intake list: PRs authored by / review-requested of Tim (+Linear la…
+├─ ✓ build-pr-pipeline-workflow  done
+│    Write the lindy PR pipeline as an executable smithers workflow
+└─ ✓ crew-subagent-rig  done
+     Install pi subagent extension + cross-model agent definitions for all crew
+
+Sources
+  MISSING  smithers:…/fm2/workflows — ps failed
+  ok  FM_HOME (/Users/twaldin/dev/fm2) — 2 tasks (2 meta, 2 status)
+  ok  backlog:tasks-axi — 10 via tasks-axi
+  ok  smithers:…/2/deck — 1 run (1 with rootDir)
+  skipped  broker — skipped (capability auth not wired — TODO seam)

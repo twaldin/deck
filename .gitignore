@@ -1,2 +1,5 @@
 node_modules/
 *.tsbuildinfo
+/.smithers/
+/smithers.db
+/smithers.db-*
