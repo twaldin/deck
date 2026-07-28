@@ -1,0 +1,22 @@
+{
+  "ticket": "LIN-123",
+  "repo": "lindy-ai/lindy",
+  "worktree": "/tmp/lindy-wt",
+  "branch": "fm/lin-123-rate-limit",
+  "dryRun": true,
+  "brief": {
+    "ticket": "LIN-123",
+    "title": "Add rate limiting to /api/foo",
+    "summary": "Rate-limit the /api/foo endpoint to 100 req/min per user",
+    "acceptanceCriteria": [
+      "429 returned after 100 req/min per user",
+      "e2e test proves the limit and the 429 body shape"
+    ],
+    "decisionLedger": [
+      { "question": "Which store backs the counters?", "decision": "redis", "open": false }
+    ],
+    "killSwitch": { "kind": "named", "name": "RATE_LIMIT_ENABLED env flag" },
+    "breakSignal": "sentry:lindy-api + #on-call-issues",
+    "blastRadius": "all /api/foo callers; worst case: legitimate traffic 429s"
+  }
+}

@@ -2,6 +2,14 @@
 
 This directory is a Smithers 0.30.0 workflow workspace. The generated pack lives in `.smithers/`; Deck-authored workflows live beside it so they remain small and reviewable.
 
+- `spike/hello-deck.tsx` — the durability spike (kill -9 drill accepted; see below).
+- `pr-pipeline/` — the executable lindy PR pipeline (enforced SOP workflow on plain
+  smithers; own `package.json` pinning smithers-orchestrator 0.30.0). See
+  `pr-pipeline/README.md` for dispatch/babysit instructions. Version note: run it
+  with `bunx smithers-orchestrator@0.30.0 ...` — an unpinned `bunx` from a directory
+  without a package.json can auto-resolve a NEWER cached CLI and skew against the
+  workspace's pinned runtime.
+
 ## Setup and health check
 
 Smithers is project-scoped. Do not install it globally, and do not use the unrelated `smithers` npm package.
