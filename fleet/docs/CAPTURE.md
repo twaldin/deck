@@ -20,15 +20,13 @@ FM_HOME=~/dev/fm2 bun run fleet/bin/deck-fleet --once --color \
 
 What the capture demonstrates end-to-end:
 
-- The live `oneshot` Smithers run is **correlated to its owning task**
-  (`fleet-dashboard-tui`) because the run's `rootDir` equals that task's
-  `meta.worktree`, and its nodes (`implement` finished, `review` in-progress)
-  render as state-colored sub-entries.
-- Backlog-only tasks (no live agent) still list, sourced via `tasks-axi`.
-- The configured second Smithers workspace path is unavailable, so its failed
-  public CLI probe degrades to a `MISSING` diagnostic in the `Sources` footer
-  rather than aborting the frame.
-- The broker source reports its intentional TODO-seam skip.
+- Active tasks have one compact identity row and their full status payload
+  wraps to the actual terminal width; it is never ellipsized.
+- Queued tasks take one row; completed history is one `✓ N done` summary.
+- Source health is one quiet, operator-readable line. Use `--verbose` to show
+  the individual collector diagnostics (including failed public CLI probes).
+- `frame.txt` and `frame.ansi` are the after captures for the dense layout;
+  the prior vertical-tree capture is available from the parent revision.
 
 `frame.ansi` contains raw ANSI SGR escapes; view it with `cat fleet/docs/frame.ansi`
 in a terminal (not a pager that escapes control bytes).

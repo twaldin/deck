@@ -15,6 +15,8 @@ export interface FleetConfig {
 	once: boolean;
 	/** Width threshold below which the renderer switches to compact layout. */
 	minWidth: number;
+	/** Show per-source diagnostic detail instead of the compact health summary. */
+	verbose?: boolean;
 }
 
 export const MIN_INTERVAL_SEC = 1;
@@ -65,6 +67,7 @@ export function parseArgs(
 	let intervalSec = DEFAULT_INTERVAL_SEC;
 	let minWidth = DEFAULT_MIN_WIDTH;
 	let once = false;
+	let verbose = false;
 	let help = false;
 	// Color defaults on for a TTY, off when piped/captured or NO_COLOR is set.
 	let color = isTty && !env.NO_COLOR;
@@ -78,6 +81,9 @@ export function parseArgs(
 				break;
 			case "--once":
 				once = true;
+				break;
+			case "--verbose":
+				verbose = true;
 				break;
 			case "--no-color":
 				color = false;
@@ -129,6 +135,7 @@ export function parseArgs(
 			color,
 			once,
 			minWidth,
+			verbose,
 		},
 	};
 }
@@ -144,6 +151,7 @@ function fail(message: string): ParsedArgs {
 			color: false,
 			once: true,
 			minWidth: DEFAULT_MIN_WIDTH,
+			verbose: false,
 		},
 	};
 }
@@ -163,6 +171,7 @@ OPTIONS
   --interval <sec>     Refresh interval, clamped to 1–5s (default: 2)
   --min-width <n>      Compact-layout threshold for narrow panes (default: 48)
   --once               Render a single frame and exit (capture/testing)
+  --verbose            Show per-source diagnostic detail
   --no-color           Disable ANSI color (also implied when piped or NO_COLOR is set)
   --color              Force ANSI color even when not a TTY
   -h, --help           Show this help

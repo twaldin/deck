@@ -1,33 +1,22 @@
-[1mFleet · ~/dev/fm2 · 10 tasks (2 active) · 1 runs · 21:28:27[0m
-[36m├─ ● fleet-dashboard-tui  working  gpt-5.6-sol/xhigh  ship  pi  43m[0m
-│    isolated worktree verified; implementation started
-[36m│ └─ ◐ oneshot (oneshot-ms447bsd-90e9781d)  running · @review · 41m ago[0m
-[32m│   ├─ ✓ implement — finished[0m
-[36m│   └─ ◐ review — in-progress[0m
-[36m├─ ● perf-offload-scout  working  claude-opus-5/xhigh  scout  pi  21m[0m
-│    starting baseline measurement of local machine load
-[90m├─ ○ cutover-prep  queued  since 2026-07-27[0m
-│    Prep tomorrow's cutover: disable ~/firstmate, this rig takes the day job
-[90m├─ ○ idle-compaction-extension  queued  since 2026-07-27[0m
-│    pi extension: proactive compaction at idle (cache already cold = free comp…
-[90m├─ ○ pi-domain-context-extension  queued  since 2026-07-27[0m
-│    LATER: pi extension injecting lindy domain doc into crewmate sysprompts
-[35m│    hold: later option; build only when brief-pointer path shows a concrete mi…[0m
-[90m├─ ○ ponytail-adoption  queued  since 2026-07-27[0m
-│    Adopt ponytail (minimalism skill) for crew - claude-family default-on, A/B…
-[90m├─ ○ shadow-old-fm  queued  since 2026-07-27[0m
-│    Shadow the live old firstmate before cutover (BLOCKED on captain word)
-[35m│    hold: old fm live on day job; shadow starts only on captain word[0m
-[32m├─ ✓ build-intake-poller  done[0m
-│    Durable intake list: PRs authored by / review-requested of Tim (+Linear la…
-[32m├─ ✓ build-pr-pipeline-workflow  done[0m
-│    Write the lindy PR pipeline as an executable smithers workflow
-[32m└─ ✓ crew-subagent-rig  done[0m
-     Install pi subagent extension + cross-model agent definitions for all crew
-[90m[0m
-[1mSources[0m
-[33m  MISSING  smithers:…/fm2/workflows — ps failed[0m
-[90m  ok  FM_HOME (/Users/twaldin/dev/fm2) — 2 tasks (2 meta, 2 status)[0m
-[90m  ok  backlog:tasks-axi — 10 via tasks-axi[0m
-[90m  ok  smithers:…/2/deck — 1 run (1 with rootDir)[0m
-[90m  skipped  broker — skipped (capability auth not wired — TODO seam)[0m
+[1mFleet · ~/dev/fm2 · 19 tasks (4 active) · 0 runs · 12:15:07[0m
+[36m● eval-action-disabled  claude-opus-5/medium · 1h[0m
+[36m  root cause found — agentActionExecutor reads LIVE account/workspace[0m
+[36m  tool-action policy during eval replay (no policy snapshot is frozen on[0m
+[36m  subTask.evalRun), so an action the real user has since disabled throws[0m
+[36m  ValidatorRejectionError "That action is turned off for the selected[0m
+[36m● eval-compare-crash  claude-opus-5/medium · 17m[0m
+[36m  setup done, base pinned 728f0b6586; tracing ComparisonRunCard render fault[0m
+[36m● eval-stack-recovery  gpt-5.6-sol/xhigh · 14s[0m
+[36m  CI triaged on current heads; propagated typecheck fixes to the lowest owning[0m
+[36m  PRs (#26431/#26487/#26488) and comparison tool-call projection fix to #26414,[0m
+[36m  then restacked/pushed descendants; #25361 Danger findings are under focused[0m
+[36m  verification because they include contract choices[0m
+[36m● fleet-tui-layout  gpt-5.6-terra/medium · 12m[0m
+[36m  isolated branch created; inspecting fleet TUI[0m
+○ box-setup  since 2026-07-27  ReliableSite box: full fleet-host setup (tailnet…
+○ eval-model-comparison-tool  since 2026-07-28  lindy: eval model-comparison to…
+○ eval-slack-llm-mock  since 2026-07-28  lindy (later): slack mocking via LLM c…
+○ pi-domain-context-extension  since 2026-07-27  LATER: pi extension injecting …
+○ takeover-loose-ends  since 2026-07-28  lindy takeover loose ends: Linear writ…
+[32m✓ 10 done — most recent: Prep tomorrow's cutover: disable ~/firstmate, this rig…[0m
+[33msources: fm ok · backlog ok · smithers failed · broker skipped[0m
