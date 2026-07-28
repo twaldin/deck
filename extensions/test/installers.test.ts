@@ -14,7 +14,17 @@
  *
  * These run the real installers into a temp INSTALL_TARGET, never ~/.pi.
  */
-import { existsSync, lstatSync, mkdtempSync, readdirSync, realpathSync, rmSync } from "node:fs";
+import {
+	existsSync,
+	lstatSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	realpathSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { afterAll, describe, expect, test } from "bun:test";
@@ -41,15 +51,32 @@ function runInNode(source: string): { exitCode: number; stdout: string; stderr: 
 	};
 }
 
-function install(script: string): string {
-	const target = mkdtempSync(path.join(tmpdir(), "deck-installer-"));
-	targets.push(target);
+function runInstaller(
+	script: string,
+	target: string,
+): { exitCode: number; stdout: string; stderr: string } {
 	const result = Bun.spawnSync([path.join(repoRoot, script)], {
 		env: { ...process.env, INSTALL_TARGET: target },
 		stdout: "pipe",
 		stderr: "pipe",
 	});
-	expect(result.stderr.toString()).toBe("");
+	return {
+		exitCode: result.exitCode,
+		stdout: result.stdout.toString(),
+		stderr: result.stderr.toString(),
+	};
+}
+
+function freshTarget(): string {
+	const target = mkdtempSync(path.join(tmpdir(), "deck-installer-"));
+	targets.push(target);
+	return target;
+}
+
+function install(script: string): string {
+	const target = freshTarget();
+	const result = runInstaller(script, target);
+	expect(result.stderr).toBe("");
 	expect(result.exitCode).toBe(0);
 	return target;
 }
@@ -156,12 +183,48 @@ describe("idle-compaction installer", () => {
 
 	test("reruns converge", () => {
 		const before = readdirSync(extensionDir).sort();
-		const result = Bun.spawnSync([path.join(repoRoot, "extensions/install.sh")], {
-			env: { ...process.env, INSTALL_TARGET: target },
-			stdout: "pipe",
-			stderr: "pipe",
-		});
+		const result = runInstaller("extensions/install.sh", target);
 		expect(result.exitCode).toBe(0);
 		expect(readdirSync(extensionDir).sort()).toEqual(before);
+	});
+});
+
+describe("idle-compaction installer migration from the old flat layout", () => {
+	const flatEntrypoint = "deck-idle-compaction.ts";
+	const flatPolicy = "idle-compaction-policy.ts";
+
+	test("removes stale flat symlinks an earlier README told operators to create", () => {
+		// Writing the good directory is not enough: pi discovers extensions/*.ts,
+		// so a leftover flat entry keeps failing next to a correct install.
+		const target = freshTarget();
+		const extensions = path.join(target, "extensions");
+		mkdirSync(extensions, { recursive: true });
+		symlinkSync(
+			path.join(repoRoot, "extensions/src/idle-compaction.ts"),
+			path.join(extensions, flatEntrypoint),
+		);
+		symlinkSync(
+			path.join(repoRoot, "extensions/src/idle-compaction-policy.ts"),
+			path.join(extensions, flatPolicy),
+		);
+
+		const result = runInstaller("extensions/install.sh", target);
+		expect(result.stderr).toBe("");
+		expect(result.exitCode).toBe(0);
+		expect(readdirSync(extensions)).toEqual(["deck-idle-compaction"]);
+	});
+
+	test("refuses to delete a user-owned file it cannot prove is ours", () => {
+		const target = freshTarget();
+		const extensions = path.join(target, "extensions");
+		mkdirSync(extensions, { recursive: true });
+		const userFile = path.join(extensions, flatEntrypoint);
+		writeFileSync(userFile, "export default function () {}\n");
+
+		const result = runInstaller("extensions/install.sh", target);
+		expect(result.exitCode).not.toBe(0);
+		expect(result.stderr).toMatch(/not a symlink into/);
+		// The operator's file must survive so they can decide what to do with it.
+		expect(existsSync(userFile)).toBe(true);
 	});
 });

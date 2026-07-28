@@ -53,6 +53,15 @@ rejects it with `does not export a valid factory`. Inside one extension
 directory only `index.ts` is an entrypoint, so the sibling stays a plain import
 target. Reruns of the installer converge.
 
+The installer also migrates away from the earlier flat layout, because writing
+the correct directory is not sufficient on its own: a leftover
+`extensions/deck-idle-compaction.ts` or `extensions/idle-compaction-policy.ts`
+is still discovered by pi and still fails, next to an otherwise correct install.
+It removes such an entry only when it is a symlink into this checkout's
+`extensions/src`; a user-owned file of the same name is left untouched and the
+installer exits with an error naming the path, rather than deleting something
+whose provenance it cannot establish.
+
 Then start a new pi process or run `/reload`. This repository does **not**
 install the extension automatically. For a one-off trial without installation:
 
