@@ -1,0 +1,56 @@
+{
+  "runAt": "2026-07-28T20:40:34.315Z",
+  "piVersion": "0.82.0",
+  "model": "deck/claude-haiku-4-5",
+  "extensionPath": "/Users/twaldin/.treehouse/deck-bd7953/1/deck/extensions/src/questions.ts",
+  "queueFile": "queue.jsonl",
+  "askerSessionId": "019faa74-b989-75d3-bf7f-d322c94daf2f",
+  "queued": {
+    "kind": "ask",
+    "id": "q-ms54dxij-kynnum",
+    "question": "Ship the questions extension behind a flag?",
+    "options": [
+      "flag",
+      "unguarded"
+    ],
+    "recommendation": "flag",
+    "urgency": "high",
+    "sessionId": "019faa74-b989-75d3-bf7f-d322c94daf2f",
+    "cwd": "/Users/twaldin/.treehouse/deck-bd7953/1/deck/extensions",
+    "askedAt": 1785271214827,
+    "status": "open",
+    "delivered": false
+  },
+  "captainDialog": {
+    "title": "(1/1) [high] asked 5s ago by session 019faa74-b989-75d3-bf7f-d322c94daf2f\ncwd: /Users/twaldin/.treehouse/deck-bd7953/1/deck/extensions\n\nShip the questions extension behind a flag?\n\nagent recommends: flag",
+    "options": [
+      "1. flag",
+      "2. unguarded",
+      "Write an answer...",
+      "Dismiss",
+      "Skip",
+      "Stop reviewing"
+    ]
+  },
+  "captainSummary": "Resolved 1 of 1 question(s); 0 still open.",
+  "deliveredToAsker": "Captain answered your queued question (q-ms54dxij-kynnum):\nQ: Ship the questions extension behind a flag?\nA: flag",
+  "finalRecord": {
+    "kind": "ask",
+    "id": "q-ms54dxij-kynnum",
+    "question": "Ship the questions extension behind a flag?",
+    "options": [
+      "flag",
+      "unguarded"
+    ],
+    "recommendation": "flag",
+    "urgency": "high",
+    "sessionId": "019faa74-b989-75d3-bf7f-d322c94daf2f",
+    "cwd": "/Users/twaldin/.treehouse/deck-bd7953/1/deck/extensions",
+    "askedAt": 1785271214827,
+    "status": "answered",
+    "delivered": true,
+    "answer": "flag",
+    "answeredAt": 1785271219547,
+    "resolvedBy": "a-ms54e15n-kkk0a4"
+  }
+}

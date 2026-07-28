@@ -34,6 +34,11 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   own extension); and ponytail's CommonJS `hooks/` need
   `ponytail/hooks/package.json` (`type: commonjs`) to survive being copied under
   the vendored `"type": "module"` package. Rationale in each README.
+- **Driving an extension COMMAND over RPC: send, do not `await` the response.**
+  pi emits a `prompt` command's response only after the extension command
+  handler *returns*, so awaiting it before answering the handler's own
+  `extension_ui_request` deadlocks. `extensions/smoke/run-questions-smoke.ts`
+  has the working shape (`send()`, await the dialog, then respond).
 - **Assert extension behavior through `node`, not `bun`.** pi is a
   `#!/usr/bin/env node` CLI and bun's loader is more permissive about CommonJS
   under `"type": "module"`, so bun-only assertions pass while real pi fails.
