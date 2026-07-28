@@ -1,0 +1,4 @@
+{
+  "//": "Deck divergence from upstream DietrichGebert/ponytail: these hook files are CommonJS (require/module.exports). Upstream keeps hooks/ OUTSIDE pi-extension/, so they never inherit its \"type\": \"module\". Deck's install.sh flattens hooks INTO the installed extension directory, which would put them under that ESM scope and break them with \"require is not defined in ES module scope\". This scope marker pins them back to CommonJS wherever they are copied.",
+  "type": "commonjs"
+}

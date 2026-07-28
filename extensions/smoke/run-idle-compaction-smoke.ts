@@ -7,7 +7,12 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 
-const extensionPath = resolve(import.meta.dir, "../src/idle-compaction.ts");
+// Defaults to the in-repo source. Set SMOKE_EXTENSION_PATH to point the same
+// smoke at an INSTALLED layout (e.g. ~/.pi/agent/extensions/deck-idle-compaction),
+// which also proves the installed directory's relative policy import resolves.
+const extensionPath = process.env.SMOKE_EXTENSION_PATH
+	? resolve(process.env.SMOKE_EXTENSION_PATH)
+	: resolve(import.meta.dir, "../src/idle-compaction.ts");
 const sessionDir = resolve(import.meta.dir, ".sessions");
 const evidenceDir = resolve(import.meta.dir, "evidence");
 mkdirSync(sessionDir, { recursive: true });
@@ -208,6 +213,7 @@ try {
 		piVersion,
 		model: "deck/claude-haiku-4-5",
 		config: smokeConfig,
+		extensionPath,
 		sessionFile: basename(state.data?.sessionFile ?? "unknown"),
 		before: before.data?.contextUsage,
 		compaction: compaction.result,
