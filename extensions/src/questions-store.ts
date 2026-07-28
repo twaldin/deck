@@ -100,6 +100,12 @@ export function readQuestions(file: string): Question[] {
 		} else if (event.kind === "answer") {
 			const existing = byId.get(event.id);
 			if (existing === undefined) continue;
+			// Resolution is TERMINAL. Two captains can hold the same /questions
+			// dialog open, and the second one's pick lands after the first answer
+			// was already delivered to the agent. Letting it win would leave the
+			// durable record disagreeing with what the agent was actually told.
+			// First answer wins, everywhere, because every reader folds this log.
+			if (existing.status !== "open") continue;
 			existing.status = event.status;
 			existing.answer = event.answer;
 			existing.answeredAt = event.answeredAt;
@@ -119,6 +125,26 @@ function pick(existing: Question | undefined): Partial<Question> {
 		answeredAt: existing.answeredAt,
 		delivered: existing.delivered,
 	};
+}
+
+/**
+ * Per-event size ceiling. The append-atomicity this store relies on holds for
+ * small writes, and every reader folds the whole log, so one multi-MB event
+ * would degrade every session sharing the queue and make the captain's dialog
+ * unusable. Enforced here as well as in the tool schema: the store is the
+ * boundary every writer crosses.
+ */
+export const MAX_EVENT_BYTES = 8 * 1024;
+
+function appendBounded(file: string, event: AskEvent): void {
+	const line = JSON.stringify(event);
+	const bytes = Buffer.byteLength(line, "utf8");
+	if (bytes > MAX_EVENT_BYTES) {
+		throw new Error(
+			`question is too large to queue (${bytes} bytes > ${MAX_EVENT_BYTES}); shorten question/context/recommendation`,
+		);
+	}
+	append(file, event);
 }
 
 export function ask(
@@ -151,18 +177,33 @@ export function ask(
 		cwd: input.cwd,
 		askedAt: input.now ?? Date.now(),
 	};
-	append(file, event);
+	appendBounded(file, event);
 	return event;
 }
 
+/**
+ * Records the captain's resolution. Returns false when the question was already
+ * resolved by another captain session, so the caller can say so instead of
+ * pretending the second answer took effect.
+ */
 export function answer(
 	file: string,
 	id: string,
 	text: string,
 	status: "answered" | "dismissed" = "answered",
 	now = Date.now(),
-): void {
-	append(file, { kind: "answer", id, answer: text, status, answeredAt: now });
+): boolean {
+	const current = readQuestions(file).find((entry) => entry.id === id);
+	append(file, {
+		kind: "answer",
+		id,
+		answer: text.slice(0, MAX_EVENT_BYTES),
+		status,
+		answeredAt: now,
+	});
+	// Advisory only: the fold is what actually enforces first-answer-wins, since
+	// a concurrent captain can resolve the question between this read and append.
+	return current?.status === "open";
 }
 
 /** Marks an answer as handed back to the asking agent so it is not re-delivered. */

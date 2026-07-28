@@ -7,6 +7,7 @@ import {
 	ask,
 	formatAge,
 	markDelivered,
+	MAX_EVENT_BYTES,
 	openQuestions,
 	pendingAnswersFor,
 	queueFile,
@@ -117,6 +118,45 @@ describe("questions store", () => {
 		expect(readQuestions(file)).toEqual([]);
 	});
 
+	test("resolution is terminal: a stale second captain cannot overwrite a delivered answer", () => {
+		// Two captains hold the same /questions dialog. A answers, the asker is
+		// told, then B's stale pick lands. The durable record must keep saying what
+		// the agent was actually told.
+		const file = freshFile();
+		const asked = ask(file, { question: "Flag?", sessionId: "s", cwd: "/" });
+		expect(answer(file, asked.id, "flag")).toBe(true);
+		markDelivered(file, asked.id);
+
+		expect(answer(file, asked.id, "unguarded")).toBe(false);
+		const [entry] = readQuestions(file);
+		expect(entry?.answer).toBe("flag");
+		expect(entry?.delivered).toBe(true);
+		// And the stale answer does not resurrect the question as pending.
+		expect(pendingAnswersFor(file, "s")).toEqual([]);
+		expect(openQuestions(file)).toEqual([]);
+	});
+
+	test("a dismissal cannot be overturned by a later answer either", () => {
+		const file = freshFile();
+		const asked = ask(file, { question: "Q", sessionId: "s", cwd: "/" });
+		answer(file, asked.id, "(dismissed)", "dismissed");
+		expect(answer(file, asked.id, "actually do it")).toBe(false);
+		expect(readQuestions(file)[0]?.status).toBe("dismissed");
+	});
+
+	test("an oversized question is rejected instead of degrading every reader", () => {
+		const file = freshFile();
+		expect(() =>
+			ask(file, {
+				question: "x".repeat(MAX_EVENT_BYTES + 1),
+				sessionId: "s",
+				cwd: "/",
+			}),
+		).toThrow(/too large/);
+		// Nothing was appended, so the queue stays readable.
+		expect(readQuestions(file)).toEqual([]);
+	});
+
 	test("answering an unknown id is inert", () => {
 		const file = freshFile();
 		answer(file, "never-asked", "hi");
@@ -164,7 +204,9 @@ class Harness {
 	on(event: string, handler: Handler): void {
 		this.hooks.set(event, [...(this.hooks.get(event) ?? []), handler]);
 	}
+	sendMessageThrows = false;
 	sendMessage(message: any, options?: any): void {
+		if (this.sendMessageThrows) throw new Error("send failed");
 		this.sent.push({ content: message.content, triggerTurn: options?.triggerTurn });
 	}
 
@@ -279,6 +321,44 @@ describe("questions extension", () => {
 		pi.intervals[0]!();
 		expect(pi.sent).toHaveLength(1);
 		expect(pi.sent[0]!.triggerTurn).toBe(true);
+	});
+
+	test("a failed send leaves the answer pending rather than losing it forever", async () => {
+		const file = freshFile();
+		const pi = new Harness();
+		registerQuestions(pi as any, { DECK_QUESTIONS_FILE: file }, pi.runtime);
+		const asked = ask(file, { question: "Q", sessionId: "session-a", cwd: "/" });
+		answer(file, asked.id, "go");
+
+		const asker = fakeContext("session-a");
+		pi.sendMessageThrows = true;
+		await expect(pi.emit("session_start", asker)).rejects.toThrow("send failed");
+		expect(readQuestions(file)[0]?.delivered).toBe(false);
+
+		// The next delivery attempt still finds it.
+		pi.sendMessageThrows = false;
+		await pi.emit("agent_settled", asker);
+		expect(pi.sent).toHaveLength(1);
+		expect(readQuestions(file)[0]?.delivered).toBe(true);
+	});
+
+	test("a captain whose answer lost the race is told, and it is not counted", async () => {
+		const file = freshFile();
+		const pi = new Harness();
+		registerQuestions(pi as any, { DECK_QUESTIONS_FILE: file }, pi.runtime);
+		const asked = ask(file, { question: "Flag?", sessionId: "session-a", cwd: "/" });
+		// Another captain session resolved it after this one listed it.
+		const captain = fakeContext("session-captain", ["flag"]);
+		const originalSelect = captain.ui.select;
+		captain.ui.select = async (title: string) => {
+			answer(file, asked.id, "unguarded");
+			return originalSelect(title);
+		};
+
+		await pi.commands.get("questions")!.handler("", captain);
+		expect(readQuestions(file)[0]?.answer).toBe("unguarded");
+		expect(captain.notices.some((n) => n.includes("Already resolved elsewhere"))).toBe(true);
+		expect(captain.notices.at(-1)).toContain("Resolved 0 of 1");
 	});
 
 	test("free-text answers, dismissal, skip, and stop all behave", async () => {

@@ -229,12 +229,29 @@ consequences follow from the fold:
 - A corrupt line is skipped instead of hiding the rest of the queue, and an
   unrecognized `urgency` degrades to `normal` instead of dropping the question.
 
-`deliver` records are written *before* the message is sent. A duplicate
-delivery would show an agent the same decision twice; a lost mark would replay
-it on every poll forever.
+**Resolution is terminal: the first answer wins.** Two captain sessions can hold
+the same `/questions` dialog open, so the second one's pick can land after the
+first answer was already delivered. The fold ignores any answer for a question
+that is no longer open, and the losing captain is told their answer was not
+applied. Without that rule the durable record would end up disagreeing with what
+the agent was actually told, which is worse than either answer winning.
+
+**Delivery sends first, then marks.** Both orderings can fail; they fail
+differently. Marking first and then crashing drops that answer permanently and
+silently parks the agent forever, which is precisely the failure this extension
+exists to kill. Sending first and then crashing re-delivers one answer, which is
+merely noisy. The noisy failure is the correct one to choose.
+
+Events are capped at 8KB each (`MAX_EVENT_BYTES`), bounded both at the tool
+schema and again in the store, because every reader folds the entire log: one
+multi-MB question would degrade sessions that never asked anything.
 
 Dismissal is a resolution, not a deletion: the asking agent is told the captain
 declined to answer, so it stops waiting instead of parking again.
+
+`ponytail:` the log is never compacted. Captain decisions accrue at human pace
+(a handful of lines a day), so a rotation scheme would be speculative today; add
+one if a home's queue ever grows enough for the fold to matter.
 
 ### Verification
 

@@ -111,10 +111,12 @@ export function registerQuestions(
 	const deliverAnswers = (ctx: QuestionsContext, triggerTurn: boolean): number => {
 		const sessionId = ctx.sessionManager.getSessionId();
 		const pending = pendingAnswersFor(file, sessionId);
+		let delivered = 0;
 		for (const entry of pending) {
-			// Mark before sending: a duplicate delivery is a confusing double answer,
-			// while a lost mark would replay the same answer on every poll.
-			markDelivered(file, entry.id, runtime.now());
+			// Send BEFORE marking. The failure this ordering picks: a crash between
+			// the two lines re-delivers one answer, which is merely noisy, whereas
+			// marking first would drop that answer permanently and silently park
+			// the agent forever - exactly the failure this extension exists to kill.
 			pi.sendMessage(
 				{
 					customType: "deck.captain-answer",
@@ -124,8 +126,10 @@ export function registerQuestions(
 				},
 				{ deliverAs: "followUp", triggerTurn },
 			);
+			markDelivered(file, entry.id, runtime.now());
+			delivered += 1;
 		}
-		return pending.length;
+		return delivered;
 	};
 
 	pi.registerTool({
@@ -140,17 +144,33 @@ export function registerQuestions(
 		promptGuidelines: [
 			"Use ask_captain when a decision needs the captain and the chat message would otherwise be missed; keep working on independent parts instead of waiting.",
 		],
+		// Lengths are bounded at the schema boundary AND again in the store. Every
+		// pi session sharing this queue folds the whole log on every poll, so an
+		// unbounded question would degrade sessions that never asked anything.
+		// They are also the practical limits of a question a human reads in a
+		// select dialog.
 		parameters: Type.Object({
-			question: Type.String({ description: "The decision to make, phrased for a human" }),
+			question: Type.String({
+				description: "The decision to make, phrased for a human",
+				maxLength: 1000,
+			}),
 			id: Type.Optional(
-				Type.String({ description: "Stable id; reusing one refreshes that question" }),
+				Type.String({
+					description: "Stable id; reusing one refreshes that question",
+					maxLength: 128,
+				}),
 			),
-			context: Type.Optional(Type.String({ description: "Background the captain needs" })),
+			context: Type.Optional(
+				Type.String({ description: "Background the captain needs", maxLength: 2000 }),
+			),
 			options: Type.Optional(
-				Type.Array(Type.String(), { description: "Concrete choices the captain can pick" }),
+				Type.Array(Type.String({ maxLength: 200 }), {
+					description: "Concrete choices the captain can pick",
+					maxItems: 12,
+				}),
 			),
 			recommendation: Type.Optional(
-				Type.String({ description: "What you would do absent an answer" }),
+				Type.String({ description: "What you would do absent an answer", maxLength: 1000 }),
 			),
 			// Plain string, normalized in the store: an enum here would need
 			// pi-ai's StringEnum for Google compatibility, and one severity word is
@@ -215,8 +235,7 @@ export function registerQuestions(
 				if (picked === undefined || picked === "Stop reviewing") break;
 				if (picked === "Skip") continue;
 				if (picked === "Dismiss") {
-					recordAnswer(file, entry.id, DISMISSED, "dismissed", runtime.now());
-					answered += 1;
+					if (resolve(ctx, entry, DISMISSED, "dismissed")) answered += 1;
 					continue;
 				}
 				let text = picked;
@@ -225,8 +244,7 @@ export function registerQuestions(
 					if (written === undefined || written.trim() === "") continue;
 					text = written.trim();
 				}
-				recordAnswer(file, entry.id, text, "answered", runtime.now());
-				answered += 1;
+				if (resolve(ctx, entry, text, "answered")) answered += 1;
 			}
 
 			// Answers to questions this very session asked are deliverable right away.
@@ -237,6 +255,23 @@ export function registerQuestions(
 			);
 		},
 	});
+
+	/** Records one resolution, telling the captain when another session got there first. */
+	const resolve = (
+		ctx: QuestionsContext,
+		entry: Question,
+		text: string,
+		status: "answered" | "dismissed",
+	): boolean => {
+		const applied = recordAnswer(file, entry.id, text, status, runtime.now());
+		if (!applied) {
+			ctx.ui.notify(
+				`Already resolved elsewhere, your answer was not applied: ${entry.question}`,
+				"warning",
+			);
+		}
+		return applied;
+	};
 
 	const startPolling = (ctx: QuestionsContext): void => {
 		if (poll !== undefined) return;
