@@ -23,6 +23,22 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   `rootDir==worktree`.
   Invocation/config/herdr-embed notes in `fleet/README.md`.
 
+- **pi extension installers ship layout, not just source.** Both shipped
+  extensions broke in `~/.pi` while their sources were fine, so verify the
+  *installed* shape: `extensions/install.sh` (idle-compaction) and
+  `ponytail/install.sh` both honor `INSTALL_TARGET` for safe testing, and
+  `extensions/test/installers.test.ts` is the red-green guard. Two traps that
+  cost real debugging time: pi discovers `extensions/*.ts` **and**
+  `extensions/*/index.ts`, so a multi-file extension must be a directory (a flat
+  symlink breaks relative sibling imports, and a flat sibling gets loaded as its
+  own extension); and ponytail's CommonJS `hooks/` need
+  `ponytail/hooks/package.json` (`type: commonjs`) to survive being copied under
+  the vendored `"type": "module"` package. Rationale in each README.
+- **Assert extension behavior through `node`, not `bun`.** pi is a
+  `#!/usr/bin/env node` CLI and bun's loader is more permissive about CommonJS
+  under `"type": "module"`, so bun-only assertions pass while real pi fails.
+- Scratch/verification output belongs in `claude-playground/` (gitignored).
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.
