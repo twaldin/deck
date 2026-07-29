@@ -1,7 +1,9 @@
 import {
 	decideIdleCompaction,
 	idleThresholdMs,
+	MAX_TIMER_DELAY_MS,
 	parseIdleCompactionConfig,
+	selectIdleCompactionConfig,
 	type IdleCompactionConfig,
 } from "./idle-compaction-policy";
 
@@ -131,7 +133,6 @@ export function registerIdleCompaction(
 		default: false,
 	});
 	const parsed = parseIdleCompactionConfig(env);
-	const config: IdleCompactionConfig = parsed.config;
 	let active = false;
 	let enabledForSession = false;
 	let timer: TimerHandle | undefined;
@@ -155,6 +156,9 @@ export function registerIdleCompaction(
 			? null
 			: `${ctx.model.provider}\u0000${ctx.model.id}\u0000${ctx.model.baseUrl ?? ""}`;
 
+	const configFor = (ctx: IdleCompactionContext): IdleCompactionConfig =>
+		selectIdleCompactionConfig(parsed, ctx.model);
+
 	const clearScheduled = (): void => {
 		if (timer !== undefined) runtime.clearTimer(timer);
 		timer = undefined;
@@ -165,7 +169,13 @@ export function registerIdleCompaction(
 		message: string,
 		level: "info" | "warning" | "error" = "info",
 	): void => {
-		if (config.notify && ctx.hasUI) ctx.ui.notify(message, level);
+		if (parsed.config.notify && ctx.hasUI) ctx.ui.notify(message, level);
+	};
+
+	const reportConfigWarning = (ctx: IdleCompactionContext, warning: string): void => {
+		const message = `Idle compaction: ${warning}`;
+		if (ctx.hasUI) ctx.ui.notify(message, "warning");
+		else console.error(message);
 	};
 
 	const persistCompaction = (
@@ -184,7 +194,9 @@ export function registerIdleCompaction(
 
 	const scheduleAfter = (delayMs: number): void => {
 		clearScheduled();
-		if (!active || !enabledForSession || !hasCacheTouch || config.engine !== "client") return;
+		if (latestContext === undefined || !active || !enabledForSession || !hasCacheTouch) return;
+		const config = configFor(latestContext);
+		if (config.engine !== "client") return;
 		timer = runtime.setTimer(() => {
 			timer = undefined;
 			const ctx = latestContext;
@@ -196,17 +208,18 @@ export function registerIdleCompaction(
 			) {
 				return;
 			}
+			const currentConfig = configFor(ctx);
 
 			const usage = ctx.getContextUsage();
 			const currentContextMarker = getContextMarker(ctx.sessionManager);
 			if (currentContextMarker !== failedContextMarker) {
 				failedContextMarker = currentContextMarker;
 				failuresForContext = 0;
-			} else if (failuresForContext > config.maxRetriesPerContext) {
+			} else if (failuresForContext > currentConfig.maxRetriesPerContext) {
 				return;
 			}
 			const decision = decideIdleCompaction({
-				config: { ...config, enabled: enabledForSession },
+				config: { ...currentConfig, enabled: enabledForSession },
 				nowMs: runtime.now(),
 				lastCacheTouchMs,
 				isIdle: ctx.isIdle(),
@@ -222,12 +235,12 @@ export function registerIdleCompaction(
 
 			if (!decision.compact) {
 				if (decision.reason === "cache-still-fresh" || decision.reason === "cooldown") {
-					scheduleAfter(decision.waitMs ?? config.retryDelayMs);
+					scheduleAfter(decision.waitMs ?? currentConfig.retryDelayMs);
 				} else if (decision.reason === "usage-unknown") {
 					failedContextMarker = currentContextMarker;
 					failuresForContext += 1;
-					if (failuresForContext <= config.maxRetriesPerContext) {
-						scheduleAfter(config.retryDelayMs * 2 ** (failuresForContext - 1));
+					if (failuresForContext <= currentConfig.maxRetriesPerContext) {
+						scheduleAfter(currentConfig.retryDelayMs * 2 ** (failuresForContext - 1));
 					}
 				}
 				return;
@@ -263,24 +276,28 @@ export function registerIdleCompaction(
 					failuresForContext += 1;
 					notify(ctx, `Idle compaction failed: ${error.message}`, "warning");
 					if (
-						failuresForContext <= config.maxRetriesPerContext &&
+						failuresForContext <= currentConfig.maxRetriesPerContext &&
 						ctx.isIdle() &&
 						!ctx.hasPendingMessages()
 					) {
-						scheduleAfter(config.retryDelayMs * 2 ** (failuresForContext - 1));
+						scheduleAfter(currentConfig.retryDelayMs * 2 ** (failuresForContext - 1));
 					}
 				},
 			});
-		}, Math.max(0, delayMs));
+		// Node would otherwise coerce an oversized timeout to 1ms; after this
+		// chunk the cache-fresh decision recomputes and schedules the remainder.
+		}, Math.min(MAX_TIMER_DELAY_MS, Math.max(0, delayMs)));
 	};
 
 	const scheduleFromCacheTouch = (): void => {
+		if (latestContext === undefined) return;
+		const config = configFor(latestContext);
 		scheduleAfter(Math.max(0, lastCacheTouchMs + idleThresholdMs(config) - runtime.now()));
 	};
 
 	pi.on("session_start", (_event, ctx) => {
 		active = true;
-		enabledForSession = config.enabled && pi.getFlag?.("no-idle-compaction") !== true;
+		enabledForSession = parsed.config.enabled && pi.getFlag?.("no-idle-compaction") !== true;
 		latestContext = ctx;
 		compacting = false;
 		idleCompactionRequested = false;
@@ -296,8 +313,8 @@ export function registerIdleCompaction(
 		lastCompactedContextMarker = restored?.contextMarker ?? null;
 		lastCompactedTokens = restored?.contextTokens ?? null;
 		lastCompactedAtMs = restored !== null && restored.compactedAt > 0 ? restored.compactedAt : null;
-		for (const warning of parsed.warnings) notify(ctx, `Idle compaction: ${warning}`, "warning");
-		if (config.engine === "native") {
+		for (const warning of parsed.warnings) reportConfigWarning(ctx, warning);
+		if (parsed.config.engine === "native") {
 			notify(ctx, "Idle compaction: native engine is reserved but unsupported; no compaction will run", "warning");
 		}
 	});

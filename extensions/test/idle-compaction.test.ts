@@ -10,6 +10,7 @@ import {
 	decideIdleCompaction,
 	idleThresholdMs,
 	parseIdleCompactionConfig,
+	selectIdleCompactionConfig,
 } from "../src/idle-compaction-policy";
 
 class FakeRuntime implements IdleCompactionRuntime {
@@ -76,7 +77,7 @@ class ExtensionHarness implements IdleCompactionExtensionApi {
 
 class TestContext {
 	hasUI = true;
-	model = { provider: "deck", id: "model-a", baseUrl: "http://deck.test/v1" };
+	model = { provider: "deck", id: "claude-test", baseUrl: "http://deck.test/v1" };
 	idle = true;
 	pending = false;
 	tokens: number | null = 80_000;
@@ -248,8 +249,109 @@ describe("idle compaction policy", () => {
 		});
 		expect(parsed.config.enabled).toBeFalse();
 		expect(parsed.config.engine).toBe("native");
-		expect(parsed.config.marginMs).toBe(999);
-		expect(parsed.warnings).toHaveLength(1);
+		expect(parsed.config.marginMs).toBe(200);
+		expect(parsed.warnings).toEqual([
+			"PI_IDLE_COMPACTION_MARGIN_MS must be smaller than PI_IDLE_COMPACTION_TTL_MS; using a safe margin",
+		]);
+	});
+
+	test("selects calibrated cache deadlines by resolved upstream provider", () => {
+		const parsed = parseIdleCompactionConfig({
+			PI_IDLE_COMPACTION_OPENAI_TTL_MS: "1000",
+			PI_IDLE_COMPACTION_OPENAI_MARGIN_MS: "300",
+			PI_IDLE_COMPACTION_ANTHROPIC_TTL_MS: "900",
+			PI_IDLE_COMPACTION_ANTHROPIC_MARGIN_MS: "100",
+		});
+		expect(selectIdleCompactionConfig(parsed, { provider: "deck", id: "claude-test" })).toMatchObject({
+			cacheTtlMs: 900,
+			marginMs: 100,
+		});
+		expect(selectIdleCompactionConfig(parsed, { provider: "deck", id: "gpt-test" })).toMatchObject({
+			cacheTtlMs: 1_000,
+			marginMs: 300,
+		});
+		expect(selectIdleCompactionConfig(parsed, { provider: "deck", id: "glm-test" })).toBe(parsed.config);
+	});
+
+	test("rejects incomplete and invalid provider timing profiles", () => {
+		const incomplete = parseIdleCompactionConfig({ PI_IDLE_COMPACTION_OPENAI_TTL_MS: "1000" });
+		expect(incomplete.providerConfigs.openai).toBeUndefined();
+		expect(incomplete.warnings).toEqual([
+			"PI_IDLE_COMPACTION_OPENAI_TTL_MS/PI_IDLE_COMPACTION_OPENAI_MARGIN_MS must both be set; ignoring the incomplete provider profile",
+		]);
+
+		const invalid = parseIdleCompactionConfig({
+			PI_IDLE_COMPACTION_TTL_MS: "600000",
+			PI_IDLE_COMPACTION_OPENAI_TTL_MS: "5min",
+			PI_IDLE_COMPACTION_OPENAI_MARGIN_MS: "30000",
+		});
+		expect(invalid.providerConfigs.openai).toBeUndefined();
+		expect(selectIdleCompactionConfig(invalid, { provider: "deck", id: "gpt-test" })).toMatchObject({
+			cacheTtlMs: 600_000,
+			marginMs: 60_000,
+		});
+	});
+
+	test("lets a provider profile override the legacy global timing", () => {
+		const parsed = parseIdleCompactionConfig({
+			PI_IDLE_COMPACTION_TTL_MS: "1000",
+			PI_IDLE_COMPACTION_MARGIN_MS: "200",
+			PI_IDLE_COMPACTION_ANTHROPIC_TTL_MS: "900",
+			PI_IDLE_COMPACTION_ANTHROPIC_MARGIN_MS: "100",
+		});
+		expect(selectIdleCompactionConfig(parsed, { provider: "anthropic", id: "claude-test" })).toMatchObject({
+			cacheTtlMs: 900,
+			marginMs: 100,
+		});
+		expect(selectIdleCompactionConfig(parsed, { provider: "openai", id: "gpt-test" })).toMatchObject({
+			cacheTtlMs: 1_000,
+			marginMs: 200,
+		});
+	});
+
+	test("recognizes direct and provider-qualified model routes", () => {
+		const parsed = parseIdleCompactionConfig({
+			PI_IDLE_COMPACTION_ANTHROPIC_TTL_MS: "900",
+			PI_IDLE_COMPACTION_ANTHROPIC_MARGIN_MS: "100",
+			PI_IDLE_COMPACTION_OPENAI_TTL_MS: "1000",
+			PI_IDLE_COMPACTION_OPENAI_MARGIN_MS: "300",
+		});
+		expect(
+			selectIdleCompactionConfig(parsed, { provider: "deck", id: "anthropic/claude-opus-5" }),
+		).toMatchObject({ cacheTtlMs: 900 });
+		expect(
+			selectIdleCompactionConfig(parsed, { provider: "deck", id: "openai-codex/gpt-5.6-sol" }),
+		).toMatchObject({ cacheTtlMs: 1_000 });
+		expect(selectIdleCompactionConfig(parsed, { provider: "anthropic", id: "custom-id" })).toMatchObject({
+			cacheTtlMs: 900,
+		});
+	});
+
+	test("caps the default cooldown at a profile deadline without overriding an explicit operator interval", () => {
+		const defaultInterval = parseIdleCompactionConfig({
+			PI_IDLE_COMPACTION_TTL_MS: "120000",
+			PI_IDLE_COMPACTION_MARGIN_MS: "60000",
+		});
+		expect(defaultInterval.config.minimumCompactionIntervalMs).toBe(60_000);
+
+		const explicitInterval = parseIdleCompactionConfig({
+			PI_IDLE_COMPACTION_TTL_MS: "120000",
+			PI_IDLE_COMPACTION_MARGIN_MS: "60000",
+			PI_IDLE_COMPACTION_MIN_INTERVAL_MS: "90000",
+		});
+		expect(explicitInterval.config.minimumCompactionIntervalMs).toBe(90_000);
+
+		const provider = parseIdleCompactionConfig({
+			PI_IDLE_COMPACTION_OPENAI_TTL_MS: "1000",
+			PI_IDLE_COMPACTION_OPENAI_MARGIN_MS: "1000",
+		});
+		expect(provider.providerConfigs.openai).toMatchObject({
+			marginMs: 200,
+			minimumCompactionIntervalMs: 800,
+		});
+		expect(provider.warnings).toEqual([
+			"PI_IDLE_COMPACTION_OPENAI_MARGIN_MS must be smaller than PI_IDLE_COMPACTION_OPENAI_TTL_MS; using a safe margin",
+		]);
 	});
 });
 
@@ -270,6 +372,64 @@ describe("idle compaction extension", () => {
 		runtime.advance(1);
 		expect(context.compactCalls).toHaveLength(1);
 		expect(context.compactCalls[0]?.customInstructions).toContain("parked");
+	});
+
+	test("uses the OpenAI profile deadline for a deck OpenAI route", async () => {
+		const { runtime, harness, context } = setup({
+			PI_IDLE_COMPACTION_OPENAI_TTL_MS: "1000",
+			PI_IDLE_COMPACTION_OPENAI_MARGIN_MS: "300",
+		});
+		context.model = { provider: "deck", id: "gpt-test", baseUrl: "http://deck.test/v1" };
+		await harness.emit("session_start", context);
+		await warmAndSettle(harness, context);
+		runtime.advance(699);
+		expect(context.compactCalls).toHaveLength(0);
+		runtime.advance(1);
+		expect(context.compactCalls).toHaveLength(1);
+	});
+
+	test("retains the legacy global deadline for an uncalibrated provider route", async () => {
+		const { runtime, harness, context } = setup();
+		context.model = { provider: "deck", id: "glm-test", baseUrl: "http://deck.test/v1" };
+		await harness.emit("session_start", context);
+		await warmAndSettle(harness, context);
+		runtime.advance(799);
+		expect(context.compactCalls).toHaveLength(0);
+		runtime.advance(1);
+		expect(context.compactCalls).toHaveLength(1);
+	});
+
+	test("uses the newly selected model family's deadline", async () => {
+		const { runtime, harness, context } = setup({
+			PI_IDLE_COMPACTION_ANTHROPIC_TTL_MS: "1000",
+			PI_IDLE_COMPACTION_ANTHROPIC_MARGIN_MS: "300",
+			PI_IDLE_COMPACTION_OPENAI_TTL_MS: "1000",
+			PI_IDLE_COMPACTION_OPENAI_MARGIN_MS: "100",
+		});
+		await harness.emit("session_start", context);
+		await warmAndSettle(harness, context);
+		context.model = { provider: "deck", id: "gpt-test", baseUrl: "http://deck.test/v1" };
+		await harness.emit("model_select", context);
+		await warmAndSettle(harness, context);
+		runtime.advance(899);
+		expect(context.compactCalls).toHaveLength(0);
+		runtime.advance(1);
+		expect(context.compactCalls).toHaveLength(1);
+	});
+
+	test("reports configuration warnings regardless of the model family", async () => {
+		const { harness, context } = setup({
+			PI_IDLE_COMPACTION_NOTIFY: "1",
+			PI_IDLE_COMPACTION_OPENAI_TTL_MS: "invalid",
+			PI_IDLE_COMPACTION_OPENAI_MARGIN_MS: "100",
+		});
+		context.model = { provider: "deck", id: "glm-test", baseUrl: "http://deck.test/v1" };
+		await harness.emit("session_start", context);
+		expect(context.notifications).toContainEqual({
+			message:
+				"Idle compaction: PI_IDLE_COMPACTION_OPENAI_TTL_MS/PI_IDLE_COMPACTION_OPENAI_MARGIN_MS must be valid timing values; ignoring the provider profile",
+			level: "warning",
+		});
 	});
 
 	test("uses the latest provider response as cache-touch time", async () => {
