@@ -2,6 +2,44 @@
 
 This directory is a Smithers 0.30.0 workflow workspace. The generated pack lives in `.smithers/`; Deck-authored workflows live beside it so they remain small and reviewable.
 
+## Smithers is the standard crew tool for multi-step PR work
+
+Any crew task that is more than one edit-and-check — implement + review + CI
+watch + stamp + land, or anything with approvals, retries, or an overnight tail
+— runs as a Smithers workflow, not as an ad-hoc agent loop. Smithers gives the
+fleet the things ad-hoc loops do not have: durable state that survives SIGKILL
+and reboot (see the drill below), replayable per-node attempts, real approval
+gates, and one read-only surface (`smithers ps|inspect --json`) that the fleet
+dashboard already reads. Start from `pr-pipeline/` — it is the enforced lindy
+SOP — and reach for a new workflow only when the shape genuinely differs.
+
+## Engine policy: pi only
+
+**Pi is the only Smithers engine Deck uses.** Every agent seat in this
+workspace is a `PiAgent` with `provider: "deck"`, so all model traffic goes
+through the Deck broker: broker-held credentials, `deck/*` model ids from the
+broker allowlist, and quota-aware routing. The direct `codex` and
+`claude-code` CLI engines are removed, not merely unused — they authenticate as
+a single mono-account and inherit whatever ambient local CLI config happens to
+exist on the host, which is neither attributable nor quota-aware.
+
+- Pack seats: `.smithers/agents.ts` (`providers` + `agents`). Deck-owned, no
+  longer regenerated content; `.smithers/agents/` (the per-engine
+  `codex.ts` / `claude-code.ts` config wrappers) is deliberately deleted. If
+  `smithers init` recreates that directory, delete it again rather than wiring
+  it up.
+- Model catalog and the `deck/` provider guard: `pr-pipeline/lib/models.ts`
+  (`DECK_PROVIDER`, `DECK_AGENT_CATALOG`, `assertDeckModel`). Seats validate at
+  import time, so an off-catalog or non-`deck/` model fails before a run starts.
+- Enforcement: `pr-pipeline/tests/engine.test.ts` asserts every seat is a
+  `PiAgent` on `deck/`, carries no raw `apiKey`, and that no workflow source in
+  this workspace constructs `CodexAgent` / `ClaudeCodeAgent` / `OpenCodeAgent` /
+  `AntigravityAgent`. Run it with `cd pr-pipeline && bun test`.
+
+Family diversity is preserved *within* pi: a seat's fallback list crosses model
+families (anthropic <-> openai) rather than crossing engines, which is what
+adversarial review actually needs.
+
 - `spike/hello-deck.tsx` — the durability spike (kill -9 drill accepted; see below).
 - `pr-pipeline/` — the executable lindy PR pipeline (enforced SOP workflow on plain
   smithers; own `package.json` pinning smithers-orchestrator 0.30.0). See

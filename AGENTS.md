@@ -5,6 +5,16 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - Smithers workflows live under `workflows/` (workspace anchor: `workflows/.smithers`,
   pinned smithers-orchestrator **0.30.0**). The lindy PR pipeline is
   `workflows/pr-pipeline/` - dispatch/babysit docs in its README.
+  **Smithers is the standard crew tool for multi-step PR work** (durable state,
+  replayable attempts, real approval gates); rationale in `workflows/README.md`.
+- **Pi is Deck's ONLY Smithers engine.** Every agent seat is a `PiAgent` on
+  `provider: "deck"` (broker auth, `deck/*` models, quota-aware); the direct
+  `codex` / `claude-code` CLI engines are deleted, not just unused, because they
+  use mono-account auth plus ambient local CLI config. Seats:
+  `workflows/.smithers/agents.ts` (deck-owned, no longer generated - if
+  `smithers init` recreates `workflows/.smithers/agents/`, delete it again).
+  Guard: `assertDeckModel` in `workflows/pr-pipeline/lib/models.ts`; the
+  red-green enforcement is `workflows/pr-pipeline/tests/engine.test.ts`.
 - **Version-skew trap:** always run the CLI as `bunx smithers-orchestrator@0.30.0 ...`.
   From a directory without a package.json, bun auto-resolves bare specifiers/binaries
   from its global cache and can silently pick a NEWER version than the workspace pin

@@ -7,6 +7,13 @@
  * preflight validation), not left as a comment.
  */
 
+/**
+ * The only pi provider deck workflows may use. Pi + this provider is deck's
+ * single Smithers engine; direct codex / claude-code CLI engines are banned
+ * because they use mono-account auth and ambient local CLI config.
+ */
+export const DECK_PROVIDER = "deck";
+
 export type ModelFamily = "anthropic" | "openai" | "zai" | "unknown";
 
 export interface ModelRef {
@@ -75,6 +82,24 @@ export function parseModelRef(ref: string): ModelRef {
 	return { provider: ref.slice(0, idx), model: ref.slice(idx + 1) };
 }
 
+/**
+ * Throw unless `ref` is an agent-pickable deck model (`deck/<catalog model>`).
+ * Use at agent-construction time so a bad seat fails at import, not mid-run.
+ */
+export function assertDeckModel(ref: string): void {
+	const { provider, model } = parseModelRef(ref);
+	if (provider !== DECK_PROVIDER) {
+		throw new Error(
+			`Model "${ref}" must use the ${DECK_PROVIDER} provider (pi harness + deck broker); got provider "${provider}".`,
+		);
+	}
+	if (!DECK_AGENT_CATALOG.includes(model)) {
+		throw new Error(
+			`Model "${ref}" is not in the agent-pickable deck catalog: [${DECK_AGENT_CATALOG.join(", ")}].`,
+		);
+	}
+}
+
 export function modelFamily(ref: string): ModelFamily {
 	const { model } = parseModelRef(ref);
 	if (model.startsWith("claude-")) return "anthropic";
@@ -125,16 +150,10 @@ export function validateModelPolicy(policy: ModelPolicy): string[] {
 	}
 
 	for (const [role, ref] of refs) {
-		const parsed = parseModelRef(ref);
-		if (parsed.provider !== "deck") {
-			violations.push(
-				`models.${role} = "${ref}" must use the deck provider (pi harness + deck broker); got provider "${parsed.provider}".`,
-			);
-		}
-		if (!DECK_AGENT_CATALOG.includes(parsed.model)) {
-			violations.push(
-				`models.${role} = "${ref}" is not in the agent-pickable deck catalog: [${DECK_AGENT_CATALOG.join(", ")}].`,
-			);
+		try {
+			assertDeckModel(ref);
+		} catch (err) {
+			violations.push(`models.${role}: ${err instanceof Error ? err.message : String(err)}`);
 		}
 	}
 
