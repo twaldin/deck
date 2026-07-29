@@ -75,7 +75,9 @@ Enforcement notes (each maps to a cited incident in the SOP):
 ## Model selection (captain addendum)
 
 `lib/models.ts` — agent models are **agent-pickable config from the deck
-catalog** (pi harness + `deck/` provider). Defaults:
+catalog** (pi harness + `deck/` provider). Pi is the only engine: every agent in
+this pipeline is a `PiAgent` on `provider: "deck"`, so auth is broker-held and
+quota-aware. See `../README.md` "Engine policy: pi only". Defaults:
 
 | Role | Default |
 |---|---|
@@ -90,7 +92,8 @@ from the producing node via `resolveAdversary()`. Preflight **refuses** a
 same-family reviewer unless `familyOpposition: false` is set explicitly.
 The catalog (`DECK_AGENT_CATALOG`) mirrors the broker allowlist:
 `claude-opus-5`, `claude-sonnet-5`, `claude-haiku-4-5`, `gpt-5.6-terra`,
-`gpt-5.6-luna`, `gpt-5.6-sol`. Non-catalog or non-`deck/` refs fail preflight.
+`gpt-5.6-luna`, `gpt-5.6-sol`. Non-catalog or non-`deck/` refs fail preflight
+(`assertDeckModel`, also used by the pack seats in `../.smithers/agents.ts`).
 
 ## How a crewmate dispatches a run
 
@@ -185,7 +188,9 @@ run can self-approve its gates.
 ## Tests
 
 ```sh
-bun test tests/          # 75 tests
+bun install                       # here
+bun install --cwd ../.smithers    # engine.test.ts loads the pack's seats
+bun test tests/          # 69 tests
 bun run typecheck
 bun run graph            # render-without-execute sanity check
 ```
@@ -194,6 +199,9 @@ bun run graph            # render-without-execute sanity check
   check, re-request detection, migration detection + evidence, ready-for-stamp
   (bot/excluded/self approvals never count; will-be-green ruling), landing
   `(#N)` matching, evidence-gated done, model catalog + family opposition.
+- `tests/engine.test.ts` — the pi-only engine invariant across the whole
+  `workflows/` workspace (see `../README.md` "Engine policy: pi only"). It
+  imports `../.smithers/agents.ts`, so it needs `.smithers` deps installed.
 - `tests/pipeline.test.tsx` — drives the REAL workflow module through
   `smithers-orchestrator/testing` `simulate()`: preflight refusal paths, parks
   at migration-gate/stamp without bypass, full-graph traversal (clean + migration
@@ -205,7 +213,8 @@ bun run graph            # render-without-execute sanity check
 pipeline.tsx            the workflow (all stage wiring)
 lib/types.ts            pure domain types
 lib/brief.ts            preflight validation
-lib/models.ts           deck catalog + family opposition (captain addendum)
+lib/models.ts           deck catalog + deck/ provider guard + family opposition
+tests/engine.test.ts    pi-only engine invariant (whole workspace)
 lib/watch.ts            watch-ci-review machine-checked exit
 lib/migrations.ts       migration detection + evidence completeness
 lib/ready.ts            ready-for-stamp evaluation
