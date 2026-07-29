@@ -84,6 +84,12 @@ describe("renderModel dense fleet layout", () => {
 		expect(text).toContain("◐ oneshot @review · running");
 	});
 
+	test("annotates a status that disagrees with the live pane", () => {
+		const stale = { ...task("stale", "working", "work", "still working"), paneState: "idle" as const };
+		const text = renderModel(baseModel({ tasks: [stale] }), { width: 100, minWidth: 40, color: false }).join("\n");
+		expect(text).toContain("status stale (pane: idle)");
+	});
+
 	test("never overflows a narrow pane on a double-width status grapheme", () => {
 		const lines = renderModel(baseModel({ tasks: [task("active", "working", "work", "界")] }), { width: 3, minWidth: 40, color: false });
 		expect(lines.every((line) => Bun.stringWidth(line) <= 3)).toBe(true);

@@ -1,6 +1,7 @@
 import { collectBacklog, type CommandRunner } from "./collectors/backlog";
 import { collectBroker, type BrokerConfig, DEFAULT_BROKER_ENDPOINT } from "./collectors/broker";
 import { collectFleetState } from "./collectors/fleet";
+import { collectPaneStates } from "./collectors/pane";
 import { collectSmithers } from "./collectors/smithers";
 import type { FleetConfig } from "./config";
 import { correlateRuns } from "./correlate";
@@ -10,6 +11,8 @@ import type { FleetModel } from "./types";
 
 export interface BuildModelDeps {
 	run: CommandRunner;
+	/** Optional live pane probe; the CLI supplies this separately from fixture runners. */
+	paneRun?: CommandRunner;
 	/** Injectable clock so model assembly is deterministic in tests. */
 	now: () => number;
 	broker?: BrokerConfig;
@@ -34,6 +37,10 @@ export async function buildModel(
 		collectSmithers(config.smithersWorkspaces, deps.run, signal),
 		collectBroker(brokerConfig),
 	]);
+	const paneCandidates = [...fleetState.metas.values()].filter((meta) => meta.backend?.toLowerCase() === "herdr" && meta.window).length;
+	const paneStates = deps.paneRun
+		? await collectPaneStates(fleetState.metas, deps.paneRun, config.fmHome, signal)
+		: new Map();
 
 	const backlogById = new Map<string, BacklogEntry>(backlog.entries.map((entry) => [entry.id, entry]));
 
@@ -48,6 +55,7 @@ export async function buildModel(
 		status: fleetState.statuses.get(id) ?? null,
 		backlog: backlogById.get(id) ?? null,
 		runs: [],
+		paneState: paneStates.get(id) ?? null,
 	}));
 
 	const { tasks, orphanRuns, diagnostics: correlationDiagnostics } = correlateRuns(baseTasks, smithers.runs);
@@ -58,6 +66,12 @@ export async function buildModel(
 		{ source: `backlog:${backlog.source}`, ok: backlog.ok, detail: backlog.detail },
 		...smithers.diagnostics,
 		...correlationDiagnostics,
+		...(paneCandidates ? [{
+			source: "pane",
+			ok: paneStates.size === paneCandidates,
+			level: paneStates.size === paneCandidates ? "ok" as const : "warning" as const,
+			detail: `${paneStates.size}/${paneCandidates} live pane${paneCandidates === 1 ? "" : "s"} checked`,
+		}] : []),
 		broker.diagnostic,
 	];
 

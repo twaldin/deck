@@ -1,4 +1,4 @@
-import type { FleetModel, FleetTask, SmithersRun, SourceDiagnostic, StatusState, TaskState } from "./types";
+import type { FleetModel, FleetTask, PaneState, SmithersRun, SourceDiagnostic, StatusState, TaskState } from "./types";
 import { isLiveRun } from "./run-state";
 
 /** SGR color codes used for state coloring. */
@@ -76,11 +76,23 @@ function taskState(task: FleetTask): DisplayState {
 
 function isActive(task: FleetTask): boolean {
 	const state = taskState(task);
-	return state === "working" || state === "in_flight" || state === "needs-decision" || state === "blocked" || state === "failed" || state === "paused" || task.runs.some(shouldShowRun);
+	return state === "working" || state === "in_flight" || state === "needs-decision" || state === "blocked" || state === "failed" || state === "paused" || task.runs.some(shouldShowRun) || stalePaneState(task) !== null;
 }
 
 function isTerminal(state: DisplayState): boolean { return state === "done" || state === "resolved"; }
 function shouldShowRun(run: SmithersRun): boolean { return isLiveRun(run) || /fail|error/i.test(run.status); }
+
+/** Compare only states both surfaces can express; an unavailable pane is not stale. */
+function stalePaneState(task: FleetTask): PaneState | null {
+	const pane = task.paneState;
+	const status = task.status?.state;
+	if (!pane || pane === "unknown" || !status || status === "unknown") return null;
+	const expected: PaneState[] = status === "working" ? ["working"]
+		: status === "blocked" || status === "needs-decision" ? ["blocked"]
+		: status === "done" || status === "resolved" ? ["idle", "done"]
+		: ["idle", "done"];
+	return expected.includes(pane) ? null : pane;
+}
 
 function taskMeta(task: FleetTask, now: number): string {
 	const bits: string[] = [];
@@ -98,7 +110,8 @@ function taskTitle(task: FleetTask): string {
 function renderActiveTask(task: FleetTask, now: number, width: number, out: Line[]): void {
 	const state = taskState(task);
 	const meta = taskMeta(task, now);
-	out.push({ color: STATUS_COLOR[state], text: `${STATUS_GLYPH[state]} ${task.id}${meta ? `  ${meta}` : ""}` });
+	const stale = stalePaneState(task);
+	out.push({ color: STATUS_COLOR[state], text: `${STATUS_GLYPH[state]} ${task.id}${meta ? `  ${meta}` : ""}${stale ? `  status stale (pane: ${stale})` : ""}` });
 	// Status is the payload: wrap it; never replace its tail with an ellipsis.
 	const detail = task.status?.message || taskTitle(task);
 	const indent = width >= 4 ? "  " : "";
@@ -126,7 +139,8 @@ function renderQueuedTask(task: FleetTask, now: number, out: Line[]): void {
 	const meta = taskMeta(task, now);
 	const hold = task.backlog?.hold ? ` — hold: ${task.backlog.hold}` : "";
 	const title = taskTitle(task);
-	out.push({ color: STATUS_COLOR[state], text: `${STATUS_GLYPH[state]} ${task.id}${meta ? `  ${meta}` : ""}${title ? `  ${title}` : ""}${hold}` });
+	const stale = stalePaneState(task);
+	out.push({ color: STATUS_COLOR[state], text: `${STATUS_GLYPH[state]} ${task.id}${meta ? `  ${meta}` : ""}${title ? `  ${title}` : ""}${hold}${stale ? `  status stale (pane: ${stale})` : ""}` });
 }
 
 function renderDoneSummary(tasks: readonly FleetTask[], out: Line[]): void {
@@ -136,7 +150,9 @@ function renderDoneSummary(tasks: readonly FleetTask[], out: Line[]): void {
 }
 
 function sourceSummary(diagnostics: readonly SourceDiagnostic[]): { text: string; color: keyof typeof SGR } {
-	const groups: [string, string][] = [["fm", "FM_HOME"], ["backlog", "backlog:"], ["smithers", "smithers:"], ["broker", "broker"]];
+	const groups: [string, string][] = [["fm", "FM_HOME"], ["backlog", "backlog:"], ["smithers", "smithers:"]];
+	if (diagnostics.some((d) => d.source === "pane")) groups.push(["pane", "pane"]);
+	groups.push(["broker", "broker"]);
 	const grouped = groups.flatMap(([, prefix]) => diagnostics.filter((d) => d.source.startsWith(prefix)));
 	const other = diagnostics.filter((d) => !grouped.includes(d));
 	const health = groups.map(([name, prefix]) => `${name} ${sourceHealth(diagnostics.filter((d) => d.source.startsWith(prefix)))}`);

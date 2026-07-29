@@ -82,6 +82,14 @@ the one launch identifier both sides share; fuzzy name matching is deliberately 
 Every run that doesn't match — including runs with no `rootDir` — is shown in a
 separate **Workflows (uncorrelated)** section rather than guessed onto a task.
 
+### Status staleness
+
+For tasks with a Herdr pane endpoint, each refresh also performs the read-only
+`herdr agent get <window>` probe. If the live pane state disagrees with the
+latest Firstmate `state/<id>.status` event, the task is annotated with
+`status stale (pane: <state>)`; unavailable or unknown pane reads are not
+presented as a disagreement.
+
 ### Graceful degradation
 
 Every source degrades to a labeled `Sources` diagnostic instead of crashing:
@@ -95,7 +103,7 @@ The renderer is kept **separate from data collection** so a future herdr plugin
 could reuse the collectors without the terminal renderer:
 
 ```
-src/collectors/*   fleet.ts · backlog.ts · smithers.ts · broker.ts  (read-only, injectable runner)
+src/collectors/*   fleet.ts · pane.ts · backlog.ts · smithers.ts · broker.ts  (read-only, injectable runner)
 src/correlate.ts   conservative run↔task attribution by rootDir
 src/run-state.ts   shared live-vs-terminal Smithers state classification
 src/model.ts       buildModel(): fan-out collectors → typed FleetModel
