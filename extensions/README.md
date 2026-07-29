@@ -91,8 +91,10 @@ process and are useful for persistent-agent launchers.
 |---|---:|---|
 | `PI_IDLE_COMPACTION` | `true` | Set `0`, `false`, `no`, or `off` to opt this process/session out. |
 | `PI_IDLE_COMPACTION_ENGINE` | `client` | `client` uses pi compaction. `native` is a deliberately inert future-engine seam. |
-| `PI_IDLE_COMPACTION_TTL_MS` | `300000` | Provider prompt-cache TTL. |
-| `PI_IDLE_COMPACTION_MARGIN_MS` | `60000` | Compact this long before TTL expiry; must be less than TTL. |
+| `PI_IDLE_COMPACTION_TTL_MS` | `300000` | Legacy global cache TTL fallback for calibrated model families. |
+| `PI_IDLE_COMPACTION_MARGIN_MS` | `60000` | Legacy global safety margin; must be less than its TTL. |
+| `PI_IDLE_COMPACTION_ANTHROPIC_TTL_MS` + `PI_IDLE_COMPACTION_ANTHROPIC_MARGIN_MS` | unset | Paired override for `claude-*` models (Anthropic's documented default is 5 minutes). |
+| `PI_IDLE_COMPACTION_OPENAI_TTL_MS` + `PI_IDLE_COMPACTION_OPENAI_MARGIN_MS` | unset | Paired override for `gpt-*` models (calibrate to the actual route; OpenAI in-memory cache is generally 5–10 minutes). |
 | `PI_IDLE_COMPACTION_FLOOR_PERCENT` | `30` | Minimum current context as a percentage of the active model's window. |
 | `PI_IDLE_COMPACTION_MIN_GROWTH_TOKENS` | `1024` | Absolute minimum growth above the post-compaction estimate before another idle compaction. |
 | `PI_IDLE_COMPACTION_MIN_GROWTH_PERCENT` | `5` | Window-relative minimum growth; the effective gate is the larger token/percentage value. |
@@ -109,9 +111,24 @@ PI_IDLE_COMPACTION=0 pi
 pi --no-idle-compaction
 ```
 
-Provider TTLs differ. Set the TTL to the cache policy of the provider/model path
-that pi actually uses; the built-in value encodes the current Anthropic
-5-minute default rather than pretending all providers have the same cache.
+Provider TTLs differ. The extension resolves the upstream provider from the
+active model ID, including Deck's gateway models (`claude-*` → Anthropic,
+`gpt-*` → OpenAI). A complete per-provider pair overrides the legacy global
+timing only for that family; changing models therefore changes the warm-cache
+deadline safely. Both variables in a pair are required; malformed or incomplete
+profiles are ignored with a session warning (and are written to stderr when
+there is no UI). When `PI_IDLE_COMPACTION_MIN_INTERVAL_MS` is left at its default,
+the effective cooldown is capped at the warm-cache deadline, so a short calibrated
+TTL cannot make later compactions wait until the cache is cold. An explicit interval
+remains an operator override. Unknown families (such as `glm-*`)
+retain the legacy global timing for backwards compatibility; use it only after
+calibrating that route's cache policy.
+
+Keep Anthropic at its documented five-minute default unless the actual route
+proves otherwise. OpenAI's in-memory prompt-cache retention is generally five
+to ten minutes, not a promise, so set a conservative proven value at the crew
+launcher (for example, `PI_IDLE_COMPACTION_OPENAI_TTL_MS=300000` and an
+appropriate margin).
 
 ### Safety and interaction with pi auto-compaction
 
@@ -127,6 +144,14 @@ that pi actually uses; the built-in value encodes the current Anthropic
   callback checks `ctx.isIdle()`, pending messages, and in-flight tools again
   immediately before `ctx.compact()`. This matters because pi 0.82's manual
   compaction path aborts an active turn before summarizing.
+- **Long tool calls:** pi 0.82 exposes `tool_call` blocking but no safe
+  defer/replay capability, while `ctx.compact()` aborts the current run. This
+  extension therefore never attempts pre-dispatch compaction by blocking a
+  tool; it cannot preserve and reissue that call. The upstream requirement is
+  an atomic lifecycle operation that defers a validated tool call, compacts the
+  session, then replays the same call exactly once with its original ID/input
+  and normal cancellation/error semantics. Until pi provides it, compact
+  manually before known long calls.
 - `session_before_compact` marks any compaction in flight, including `/compact`
   and other extensions, so the idle timer cannot race it. Every completion is
   observed through `session_compact`. If pi's threshold or overflow

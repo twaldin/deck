@@ -1,4 +1,5 @@
 export type IdleCompactionEngine = "client" | "native";
+export type IdleCompactionProvider = "anthropic" | "openai";
 
 export interface IdleCompactionConfig {
 	enabled: boolean;
@@ -28,6 +29,40 @@ export const DEFAULT_IDLE_COMPACTION_CONFIG: Readonly<IdleCompactionConfig> = {
 	maxRetriesPerContext: 2,
 	notify: true,
 };
+
+export interface IdleCompactionModel {
+	provider: string;
+	id: string;
+}
+
+export interface ParsedIdleCompactionConfig {
+	config: IdleCompactionConfig;
+	providerConfigs: Readonly<Partial<Record<IdleCompactionProvider, IdleCompactionConfig>>>;
+	warnings: string[];
+}
+
+/**
+ * Deck presents a single gateway provider to pi, so infer the broker's resolved
+ * upstream cache policy from its model family. Direct provider routes are also
+ * recognized. Unknown routes retain the legacy global timing for compatibility.
+ */
+export function cacheProviderForModel(model: IdleCompactionModel | undefined): IdleCompactionProvider | undefined {
+	if (model === undefined) return undefined;
+	if (model.provider === "anthropic") return "anthropic";
+	if (model.provider === "openai" || model.provider === "openai-codex") return "openai";
+	const modelId = model.id.slice(model.id.lastIndexOf("/") + 1);
+	if (modelId.startsWith("claude-")) return "anthropic";
+	if (modelId.startsWith("gpt-")) return "openai";
+	return undefined;
+}
+
+export function selectIdleCompactionConfig(
+	parsed: ParsedIdleCompactionConfig,
+	model: IdleCompactionModel | undefined,
+): IdleCompactionConfig {
+	const provider = cacheProviderForModel(model);
+	return provider === undefined ? parsed.config : (parsed.providerConfigs[provider] ?? parsed.config);
+}
 
 export type IdleCompactionDecision =
 	| { compact: true; idleForMs: number; floorTokens: number }
@@ -124,11 +159,27 @@ interface ConfigVariable {
 	maximum?: number;
 }
 
+const PROVIDER_CACHE_PROFILES: readonly IdleCompactionProvider[] = ["anthropic", "openai"];
+/** Node clamps larger delays to 1ms, which would spin an idle timer. */
+export const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
 const CONFIG_VARIABLES: ConfigVariable[] = [
 	{ key: "enabled", env: "PI_IDLE_COMPACTION", kind: "boolean" },
 	{ key: "engine", env: "PI_IDLE_COMPACTION_ENGINE", kind: "engine" },
-	{ key: "cacheTtlMs", env: "PI_IDLE_COMPACTION_TTL_MS", kind: "number", minimum: 1 },
-	{ key: "marginMs", env: "PI_IDLE_COMPACTION_MARGIN_MS", kind: "number", minimum: 0 },
+	{
+		key: "cacheTtlMs",
+		env: "PI_IDLE_COMPACTION_TTL_MS",
+		kind: "number",
+		minimum: 1,
+		maximum: MAX_TIMER_DELAY_MS,
+	},
+	{
+		key: "marginMs",
+		env: "PI_IDLE_COMPACTION_MARGIN_MS",
+		kind: "number",
+		minimum: 0,
+		maximum: MAX_TIMER_DELAY_MS,
+	},
 	{
 		key: "contextFloorPercent",
 		env: "PI_IDLE_COMPACTION_FLOOR_PERCENT",
@@ -154,12 +205,14 @@ const CONFIG_VARIABLES: ConfigVariable[] = [
 		env: "PI_IDLE_COMPACTION_MIN_INTERVAL_MS",
 		kind: "number",
 		minimum: 0,
+		maximum: MAX_TIMER_DELAY_MS,
 	},
 	{
 		key: "retryDelayMs",
 		env: "PI_IDLE_COMPACTION_RETRY_MS",
 		kind: "number",
 		minimum: 1,
+		maximum: MAX_TIMER_DELAY_MS,
 	},
 	{
 		key: "maxRetriesPerContext",
@@ -171,18 +224,13 @@ const CONFIG_VARIABLES: ConfigVariable[] = [
 	{ key: "notify", env: "PI_IDLE_COMPACTION_NOTIFY", kind: "boolean" },
 ];
 
-export interface ParsedIdleCompactionConfig {
-	config: IdleCompactionConfig;
-	warnings: string[];
-}
-
-export function parseIdleCompactionConfig(
+function parseConfigVariables(
+	config: IdleCompactionConfig,
+	variables: readonly ConfigVariable[],
 	env: Record<string, string | undefined>,
-): ParsedIdleCompactionConfig {
-	const config: IdleCompactionConfig = { ...DEFAULT_IDLE_COMPACTION_CONFIG };
-	const warnings: string[] = [];
-
-	for (const variable of CONFIG_VARIABLES) {
+	warnings: string[],
+): void {
+	for (const variable of variables) {
 		const raw = env[variable.env];
 		if (raw === undefined || raw.trim() === "") continue;
 		if (variable.kind === "engine") {
@@ -190,7 +238,7 @@ export function parseIdleCompactionConfig(
 			if (normalized === "client" || normalized === "native") {
 				config.engine = normalized;
 			} else {
-				warnings.push(`${variable.env} must be client or native; using the default`);
+				warnings.push(`${variable.env} must be client or native; ignoring it`);
 			}
 			continue;
 		}
@@ -201,7 +249,7 @@ export function parseIdleCompactionConfig(
 			} else if (["0", "false", "no", "off"].includes(normalized)) {
 				(config[variable.key] as boolean | number) = false;
 			} else {
-				warnings.push(`${variable.env} must be a boolean; using the default`);
+				warnings.push(`${variable.env} must be a boolean; ignoring it`);
 			}
 			continue;
 		}
@@ -212,19 +260,99 @@ export function parseIdleCompactionConfig(
 			(variable.minimum !== undefined && value < variable.minimum) ||
 			(variable.maximum !== undefined && value > variable.maximum)
 		) {
-			warnings.push(`${variable.env} is out of range; using the default`);
+			warnings.push(`${variable.env} is out of range; ignoring it`);
 			continue;
 		}
 		(config[variable.key] as boolean | number) = value;
 	}
+}
 
+function normalizeTiming(
+	config: IdleCompactionConfig,
+	ttlEnv: string,
+	marginEnv: string,
+	capCooldown: boolean,
+	warnings: string[],
+): void {
 	if (config.marginMs >= config.cacheTtlMs) {
-		warnings.push("PI_IDLE_COMPACTION_MARGIN_MS must be smaller than the TTL; using the default margin");
+		warnings.push(`${marginEnv} must be smaller than ${ttlEnv}; using a safe margin`);
 		config.marginMs = Math.min(
 			DEFAULT_IDLE_COMPACTION_CONFIG.marginMs,
-			Math.max(0, config.cacheTtlMs - 1),
+			Math.floor(config.cacheTtlMs / 5),
 		);
 	}
+	if (capCooldown) {
+		config.minimumCompactionIntervalMs = Math.min(
+			config.minimumCompactionIntervalMs,
+			idleThresholdMs(config),
+		);
+	}
+}
 
-	return { config, warnings };
+export function parseIdleCompactionConfig(
+	env: Record<string, string | undefined>,
+): ParsedIdleCompactionConfig {
+	const config: IdleCompactionConfig = { ...DEFAULT_IDLE_COMPACTION_CONFIG };
+	const warnings: string[] = [];
+	parseConfigVariables(config, CONFIG_VARIABLES, env, warnings);
+	normalizeTiming(
+		config,
+		"PI_IDLE_COMPACTION_TTL_MS",
+		"PI_IDLE_COMPACTION_MARGIN_MS",
+		env.PI_IDLE_COMPACTION_MIN_INTERVAL_MS?.trim() === "" ||
+			env.PI_IDLE_COMPACTION_MIN_INTERVAL_MS === undefined,
+		warnings,
+	);
+
+	const providerConfigs: Partial<Record<IdleCompactionProvider, IdleCompactionConfig>> = {};
+	for (const provider of PROVIDER_CACHE_PROFILES) {
+		const ttlEnv = `PI_IDLE_COMPACTION_${provider.toUpperCase()}_TTL_MS`;
+		const marginEnv = `PI_IDLE_COMPACTION_${provider.toUpperCase()}_MARGIN_MS`;
+		const ttlValue = env[ttlEnv]?.trim();
+		const marginValue = env[marginEnv]?.trim();
+		if ((ttlValue === undefined || ttlValue === "") && (marginValue === undefined || marginValue === "")) continue;
+		if (ttlValue === undefined || ttlValue === "" || marginValue === undefined || marginValue === "") {
+			warnings.push(`${ttlEnv}/${marginEnv} must both be set; ignoring the incomplete provider profile`);
+			continue;
+		}
+
+		const profile = { ...config };
+		const profileWarnings: string[] = [];
+		parseConfigVariables(
+			profile,
+			[
+				{
+					key: "cacheTtlMs",
+					env: ttlEnv,
+					kind: "number",
+					minimum: 1,
+					maximum: MAX_TIMER_DELAY_MS,
+				},
+				{
+					key: "marginMs",
+					env: marginEnv,
+					kind: "number",
+					minimum: 0,
+					maximum: MAX_TIMER_DELAY_MS,
+				},
+			],
+			env,
+			profileWarnings,
+		);
+		if (profileWarnings.length > 0) {
+			warnings.push(`${ttlEnv}/${marginEnv} must be valid timing values; ignoring the provider profile`);
+			continue;
+		}
+		normalizeTiming(
+			profile,
+			ttlEnv,
+			marginEnv,
+			env.PI_IDLE_COMPACTION_MIN_INTERVAL_MS?.trim() === "" ||
+				env.PI_IDLE_COMPACTION_MIN_INTERVAL_MS === undefined,
+			warnings,
+		);
+		providerConfigs[provider] = profile;
+	}
+
+	return { config, providerConfigs, warnings };
 }
