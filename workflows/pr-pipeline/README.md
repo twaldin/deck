@@ -188,7 +188,9 @@ run can self-approve its gates.
 ## Tests
 
 ```sh
-bun test tests/          # 75 tests
+bun install                       # here
+bun install --cwd ../.smithers    # engine.test.ts loads the pack's seats
+bun test tests/          # 69 tests
 bun run typecheck
 bun run graph            # render-without-execute sanity check
 ```
@@ -197,6 +199,9 @@ bun run graph            # render-without-execute sanity check
   check, re-request detection, migration detection + evidence, ready-for-stamp
   (bot/excluded/self approvals never count; will-be-green ruling), landing
   `(#N)` matching, evidence-gated done, model catalog + family opposition.
+- `tests/engine.test.ts` — the pi-only engine invariant across the whole
+  `workflows/` workspace (see `../README.md` "Engine policy: pi only"). It
+  imports `../.smithers/agents.ts`, so it needs `.smithers` deps installed.
 - `tests/pipeline.test.tsx` — drives the REAL workflow module through
   `smithers-orchestrator/testing` `simulate()`: preflight refusal paths, parks
   at migration-gate/stamp without bypass, full-graph traversal (clean + migration
