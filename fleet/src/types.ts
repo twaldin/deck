@@ -27,6 +27,9 @@ export type StatusState =
 	| "failed"
 	| "unknown";
 
+/** Live state reported by a Herdr agent registration for a task pane. */
+export type PaneState = "working" | "idle" | "blocked" | "done" | "unknown";
+
 /** Parsed `state/<id>.meta` key=value block. Every key is optional. */
 export interface TaskMeta {
 	window: string | null;
@@ -99,6 +102,8 @@ export interface FleetTask {
 	status: StatusEvent | null;
 	backlog: BacklogEntry | null;
 	runs: SmithersRun[];
+	/** Live pane state, when the task's Herdr endpoint could be queried. */
+	paneState?: PaneState | null;
 }
 
 /** Per-source health, so missing sources degrade loudly rather than silently. */

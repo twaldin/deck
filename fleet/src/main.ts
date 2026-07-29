@@ -6,6 +6,7 @@
 export * from "./types";
 export * from "./config";
 export { collectFleetState, parseMeta, parseStatusTail } from "./collectors/fleet";
+export { collectPaneStates, parsePaneState } from "./collectors/pane";
 export {
 	collectBacklog,
 	parseTasksAxiList,

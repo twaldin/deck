@@ -91,7 +91,7 @@ export async function runCli(argv: readonly string[], runtime: CliRuntime = PROC
 		return 0;
 	}
 
-	const deps = { run: runtime.makeRunner(), now: runtime.now };
+	const deps = { run: runtime.makeRunner(), paneRun: runtime.makeRunner(), now: runtime.now };
 
 	const io: TuiIo = {
 		write: runtime.stdout.write,
