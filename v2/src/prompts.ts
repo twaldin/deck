@@ -15,6 +15,8 @@
  * Names are plain so a status line or prompt can never be ambiguous about which
  * is meant.
  */
+import * as path from "node:path";
+import { dataDir } from "./home";
 
 /**
  * Projects whose convention is to sign agent-authored comments.
@@ -43,6 +45,58 @@ function signatureProjects(): Set<string> {
 			.map((name) => name.trim())
 			.filter((name) => name.length > 0),
 	);
+}
+
+/**
+ * Frozen copy of the 3 load-bearing traps from data/lindy-domain.md.
+ *
+ * Inlined verbatim on purpose: a path alone decays (workers skip the read), and
+ * reading the live file at brief time would make the brief depend on home-file
+ * state. Keep this in sync with lindy-domain.md when the traps change.
+ */
+const LINDY_TRAPS = `1. **Graphite lands-and-closes**: a queue-merged PR reads \`state=closed, merged=false\`. Before any "not landed" verdict, search main for the squash commit \`(#N)\`.
+2. **Migration gate**: a diff touching migrations/ or packages/database-migrations/ makes the migration run (stg → verify → prod → verify, with evidence) mandatory before landing is done. Unapplied migrations block ALL of CI repo-wide.
+3. **Review requests silently no-op**: after requesting reviewers (or any GH edit), verify via the requested_reviewers API. Plausible-but-wrong logins return ok.`;
+
+/**
+ * Standing doctrine for a worker brief: absolute paths into the knowledge pack
+ * plus the frozen traps. Progressive disclosure — paths and one-liners only,
+ * never the full pack contents. Exported so smithers seats can share the same
+ * doctrine string.
+ */
+export function buildStandingDoctrine(project?: string): string {
+	const data = dataDir();
+	const distill = path.join(data, "ref", "distill");
+	if (project?.toLowerCase() === "lindy") {
+		return `## Standing doctrine (lindy)
+
+Read before you touch prod, a PR, or Linear. Full doctrine (absolute paths):
+
+- ${path.join(data, "KNOWLEDGE.md")} (load index)
+- ${path.join(data, "lindy-domain.md")} · ${path.join(data, "lindy-ops.md")} · ${path.join(data, "lindy-pipeline.md")} · ${path.join(data, "lindy-standing-work.md")} · ${path.join(data, "lindy-learnings.md")}
+- ${path.join(distill, "STANDING-RULES.md")} · ${path.join(distill, "SETUP-CHECKLIST.md")} · ${path.join(distill, "CREDS-AND-TOOLS.md")}
+
+The 3 load-bearing traps (verbatim, non-negotiable):
+
+${LINDY_TRAPS}
+
+And:
+
+- Prod DB reads: \`pnpm repl:prod-readonly\` only. Repo skills live under \`.agent/skills/\`.
+- Sitevars: query the collection sorted \`version: -1\` — never \`getSitevar()\` (REPL cache returns registry defaults) and never unsorted \`findOne\`.
+- Merges: yolo OFF. Per-PR captain stamp + merge word, always. Never run a no-mistakes pipeline.
+- Reviewers: CODEOWNERS + review-frequency + gh-reviewer-lookup skill. Never Ali as code reviewer.
+- CI/review watching belongs to the orchestrator's wake engine — never sleep-poll in your own run; workers that poll-and-exit read as dead.`;
+	}
+	return `## Standing doctrine
+
+Distilled fleet rules (absolute paths, open when the topic goes deep):
+
+- ${path.join(distill, "STANDING-RULES.md")}
+- ${path.join(data, "captain.md")} (captain's preferences)
+- ${path.join(data, "secrets-map.md")} (credential locations, names only — never values)
+
+You never contact the captain directly; every question routes through your status file.`;
 }
 
 export type WorkerBriefInput = {
@@ -172,6 +226,8 @@ Tests: ask what assertion would actually catch this breaking, and write that.
 Do not write one test per changed line. A test earns its place by going red on
 the old behavior — if it passes against the code before your change, it is
 testing nothing. Verify the mechanism fires rather than trusting a green run.`);
+
+	sections.push(buildStandingDoctrine(project));
 
 	if (kind === "scout") {
 		sections.push(`## Definition of done
