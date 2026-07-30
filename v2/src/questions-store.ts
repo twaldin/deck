@@ -89,8 +89,9 @@ function append(file: string, event: QueueEvent): void {
 			`queue event is too large (${bytes} bytes > ${MAX_EVENT_BYTES}); shorten the text`,
 		);
 	}
-	mkdirSync(path.dirname(file), { recursive: true });
-	appendFileSync(file, `${line}\n`, "utf8");
+	// Decision text names cwds and project details; keep it out of other users' reach.
+	mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+	appendFileSync(file, `${line}\n`, { encoding: "utf8", mode: 0o600 });
 }
 
 /**
@@ -288,16 +289,19 @@ export function pendingAnswersFor(file: string, sessionId: string): Question[] {
 export const STALE_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
- * A question worth keeping in the live queue: open, fresh, and with a sane
- * timestamp. Resolved-but-undelivered stays live so the answer can still reach
- * its asker; resolved-and-delivered is history; junk without a real `askedAt`
+ * A question worth keeping in the live queue.
+ *
+ * Resolved-but-undelivered is ALWAYS kept, at any age: compaction runs on
+ * session start before delivery, so aging these out would silently destroy a
+ * captain answer the asker never saw — the exact failure the queue exists
+ * to prevent. Resolved-and-delivered is history. Open questions must
+ * be fresh and carry a sane timestamp; junk without a real `askedAt`
  * (firstmate-era records) can never age out, so it goes immediately.
  */
 function isLive(entry: Question, now: number): boolean {
+	if (entry.status !== "open") return !entry.delivered;
 	if (typeof entry.askedAt !== "number" || !Number.isFinite(entry.askedAt)) return false;
-	if (now - entry.askedAt > STALE_AFTER_MS) return false;
-	if (entry.status !== "open" && entry.delivered) return false;
-	return true;
+	return now - entry.askedAt <= STALE_AFTER_MS;
 }
 
 /** Reconstructs the minimal event lines that fold back into `entry`. */
@@ -337,15 +341,15 @@ export function compact(file: string, now = Date.now()): { kept: number; archive
 	const drop = all.filter((entry) => !isLive(entry, now));
 	if (drop.length === 0) return { kept: keep.length, archived: 0 };
 	const dir = path.dirname(file);
-	mkdirSync(dir, { recursive: true });
+	mkdirSync(dir, { recursive: true, mode: 0o700 });
 	appendFileSync(
 		path.join(dir, "archive.jsonl"),
 		`${drop.map((entry) => JSON.stringify(entry)).join("\n")}\n`,
-		"utf8",
+		{ encoding: "utf8", mode: 0o600 },
 	);
 	const tmp = `${file}.tmp`;
 	const body = keep.flatMap(eventLines).join("\n");
-	writeFileSync(tmp, body === "" ? "" : `${body}\n`, "utf8");
+	writeFileSync(tmp, body === "" ? "" : `${body}\n`, { encoding: "utf8", mode: 0o600 });
 	renameSync(tmp, file);
 	return { kept: keep.length, archived: drop.length };
 }

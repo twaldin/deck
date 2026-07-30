@@ -143,6 +143,25 @@ describe("installer layout", () => {
 		expect(fs.existsSync(path.join(link, "keep.txt"))).toBe(true);
 	});
 
+	test("the default install target is the runtime default home (~/.deck/.pi)", () => {
+		// The installer default and deckV2Home() must name the SAME home, or the
+		// extension lands in a pi home no orchestrator session ever starts from.
+		execFileSync(path.join(REPO_V2, "install.sh"), [], {
+			env: {
+				...process.env,
+				HOME: target,
+				INSTALL_TARGET: "",
+				DECK_V2_HOME: "",
+				BIN_TARGET: path.join(target, "bin"),
+			},
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+		expect(
+			fs.existsSync(path.join(target, ".deck", ".pi", "extensions", "deck-v2", "index.ts")),
+		).toBe(true);
+	});
+
 	test("refuses a foreign flat entry rather than deleting it", () => {
 		const extensions = path.join(target, "agent", "extensions");
 		fs.mkdirSync(extensions, { recursive: true });

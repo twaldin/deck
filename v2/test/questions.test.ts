@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { afterAll, describe, expect, test } from "bun:test";
@@ -282,6 +282,34 @@ describe("compact", () => {
 			"ghost",
 			"stale open",
 		]);
+	});
+
+	test("REGRESSION: an old answered-but-undelivered question survives compaction and still delivers", async () => {
+		// Compaction runs on session_start BEFORE delivery. Aging these out by
+		// askedAt would destroy a captain answer the asker never saw.
+		const file = freshFile();
+		const asked = ask(file, { question: "old but answered", sessionId: "s", cwd: "/", now: 0 });
+		answer(file, asked.id, "the word", "answered", 1000);
+
+		expect(compact(file, STALE_AFTER_MS * 10)).toEqual({ kept: 1, archived: 0 });
+		expect(pendingAnswersFor(file, "s").map((e) => e.answer)).toEqual(["the word"]);
+
+		const pi = new Harness();
+		pi.currentTime = STALE_AFTER_MS * 10;
+		registerQuestions(pi as any, envFor(file), pi.runtime);
+		await pi.emit("session_start", fakeContext("s"));
+		expect(pi.sent.map((m) => m.content.includes("A: the word"))).toEqual([true]);
+	});
+
+	test("the queue dir and files are private to the operator", () => {
+		const file = freshFile();
+		ask(file, { question: "Q", sessionId: "s", cwd: "/", now: 1000 });
+		answer(file, readQuestions(file)[0]!.id, "a", "answered", 1000);
+		markDelivered(file, readQuestions(file)[0]!.id, 1000);
+		compact(file, STALE_AFTER_MS * 2);
+		const mode = (target: string) => statSync(target).mode & 0o777;
+		expect(mode(file)).toBe(0o600);
+		expect(mode(path.join(path.dirname(file), "archive.jsonl"))).toBe(0o600);
 	});
 
 	test("a clean queue is left untouched", () => {
