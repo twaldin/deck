@@ -15,7 +15,10 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   `smithers init` recreates `workflows/.smithers/agents/`, delete it again).
   Guard: `assertDeckModel` in `workflows/pr-pipeline/lib/models.ts`; the
   red-green enforcement is `workflows/pr-pipeline/tests/engine.test.ts`.
-- **Version-skew trap:** always run the CLI as `bunx smithers-orchestrator@0.30.0 ...`.
+- **Version-skew trap:** run the CLI through the pinned `smithers` shim that
+  `v2/install.sh` writes to `~/.local/bin` (or as `bunx smithers-orchestrator@0.30.0 ...`).
+  The one code pin is `v2/src/smithers.ts`; `v2/test/smithers-pin.test.ts` keeps it
+  equal to both workspace pins.
   From a directory without a package.json, bun auto-resolves bare specifiers/binaries
   from its global cache and can silently pick a NEWER version than the workspace pin
   (observed: 0.31.0 vs 0.30.0). `workflows/pr-pipeline/` has its own package.json pin

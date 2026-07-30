@@ -20,6 +20,7 @@ import { stateDir, stateFiles } from "./home";
 import { readMeta } from "./meta";
 import { pending } from "./queue";
 import { unresolvedReceipts } from "./side-effects";
+import { SMITHERS_SPEC } from "./smithers";
 import { pidAlive } from "./spawn";
 import { deckOwnedTasks } from "./wake";
 
@@ -82,10 +83,18 @@ type PsRun = { id: string; workflow?: string; status?: string; step?: string; ro
 
 /** Public read-only CLI only. Never the private db, never Gateway lifecycle. */
 async function collectRuns(cwd: string): Promise<{ runs: PsRun[]; health: SourceHealth }> {
+	// A home whose workflows link is not installed yet has no runs to miss:
+	// that is "skipped" (run v2/install.sh), not "missing" (smithers broke).
+	if (!fs.existsSync(cwd)) {
+		return {
+			runs: [],
+			health: { name: "smithers", state: "skipped", detail: `no workspace at ${cwd} (run v2/install.sh)` },
+		};
+	}
 	try {
 		const { stdout } = await run(
 			"bunx",
-			["smithers-orchestrator@0.30.0", "ps", "--json"],
+			[SMITHERS_SPEC, "ps", "--json"],
 			{ cwd, timeout: 15_000, maxBuffer: 4_000_000 },
 		);
 		const parsed: unknown = JSON.parse(stdout);

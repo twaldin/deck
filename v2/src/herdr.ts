@@ -29,6 +29,7 @@ import { promisify } from "node:util";
 import type { FleetFrame, SourceHealth, TaskRow, WorkflowRow } from "./fleet";
 import { stateDir, stateFiles } from "./home";
 import { readMeta, updateMeta } from "./meta";
+import { SMITHERS_SPEC } from "./smithers";
 
 const run = promisify(execFile);
 
@@ -329,7 +330,7 @@ async function pass(frame: FleetFrame, options: { workflowCwd?: string }): Promi
 						"pane",
 						"run",
 						pane,
-						`while true; do clear; bunx smithers-orchestrator@0.30.0 ps; sleep 15; done`,
+						`while true; do clear; bunx ${SMITHERS_SPEC} ps; sleep 15; done`,
 					]);
 				}
 			}
