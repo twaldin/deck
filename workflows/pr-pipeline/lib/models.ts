@@ -31,6 +31,7 @@ export interface ModelRef {
  */
 export const DECK_AGENT_CATALOG: readonly string[] = [
 	// anthropic
+	"claude-fable-5",
 	"claude-opus-5",
 	"claude-sonnet-5",
 	"claude-haiku-4-5",
@@ -40,8 +41,13 @@ export const DECK_AGENT_CATALOG: readonly string[] = [
 	"gpt-5.6-sol",
 ];
 
+/**
+ * Captain policy 2026-07-30: implementation work defaults to the fable/sol
+ * class. opus-5 and sonnet-5 are acceptable but measurably token-heavy and slow,
+ * so they are fallbacks rather than defaults.
+ */
 export const DEFAULT_MODELS = {
-	implementer: "deck/claude-sonnet-5",
+	implementer: "deck/claude-fable-5",
 	reviewer: "deck/gpt-5.6-sol",
 	watcher: "deck/gpt-5.6-terra",
 	fallout: "deck/claude-opus-5",

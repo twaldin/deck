@@ -21,6 +21,8 @@ function deckAgent(model: string, thinking: Thinking): PiAgent {
 }
 
 export const providers = {
+  // Captain policy 2026-07-30: fable is the default implementation seat.
+  claudeFable: deckAgent("claude-fable-5", "medium"),
   claudeOpus: deckAgent("claude-opus-5", "high"),
   claudeSonnet: deckAgent("claude-sonnet-5", "medium"),
   claudeHaiku: deckAgent("claude-haiku-4-5", "off"),
@@ -33,7 +35,7 @@ export const agents = {
   // Later entries are runtime fallbacks, invoked only if every earlier attempt fails.
   cheapFast: [providers.gptLuna, providers.claudeHaiku, providers.claudeSonnet],
   research: [providers.gptLuna, providers.claudeSonnet],
-  implement: [providers.gptTerra, providers.claudeSonnet],
+  implement: [providers.claudeFable, providers.gptSol, providers.claudeSonnet],
   midTier: [providers.gptTerra, providers.claudeSonnet],
   smartTool: [providers.gptTerra, providers.claudeSonnet],
   validate: [providers.gptTerra, providers.claudeSonnet],
