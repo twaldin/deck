@@ -12,6 +12,7 @@
 		"typecheck": "tsc --noEmit"
 	},
 	"devDependencies": {
+		"@earendil-works/pi-tui": "^0.83.0",
 		"@types/bun": "latest",
 		"typescript": "^5"
 	},

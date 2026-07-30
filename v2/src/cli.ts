@@ -18,6 +18,7 @@ import {
 import { bootstrapHome, formatBootstrap } from "./bootstrap";
 import { appendStatus, readStatus } from "./events";
 import { buildFrame, renderFrame, renderStatusline } from "./fleet";
+import { projectFleet } from "./herdr";
 import { assertHomeIsNotACheckout, assertHomeIsNotAnotherFleet, deckV2Home, stateFiles } from "./home";
 import { readMeta } from "./meta";
 import { enqueue, pending } from "./queue";
@@ -34,7 +35,7 @@ const USAGE = `deck-v2 — fleet primitives
   send <id> <message>              queue a message for the task's next run
   status <id> [--json]             the task's events and current reconciliation
   peek <id> [--limit N]            tail the task's session transcript
-  fleet [--json] [--statusline]    the fleet frame
+  fleet [--json] [--statusline] [--project]   the fleet frame; --project mirrors it into herdr
   wake [--json]                    one reconcile pass (T0 now, T1 folded, T2 silent)
   stale                            runs that vanished without a terminal status
   teardown <id> [--pr N]           evaluate the teardown guard (never destructive)
@@ -180,9 +181,13 @@ export async function runCli(argv: string[]): Promise<number> {
 			}
 
 			case "fleet": {
-				const frame = await buildFrame({
-					workflowCwd: str(args.flags, "workflows") ?? path.join(deckV2Home(), "workflows", ".smithers"),
-				});
+				const workflowCwd =
+					str(args.flags, "workflows") ?? path.join(deckV2Home(), "workflows", ".smithers");
+				const frame = await buildFrame({ workflowCwd });
+				if (args.flags.project === true) {
+					const health = await projectFleet(frame, { workflowCwd });
+					process.stdout.write(`${health.name}=${health.state} (${health.detail})\n`);
+				}
 				if (args.flags.json === true) process.stdout.write(`${JSON.stringify(frame, null, 2)}\n`);
 				else if (args.flags.statusline === true) process.stdout.write(`${renderStatusline(frame)}\n`);
 				else process.stdout.write(`${renderFrame(frame)}\n`);
