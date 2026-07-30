@@ -8,8 +8,19 @@ import {
 } from "./idle-compaction-policy";
 
 const STATE_ENTRY_TYPE = "deck.idle-compaction.v1";
+/**
+ * Supplements pi's own structured compaction template (pi appends this as
+ * "Additional focus:"), so it names only what a PARKED FLEET AGENT uniquely
+ * needs and does not restate Goal/Progress/Next-Steps, which pi already covers.
+ *
+ * The previous text asked for "goals, constraints, decisions, progress, next
+ * steps" — all of which pi's template already demands — and asked for none of
+ * the identifiers a resuming agent actually cannot reconstruct. An agent that
+ * wakes without its run receipt starts a second run of something already
+ * executing; one that wakes without its pending decision asks the captain twice.
+ */
 const COMPACTION_INSTRUCTIONS =
-	"Preserve the durable state needed for a parked, long-lived agent to resume accurately. Keep goals, constraints, decisions, progress, next steps, and file operations.";
+	"This agent is parking and will resume cold. Additionally preserve, exactly: its task id and current status-file state; worktree path and branch; PR URLs with their last known CI and review state; any pending decision it is waiting on and who owes the answer; run receipts (endpoint, run id, poller) for anything still executing remotely; and the precise next command or action it would have taken. Prefer exact identifiers over descriptions.";
 
 type TimerHandle = ReturnType<typeof setTimeout>;
 

@@ -371,7 +371,13 @@ describe("idle compaction extension", () => {
 		expect(context.compactCalls).toHaveLength(0);
 		runtime.advance(1);
 		expect(context.compactCalls).toHaveLength(1);
-		expect(context.compactCalls[0]?.customInstructions).toContain("parked");
+		// Assert the identifiers a cold resume cannot reconstruct, not the prose:
+		// an agent that wakes without its run receipt starts a second run of work
+		// already executing, and one without its pending decision asks twice.
+		const instructions = context.compactCalls[0]?.customInstructions ?? "";
+		expect(instructions).toContain("task id");
+		expect(instructions).toContain("run receipts");
+		expect(instructions).toContain("pending decision");
 	});
 
 	test("uses the OpenAI profile deadline for a deck OpenAI route", async () => {
