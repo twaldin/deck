@@ -37,7 +37,7 @@ import * as path from "node:path";
  * whichever value the first import happened to see into every later caller.
  */
 export function deckV2Home(): string {
-	return process.env.DECK_V2_HOME ?? path.join(os.homedir(), "deck");
+	return process.env.DECK_V2_HOME ?? path.join(os.homedir(), ".deck");
 }
 
 export function dataDir(): string {

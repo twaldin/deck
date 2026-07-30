@@ -14,7 +14,8 @@
  *      (worktree corruption, unparseable status lines, premature done).
  */
 import { describe, expect, test } from "bun:test";
-import { orchestratorContract, workerBrief } from "../src/prompts";
+import { orchestratorContract } from "../src/bootstrap";
+import { workerBrief } from "../src/prompts";
 
 const base = {
 	taskId: "t1",

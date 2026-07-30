@@ -33,6 +33,17 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   `rootDir==worktree`.
   Invocation/config/herdr-embed notes in `fleet/README.md`.
 
+- `v2/` is the agent-fleet layer: one library (`v2/src/`) behind two faces — a pi
+  extension (`v2/src/extension/`) and a thin CLI (`v2/bin/deck-v2`). Neither wraps
+  the other; both import the same modules, so there is no subprocess hop in the
+  hot path and no duplicated logic. `v2/README.md` explains the design.
+  **Two traps here.** The orchestrator's operating contract is
+  `v2/seed/orchestrator-contract.md`, deliberately NOT named `AGENTS.md`: pi
+  discovers `AGENTS.md` in the cwd and every ancestor, so committing it under that
+  name would make any agent working in this checkout load "you never write code"
+  as its own instructions. And the operator home (`~/.deck`) must never be a git
+  checkout — `assertHomeIsNotACheckout` enforces it, because a checkout brings its
+  own `AGENTS.md` and lets a crew rebase live state out from under the fleet.
 - **pi extension installers ship layout, not just source.** Both shipped
   extensions broke in `~/.pi` while their sources were fine, so verify the
   *installed* shape: `extensions/install.sh` (idle-compaction) and

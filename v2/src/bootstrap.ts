@@ -75,28 +75,23 @@ export function bootstrapHome(options: { repoV2Dir: string; home?: string } = { 
 		}
 	}
 
-	// The contract, by symlink: editing it is a normal repo commit.
+	// The contract is COPIED once, not symlinked. The captain owns ~/.deck/AGENTS.md
+	// and edits it in place; a symlink would make his edits a repo diff, and a
+	// regenerating installer would silently overwrite them.
 	if (options.repoV2Dir.length > 0) {
-		const source = path.join(options.repoV2Dir, "AGENTS.md");
+		const source = path.join(options.repoV2Dir, "seed", "orchestrator-contract.md");
 		const target = path.join(home, "AGENTS.md");
-		if (fs.existsSync(source)) {
-			const current = fs.existsSync(target) || isLink(target) ? readLink(target) : null;
-			if (current !== source) {
-				if (isLink(target) || fs.existsSync(target)) {
-					if (!isLink(target)) {
-						notes.push(`${target} exists and is not our symlink; left alone`);
-					} else {
-						fs.rmSync(target);
-						fs.symlinkSync(source, target);
-						linked.push(`${target} -> ${source}`);
-					}
-				} else {
-					fs.symlinkSync(source, target);
-					linked.push(`${target} -> ${source}`);
-				}
-			}
+		if (!fs.existsSync(source)) {
+			notes.push(`no contract seed at ${source}`);
+		} else if (fs.existsSync(target)) {
+			notes.push(`${target} already exists; left alone (it is yours to edit)`);
 		} else {
-			notes.push(`no contract at ${source}`);
+			// Strip the seed's build-time HTML comment: it explains why the file is
+			// not named AGENTS.md in the repo, which is guidance for whoever works on
+			// deck, not an operating instruction for the agent that reads it.
+			const seeded = fs.readFileSync(source, "utf8").replace(/<!--[\s\S]*?-->\n\n?/, "");
+			fs.writeFileSync(target, seeded, { mode: 0o600 });
+			created.push(target);
 		}
 	}
 
@@ -143,4 +138,18 @@ export function formatBootstrap(result: BootstrapResult): string {
 	lines.push("");
 	lines.push("This home is not a checkout. The deck repo is a project you dispatch against.");
 	return lines.join("\n");
+}
+
+/**
+ * The orchestrator's live contract: the captain's copy if the home has one, else
+ * the shipped seed.
+ *
+ * Deliberately not in prompts.ts. That file generates DYNAMIC prompts — briefs
+ * spliced per task — and holding a second copy of the contract there is what let
+ * the two drift ("he wrote most of this" existed in only one of them).
+ */
+export function orchestratorContract(home = deckV2Home()): string {
+	const live = path.join(home, "AGENTS.md");
+	if (fs.existsSync(live)) return fs.readFileSync(live, "utf8");
+	return fs.readFileSync(path.join(import.meta.dir, "..", "seed", "orchestrator-contract.md"), "utf8");
 }

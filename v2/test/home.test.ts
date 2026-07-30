@@ -80,7 +80,7 @@ describe("home is not a checkout", () => {
 });
 
 describe("bootstrap", () => {
-	test("creates the home and symlinks the contract", async () => {
+	test("creates the home and copies the contract seed", async () => {
 		const home = path.join(sandbox, "home");
 		process.env.DECK_V2_HOME = home;
 		const { bootstrapHome } = await import("../src/bootstrap");
@@ -88,10 +88,10 @@ describe("bootstrap", () => {
 
 		expect(fs.existsSync(path.join(home, "data"))).toBe(true);
 		expect(fs.existsSync(path.join(home, "state"))).toBe(true);
-		// The contract is a LINK so improving it stays a normal repo commit.
+		// COPIED, not linked: the captain owns this file and edits it in place, so a
+		// link would make his edits a repo diff and a reinstall would clobber them.
 		const contract = path.join(home, "AGENTS.md");
-		expect(fs.lstatSync(contract).isSymbolicLink()).toBe(true);
-		expect(fs.realpathSync(contract)).toBe(path.join(REPO_V2, "AGENTS.md"));
+		expect(fs.lstatSync(contract).isSymbolicLink()).toBe(false);
 		// And it is the ORCHESTRATOR contract, not deck's project memory.
 		const body = fs.readFileSync(contract, "utf8");
 		expect(body).toContain("You are the captain's single point of contact");
@@ -115,7 +115,7 @@ describe("bootstrap", () => {
 		const { bootstrapHome } = await import("../src/bootstrap");
 		const result = bootstrapHome({ repoV2Dir: REPO_V2, home });
 		expect(fs.readFileSync(path.join(home, "AGENTS.md"), "utf8")).toBe("# mine\n");
-		expect(result.notes.join(" ")).toContain("not our symlink");
+		expect(result.notes.join(" ")).toContain("yours to edit");
 	});
 
 	test("seeds memory files once, then leaves them alone", async () => {
@@ -162,5 +162,43 @@ describe("symlink escape", () => {
 		const { assertHomeIsNotACheckout } = await import("../src/home");
 		// bootstrap runs before the directory exists; the guard must still fire.
 		expect(() => assertHomeIsNotACheckout(path.join(repo, "not", "yet"))).toThrow(/git working tree/);
+	});
+});
+
+describe("prompt isolation in the checkout", () => {
+	// pi discovers AGENTS.md in the working directory and its ancestors. The
+	// orchestrator contract therefore must not be committed under that name
+	// anywhere in this repo: a worker running here would load "you are the
+	// captain's single point of contact, you never write code" as its own
+	// instructions.
+	test("REGRESSION: no AGENTS.md in the repo carries operator doctrine", () => {
+		const repoRoot = path.resolve(REPO_V2, "..");
+		const found = execFileSync("git", ["ls-files", "*AGENTS.md", "AGENTS.md"], {
+			cwd: repoRoot,
+			encoding: "utf8",
+		})
+			.split("\n")
+			.filter((line) => line.length > 0);
+
+		for (const file of found) {
+			const body = fs.readFileSync(path.join(repoRoot, file), "utf8");
+			expect(body).not.toContain("You are the captain's single point of contact");
+		}
+		// And the seed exists under a name pi does not auto-load.
+		expect(fs.existsSync(path.join(REPO_V2, "seed", "orchestrator-contract.md"))).toBe(true);
+	});
+});
+
+describe("the seeded contract is clean", () => {
+	test("build guidance does not ship into the captain's contract", async () => {
+		const home = path.join(sandbox, "home");
+		const { bootstrapHome } = await import("../src/bootstrap");
+		bootstrapHome({ repoV2Dir: REPO_V2, home });
+		const contract = fs.readFileSync(path.join(home, "AGENTS.md"), "utf8");
+		// The seed explains why it is not named AGENTS.md; that is for whoever works
+		// on deck, not an instruction for the agent reading its own contract.
+		expect(contract).not.toContain("<!--");
+		expect(contract).toStartWith("# Orchestrator");
+		expect(contract).toContain("only agent that asks him anything");
 	});
 });

@@ -15,8 +15,6 @@
  * Names are plain so a status line or prompt can never be ambiguous about which
  * is meant.
  */
-import * as fs from "node:fs";
-import * as path from "node:path";
 
 /**
  * Projects whose convention is to sign agent-authored comments.
@@ -26,7 +24,26 @@ import * as path from "node:path";
  * answer facts, never argue — is global, because that one is about behavior and
  * applies wherever an agent posts.
  */
-const SIGNATURE_PROJECTS = new Set(["lindy"]);
+/**
+ * Projects whose convention is to sign agent-authored comments.
+ *
+ * Signing is one team's convention, not a universal rule, so it rides per project
+ * instead of appearing in every brief. The CONDUCT rule next to it — answer with
+ * facts, never argue with a reviewer — is global, because that one is about
+ * behavior and applies wherever an agent posts.
+ *
+ * Set DECK_SIGNATURE_PROJECTS to a comma-separated list to change this.
+ */
+function signatureProjects(): Set<string> {
+	const configured = process.env.DECK_SIGNATURE_PROJECTS;
+	if (configured === undefined) return new Set(["lindy"]);
+	return new Set(
+		configured
+			.split(",")
+			.map((name) => name.trim())
+			.filter((name) => name.length > 0),
+	);
+}
 
 export type WorkerBriefInput = {
 	taskId: string;
@@ -190,7 +207,7 @@ flag.
 
 In PR threads: agree, or answer with facts. Never argue with a reviewer — if you
 believe a reviewer is wrong, append \`needs-decision:\` and stop. Write comments in
-Simplified Technical English.${SIGNATURE_PROJECTS.has(project ?? "") ? `
+Simplified Technical English.${signatureProjects().has(project ?? "") ? `
 
 Sign every comment you post \`-- tim's agent\`, because a reader deserves to know a
 person did not write it.` : ""}
@@ -201,17 +218,4 @@ question is not — append \`needs-decision:\` with the options and stop.`);
 	}
 
 	return sections.join("\n\n");
-}
-
-/**
- * The orchestrator contract is the FILE, v2/AGENTS.md — read, never generated.
- *
- * It used to also exist as a string constant here and the two had already
- * drifted. One owner: worker BRIEFS are generated because they splice per-task
- * values, but the contract has no variables, the captain edits it directly
- * through his home symlink, and a generator would silently overwrite those edits
- * on the next install. A file the human owns beats a string the code owns.
- */
-export function orchestratorContract(): string {
-	return fs.readFileSync(path.join(import.meta.dir, "..", "AGENTS.md"), "utf8");
 }
