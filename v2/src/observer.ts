@@ -31,6 +31,7 @@ import * as path from "node:path";
 import { appendStatus } from "./events";
 import type { StatusVerb } from "./status";
 import { stateDir } from "./home";
+import { SMITHERS_SPEC } from "./smithers";
 
 /** A run as the read-only CLI reports it. */
 export type ObservedRun = {
@@ -310,8 +311,6 @@ export async function observeRun(options: {
 	return emitted;
 }
 
-/** Pinned CLI spec; see the version-skew note in the repo's AGENTS.md. */
-const SMITHERS_SPEC = "smithers-orchestrator@0.30.0";
 
 /**
  * Parse `inspect --format json`. Returns null for anything unusable rather than

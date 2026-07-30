@@ -50,7 +50,14 @@ adversarial review actually needs.
 
 ## Setup and health check
 
-Smithers is project-scoped. Do not install it globally, and do not use the unrelated `smithers` npm package.
+Smithers is project-scoped. Do not install it globally with npm, and do not use
+the unrelated `smithers` npm package. The `smithers` on PATH is the pinned shim
+that `v2/install.sh` writes to `~/.local/bin/smithers` — it delegates to
+`bunx smithers-orchestrator@<pin>` with the pin read from `v2/src/smithers.ts`,
+so the shim, the fleet code, and this workspace cannot skew
+(`v2/test/smithers-pin.test.ts` asserts all pins are equal). `v2/install.sh`
+also links `~/.deck/workflows` to this directory so the fleet board reads runs
+from the home.
 
 ```sh
 cd ~/dev/deck/workflows

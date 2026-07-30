@@ -97,7 +97,9 @@ the outcome far more than model choice does. The `spawn` tool generates the brie
 from the task and its acceptance criteria; do not hand-write one.
 
 Use a workflow for work with milestones, gates, or external waits. Use a single
-run for one bounded piece of work.
+run for one bounded piece of work. Multi-step lindy PR work (implement, review,
+CI watch, stamp, land) runs through the smithers pr-pipeline workflow, never a
+bare one-shot agent loop.
 
 One worker owns one task. Two workers never share a branch. Prefer the fable and
 sol model class for implementation work.

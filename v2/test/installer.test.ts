@@ -18,9 +18,12 @@ import * as path from "node:path";
 
 const REPO_V2 = path.resolve(import.meta.dir, "..");
 let target: string;
+let workflowsSource: string;
 
 beforeEach(() => {
 	target = fs.mkdtempSync(path.join(os.tmpdir(), "deckv2-install-"));
+	workflowsSource = path.join(target, "workflows-src");
+	fs.mkdirSync(workflowsSource, { recursive: true });
 });
 
 afterEach(() => {
@@ -33,6 +36,11 @@ function install(): void {
 			...process.env,
 			INSTALL_TARGET: path.join(target, "agent"),
 			BIN_TARGET: path.join(target, "bin"),
+			WORKFLOWS_LINK: path.join(target, "home", "workflows"),
+			// A fixture, not the real workflows workspace: without this the installer
+			// would bun-install the checkout's .smithers on any machine where
+			// node_modules is absent — a unit test mutating the repo.
+			WORKFLOWS_SOURCE: workflowsSource,
 		},
 		encoding: "utf8",
 		stdio: ["ignore", "pipe", "pipe"],
@@ -95,6 +103,44 @@ describe("installer layout", () => {
 		const shim = path.join(target, "bin", "deck-v2");
 		expect(fs.existsSync(shim)).toBe(true);
 		expect(fs.realpathSync(shim)).toBe(path.join(REPO_V2, "bin", "deck-v2"));
+	});
+
+	test("installs a pinned smithers shim that matches src/smithers.ts", () => {
+		install();
+		const shim = path.join(target, "bin", "smithers");
+		const body = fs.readFileSync(shim, "utf8");
+		const pin = fs
+			.readFileSync(path.join(REPO_V2, "src", "smithers.ts"), "utf8")
+			.match(/SMITHERS_VERSION = "([^"]+)"/)?.[1];
+		expect(pin).toBeDefined();
+		expect(body).toContain(`smithers-orchestrator@${pin}`);
+		expect(fs.statSync(shim).mode & 0o111).not.toBe(0);
+	});
+
+	test("refuses a foreign smithers on the bin path rather than overwriting it", () => {
+		const bin = path.join(target, "bin");
+		fs.mkdirSync(bin, { recursive: true });
+		fs.writeFileSync(path.join(bin, "smithers"), "#!/bin/sh\n# someone else's smithers\n");
+		expect(() => install()).toThrow();
+		expect(fs.readFileSync(path.join(bin, "smithers"), "utf8")).toContain("someone else's");
+	});
+
+	test("links <home>/workflows to the workflows workspace", () => {
+		install();
+		const link = path.join(target, "home", "workflows");
+		expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
+		expect(fs.realpathSync(link)).toBe(fs.realpathSync(workflowsSource));
+		install(); // reruns converge
+		expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
+	});
+
+	test("leaves a real (non-symlink) workflows directory alone", () => {
+		const link = path.join(target, "home", "workflows");
+		fs.mkdirSync(link, { recursive: true });
+		fs.writeFileSync(path.join(link, "keep.txt"), "mine\n");
+		install();
+		expect(fs.lstatSync(link).isSymbolicLink()).toBe(false);
+		expect(fs.existsSync(path.join(link, "keep.txt"))).toBe(true);
 	});
 
 	test("refuses a foreign flat entry rather than deleting it", () => {
