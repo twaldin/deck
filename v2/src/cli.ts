@@ -38,7 +38,7 @@ const USAGE = `deck-v2 — fleet primitives
   wake [--json]                    one reconcile pass (T0 now, T1 folded, T2 silent)
   stale                            runs that vanished without a terminal status
   teardown <id> [--pr N]           evaluate the teardown guard (never destructive)
-  note <id> <verb> <text>          append a status event as the orchestrator
+  note <id> <verb> <text> [--epoch N]          append a status event as the orchestrator
   backlog ls|add|close|externalize|sweep|check
   home                             print the resolved home
 
@@ -234,6 +234,23 @@ export async function runCli(argv: string[]): Promise<number> {
 				}
 				if (!STATUS_VERBS.includes(verb as StatusVerb)) {
 					throw new Error(`${verb} is not a status verb (${STATUS_VERBS.join(", ")})`);
+				}
+				// Epoch fence. A worker gets DECK_RUN_EPOCH in its environment and its
+				// brief tells it to use this command, so a superseded worker's late
+				// append is refused here rather than being believed. The raw
+				// `echo >> status` the brief used to document had no way to check
+				// this: a cancelled-and-respawned task's old process could still
+				// append `done:` and the orchestrator would act on it.
+				const epoch = str(args.flags, "epoch");
+				if (epoch !== undefined) {
+					const current = readMeta(id)?.run_epoch;
+					if (current !== undefined && Number(epoch) !== current) {
+						process.stderr.write(
+							`refusing a status append from epoch ${epoch}; task ${id} is now at epoch ${current}. ` +
+								"This run was superseded, so its status is no longer the task's truth.\n",
+						);
+						return 1;
+					}
 				}
 				process.stdout.write(`${appendStatus(id, verb as StatusVerb, text)}\n`);
 				return 0;

@@ -137,16 +137,19 @@ export function acquireClaim(
 		);
 	}
 
+	// Any LIVE holder blocks, whatever its epoch. Only checking same-epoch holders
+	// was wrong: a superseded run whose process is still alive can still be
+	// mid-push, and letting a new epoch push alongside it is exactly the
+	// double-irreversible-op this protocol exists to prevent. An epoch grants the
+	// right to START; it cannot un-land someone else's push.
 	const existing = readClaim(taskId);
-	if (existing !== null) {
-		if (existing.epoch === live && pidAlive(existing.pid)) {
-			throw new ClaimError(
-				`refusing ${op} for ${taskId}: claim held by live pid ${existing.pid} at epoch ${existing.epoch}`,
-			);
-		}
-		// A dead or stale-epoch holder leaves its PENDING receipt behind on
-		// purpose: reclaiming the claim never resolves it.
+	if (existing !== null && pidAlive(existing.pid)) {
+		throw new ClaimError(
+			`refusing ${op} for ${taskId}: claim held by live pid ${existing.pid} at epoch ${existing.epoch}`,
+		);
 	}
+	// A dead holder leaves its PENDING receipt behind on purpose: reclaiming the
+	// claim never resolves it, because we cannot know whether its op landed.
 
 	const receipt: Receipt = {
 		receipt_id: receiptId(),
@@ -165,12 +168,64 @@ export function acquireClaim(
 		pid: process.pid,
 		at: receipt.started_at,
 	};
+	// The claim is taken with an ATOMIC exclusive create, before the receipt is
+	// written. "wx" fails if the file exists, so exactly one of two concurrent
+	// callers can win. The previous write-then-rename silently overwrote a
+	// competing claim, so both callers believed they held it and both would push:
+	// read-then-write has a gap between the read and the write, and rename closes
+	// nothing.
+	const claimFile = stateFiles(taskId).claim;
+	try {
+		fs.writeFileSync(claimFile, `${JSON.stringify(claim)}\n`, { mode: 0o600, flag: "wx" });
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+			// Someone created it between our check and here, or a dead holder's file
+			// is still present. Re-read to report which.
+			const holder = readClaim(taskId);
+			if (holder !== null && pidAlive(holder.pid)) {
+				throw new ClaimError(
+					`refusing ${op} for ${taskId}: claim held by live pid ${holder.pid} at epoch ${holder.epoch}`,
+				);
+			}
+			// A dead holder's claim is reclaimable, but rm-then-create is NOT atomic:
+			// two callers can both remove, then both create, and both believe they
+			// hold it. (Observed: 2 winners out of 8 contenders.)
+			//
+			// The exchange is made atomic with a per-caller lock directory. mkdir is
+			// atomic on every POSIX filesystem, so exactly one caller can create it,
+			// and only that caller is allowed to replace the dead claim.
+			const reclaimLock = `${claimFile}.reclaim`;
+			try {
+				fs.mkdirSync(reclaimLock);
+			} catch {
+				throw new ClaimError(
+					`refusing ${op} for ${taskId}: another run is reclaiming the claim from a dead holder`,
+				);
+			}
+			try {
+				// Re-verify under the lock: the winner of the previous reclaim may have
+				// already installed a live claim while we waited.
+				const holder = readClaim(taskId);
+				if (holder !== null && pidAlive(holder.pid)) {
+					throw new ClaimError(
+						`refusing ${op} for ${taskId}: claim held by live pid ${holder.pid} at epoch ${holder.epoch}`,
+					);
+				}
+				// rename is atomic, so the claim file is never briefly absent.
+				const staging = `${claimFile}.${process.pid}.staged`;
+				fs.writeFileSync(staging, `${JSON.stringify(claim)}\n`, { mode: 0o600 });
+				fs.renameSync(staging, claimFile);
+			} finally {
+				fs.rmSync(reclaimLock, { recursive: true, force: true });
+			}
+		} else {
+			throw error;
+		}
+	}
 	// PENDING receipt lands BEFORE the provider call, so a crash is always
-	// detectable as "may have happened".
+	// detectable as "may have happened". It is written after the claim so a lost
+	// race leaves no misleading pending receipt behind.
 	appendReceipt(taskId, receipt);
-	const tmp = `${stateFiles(taskId).claim}.tmp`;
-	fs.writeFileSync(tmp, `${JSON.stringify(claim)}\n`, { mode: 0o600 });
-	fs.renameSync(tmp, stateFiles(taskId).claim);
 	return receipt;
 }
 

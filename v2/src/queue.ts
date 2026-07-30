@@ -76,6 +76,28 @@ export function pending(taskId: string): QueuedMessage[] {
  * ack fields set. Rewrite is safe because the queue is drained by exactly one
  * run at a time (the epoch holder).
  */
+/**
+ * Mark specific messages acked. Separated from reading so the ack can happen
+ * after the consuming run is known to have started: acking at string-build time
+ * loses the captain's steer outright if the spawn then fails.
+ */
+export function ack(taskId: string, ids: string[], epoch: number): void {
+	if (ids.length === 0) return;
+	const target = new Set(ids);
+	const now = new Date().toISOString();
+	const all = readQueue(taskId).map((message) =>
+		target.has(message.id) && message.acked_at === undefined
+			? { ...message, acked_by_epoch: epoch, acked_at: now }
+			: message,
+	);
+	const file = stateFiles(taskId).queue;
+	const tmp = `${file}.tmp`;
+	fs.writeFileSync(tmp, all.map((message) => JSON.stringify(message)).join("\n") + "\n", {
+		mode: 0o600,
+	});
+	fs.renameSync(tmp, file);
+}
+
 export function drain(taskId: string, epoch: number): QueuedMessage[] {
 	assertTaskId(taskId);
 	const all = readQueue(taskId);

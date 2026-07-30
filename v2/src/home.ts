@@ -119,7 +119,12 @@ export function assertTaskId(id: string): void {
  */
 export function assertHomeIsNotACheckout(home = deckV2Home()): void {
 	if (process.env.DECK_V2_ALLOW_REPO_HOME === "1") return;
-	let dir = path.resolve(home);
+	// Canonicalize first. path.resolve does not follow symlinks, so a home that is
+	// a symlink pointing INTO a checkout walked the link's own parents and never
+	// saw the repo's .git — the guard passed and live state landed in a working
+	// tree anyway. For a home that does not exist yet, resolve the nearest
+	// existing ancestor and re-append the rest.
+	let dir = realpathOrNearest(path.resolve(home));
 	for (;;) {
 		if (fs.existsSync(path.join(dir, ".git"))) {
 			throw new Error(
@@ -132,6 +137,25 @@ export function assertHomeIsNotACheckout(home = deckV2Home()): void {
 		const parent = path.dirname(dir);
 		if (parent === dir) return;
 		dir = parent;
+	}
+}
+
+/**
+ * Canonical path for a location that may not exist yet: realpath the deepest
+ * existing ancestor, then re-append the missing segments.
+ */
+function realpathOrNearest(target: string): string {
+	const missing: string[] = [];
+	let dir = target;
+	for (;;) {
+		try {
+			return path.join(fs.realpathSync(dir), ...missing.reverse());
+		} catch {
+			const parent = path.dirname(dir);
+			if (parent === dir) return target;
+			missing.push(path.basename(dir));
+			dir = parent;
+		}
 	}
 }
 

@@ -18,6 +18,16 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 
+/**
+ * Projects whose convention is to sign agent-authored comments.
+ *
+ * Captain's decision: the signature is lindy's convention, not a global rule, so
+ * it rides per-project rather than in every brief. The CONDUCT rule above it —
+ * answer facts, never argue — is global, because that one is about behavior and
+ * applies wherever an agent posts.
+ */
+const SIGNATURE_PROJECTS = new Set(["lindy"]);
+
 export type WorkerBriefInput = {
 	taskId: string;
 	/** What to do. Front-loaded and self-contained: this is the whole contract. */
@@ -51,6 +61,7 @@ export function workerBrief(input: WorkerBriefInput): string {
 		branch,
 		reportPath,
 		context,
+		project,
 	} = input;
 
 	const sections: string[] = [];
@@ -84,15 +95,19 @@ to your status file. Do not branch, commit, or edit.${
 
 	sections.push(`## Reporting
 
-Append one line per event to ${statusFile}:
+Report one event at a time with:
 
 \`\`\`
-echo "{verb}: {one short line}" >> '${statusFile}'
+deck-v2 note ${taskId} {verb} "{one short line}" --epoch "$DECK_RUN_EPOCH"
 \`\`\`
 
 Verbs: working, needs-decision, blocked, paused, resolved, done, failed.
-The line MUST start with the verb. A timestamp or prose prefix makes the event
-unreadable to the orchestrator; put time after the colon if you need it.
+
+Use that command, not a raw append to the file. It carries your run epoch, so if
+this task was cancelled and restarted, your late report is refused instead of
+being mistaken for the live run's. It also rejects a malformed line before it
+reaches the orchestrator. If the command refuses your append, you have been
+superseded: stop, and change nothing further.
 
 Report sparingly. Append only when the orchestrator can act: a phase change it
 would care about, or a terminal state. Progress narration belongs in your own
@@ -174,9 +189,11 @@ Landing truth is the squash commit \`(#N)\` on the base branch, never the merged
 flag.
 
 In PR threads: agree, or answer with facts. Never argue with a reviewer — if you
-believe a reviewer is wrong, append \`needs-decision:\` and stop. Write comments
-in Simplified Technical English and sign them \`-- tim's agent\`, because a reader
-deserves to know a person did not write it.
+believe a reviewer is wrong, append \`needs-decision:\` and stop. Write comments in
+Simplified Technical English.${SIGNATURE_PROJECTS.has(project ?? "") ? `
+
+Sign every comment you post \`-- tim's agent\`, because a reader deserves to know a
+person did not write it.` : ""}
 
 If review or CI comes back: a scoped correctness fix (a failing assertion, a
 lint error, a rebase) is yours to make immediately. A product or architecture

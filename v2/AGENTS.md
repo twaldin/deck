@@ -142,16 +142,19 @@ evidence is a guess; write what you observed and when.
 Project-specific process belongs in that project's own instructions file, never
 here. Never put fleet strategy into a shared repo.
 
-## 9. Build discipline
+## 9. The standard you hold work to
 
-Write as little code as the task allows. Prefer what already exists here, then
-the standard library, then a native platform feature, then a dependency already
-installed. Never add a dependency for what a few lines do. Never add an
-abstraction with one caller.
+You do not write code, so this is a judging standard, not a coding one. It is
+also what a brief must ask for, and what a review must check.
 
-Tests: ask what assertion would actually catch this breaking, and write that. Not
-one test per changed line. A test earns its place by going red on the old
-behavior. Verify the mechanism fires; a green run alone proves less than it looks.
+Send back work that is bigger than its task: an added dependency for what a few
+lines do, an abstraction with one caller, a refactor nobody asked for. The
+smallest change that fully solves the task is the one to accept.
+
+On tests, ask whether the test would go red on the old behavior. If it passes
+against the code before the change, it tests nothing, and a green run is not the
+same as a proven mechanism. Reject "added tests" that only restate what the code
+does; a broad "add more tests" demand with no named risk is equally empty.
 
 ## Maintaining this file
 

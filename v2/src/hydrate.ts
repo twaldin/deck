@@ -18,7 +18,7 @@ import * as fs from "node:fs";
 import { openDecisions, readStatus } from "./events";
 import { taskFiles } from "./home";
 import { readMeta } from "./meta";
-import { drain } from "./queue";
+import { pending as pendingMessages } from "./queue";
 import { unresolvedReceipts } from "./side-effects";
 
 export type HydrationOptions = {
@@ -34,10 +34,18 @@ const DEFAULT_BUDGET = 12_000;
 /**
  * Build the hydration seed for a run.
  *
- * `drain` marks queued messages acked, so this has a side effect on purpose: a
- * message is delivered exactly once, and the ack is durable.
+ * Reading is deliberately side-effect free. Acking here would mark the captain's
+ * steer delivered at string-build time, so a spawn that then failed would lose it
+ * outright. The caller acks after the run is actually running, and reports which
+ * message ids it hydrated so the caller knows what to ack.
  */
-export function buildHydration(taskId: string, epoch: number, options: HydrationOptions = {}): string {
+export type Hydration = {
+	text: string;
+	/** Queued message ids included in the text, to ack once the run is started. */
+	messageIds: string[];
+};
+
+export function buildHydration(taskId: string, epoch: number, options: HydrationOptions = {}): Hydration {
 	const statusTail = options.statusTail ?? DEFAULT_STATUS_TAIL;
 	const budget = options.budget ?? DEFAULT_BUDGET;
 	const meta = readMeta(taskId);
@@ -45,7 +53,7 @@ export function buildHydration(taskId: string, epoch: number, options: Hydration
 
 	// --- Element 2: queued messages (never truncated) ------------------------
 	// Drained first so a steer can never be lost to a budget decision.
-	const messages = drain(taskId, epoch);
+	const messages = pendingMessages(taskId);
 	if (messages.length > 0) {
 		sections.push(
 			`## Messages for you\n\n${messages
@@ -113,7 +121,10 @@ export function buildHydration(taskId: string, epoch: number, options: Hydration
 	);
 
 	const seed = sections.join("\n\n");
-	return seed.length <= budget ? seed : `${seed.slice(0, budget)}\n\n[seed truncated at budget]`;
+	return {
+		text: seed.length <= budget ? seed : `${seed.slice(0, budget)}\n\n[seed truncated at budget]`,
+		messageIds: messages.map((message) => message.id),
+	};
 }
 
 /** `git status --porcelain`, or null when clean/unavailable. */

@@ -76,7 +76,11 @@ describe("worker brief", () => {
 		expect(brief).toContain("Never open a second PR");
 		// Queue-merged PRs read closed-not-merged.
 		expect(brief).toContain("(#N)");
-		expect(brief).toContain("-- tim's agent");
+		// The signature is lindy's convention, not global (captain's decision).
+		expect(brief).not.toContain("-- tim's agent");
+		expect(workerBrief({ ...base, project: "lindy" })).toContain("-- tim's agent");
+		// The conduct rule is global either way.
+		expect(brief).toContain("Never argue with a reviewer");
 	});
 
 	test("the branch checkout is only instructed when a branch is given", () => {
@@ -122,5 +126,23 @@ describe("orchestrator contract", () => {
 		// is the mechanism that keeps this one read.
 		const words = orchestratorContract().split(/\s+/).length;
 		expect(words).toBeLessThan(2000);
+	});
+});
+
+describe("epoch-fenced reporting", () => {
+	// Both adversarial reviewers found the same hole: the brief documented a raw
+	// `echo >> status` append, which has no way to check the run epoch. A
+	// cancelled-and-respawned task's old process could still append `done:` and
+	// the orchestrator would act on it.
+	test("REGRESSION: the brief instructs the fenced command, not a raw append", () => {
+		const brief = workerBrief(base);
+		expect(brief).toContain("--epoch");
+		expect(brief).toContain("DECK_RUN_EPOCH");
+		// The raw redirect must not be offered as the documented path.
+		expect(brief).not.toMatch(/echo "\{verb\}.*>>/);
+	});
+
+	test("a superseded worker is told to stop, not to retry", () => {
+		expect(workerBrief(base)).toContain("you have been\nsuperseded");
 	});
 });

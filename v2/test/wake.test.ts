@@ -170,3 +170,64 @@ describe("delivery ordering", () => {
 		expect(wake.reconcile(["t1"]).interrupt).toHaveLength(1);
 	});
 });
+
+describe("durable delivery outbox", () => {
+	// The finding both reviewers raised: reconcile advances a durable cursor, so
+	// if delivery is the same step as the read, a failed or absent send loses the
+	// event permanently. A lost `blocked:` is the worst failure this system has.
+	test("REGRESSION: a T0 event survives a failed send and is redelivered", async () => {
+		const { wake, events } = await mods();
+		events.appendStatus("t1", "blocked", "needs a credential");
+
+		wake.reconcile(["t1"]);
+		// The send failed, so nothing is acknowledged.
+		const owed = wake.pendingWakes();
+		expect(owed.map((entry) => entry.verb)).toContain("blocked");
+
+		// A later cycle cannot re-read it from the status file — the cursor moved —
+		// so the outbox is the only thing that keeps it alive.
+		wake.reconcile(["t1"]);
+		expect(wake.pendingWakes().filter((entry) => entry.verb === "blocked")).toHaveLength(1);
+	});
+
+	test("an acknowledged wake is not redelivered", async () => {
+		const { wake, events } = await mods();
+		events.appendStatus("t1", "failed", "gave up");
+		wake.reconcile(["t1"]);
+		const owed = wake.pendingWakes();
+		expect(owed).toHaveLength(1);
+
+		wake.ackWakes(owed.map((entry) => entry.id));
+		expect(wake.pendingWakes()).toHaveLength(0);
+		// And a further cycle adds nothing, because the cursor is past it.
+		wake.reconcile(["t1"]);
+		expect(wake.pendingWakes()).toHaveLength(0);
+	});
+
+	test("a partial acknowledgement leaves only the undelivered wake owed", async () => {
+		const { wake, events } = await mods();
+		events.appendStatus("t1", "blocked", "first");
+		events.appendStatus("t2", "failed", "second");
+		wake.reconcile(["t1", "t2"]);
+
+		const owed = wake.pendingWakes();
+		expect(owed).toHaveLength(2);
+		// Only the t1 send succeeded.
+		wake.ackWakes(owed.filter((entry) => entry.taskId === "t1").map((entry) => entry.id));
+		const remaining = wake.pendingWakes();
+		expect(remaining).toHaveLength(1);
+		expect(remaining[0]?.taskId).toBe("t2");
+	});
+
+	test("a torn outbox line is skipped rather than poisoning the queue", async () => {
+		const { wake, events } = await mods();
+		events.appendStatus("t1", "blocked", "real event");
+		wake.reconcile(["t1"]);
+		// Simulating a crash mid-append.
+		const fs = await import("node:fs");
+		const { wakeFiles } = await import("../src/home");
+		fs.appendFileSync(wakeFiles().queue, '{"id":"torn","taskId":"t2"');
+		expect(() => wake.pendingWakes()).not.toThrow();
+		expect(wake.pendingWakes().some((entry) => entry.note === "real event")).toBe(true);
+	});
+});

@@ -153,7 +153,80 @@ export function reconcile(taskIds?: string[]): ReconcileResult {
 
 	saveCursors(cursors);
 	saveBaseline(baseline);
+	// The cursor has now advanced, so these events will never be re-read from the
+	// status files. Persist them BEFORE returning: the caller may fail to inject,
+	// or crash between reconcile and delivery, and a dropped `blocked:` is the
+	// worst failure this system has. The outbox is what makes delivery
+	// at-least-once instead of at-most-once.
+	enqueue([...result.interrupt, ...result.batched]);
 	return result;
+}
+
+/**
+ * Durable wake outbox.
+ *
+ * Reconcile is truth for READING status files; it cannot also be the
+ * acknowledgement of delivery, because the read advances a durable cursor while
+ * the delivery happens in a different process step that can fail. Splitting them
+ * is the difference between "we saw it" and "the orchestrator was told".
+ */
+type OutboxEntry = { id: string; taskId: string; tier: WakeTier; raw: string; note: string; verb: string };
+
+function outboxPath(): string {
+	return wakeFiles().queue;
+}
+
+function enqueue(items: WakeItem[]): void {
+	if (items.length === 0) return;
+	const lines = items.map((item) =>
+		JSON.stringify({
+			id: `${item.taskId}:${item.event.raw}`,
+			taskId: item.taskId,
+			tier: item.tier,
+			raw: item.event.raw,
+			note: item.event.note,
+			verb: item.event.verb,
+		} satisfies OutboxEntry),
+	);
+	fs.mkdirSync(path.dirname(outboxPath()), { recursive: true });
+	// Append-only, one JSON object per line: a torn final line loses at most the
+	// newest entry and is skipped on read, rather than corrupting the file.
+	fs.appendFileSync(outboxPath(), `${lines.join("\n")}\n`, { mode: 0o600 });
+}
+
+/** Everything still owed to the orchestrator, oldest first. */
+export function pendingWakes(): OutboxEntry[] {
+	let raw: string;
+	try {
+		raw = fs.readFileSync(outboxPath(), "utf8");
+	} catch {
+		return [];
+	}
+	const entries: OutboxEntry[] = [];
+	for (const line of raw.split("\n")) {
+		if (line.trim().length === 0) continue;
+		try {
+			entries.push(JSON.parse(line) as OutboxEntry);
+		} catch {
+			// A torn tail line from a crash mid-append. Skipping it is correct:
+			// the event is still in the status file's history for a rescan.
+		}
+	}
+	return entries;
+}
+
+/**
+ * Acknowledge delivery. Only called after the send is known to have happened.
+ * Anything not acknowledged stays owed and is redelivered next cycle.
+ */
+export function ackWakes(ids: string[]): void {
+	if (ids.length === 0) return;
+	const done = new Set(ids);
+	const remaining = pendingWakes().filter((entry) => !done.has(entry.id));
+	const target = outboxPath();
+	const tmp = `${target}.tmp`;
+	fs.writeFileSync(tmp, remaining.map((entry) => JSON.stringify(entry)).join("\n") + (remaining.length > 0 ? "\n" : ""), { mode: 0o600 });
+	fs.renameSync(tmp, target);
 }
 
 /**

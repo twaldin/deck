@@ -129,3 +129,38 @@ describe("bootstrap", () => {
 		expect(fs.readFileSync(learnings, "utf8")).toContain("something we learned");
 	});
 });
+
+describe("symlink escape", () => {
+	// The adversarial review found this: path.resolve does not follow symlinks, so
+	// a home that is a LINK into a checkout walked the link's own parents, never
+	// saw the repo's .git, and the guard passed. Live state then lived in a working
+	// tree a crew could rebase.
+	test("REGRESSION: a symlink pointing into a checkout is still refused", async () => {
+		const repo = path.join(sandbox, "repo");
+		const inside = path.join(repo, "home");
+		fs.mkdirSync(path.join(repo, ".git"), { recursive: true });
+		fs.mkdirSync(inside, { recursive: true });
+		const link = path.join(sandbox, "link-home");
+		fs.symlinkSync(inside, link);
+
+		const { assertHomeIsNotACheckout } = await import("../src/home");
+		expect(() => assertHomeIsNotACheckout(link)).toThrow(/git working tree/);
+	});
+
+	test("a symlink to a plain directory is still accepted", async () => {
+		const real = path.join(sandbox, "real-home");
+		fs.mkdirSync(real, { recursive: true });
+		const link = path.join(sandbox, "ok-home");
+		fs.symlinkSync(real, link);
+		const { assertHomeIsNotACheckout } = await import("../src/home");
+		expect(() => assertHomeIsNotACheckout(link)).not.toThrow();
+	});
+
+	test("a home that does not exist yet is still checked against its ancestors", async () => {
+		const repo = path.join(sandbox, "repo2");
+		fs.mkdirSync(path.join(repo, ".git"), { recursive: true });
+		const { assertHomeIsNotACheckout } = await import("../src/home");
+		// bootstrap runs before the directory exists; the guard must still fire.
+		expect(() => assertHomeIsNotACheckout(path.join(repo, "not", "yet"))).toThrow(/git working tree/);
+	});
+});

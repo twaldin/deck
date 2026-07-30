@@ -23,7 +23,7 @@ import { enqueue, pending } from "../queue";
 import { peekSession, startRun } from "../spawn";
 import { STATUS_VERBS, type StatusVerb } from "../status";
 import { evaluateTeardown, formatVerdict } from "../teardown";
-import { detectStale, foldBatched, reconcile } from "../wake";
+import { ackWakes, detectStale, foldBatched, pendingWakes, reconcile } from "../wake";
 import {
 	assertDispatchable,
 	closeInternal,
@@ -284,13 +284,14 @@ export default function deckV2(pi: any): void {
 	pi.registerCommand("wake", {
 		description: "Run one reconcile pass now and report what changed",
 		handler: async (_args: string, ctx: any) => {
-			const result = reconcile();
-			const parts: string[] = [];
-			for (const item of result.interrupt) {
-				parts.push(`T0 ${item.taskId}: ${item.event.verb} — ${item.event.note}`);
-			}
-			const folded = foldBatched(result.batched);
-			if (folded !== null) parts.push(`T1 ${folded}`);
+			// Reconcile, then report from the OUTBOX rather than the reconcile
+			// result. Reporting from the result would show the captain events that
+			// are still owed, and reconcile's cursor advance means a second reader
+			// of the same result cannot see them again — this command must observe
+			// the queue, not consume it.
+			reconcile();
+			const pending = pendingWakes();
+			const parts = pending.map((entry) => `${entry.tier} ${entry.taskId}: ${entry.verb} — ${entry.note}`);
 			if (parts.length === 0) parts.push("nothing actionable");
 			ctx.ui?.notify?.(parts.join("\n"), "info");
 		},
@@ -314,23 +315,64 @@ export default function deckV2(pi: any): void {
 			void refreshStatusline(ctx);
 			return;
 		}
-		const result = reconcile();
-		for (const item of result.interrupt) {
-			pi.sendUserMessage?.(
-				`[deck] ${item.taskId}: ${item.event.verb} — ${item.event.note}`,
-				{ deliverAs: "followUp" },
-			);
-		}
-		const folded = foldBatched(result.batched);
-		if (folded !== null) {
-			pi.sendUserMessage?.(`[deck] ${folded}`, { deliverAs: "followUp" });
-		}
+		// Reconcile reads the status files and advances the durable cursor, then
+		// persists whatever it found into the wake outbox. Delivery drains the
+		// OUTBOX, not the reconcile result, and acknowledges only what was
+		// actually sent. Delivering straight from the reconcile result made the
+		// cursor advance the acknowledgement: if sendUserMessage was missing or
+		// threw, the event was gone for good, and a lost `blocked:` is the worst
+		// failure this system has.
+		reconcile();
 		for (const verdict of detectStale()) {
-			pi.sendUserMessage?.(`[deck] ${verdict.taskId} stopped responding: ${verdict.reason}`, {
-				deliverAs: "followUp",
-			});
+			// Staleness is derived from live facts, not from a status event, so it
+			// is not an outbox entry; it is recomputed every cycle and is
+			// therefore safe to send directly.
+			send(ctx, `[deck] ${verdict.taskId} stopped responding: ${verdict.reason}`);
 		}
+
+		const pending = pendingWakes();
+		if (pending.length === 0) {
+			void refreshStatusline(ctx);
+			return;
+		}
+		const delivered: string[] = [];
+		for (const entry of pending.filter((item) => item.tier === "T0")) {
+			if (send(ctx, `[deck] ${entry.taskId}: ${entry.verb} — ${entry.note}`)) {
+				delivered.push(entry.id);
+			}
+		}
+		// T1 folds into ONE message per cycle: six queued follow-ups each burning a
+		// turn is the failure the captain screenshotted. The fold is acknowledged
+		// as a unit because it was sent as a unit.
+		const batched = pending.filter((item) => item.tier === "T1");
+		if (batched.length > 0) {
+			const folded = foldBatched(
+				batched.map((entry) => ({
+					taskId: entry.taskId,
+					tier: entry.tier,
+					event: { verb: entry.verb as any, note: entry.note, raw: entry.raw },
+				})) as any,
+			);
+			if (folded !== null && send(ctx, `[deck] ${folded}`)) {
+				delivered.push(...batched.map((entry) => entry.id));
+			}
+		}
+		ackWakes(delivered);
 		void refreshStatusline(ctx);
+	}
+
+	/**
+	 * Send one message, reporting whether it actually went out. A false return
+	 * leaves the wake owed, so the next cycle retries it.
+	 */
+	function send(ctx: any, text: string): boolean {
+		try {
+			if (typeof pi.sendUserMessage !== "function") return false;
+			pi.sendUserMessage(text, { deliverAs: "followUp" });
+			return true;
+		} catch {
+			return false;
+		}
 	}
 
 	async function refreshStatusline(ctx: any): Promise<void> {

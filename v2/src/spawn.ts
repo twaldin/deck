@@ -17,6 +17,7 @@ import { ensureTaskDirs, stateFiles, taskFiles } from "./home";
 import { bumpEpoch, readMeta, updateMeta, type TaskKind } from "./meta";
 import { workerBrief } from "./prompts";
 import { buildHydration } from "./hydrate";
+import { ack as ackMessages } from "./queue";
 
 /** Captain policy: implementation work defaults to the fable/sol class. */
 export const DEFAULT_WORKER_MODEL = "deck/claude-fable-5";
@@ -129,9 +130,10 @@ export function startRun(request: SpawnRequest, primaryCheckout: string): SpawnR
 	});
 
 	const resume = hasSession(sessionDir);
+	const hydration = buildHydration(request.taskId, epoch);
 	const prompt = resume
-		? buildHydration(request.taskId, epoch)
-		: `${fs.readFileSync(briefPath, "utf8")}\n\n${buildHydration(request.taskId, epoch)}`;
+		? hydration.text
+		: `${fs.readFileSync(briefPath, "utf8")}\n\n${hydration.text}`;
 
 	const child = spawnProcess("pi", piArgs(sessionDir, model, request.thinking, resume), {
 		cwd: request.worktree,
@@ -145,6 +147,13 @@ export function startRun(request: SpawnRequest, primaryCheckout: string): SpawnR
 	const pid = child.pid ?? -1;
 	// Recorded so stale detection can tell "run finished" from "run vanished".
 	if (pid > 0) updateMeta(request.taskId, { run_pid: pid });
+
+	// Ack the queued messages only now, because the run exists and the prompt
+	// carrying them has been written to it. Acking while building the prompt marked
+	// the captain's steer delivered even when the spawn then failed, and a lost
+	// steer is silent: he believes he redirected the work and it keeps going the
+	// old way. A message left pending is redelivered, which is the safe direction.
+	if (pid > 0) ackMessages(request.taskId, hydration.messageIds, epoch);
 
 	return { taskId: request.taskId, epoch, briefPath, sessionDir, pid, model };
 }
