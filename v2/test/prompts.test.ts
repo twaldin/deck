@@ -98,7 +98,10 @@ describe("worker brief", () => {
 	// The four things the captain's audit removed. A future edit that reintroduces
 	// them should fail rather than quietly bloat the brief again.
 	test("REGRESSION: the audited-out boilerplate stays out", () => {
-		const brief = workerBrief(base) + orchestratorContract();
+		// The contract is read from the shipped seed, not the live home: the
+		// captain's own edits may legitimately name a banned term (e.g. "never
+		// no-mistakes" as a lindy rule); the ban guards what WE ship.
+		const brief = workerBrief(base) + orchestratorContract("/nonexistent-use-seed");
 		for (const banned of ["no-mistakes", "Herdr", "herdr", "delivery mode", "delivery-mode"]) {
 			expect(brief).not.toContain(banned);
 		}
@@ -135,6 +138,14 @@ describe("worker brief", () => {
 	test("buildStandingDoctrine is exported for smithers seats to share", () => {
 		expect(buildStandingDoctrine("lindy")).toContain("repl:prod-readonly");
 		expect(buildStandingDoctrine()).not.toContain("repl:prod-readonly");
+	});
+
+	test("REGRESSION: the doctrine stays paths + traps, never a pack dump", () => {
+		// Progressive disclosure is the contract: pasting STANDING-RULES (or any
+		// pack) into the brief would blow the short-brief envelope that fm2's
+		// evidence earned. The lindy block is ~1.8K today; 2.5K is the alarm.
+		expect(buildStandingDoctrine("lindy").length).toBeLessThan(2500);
+		expect(buildStandingDoctrine().length).toBeLessThan(1000);
 	});
 });
 
