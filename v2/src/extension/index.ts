@@ -14,9 +14,18 @@
  * orchestrator's own process, so there is no second thing that can die silently
  * while the orchestrator keeps running. fm2 lost a watcher for 23.8h that way.
  */
+import { Box, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { appendStatus, readStatus } from "../events";
-import { buildFrame, renderFrame, renderStatusline } from "../fleet";
+import {
+	buildFleetText,
+	buildFrame,
+	type FleetTheme,
+	PLAIN_FLEET_THEME,
+	renderFrame,
+	renderStatusline,
+} from "../fleet";
+import { projectFleet } from "../herdr";
 import { deckV2Home, stateFiles } from "../home";
 import { readMeta } from "../meta";
 import { enqueue, pending } from "../queue";
@@ -259,31 +268,57 @@ export default function deckV2(pi: any): void {
 	// ---- commands -----------------------------------------------------------
 
 	pi.registerCommand("fleet", {
-		description: "Full-screen fleet board: runs, workflows, PRs, decisions",
+		description: "Fleet overlay: runs, workflows, PRs, decisions (q/Esc close, r refresh, live)",
 		handler: async (_args: string, ctx: any) => {
-			const frame = await buildFrame(workflowCwd === undefined ? {} : { workflowCwd });
-			const body = renderFrame(frame);
+			const frameOptions = workflowCwd === undefined ? {} : { workflowCwd };
+			const frame = await buildFrame(frameOptions);
 			// ctx.ui.custom is TUI-only; degrade to a printed frame elsewhere.
 			if (ctx.mode !== "tui" || ctx.ui?.custom === undefined) {
-				ctx.ui?.notify?.(body, "info");
+				ctx.ui?.notify?.(renderFrame(frame), "info");
 				return;
 			}
-			await ctx.ui.custom((_tui: any, _theme: any, _kb: any, done: any) => {
-				// The Component contract requires render(width) and invalidate(). A
-				// render that ignores width corrupts the display, because the TUI
-				// requires every line to fit: fleet rows carry full status text and PR
-				// URLs, which are exactly the long lines that overflow.
-				const lines = body.split("\n");
-				return {
-					render: (width: number) =>
-						lines.map((line) => (line.length > width ? `${line.slice(0, Math.max(0, width - 1))}…` : line)),
-					handleInput: (data: string) => {
-						// Any key closes. A read-only board needs no other control.
-						if (data.length > 0) done(undefined);
-					},
-					invalidate: () => {},
-				};
-			});
+			await ctx.ui.custom(
+				(tui: any, rawTheme: any, _kb: any, done: any) => {
+					const theme = asFleetTheme(rawTheme);
+					// Box paints a background across all children — that is what makes
+					// the overlay opaque instead of layering over the transcript.
+					const box = new Box(2, 1, backgroundFn(rawTheme));
+					const body = new Text(buildFleetText(frame, theme), 0, 0);
+					box.addChild(body);
+
+					// In-flight guard: buildFrame shells out to smithers ps, which can
+					// outlast a tick; overlapping rebuilds would pile up subprocesses.
+					let busy = false;
+					const refresh = async (): Promise<void> => {
+						if (busy) return;
+						busy = true;
+						try {
+							body.setText(buildFleetText(await buildFrame(frameOptions), theme));
+							tui.requestRender();
+						} catch {
+							// keep the last good frame on a failed refresh
+						} finally {
+							busy = false;
+						}
+					};
+					const timer = setInterval(() => void refresh(), 5_000);
+					timer.unref?.();
+
+					return {
+						render: (width: number) => box.render(width),
+						invalidate: () => box.invalidate(),
+						handleInput: (data: string) => {
+							if (data === "q" || data === "\u001b" || data === "\u0003") {
+								clearInterval(timer);
+								done(undefined);
+								return;
+							}
+							if (data === "r") void refresh();
+						},
+					};
+				},
+				{ overlay: true, overlayOptions: { anchor: "center", width: "80%", margin: 2 } },
+			);
 		},
 	});
 
@@ -385,6 +420,10 @@ export default function deckV2(pi: any): void {
 		try {
 			const frame = await buildFrame(workflowCwd === undefined ? {} : { workflowCwd });
 			ctx.ui?.setStatus?.("deck", renderStatusline(frame));
+			// Herdr projection rides the same cadence: every reconcile cycle mirrors
+			// worker + smithers state into herdr agents. Guarded inside; herdr being
+			// down makes this a no-op, never a fault.
+			await projectFleet(frame, workflowCwd === undefined ? {} : { workflowCwd });
 		} catch {
 			// A statusline is decoration; never let it break a turn.
 		}
@@ -418,6 +457,43 @@ export default function deckV2(pi: any): void {
 		timer = undefined;
 		unwatch = undefined;
 	});
+}
+
+/**
+ * Adapt pi's theme to the two calls the renderer uses. Method-style calls keep
+ * the receiver (Theme.fg reads this.fgColors); see deck-usage.ts for the
+ * incident that taught this.
+ */
+function asFleetTheme(source: unknown): FleetTheme {
+	if (typeof source !== "object" || source === null) return PLAIN_FLEET_THEME;
+	const probe = source as { fg?: unknown; bold?: unknown };
+	if (typeof probe.fg !== "function" || typeof probe.bold !== "function") return PLAIN_FLEET_THEME;
+	const themed = source as {
+		fg: (key: string, text: string) => unknown;
+		bold: (text: string) => unknown;
+	};
+	return {
+		fg: (key, text) => {
+			const out = themed.fg(key, text);
+			return typeof out === "string" ? out : text;
+		},
+		bold: (text) => {
+			const out = themed.bold(text);
+			return typeof out === "string" ? out : text;
+		},
+	};
+}
+
+/** Background fill so the overlay is opaque instead of transparent. */
+function backgroundFn(source: unknown): ((text: string) => string) | undefined {
+	if (typeof source !== "object" || source === null) return undefined;
+	const probe = source as { bg?: unknown };
+	if (typeof probe.bg !== "function") return undefined;
+	const themed = source as { bg: (key: string, text: string) => unknown };
+	return (text) => {
+		const out = themed.bg("customMessageBg", text);
+		return typeof out === "string" ? out : text;
+	};
 }
 
 /** Exported for the installer's smoke test. */

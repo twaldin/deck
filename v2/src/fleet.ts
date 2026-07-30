@@ -16,7 +16,7 @@ import * as fs from "node:fs";
 import { promisify } from "node:util";
 import { lastEvent, openDecisions } from "./events";
 import { internalSummary } from "./backlog";
-import { stateDir } from "./home";
+import { stateDir, stateFiles } from "./home";
 import { readMeta } from "./meta";
 import { pending } from "./queue";
 import { unresolvedReceipts } from "./side-effects";
@@ -50,11 +50,23 @@ export type TaskRow = {
 	stage: string | null;
 	/** herdr pane, when the run is visible. */
 	pane: string | null;
+	/** ms since the last status append, from the file's mtime. */
+	statusAgeMs: number | null;
+};
+
+export type WorkflowRow = {
+	runId: string;
+	workflow: string | null;
+	status: string | null;
+	step: string | null;
+	/** Task correlated by rootDir == worktree, when one matches. */
+	taskId: string | null;
 };
 
 export type FleetFrame = {
 	generatedAt: string;
 	tasks: TaskRow[];
+	workflows: WorkflowRow[];
 	counters: {
 		tasks: number;
 		running: number;
@@ -154,6 +166,7 @@ export async function buildFrame(options: { workflowCwd?: string } = {}): Promis
 		}
 	}
 
+	const taskByRoot = new Map<string, string>();
 	const tasks: TaskRow[] = [];
 	for (const taskId of ids) {
 		const meta = readMeta(taskId);
@@ -161,7 +174,14 @@ export async function buildFrame(options: { workflowCwd?: string } = {}): Promis
 		const worktree = meta?.worktree ?? null;
 		const resolved = worktree === null ? null : realpath(worktree);
 		const psRun = resolved === null ? undefined : runsByRoot.get(resolved);
+		if (resolved !== null) taskByRoot.set(resolved, taskId);
 		const pid = meta?.run_pid;
+		let statusAgeMs: number | null = null;
+		try {
+			statusAgeMs = Date.now() - fs.statSync(stateFiles(taskId).status).mtimeMs;
+		} catch {
+			// no status file yet
+		}
 
 		tasks.push({
 			taskId,
@@ -179,13 +199,26 @@ export async function buildFrame(options: { workflowCwd?: string } = {}): Promis
 			runId: psRun?.id ?? meta?.run_id ?? null,
 			stage: psRun?.step ?? null,
 			pane: resolved === null ? null : byWorktree.get(resolved) ?? null,
+			statusAgeMs,
 		});
 	}
+
+	const workflows: WorkflowRow[] = runs.map((psRun) => ({
+		runId: psRun.id,
+		workflow: psRun.workflow ?? null,
+		status: psRun.status ?? null,
+		step: psRun.step ?? null,
+		taskId:
+			psRun.rootDir !== undefined && psRun.rootDir.length > 0
+				? taskByRoot.get(realpath(psRun.rootDir)) ?? null
+				: null,
+	}));
 
 	const internal = internalSummary();
 	return {
 		generatedAt: new Date().toISOString(),
 		tasks,
+		workflows,
 		counters: {
 			tasks: tasks.length,
 			running: tasks.filter((task) => task.runState === "running").length,
@@ -211,6 +244,13 @@ export function renderFrame(frame: FleetFrame): string {
 	);
 	if (frame.tasks.length === 0) {
 		lines.push("  (no tasks)");
+	}
+	for (const wf of frame.workflows) {
+		lines.push(
+			`▸ wf:${wf.runId}  ${[wf.workflow, wf.status, wf.step === null ? null : `@${wf.step}`, wf.taskId]
+				.filter((bit): bit is string => bit !== null)
+				.join(" · ")}`,
+		);
 	}
 	for (const task of frame.tasks) {
 		const mark = task.runState === "running" ? "●" : task.runState === "finished" ? "✓" : "○";
@@ -238,6 +278,155 @@ export function renderFrame(frame: FleetFrame): string {
 			.join("  ")}`,
 	);
 	return lines.join("\n");
+}
+
+// ---- themed overlay renderer ----------------------------------------------
+//
+// Pure text: the theme is injected as two functions, so these helpers run under
+// bun tests with PLAIN_FLEET_THEME and inside pi with the real theme. The
+// extension wraps this text in a pi-tui Box; nothing here imports pi-tui.
+
+export interface FleetTheme {
+	fg: (key: string, text: string) => string;
+	bold: (text: string) => string;
+}
+
+export const PLAIN_FLEET_THEME: FleetTheme = {
+	fg: (_key, text) => text,
+	bold: (text) => text,
+};
+
+// eslint-disable-next-line no-control-regex
+const ANSI_RE = /\x1b\[[0-9;]*m/g;
+
+/** Printable width. ANSI-aware; fleet text carries no wide glyph classes. */
+export function textWidth(line: string): number {
+	return line.replace(ANSI_RE, "").length;
+}
+
+export type Chip = { label: string; color: string };
+
+/**
+ * One status chip per task. Severity order: a captain decision outranks a
+ * blocked run, which outranks the fact that a process happens to be alive.
+ */
+export function chipFor(task: TaskRow): Chip {
+	if (task.openDecisions > 0 || task.lastVerb === "needs-decision") {
+		return { label: "decision", color: "warning" };
+	}
+	if (task.lastVerb === "blocked" || task.lastVerb === "failed") {
+		return { label: task.lastVerb, color: "error" };
+	}
+	if (task.runState === "running") return { label: "running", color: "success" };
+	if (task.lastVerb === "done") return { label: "done", color: "dim" };
+	if (task.queuedMessages > 0) return { label: "queued", color: "accent" };
+	return { label: "idle", color: "dim" };
+}
+
+/** "3h7m" / "12m" / "41s" — compact age, matching the usage overlay. */
+export function humanAge(ms: number): string {
+	if (!Number.isFinite(ms) || ms < 0) return "?";
+	const seconds = Math.floor(ms / 1000);
+	if (seconds < 60) return `${seconds}s`;
+	const minutes = Math.floor(seconds / 60);
+	if (minutes < 60) return `${minutes}m`;
+	const hours = Math.floor(minutes / 60);
+	const rest = minutes % 60;
+	if (hours < 24) return `${hours}h${rest}m`;
+	return `${Math.floor(hours / 24)}d${hours % 24}h`;
+}
+
+function truncate(body: string, max: number): string {
+	return body.length > max ? `${body.slice(0, Math.max(0, max - 1))}…` : body;
+}
+
+/**
+ * Wrap the body in a titled border so the overlay reads as a panel — the same
+ * frame the usage overlay draws (deck-usage.ts framed()).
+ */
+export function framed(title: string, body: string, footer: string, theme: FleetTheme): string {
+	const lines = body.split("\n");
+	const inner = Math.max(textWidth(title) + 4, ...lines.map(textWidth), textWidth(footer)) + 2;
+	const top =
+		theme.fg("border", "╭─ ") +
+		theme.bold(theme.fg("accent", title)) +
+		theme.fg("border", ` ${"─".repeat(Math.max(0, inner - textWidth(title) - 3))}╮`);
+	const bottom = theme.fg("border", `╰${"─".repeat(inner)}╯`);
+	const padded = lines.map((line) => {
+		const pad = " ".repeat(Math.max(0, inner - textWidth(line) - 1));
+		return `${theme.fg("border", "│")} ${line}${pad}${theme.fg("border", "│")}`;
+	});
+	return [top, ...padded, bottom, "", footer].join("\n");
+}
+
+/**
+ * The overlay's whole text: counters header, chip-per-task rows, workflow rows,
+ * source health, key footer. Pure, so tests assert on it directly.
+ */
+export function buildFleetText(frame: FleetFrame, theme: FleetTheme = PLAIN_FLEET_THEME): string {
+	const c = frame.counters;
+	const lines: string[] = [];
+	const header = [
+		`${theme.bold(String(c.running))} running`,
+		`${c.tasks} task(s)`,
+		c.openDecisions > 0 ? theme.fg("warning", `${c.openDecisions} decision(s)`) : null,
+		c.queuedMessages > 0 ? theme.fg("accent", `${c.queuedMessages} queued`) : null,
+		`internal ${c.internalOpen}/${c.internalCap}`,
+	].filter((bit): bit is string => bit !== null);
+	lines.push(header.join(theme.fg("dim", "  ·  ")));
+	lines.push("");
+
+	if (frame.tasks.length === 0) lines.push(theme.fg("dim", "  (no tasks)"));
+	for (const task of frame.tasks) {
+		const chip = chipFor(task);
+		const age = task.statusAgeMs === null ? "" : theme.fg("dim", ` ${humanAge(task.statusAgeMs)}`);
+		// Every dynamic field is clamped: the Text component word-wraps rather
+		// than corrupting the TUI, but an unclamped URL or task id would still
+		// wrap across the frame border and break the panel visually.
+		const bits: string[] = [theme.fg("dim", task.kind)];
+		if (task.project !== null) bits.push(theme.fg("text", truncate(task.project, 20)));
+		if (task.stage !== null) bits.push(theme.fg("accent", `@${truncate(task.stage, 20)}`));
+		if (task.pane !== null) bits.push(theme.fg("dim", truncate(task.pane, 12)));
+		lines.push(
+			`${theme.fg(chip.color, `[${chip.label.padEnd(8)}]`)} ${theme.bold(truncate(task.taskId, 24).padEnd(24))}${bits.join(theme.fg("dim", " · "))}${age}`,
+		);
+		if (task.lastVerb !== null) {
+			lines.push(
+				`           ${theme.fg("dim", `${task.lastVerb}:`)} ${theme.fg("text", truncate(task.lastNote ?? "", 64))}`,
+			);
+		}
+		if (task.pr !== null) lines.push(`           ${theme.fg("accent", truncate(task.pr, 72))}`);
+		const flags: string[] = [];
+		if (task.openDecisions > 0) flags.push(`${task.openDecisions} decision(s) open`);
+		if (task.queuedMessages > 0) flags.push(`${task.queuedMessages} message(s) queued`);
+		if (task.unresolvedSideEffects > 0) flags.push(`${task.unresolvedSideEffects} UNRESOLVED side effect(s)`);
+		if (flags.length > 0) lines.push(`           ${theme.fg("warning", `! ${flags.join(" · ")}`)}`);
+	}
+
+	if (frame.workflows.length > 0) {
+		lines.push("");
+		lines.push(theme.bold(theme.fg("toolTitle", "workflows")));
+		for (const wf of frame.workflows) {
+			const bits = [wf.workflow, wf.status, wf.step === null ? null : `@${wf.step}`, wf.taskId]
+				.filter((bit): bit is string => bit !== null)
+				.join(" · ");
+			lines.push(
+				`  ${theme.fg("accent", `wf:${truncate(wf.runId, 16)}`)}  ${theme.fg("text", truncate(bits, 64))}`,
+			);
+		}
+	}
+
+	lines.push("");
+	lines.push(
+		frame.sources
+			.map((source) =>
+				theme.fg(source.state === "ok" ? "success" : source.state === "missing" ? "error" : "dim", `${source.name}=${source.state}`),
+			)
+			.join("  "),
+	);
+
+	const footer = `${theme.fg("accent", "[q/Esc]")} ${theme.fg("dim", "close")}   ${theme.fg("accent", "[r]")} ${theme.fg("dim", "refresh")}   ${theme.fg("dim", "live · refreshes every 5s")}`;
+	return framed("deck fleet", lines.join("\n"), footer, theme);
 }
 
 /** Compact statusline. Costs no turn; the captain glances instead of being told. */
