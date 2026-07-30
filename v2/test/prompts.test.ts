@@ -15,7 +15,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { orchestratorContract } from "../src/bootstrap";
-import { workerBrief } from "../src/prompts";
+import { buildStandingDoctrine, workerBrief } from "../src/prompts";
 
 const base = {
 	taskId: "t1",
@@ -102,6 +102,39 @@ describe("worker brief", () => {
 		for (const banned of ["no-mistakes", "Herdr", "herdr", "delivery mode", "delivery-mode"]) {
 			expect(brief).not.toContain(banned);
 		}
+	});
+
+	test("a lindy brief carries the standing doctrine inline", () => {
+		for (const project of ["lindy", "Lindy"]) {
+			const brief = workerBrief({ ...base, project });
+			// The three load-bearing traps, verbatim.
+			expect(brief).toContain("state=closed, merged=false");
+			expect(brief).toContain("Unapplied migrations block ALL of CI repo-wide");
+			expect(brief).toContain("requested_reviewers API");
+			// The one-liners.
+			expect(brief).toContain("repl:prod-readonly");
+			expect(brief).toContain("version: -1");
+			expect(brief).toContain("Never Ali as code reviewer");
+			// Paths into the knowledge pack, including the distill packs.
+			expect(brief).toContain("lindy-domain.md");
+			expect(brief).toContain("ref/distill/STANDING-RULES.md");
+		}
+	});
+
+	test("a non-lindy brief gets the thin global block, not the lindy traps", () => {
+		const brief = workerBrief(base);
+		expect(brief).toContain("## Standing doctrine");
+		expect(brief).toContain("ref/distill/STANDING-RULES.md");
+		expect(brief).toContain("captain.md");
+		expect(brief).toContain("names only");
+		expect(brief).not.toContain("repl:prod-readonly");
+		expect(brief).not.toContain("state=closed, merged=false");
+		expect(brief).not.toContain("lindy-domain.md");
+	});
+
+	test("buildStandingDoctrine is exported for smithers seats to share", () => {
+		expect(buildStandingDoctrine("lindy")).toContain("repl:prod-readonly");
+		expect(buildStandingDoctrine()).not.toContain("repl:prod-readonly");
 	});
 });
 
