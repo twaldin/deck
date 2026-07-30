@@ -1,17 +1,19 @@
 /**
- * Captain-facing pending-questions queue.
- *
- * Failure mode this kills: an agent asks a decision question in chat, the
- * captain never sees it, and the effort parks silently forever. Agents call
- * `ask_captain` instead, which writes to a durable shared queue; the captain
- * runs `/questions` in ANY pi session in the same home and clears the backlog
- * in one sitting; the asking session picks its answers back up.
+ * Captain-facing pending-questions queue. ORCHESTRATOR-ONLY by placement: this
+ * registers from the deck-v2 extension, which installs into the deck home's
+ * own `.pi/extensions`, so worker `pi -p` sessions never load it and never
+ * surface a competing questions UI. Workers that need a decision report
+ * `needs-decision:` through their status file; the orchestrator relays it here
+ * with `ask_captain`, and the captain clears the backlog with `/questions`.
  */
 import { Type } from "typebox";
 import {
 	answer as recordAnswer,
 	ask,
+	compact,
 	formatAge,
+	importLegacyQueue,
+	legacyQueueFile,
 	markDelivered,
 	openQuestions,
 	pendingAnswersFor,
@@ -145,8 +147,8 @@ export function registerQuestions(
 		name: "ask_captain",
 		label: "Ask Captain",
 		description:
-			"Queue a decision question for the captain in a durable shared queue instead of asking in chat. " +
-			"The captain reviews all queued questions with /questions from any pi session; the answer is " +
+			"Queue a decision question for the captain in a durable queue instead of asking in chat. " +
+			"The captain reviews all queued questions with /questions; the answer is " +
 			"delivered back into this session when they answer. Returns immediately - do not block on it. " +
 			"Prefer continuing on any work that does not depend on the answer.",
 		promptSnippet: "Queue a decision question for the captain without blocking this session",
@@ -317,6 +319,27 @@ export function registerQuestions(
 	};
 
 	pi.on("session_start", (_event, ctx) => {
+		// Hygiene before anything reads the queue: pull still-open questions out of
+		// the legacy pi-home queue once, then purge answered + stale entries. Both
+		// are best-effort — a hygiene failure must never break session start.
+		//
+		// The import is gated: it renames the legacy file under the PI HOME, which
+		// is live state. It runs only when the caller explicitly points at a pi
+		// home (PI_CONFIG_DIR, tests) or when nothing at all is overridden (the
+		// real orchestrator). A partially-overridden env — a test that redirects
+		// the deck side but not the pi side — must never reach the live ~/.pi.
+		const importSafe =
+			env.PI_CONFIG_DIR !== undefined ||
+			(env.DECK_QUESTIONS_FILE === undefined && process.env.DECK_V2_HOME === undefined);
+		try {
+			if (importSafe) importLegacyQueue(file, legacyQueueFile(env), runtime.now());
+			compact(file, runtime.now());
+		} catch {
+			// the queue stays usable unhygienic
+		}
+		// deck-v2 registers several session_start handlers; a test or RPC ctx may
+		// not carry a session manager, and hygiene above already ran.
+		if (ctx?.sessionManager === undefined) return;
 		// Refreshed on every session event so the poll never holds a dead ctx.
 		latestSessionId = ctx.sessionManager.getSessionId();
 		// Snapshot the poll baseline BEFORE the delivery read. The other order
@@ -330,6 +353,7 @@ export function registerQuestions(
 	});
 
 	pi.on("agent_settled", (_event, ctx) => {
+		if (ctx?.sessionManager === undefined) return;
 		latestSessionId = ctx.sessionManager.getSessionId();
 		lastSeenMtimeMs = queueMtimeMs(file);
 		deliverAnswers(ctx, true);

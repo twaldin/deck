@@ -17,6 +17,10 @@ import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { readQuestions } from "../src/questions-store";
 
+// The questions module is loaded STANDALONE here (its own default export), not
+// through the whole deck-v2 extension: this smoke exercises the queue
+// round-trip, and the full extension would drag the wake loop and smithers
+// probing into a check about questions.
 const extensionPath = process.env.SMOKE_EXTENSION_PATH
 	? resolve(process.env.SMOKE_EXTENSION_PATH)
 	: resolve(import.meta.dir, "../src/questions.ts");
