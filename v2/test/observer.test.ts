@@ -216,3 +216,51 @@ describe("polling a real run shape", () => {
 		expect(legacy?.nodes[0]?.nodeId).toBe("plan");
 	});
 });
+
+describe("key collisions that lose events", () => {
+	// Verified against a live 0.30.0 debate run: `backlog-opponent` appears TWICE at
+	// attempt 1, once per round. Two failures of the same loop node in one payload
+	// must be two events; keying without an occurrence collapses them and one
+	// failure is never reported.
+	test("REGRESSION: duplicate loop-node rows get distinct keys", async () => {
+		const { observer } = await mods();
+		const observation = {
+			run: run("running", "debate"),
+			nodes: [
+				{ nodeId: "opponent", status: "failed", attempt: 1 },
+				{ nodeId: "opponent", status: "failed", attempt: 1 },
+			],
+		};
+		const emitted = observer.observeOnce("t1", observation);
+		expect(emitted).toHaveLength(2);
+		// The KEYS must differ. Identical keys mean the ledger records one and the
+		// next poll re-reports the other forever, or drops it — the status lines look
+		// fine either way, so the key is what has to be asserted.
+		expect(new Set(emitted.map((event) => event.key)).size).toBe(2);
+
+		// And a re-poll of the unchanged payload adds nothing.
+		expect(observer.observeOnce("t1", observation)).toHaveLength(0);
+	});
+
+	// A workflow with two approval gates stops twice in waiting-approval. Keying on
+	// the state alone reports only the first, so the second gate waits on a captain
+	// who was never told it existed.
+	test("REGRESSION: a second approval gate is reported, not swallowed", async () => {
+		const { observer, events } = await mods();
+		observer.observeOnce("t1", { run: run("waiting-approval", "gate-one"), nodes: [] });
+		observer.observeOnce("t1", { run: run("running", "work"), nodes: [] });
+		observer.observeOnce("t1", { run: run("waiting-approval", "gate-two"), nodes: [] });
+
+		const decisions = events.readStatus("t1").events.filter((line) => line.verb === "needs-decision");
+		expect(decisions).toHaveLength(2);
+		expect(decisions[1]?.note).toContain("gate-two");
+	});
+
+	test("re-polling the SAME gate still appends only once", async () => {
+		const { observer, events } = await mods();
+		for (let i = 0; i < 4; i++) {
+			observer.observeOnce("t1", { run: run("waiting-approval", "gate-one"), nodes: [] });
+		}
+		expect(events.readStatus("t1").events).toHaveLength(1);
+	});
+});

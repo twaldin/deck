@@ -138,8 +138,21 @@ export function transitionKey(input: {
 	nodeId: string;
 	transition: string;
 	seq: number;
+	/**
+	 * Distinguishes repeats that share every other field.
+	 *
+	 * Needed because real payloads DO contain duplicate (nodeId, attempt) pairs —
+	 * verified on a live debate run, where `backlog-opponent` appears twice at
+	 * attempt 1, once per round. Without this, two failures of the same loop node in
+	 * one poll collapse to one key and one of them is silently never reported.
+	 *
+	 * For run-level transitions it separates re-entries of the same state, so a
+	 * workflow that stops at a second approval gate is not mistaken for the first.
+	 */
+	occurrence?: number | string;
 }): string {
-	return `${input.scope}:${input.runId}:${input.nodeId}:${input.transition}:${input.seq}`;
+	const occurrence = input.occurrence === undefined ? "" : `:${input.occurrence}`;
+	return `${input.scope}:${input.runId}:${input.nodeId}:${input.transition}:${input.seq}${occurrence}`;
 }
 
 /**
@@ -160,15 +173,22 @@ export function planEvents(
 	// A failed node inside a still-running workflow is reported, because the
 	// fix-now doctrine depends on the orchestrator hearing about a red result
 	// without waiting for the whole run to finish.
+	// Occurrence index per (nodeId, attempt), so duplicate loop-node rows in one
+	// payload get distinct keys instead of collapsing to one event.
+	const seenNode = new Map<string, number>();
 	for (const node of nodes) {
 		// Real step states seen live: finished, waiting-approval, failed.
 		if (node.status !== "failed") continue;
+		const dedupeKey = `${node.nodeId}:${node.attempt ?? 0}`;
+		const occurrence = seenNode.get(dedupeKey) ?? 0;
+		seenNode.set(dedupeKey, occurrence + 1);
 		const key = transitionKey({
 			scope: "node",
 			runId: run.id,
 			nodeId: node.nodeId,
 			transition: "failed",
 			seq: node.attempt ?? 0,
+			occurrence,
 		});
 		if (seen.has(key)) continue;
 		events.push({
@@ -181,12 +201,17 @@ export function planEvents(
 
 	const transition = RUN_TRANSITIONS[run.status];
 	if (transition !== undefined) {
+		// The blocking step discriminates re-entries of a non-terminal state: a
+		// workflow with two approval gates stops twice in `waiting-approval`, and
+		// keying on the state alone reports only the first, leaving the second gate
+		// waiting on a captain who was never told.
 		const key = transitionKey({
 			scope: "run",
 			runId: run.id,
 			nodeId: "",
 			transition: run.status,
 			seq: 0,
+			...(TERMINAL.has(run.status) || run.step === null ? {} : { occurrence: run.step }),
 		});
 		if (!seen.has(key)) {
 			const step = run.step === null ? "" : ` at ${run.step}`;

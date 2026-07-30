@@ -29,7 +29,24 @@ export const DEFAULT_WORKER_MODEL = "deck/claude-fable-5";
  * escalate through their status file and the orchestrator relays. A prompt rule
  * would decay; an absent tool cannot be called.
  */
-export const WORKER_EXCLUDED_TOOLS = ["ask_captain"] as const;
+/**
+ * Tools a worker must not have.
+ *
+ * `ask_captain` is excluded structurally, not by instruction: two channels to the
+ * captain race, and the loser is a decision nobody sees.
+ *
+ * `web_search` is excluded because a rate-limited search is an infinite retry
+ * trap. Observed on a live worker: nine consecutive 429s, and it was STILL
+ * retrying — it had already fixed the code and written its test, and burned the
+ * rest of the run re-confirming a fact it stated correctly from memory
+ * ("I don't need to search this"). A worker's job is bounded work in a repo it can
+ * read; if a task genuinely needs the web, that research belongs in a scout whose
+ * deliverable is a report.
+ */
+export const WORKER_EXCLUDED_TOOLS = ["ask_captain", "web_search"] as const;
+
+/** A worker exceeding this has stopped making progress; see run_deadline. */
+export const DEFAULT_DEADLINE_MS = 30 * 60 * 1000;
 
 export type SpawnRequest = {
 	taskId: string;
@@ -38,6 +55,8 @@ export type SpawnRequest = {
 	worktree: string;
 	kind: TaskKind;
 	project?: string;
+	/** Wall-clock budget for the run. Default DEFAULT_DEADLINE_MS. */
+	deadlineMs?: number;
 	branch?: string;
 	model?: string;
 	context?: string;
@@ -146,7 +165,15 @@ export function startRun(request: SpawnRequest, primaryCheckout: string): SpawnR
 
 	const pid = child.pid ?? -1;
 	// Recorded so stale detection can tell "run finished" from "run vanished".
-	if (pid > 0) updateMeta(request.taskId, { run_pid: pid });
+	// The deadline makes "bounded work" an enforced property rather than an
+	// assumption: a live worker that loops writes no status and never dies, so
+	// without a deadline it is invisible forever. Observed on a live run.
+	if (pid > 0) {
+		updateMeta(request.taskId, {
+			run_pid: pid,
+			run_deadline: Date.now() + (request.deadlineMs ?? DEFAULT_DEADLINE_MS),
+		});
+	}
 
 	// Ack the queued messages only now, because the run exists and the prompt
 	// carrying them has been written to it. Acking while building the prompt marked

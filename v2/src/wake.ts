@@ -21,7 +21,7 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { type StatusCursor, loadCursors, readStatusSince, saveCursors } from "./events";
+import { type StatusCursor, loadCursors, readStatus, readStatusSince, saveCursors } from "./events";
 import { stateDir, wakeFiles } from "./home";
 import { readMeta } from "./meta";
 import { type StatusEvent, type WakeTier, tierFor } from "./status";
@@ -172,6 +172,18 @@ export function reconcile(taskIds?: string[]): ReconcileResult {
  */
 type OutboxEntry = { id: string; taskId: string; tier: WakeTier; raw: string; note: string; verb: string };
 
+/**
+ * Monotonic counter for outbox ids.
+ *
+ * The id used to be `${taskId}:${raw}`, which is identical for two identical
+ * status lines — and a worker blocked twice for the same reason writes exactly
+ * that. Reproduced: both events collapsed into one entry, and acking it discarded
+ * the second wake. Coalescing is a DELIVERY policy (fold T1 into one message); it
+ * must never be storage identity, or acking a delivered event silently drops an
+ * undelivered one.
+ */
+let outboxSeq = 0;
+
 function outboxPath(): string {
 	return wakeFiles().queue;
 }
@@ -180,7 +192,7 @@ function enqueue(items: WakeItem[]): void {
 	if (items.length === 0) return;
 	const lines = items.map((item) =>
 		JSON.stringify({
-			id: `${item.taskId}:${item.event.raw}`,
+			id: `${item.taskId}:${Date.now().toString(36)}:${(outboxSeq++).toString(36)}`,
 			taskId: item.taskId,
 			tier: item.tier,
 			raw: item.event.raw,
@@ -284,14 +296,31 @@ export function detectStale(
 		if (meta === null) continue;
 		const pid = typeof meta.run_pid === "number" ? meta.run_pid : undefined;
 		if (pid === undefined) continue;
-		if (alive(pid)) continue;
+
+		const { lastEventVerb: currentVerb } = lastVerb(taskId);
+		const terminal = currentVerb === "done" || currentVerb === "failed";
+		const waiting = currentVerb === "paused" || currentVerb === "needs-decision";
+
+		if (alive(pid)) {
+			// A LIVE worker past its deadline is stuck, not working. Liveness alone
+			// cannot tell the difference: a looping worker writes no status and never
+			// exits, so it is invisible forever without this. Observed live — a worker
+			// finished its task, then retried a rate-limited search nine times.
+			const deadline = typeof meta.run_deadline === "number" ? meta.run_deadline : undefined;
+			if (deadline === undefined || terminal || waiting) continue;
+			if (Date.now() < deadline) continue;
+			const overdueMin = Math.max(1, Math.round((Date.now() - deadline) / 60000));
+			verdicts.push({
+				taskId,
+				reason: `still running ${overdueMin} minute(s) past its budget with no result — likely stuck, not working`,
+			});
+			continue;
+		}
 		// Process gone. Stale only if the task never reached a terminal event.
-		const { lastEventVerb } = lastVerb(taskId);
-		if (lastEventVerb === "done" || lastEventVerb === "failed") continue;
-		if (lastEventVerb === "paused" || lastEventVerb === "needs-decision") continue;
+		if (terminal || waiting) continue;
 		verdicts.push({
 			taskId,
-			reason: `run pid ${pid} is gone and the task never reported a terminal state (last: ${lastEventVerb ?? "no events"})`,
+			reason: `run pid ${pid} is gone and the task never reported a terminal state (last: ${currentVerb ?? "no events"})`,
 		});
 	}
 	return verdicts;
@@ -306,7 +335,22 @@ function defaultAlive(pid: number): boolean {
 	}
 }
 
+/**
+ * The task's last verb, read from the STATUS FILE.
+ *
+ * It used to read the wake baseline, which is only what reconcile has already
+ * seen. That made a just-written `done:` invisible here, so a worker that had
+ * finished but not yet exited was reported as stuck — and once a deadline exists,
+ * that is a false alarm on every successful run whose process outlives its last
+ * append. Staleness is a question about the task's real state, so it must read the
+ * real record.
+ */
 function lastVerb(taskId: string): { lastEventVerb: string | null } {
+	const { events } = readStatus(taskId);
+	const last = events[events.length - 1];
+	if (last !== undefined) return { lastEventVerb: last.verb };
+	// No parseable event: fall back to the baseline, which may hold a malformed
+	// line reconcile has seen.
 	const baseline = loadBaseline()[taskId];
 	if (baseline === undefined) return { lastEventVerb: null };
 	const colon = baseline.lastRaw.indexOf(":");

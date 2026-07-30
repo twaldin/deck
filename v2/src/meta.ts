@@ -31,6 +31,14 @@ export type TaskMeta = {
 	/** pid of the live run, when one is running. */
 	run_pid?: number;
 	/**
+	 * Epoch-ms wall-clock deadline for the live run.
+	 *
+	 * A worker that loops stays alive and writes nothing, so pid-liveness alone
+	 * cannot detect it — observed live: a worker retried a rate-limited search nine
+	 * times after finishing its actual work, and would have run forever.
+	 */
+	run_deadline?: number;
+	/**
 	 * Which system owns this task.
 	 *
 	 * Do NOT read this as parallel-run safety: the previous system has no notion of
@@ -52,7 +60,7 @@ export type TaskMeta = {
 };
 
 /** Keys stored as integers. Everything else round-trips as a string. */
-const NUMERIC_KEYS = new Set(["run_epoch", "run_pid"]);
+const NUMERIC_KEYS = new Set(["run_epoch", "run_pid", "run_deadline"]);
 
 export function readMeta(id: string): TaskMeta | null {
 	assertTaskId(id);

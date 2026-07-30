@@ -315,3 +315,87 @@ describe("fleet board component", () => {
 		}
 	});
 });
+
+describe("a live worker that stops making progress", () => {
+	// Found by running a real worker, not by a test. It fixed the code correctly,
+	// wrote its test, then retried a rate-limited web search nine times and was
+	// STILL alive with zero status lines written. Pid-liveness cannot see this: the
+	// process is healthy, it just never finishes. Without a deadline it is invisible
+	// forever, which breaks the core premise that work is bounded.
+	test("REGRESSION: a live run past its deadline is reported as stuck", async () => {
+		const { wake } = await mods();
+		const { updateMeta } = await import("../src/meta");
+		updateMeta("t1", { run_pid: 4242, run_deadline: Date.now() - 60_000 });
+
+		const verdicts = wake.detectStale(["t1"], { runAlive: () => true });
+		expect(verdicts).toHaveLength(1);
+		expect(verdicts[0]?.reason).toContain("past its budget");
+	});
+
+	test("a live run inside its deadline is left alone", async () => {
+		const { wake } = await mods();
+		const { updateMeta } = await import("../src/meta");
+		updateMeta("t1", { run_pid: 4242, run_deadline: Date.now() + 600_000 });
+		expect(wake.detectStale(["t1"], { runAlive: () => true })).toHaveLength(0);
+	});
+
+	test("a run that finished is never called stuck, however overdue", async () => {
+		const { wake, events } = await mods();
+		const { updateMeta } = await import("../src/meta");
+		updateMeta("t1", { run_pid: 4242, run_deadline: Date.now() - 600_000 });
+		events.appendStatus("t1", "done", "PR opened");
+		expect(wake.detectStale(["t1"], { runAlive: () => true })).toHaveLength(0);
+	});
+
+	test("a run waiting on a decision is not stuck, however overdue", async () => {
+		const { wake, events } = await mods();
+		const { updateMeta } = await import("../src/meta");
+		updateMeta("t1", { run_pid: 4242, run_deadline: Date.now() - 600_000 });
+		events.appendStatus("t1", "needs-decision", "which approach");
+		expect(wake.detectStale(["t1"], { runAlive: () => true })).toHaveLength(0);
+	});
+});
+
+describe("worker tool exclusions", () => {
+	test("REGRESSION: web_search is excluded, because a 429 is an infinite retry trap", async () => {
+		const { WORKER_EXCLUDED_TOOLS } = await import("../src/spawn");
+		expect(WORKER_EXCLUDED_TOOLS).toContain("web_search");
+		// And the single-channel rule stays enforced structurally.
+		expect(WORKER_EXCLUDED_TOOLS).toContain("ask_captain");
+	});
+});
+
+describe("outbox identity", () => {
+	// The id was `${taskId}:${raw}`, so two entries with identical text shared one
+	// id and acking one discarded the other. Coalescing is a DELIVERY policy (fold
+	// T1 into one message); it must never be storage identity.
+	test("REGRESSION: identical text on two tasks yields distinct entries", async () => {
+		const { wake, events } = await mods();
+		events.appendStatus("ta", "blocked", "needs a credential");
+		events.appendStatus("tb", "blocked", "needs a credential");
+		wake.reconcile(["ta", "tb"]);
+
+		const owed = wake.pendingWakes();
+		expect(owed).toHaveLength(2);
+		expect(new Set(owed.map((entry) => entry.id)).size).toBe(2);
+		// Acking one must leave the other owed.
+		wake.ackWakes([owed[0]!.id]);
+		expect(wake.pendingWakes()).toHaveLength(1);
+	});
+
+	// Edge-triggering treats an identical repeat as a standing condition, which is
+	// deliberate. It must NOT hide a genuine recurrence after the condition cleared.
+	test("a blocked → resolved → blocked cycle is delivered again", async () => {
+		const { wake, events } = await mods();
+		events.appendStatus("ta", "blocked", "needs a credential");
+		wake.reconcile(["ta"]);
+		wake.ackWakes(wake.pendingWakes().map((entry) => entry.id));
+
+		events.appendStatus("ta", "resolved", "credential added");
+		wake.reconcile(["ta"]);
+		events.appendStatus("ta", "blocked", "needs a credential");
+		wake.reconcile(["ta"]);
+
+		expect(wake.pendingWakes().filter((entry) => entry.verb === "blocked")).toHaveLength(1);
+	});
+});

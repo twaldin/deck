@@ -126,10 +126,15 @@ being mistaken for the live run's. It also rejects a malformed line before it
 reaches the orchestrator. If the command refuses your append, you have been
 superseded: stop, and change nothing further.
 
-Report sparingly. Append only when the orchestrator can act: a phase change it
-would care about, or a terminal state. Progress narration belongs in your own
-output, not the status file — a \`working:\` line that says nothing actionable is
-noise that costs a supervision turn.
+**Your LAST action, always, is a terminal report.** Run the command with \`done:\` or
+\`failed:\` before you stop, and run it even if you have already summarized in your
+output. Nothing reads your output — the orchestrator only sees this file, so a
+finished task that never reports is a task nobody knows is finished, and it gets
+chased as stuck.
+
+Between the start and that final line, report sparingly: only a phase change the
+orchestrator can act on. Progress narration belongs in your output, not this file —
+a \`working:\` line that says nothing actionable costs a supervision turn.
 
 Use \`blocked:\` when you are stuck and need help. Use \`paused:\` only when you are
 deliberately waiting on a known external event that will clear on its own.

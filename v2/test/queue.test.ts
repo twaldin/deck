@@ -42,3 +42,52 @@ describe("queued message delivery", () => {
 		expect(buildHydration("t1", 2).messageIds).toHaveLength(0);
 	});
 });
+
+describe("concurrent send and ack", () => {
+	// Acking used to rewrite the producer log from a snapshot, which races
+	// `deck-v2 send`. Measured with two real processes: 29 of 41 queued captain
+	// steers destroyed. A lost steer is silent — he believes he redirected the work
+	// and it continues the old way.
+	test("REGRESSION: a concurrent send and ack lose nothing", async () => {
+		const { enqueue, readQueue } = await import("../src/queue");
+		enqueue("t1", "seed", "captain");
+
+		const script = `
+			process.env.DECK_V2_HOME = ${JSON.stringify(home)};
+			const fs = await import("node:fs");
+			const { enqueue, ack, readQueue } = await import(${JSON.stringify(path.join(import.meta.dir, "..", "src", "queue.ts"))});
+			const barrier = ${JSON.stringify(path.join(home, "barrier"))};
+			fs.appendFileSync(barrier, "x");
+			while (fs.readFileSync(barrier, "utf8").length < 2) {}
+			if (process.argv[2] === "send") {
+				for (let i = 0; i < 40; i++) enqueue("t1", "steer " + i, "captain");
+			} else {
+				for (let i = 0; i < 40; i++) ack("t1", readQueue("t1").map((m) => m.id), 1);
+			}
+		`;
+		const file = path.join(home, "race.mjs");
+		fs.writeFileSync(file, script);
+		fs.writeFileSync(path.join(home, "barrier"), "");
+
+		const procs = ["send", "ack"].map((mode) =>
+			Bun.spawn(["bun", file, mode], { env: { ...process.env }, stdout: "pipe", stderr: "pipe" }),
+		);
+		await Promise.all(procs.map((proc) => proc.exited));
+
+		// Every message the producer wrote must still exist.
+		expect(readQueue("t1")).toHaveLength(41);
+	});
+
+	test("acking never rewrites the producer log", async () => {
+		const { enqueue, ack, pending } = await import("../src/queue");
+		const first = enqueue("t1", "one", "captain");
+		enqueue("t1", "two", "captain");
+		const queueFile = path.join(home, "state", "t1.queue");
+		const before = fs.readFileSync(queueFile, "utf8");
+
+		ack("t1", [first.id], 1);
+		// Byte-identical: the queue file is append-only from the producer's side.
+		expect(fs.readFileSync(queueFile, "utf8")).toBe(before);
+		expect(pending("t1").map((m) => m.text)).toEqual(["two"]);
+	});
+});

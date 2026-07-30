@@ -20,7 +20,7 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { assertHomeIsNotACheckout, dataDir, deckV2Home, memoryFiles, stateDir } from "./home";
+import { assertHomeIsNotACheckout, assertHomeIsNotAnotherFleet, deckV2Home } from "./home";
 
 export type BootstrapResult = {
 	home: string;
@@ -62,13 +62,23 @@ The orchestrator reads projects; workers change them.
 /** Create or converge the home. Idempotent. */
 export function bootstrapHome(options: { repoV2Dir: string; home?: string } = { repoV2Dir: "" }): BootstrapResult {
 	const home = options.home ?? deckV2Home();
+	// Both guards run against the RESOLVED home. The CLI preflight checks the
+	// default home, which is a different path when --home is passed, so relying on
+	// it would let `bootstrap --home <legacy fleet>` through.
 	assertHomeIsNotACheckout(home);
+	assertHomeIsNotAnotherFleet(home);
+
+	// Paths are derived from `home`, never from the env-reading helpers. Mixing the
+	// two split a home in half: AGENTS.md landed in the requested directory while
+	// data/ and state/ landed in whatever DECK_V2_HOME said.
+	const dataPath = path.join(home, "data");
+	const statePath = path.join(home, "state");
 
 	const created: string[] = [];
 	const linked: string[] = [];
 	const notes: string[] = [];
 
-	for (const dir of [home, dataDir(), stateDir()]) {
+	for (const dir of [home, dataPath, statePath]) {
 		if (!fs.existsSync(dir)) {
 			fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
 			created.push(dir);
@@ -96,11 +106,10 @@ export function bootstrapHome(options: { repoV2Dir: string; home?: string } = { 
 	}
 
 	// Memory files are seeded once, then owned by the orchestrator.
-	const memory = memoryFiles();
 	for (const [file, seed] of [
-		[memory.captain, CAPTAIN_SEED],
-		[memory.learnings, LEARNINGS_SEED],
-		[memory.projects, PROJECTS_SEED],
+		[path.join(dataPath, "captain.md"), CAPTAIN_SEED],
+		[path.join(dataPath, "learnings.md"), LEARNINGS_SEED],
+		[path.join(dataPath, "projects.md"), PROJECTS_SEED],
 	] as const) {
 		if (!fs.existsSync(file)) {
 			fs.writeFileSync(file, seed, { mode: 0o600 });

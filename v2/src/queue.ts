@@ -10,6 +10,16 @@
  *
  * Delivery receipts are a file cursor, not a protocol: a message is `delivered`
  * when appended and `acked` when a run records having consumed it.
+ *
+ * BOTH logs are append-only, and nothing ever rewrites the producer log.
+ * Acknowledgement used to rewrite the queue file with ack fields set, which races
+ * the producer: `deck-v2 send` appends while a spawning run rewrites, and the
+ * rewrite is built from a snapshot taken before the append. Measured with two
+ * concurrent processes: 29 of 41 queued captain steers destroyed. A lost steer is
+ * silent — he believes he redirected the work and it continues the old way.
+ *
+ * So acks live in their own append-only file and `pending()` joins the two by id.
+ * Two appends to two different files cannot lose each other.
  */
 import * as fs from "node:fs";
 import { assertTaskId, ensureHomeDirs, stateFiles } from "./home";
@@ -20,10 +30,36 @@ export type QueuedMessage = {
 	text: string;
 	/** Who queued it: the captain via CLI, or the orchestrator. */
 	from: "captain" | "orchestrator";
-	/** Set when a run consumed it. */
+	/** Legacy inline ack, from before acks moved to their own append-only log. */
 	acked_by_epoch?: number;
 	acked_at?: string;
 };
+
+function ackFile(taskId: string): string {
+	return `${stateFiles(taskId).queue}.acks`;
+}
+
+/** Ids already consumed by some run, read from the append-only ack log. */
+function ackedIds(taskId: string): Set<string> {
+	const acked = new Set<string>();
+	let raw: string;
+	try {
+		raw = fs.readFileSync(ackFile(taskId), "utf8");
+	} catch {
+		return acked;
+	}
+	for (const line of raw.split("\n")) {
+		if (line.trim().length === 0) continue;
+		try {
+			const parsed = JSON.parse(line) as { id?: string };
+			if (typeof parsed.id === "string") acked.add(parsed.id);
+		} catch {
+			// A torn tail line from a crash mid-append. Skipping it re-delivers one
+			// message, which is noisy; treating it as an ack would lose one silently.
+		}
+	}
+	return acked;
+}
 
 function messageId(): string {
 	return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -68,7 +104,10 @@ export function readQueue(taskId: string): QueuedMessage[] {
 }
 
 export function pending(taskId: string): QueuedMessage[] {
-	return readQueue(taskId).filter((m) => m.acked_at === undefined);
+	const acked = ackedIds(taskId);
+	// A message is pending unless an ack record exists for it, or the message row
+	// itself carries a legacy inline ack.
+	return readQueue(taskId).filter((m) => m.acked_at === undefined && !acked.has(m.id));
 }
 
 /**
@@ -83,38 +122,12 @@ export function pending(taskId: string): QueuedMessage[] {
  */
 export function ack(taskId: string, ids: string[], epoch: number): void {
 	if (ids.length === 0) return;
-	const target = new Set(ids);
+	assertTaskId(taskId);
+	ensureHomeDirs();
 	const now = new Date().toISOString();
-	const all = readQueue(taskId).map((message) =>
-		target.has(message.id) && message.acked_at === undefined
-			? { ...message, acked_by_epoch: epoch, acked_at: now }
-			: message,
-	);
-	const file = stateFiles(taskId).queue;
-	const tmp = `${file}.tmp`;
-	fs.writeFileSync(tmp, all.map((message) => JSON.stringify(message)).join("\n") + "\n", {
-		mode: 0o600,
-	});
-	fs.renameSync(tmp, file);
+	// Append-only, to its own file: never touch the producer log.
+	const lines = ids.map((id) => JSON.stringify({ id, acked_by_epoch: epoch, acked_at: now }));
+	fs.appendFileSync(ackFile(taskId), `${lines.join("\n")}\n`, { mode: 0o600 });
 }
 
-export function drain(taskId: string, epoch: number): QueuedMessage[] {
-	assertTaskId(taskId);
-	const all = readQueue(taskId);
-	const now = new Date().toISOString();
-	const drained: QueuedMessage[] = [];
-	const rewritten = all.map((message) => {
-		if (message.acked_at !== undefined) return message;
-		const acked: QueuedMessage = { ...message, acked_by_epoch: epoch, acked_at: now };
-		drained.push(acked);
-		return acked;
-	});
-	if (drained.length === 0) return [];
-	const file = stateFiles(taskId).queue;
-	const tmp = `${file}.tmp`;
-	fs.writeFileSync(tmp, rewritten.map((m) => JSON.stringify(m)).join("\n") + "\n", {
-		mode: 0o600,
-	});
-	fs.renameSync(tmp, file);
-	return drained;
-}
+
