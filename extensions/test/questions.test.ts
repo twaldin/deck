@@ -518,3 +518,33 @@ describe("questions extension", () => {
 		expect(pi.intervals).toHaveLength(0);
 	});
 });
+
+describe("poll does not hold a dead ctx", () => {
+	// Observed live: every session in a directory with this extension printed
+	// "This extension ctx is stale after session replacement or reload", because
+	// startPolling captured the session_start ctx and reused it forever. A stale
+	// ctx throws instead of delivering, which parks the asking agent for good —
+	// the exact failure this extension exists to prevent.
+	test("REGRESSION: the poll still delivers after the session ctx goes stale", async () => {
+		const file = freshFile();
+		const pi = new Harness();
+		registerQuestions(pi as any, { DECK_QUESTIONS_FILE: file }, pi.runtime);
+
+		const asker = fakeContext("session-a");
+		await pi.emit("session_start", asker);
+
+		// pi replaces the session: the old ctx is now poison. Anything that touches
+		// it throws, so a poll holding it cannot deliver.
+		asker.sessionManager.getSessionId = () => {
+			throw new Error("This extension ctx is stale after session replacement or reload");
+		};
+
+		// Queue a question and answer it while only the stale ctx exists.
+		const queued = ask(file, { question: "ship it?", sessionId: "session-a" });
+		answer(file, queued.id, "yes");
+
+		// The poll must run without throwing and must deliver the answer.
+		expect(() => pi.intervals.forEach((tick) => tick())).not.toThrow();
+		expect(pendingAnswersFor(file, "session-a")).toHaveLength(0);
+	});
+});

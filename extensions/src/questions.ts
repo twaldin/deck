@@ -108,11 +108,17 @@ export function registerQuestions(
 ): void {
 	const file = queueFile(env);
 	let poll: ReturnType<typeof setInterval> | undefined;
+	/** Latest live session id, refreshed by session events (see startPolling). */
+	let latestSessionId: string | undefined;
 	let lastSeenMtimeMs: number | null = null;
 
 	/** Hands every undelivered answer for this session back to its agent, once. */
-	const deliverAnswers = (ctx: QuestionsContext, triggerTurn: boolean): number => {
-		const sessionId = ctx.sessionManager.getSessionId();
+	const deliverAnswers = (
+		source: QuestionsContext | { sessionId: string },
+		triggerTurn: boolean,
+	): number => {
+		const sessionId =
+			"sessionId" in source ? source.sessionId : source.sessionManager.getSessionId();
 		const pending = pendingAnswersFor(file, sessionId);
 		let delivered = 0;
 		for (const entry of pending) {
@@ -287,19 +293,32 @@ export function registerQuestions(
 		return applied;
 	};
 
-	const startPolling = (ctx: QuestionsContext): void => {
+	/**
+	 * The poll must NOT capture the session_start ctx.
+	 *
+	 * A captured ctx dies with its session: after ctx.newSession(), fork(),
+	 * switchSession() or reload(), pi rejects it as "stale after session
+	 * replacement" and every later poll throws instead of delivering an answer —
+	 * which parks the asking agent forever, the exact failure this extension
+	 * exists to prevent. Only the session id is actually needed, so the poll reads
+	 * the latest one recorded by a live event.
+	 */
+	const startPolling = (): void => {
 		if (poll !== undefined) return;
 		poll = runtime.setInterval(() => {
+			if (latestSessionId === undefined) return;
 			const mtime = queueMtimeMs(file);
 			if (mtime === lastSeenMtimeMs) return;
 			lastSeenMtimeMs = mtime;
 			// triggerTurn wakes a parked agent: without it, an agent that queued a
 			// question and stopped would never learn the answer arrived.
-			deliverAnswers(ctx, true);
+			deliverAnswers({ sessionId: latestSessionId }, true);
 		}, POLL_INTERVAL_MS);
 	};
 
 	pi.on("session_start", (_event, ctx) => {
+		// Refreshed on every session event so the poll never holds a dead ctx.
+		latestSessionId = ctx.sessionManager.getSessionId();
 		// Snapshot the poll baseline BEFORE the delivery read. The other order
 		// loses a wake-up: an answer appended between the read and the snapshot
 		// would be baked into the baseline as already-seen, so the poll would not
@@ -307,10 +326,11 @@ export function registerQuestions(
 		lastSeenMtimeMs = queueMtimeMs(file);
 		// Answers that landed while this session was not running.
 		deliverAnswers(ctx, false);
-		startPolling(ctx);
+		startPolling();
 	});
 
 	pi.on("agent_settled", (_event, ctx) => {
+		latestSessionId = ctx.sessionManager.getSessionId();
 		lastSeenMtimeMs = queueMtimeMs(file);
 		deliverAnswers(ctx, true);
 	});
