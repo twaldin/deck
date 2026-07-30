@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Install Deck's pi extensions (idle-compaction, questions) as DIRECTORY extensions.
+# Install Deck's pi extensions (idle-compaction) as DIRECTORY extensions.
 # INSTALL_TARGET is intentionally overridable so tests never touch live ~/.pi.
 #
 # Why a directory and not a single symlinked file: pi discovers
@@ -16,7 +16,6 @@ INSTALL_TARGET="${INSTALL_TARGET:-$HOME/.pi/agent}"
 SOURCE_DIR="$(cd "$(dirname "$0")" && pwd)/src"
 EXTENSIONS_DIR="$INSTALL_TARGET/extensions"
 DEST="$EXTENSIONS_DIR/deck-idle-compaction"
-QUESTIONS_DEST="$EXTENSIONS_DIR/deck-questions"
 
 mkdir -p "$EXTENSIONS_DIR"
 
@@ -50,15 +49,28 @@ for stale in "$EXTENSIONS_DIR/deck-idle-compaction.ts" "$EXTENSIONS_DIR/idle-com
   fi
 done
 
+# The questions extension moved into deck-v2 (v2/install.sh), which installs
+# into the ORCHESTRATOR home's own .pi — a global install here put ask_captain
+# and /questions into every pi session on the machine, including worker `pi -p`
+# sessions, each one a competing question surface. Remove an install of ours;
+# leave anything we cannot prove is ours.
+QUESTIONS_DEST="$EXTENSIONS_DIR/deck-questions"
+if [ -L "$QUESTIONS_DEST/index.ts" ]; then
+  case "$(readlink "$QUESTIONS_DEST/index.ts")" in
+    */extensions/src/questions.ts)
+      rm -rf "$QUESTIONS_DEST"
+      printf 'removed retired deck-questions extension from %s (now part of deck-v2)\n' "$EXTENSIONS_DIR"
+      ;;
+    *)
+      printf 'warning: %s is not ours; leaving it in place\n' "$QUESTIONS_DEST" >&2
+      ;;
+  esac
+fi
+
 mkdir -p "$DEST"
 # -n prevents following an existing symlink; -f makes reruns converge.
 ln -sfn "$SOURCE_DIR/idle-compaction.ts" "$DEST/index.ts"
 ln -sfn "$SOURCE_DIR/idle-compaction-policy.ts" "$DEST/idle-compaction-policy.ts"
 
-mkdir -p "$QUESTIONS_DEST"
-ln -sfn "$SOURCE_DIR/questions.ts" "$QUESTIONS_DEST/index.ts"
-ln -sfn "$SOURCE_DIR/questions-store.ts" "$QUESTIONS_DEST/questions-store.ts"
-
 printf 'installed Deck idle-compaction pi extension in %s\n' "$DEST"
-printf 'installed Deck questions pi extension in %s\n' "$QUESTIONS_DEST"
 # `typebox` needs no vendoring here: pi provides it to extensions itself.

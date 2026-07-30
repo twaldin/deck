@@ -10,6 +10,7 @@ import {
 	framed,
 	humanAge,
 	PLAIN_FLEET_THEME,
+	renderStatusline,
 	textWidth,
 	type FleetFrame,
 	type TaskRow,
@@ -46,6 +47,7 @@ function frame(overrides: Partial<FleetFrame> = {}): FleetFrame {
 			running: 0,
 			openDecisions: 0,
 			queuedMessages: 0,
+			openQuestions: 0,
 			internalOpen: 0,
 			internalCap: 12,
 		},
@@ -117,6 +119,7 @@ describe("buildFleetText", () => {
 					running: 1,
 					openDecisions: 0,
 					queuedMessages: 0,
+					openQuestions: 0,
 					internalOpen: 0,
 					internalCap: 12,
 				},
@@ -176,5 +179,26 @@ describe("buildFleetText", () => {
 		);
 		const longest = Math.max(...out.split("\n").map(textWidth));
 		expect(longest).toBeLessThan(140);
+	});
+});
+
+describe("statusline question badge", () => {
+	test("open questions show as Nq next to the task count", () => {
+		const f = frame();
+		f.counters.tasks = 10;
+		f.counters.openQuestions = 2;
+		expect(renderStatusline(f)).toBe("0\u25b6 \u00b7 10 task \u00b7 2q");
+	});
+
+	test("no badge when the queue is clear", () => {
+		const f = frame();
+		f.counters.tasks = 10;
+		expect(renderStatusline(f)).toBe("0\u25b6 \u00b7 10 task");
+	});
+
+	test("the overlay header names /questions so the captain knows the next move", () => {
+		const f = frame();
+		f.counters.openQuestions = 3;
+		expect(buildFleetText(f)).toContain("3 question(s) \u2014 /questions");
 	});
 });

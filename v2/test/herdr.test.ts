@@ -128,7 +128,7 @@ describe("projectFleet degrades without herdr", () => {
 				generatedAt: new Date().toISOString(),
 				tasks: [task({ runState: "running" })],
 				workflows: [],
-				counters: { tasks: 1, running: 1, openDecisions: 0, queuedMessages: 0, internalOpen: 0, internalCap: 12 },
+				counters: { tasks: 1, running: 1, openDecisions: 0, queuedMessages: 0, openQuestions: 0, internalOpen: 0, internalCap: 12 },
 				sources: [],
 			});
 			expect(health.state).toBe("skipped");

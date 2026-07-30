@@ -18,6 +18,7 @@ import { lastEvent, openDecisions } from "./events";
 import { internalSummary } from "./backlog";
 import { stateDir, stateFiles } from "./home";
 import { readMeta } from "./meta";
+import { openQuestions, queueFile } from "./questions-store";
 import { pending } from "./queue";
 import { unresolvedReceipts } from "./side-effects";
 import { pidAlive } from "./spawn";
@@ -72,6 +73,8 @@ export type FleetFrame = {
 		running: number;
 		openDecisions: number;
 		queuedMessages: number;
+		/** Captain questions waiting in the /questions queue. */
+		openQuestions: number;
 		internalOpen: number;
 		internalCap: number;
 	};
@@ -215,6 +218,12 @@ export async function buildFrame(options: { workflowCwd?: string } = {}): Promis
 	}));
 
 	const internal = internalSummary();
+	let questionsOpen = 0;
+	try {
+		questionsOpen = openQuestions(queueFile()).length;
+	} catch {
+		// an unreadable queue must not take the fleet view down with it
+	}
 	return {
 		generatedAt: new Date().toISOString(),
 		tasks,
@@ -224,6 +233,7 @@ export async function buildFrame(options: { workflowCwd?: string } = {}): Promis
 			running: tasks.filter((task) => task.runState === "running").length,
 			openDecisions: tasks.reduce((sum, task) => sum + task.openDecisions, 0),
 			queuedMessages: tasks.reduce((sum, task) => sum + task.queuedMessages, 0),
+			openQuestions: questionsOpen,
 			internalOpen: internal.open,
 			internalCap: internal.cap,
 		},
@@ -240,7 +250,7 @@ export function renderFrame(frame: FleetFrame): string {
 	const lines: string[] = [];
 	const c = frame.counters;
 	lines.push(
-		`Fleet · ${c.tasks} task(s), ${c.running} running · ${c.openDecisions} decision(s) · ${c.queuedMessages} queued · internal ${c.internalOpen}/${c.internalCap}`,
+		`Fleet · ${c.tasks} task(s), ${c.running} running · ${c.openDecisions} decision(s) · ${c.openQuestions} question(s) · ${c.queuedMessages} queued · internal ${c.internalOpen}/${c.internalCap}`,
 	);
 	if (frame.tasks.length === 0) {
 		lines.push("  (no tasks)");
@@ -370,6 +380,7 @@ export function buildFleetText(frame: FleetFrame, theme: FleetTheme = PLAIN_FLEE
 		`${theme.bold(String(c.running))} running`,
 		`${c.tasks} task(s)`,
 		c.openDecisions > 0 ? theme.fg("warning", `${c.openDecisions} decision(s)`) : null,
+		c.openQuestions > 0 ? theme.fg("warning", `${c.openQuestions} question(s) — /questions`) : null,
 		c.queuedMessages > 0 ? theme.fg("accent", `${c.queuedMessages} queued`) : null,
 		`internal ${c.internalOpen}/${c.internalCap}`,
 	].filter((bit): bit is string => bit !== null);
@@ -433,6 +444,7 @@ export function buildFleetText(frame: FleetFrame, theme: FleetTheme = PLAIN_FLEE
 export function renderStatusline(frame: FleetFrame): string {
 	const c = frame.counters;
 	const parts = [`${c.running}▶`, `${c.tasks} task`];
+	if (c.openQuestions > 0) parts.push(`${c.openQuestions}q`);
 	if (c.openDecisions > 0) parts.push(`${c.openDecisions}?`);
 	if (c.queuedMessages > 0) parts.push(`${c.queuedMessages}✉`);
 	return parts.join(" · ");

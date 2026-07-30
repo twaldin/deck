@@ -1,6 +1,7 @@
 node_modules/
 *.tsbuildinfo
 /extensions/smoke/.sessions/
+/v2/smoke/.sessions/
 /.smithers/
 /smithers.db
 /smithers.db-*
