@@ -202,3 +202,39 @@ describe("the seeded contract is clean", () => {
 		expect(contract).toContain("only agent that asks him anything");
 	});
 });
+
+describe("the two fleets stay apart", () => {
+	// The previous system has NO notion of owner_system (verified: zero references
+	// across its 90 scripts) and its watcher globs every *.status in its own state
+	// dir. So a marker cannot make it skip deck-owned tasks — the only real
+	// isolation is separate homes, and that was incidental until this guard.
+	test("REGRESSION: refuses the previous fleet's home", async () => {
+		const legacy = path.join(sandbox, "fm-home");
+		fs.mkdirSync(path.join(legacy, "state"), { recursive: true });
+		fs.mkdirSync(path.join(legacy, "bin"), { recursive: true });
+		fs.writeFileSync(path.join(legacy, "bin", "fm-watch.sh"), "#!/bin/sh\n");
+
+		const { assertHomeIsNotAnotherFleet } = await import("../src/home");
+		expect(() => assertHomeIsNotAnotherFleet(legacy)).toThrow(/previous fleet's home/);
+	});
+
+	test("a deck home with its own state dir is fine", async () => {
+		const home = path.join(sandbox, "deck-home");
+		fs.mkdirSync(path.join(home, "state"), { recursive: true });
+		const { assertHomeIsNotAnotherFleet } = await import("../src/home");
+		expect(() => assertHomeIsNotAnotherFleet(home)).not.toThrow();
+	});
+
+	test("the guard is independent of the checkout guard", async () => {
+		// Someone who sets DECK_V2_ALLOW_REPO_HOME must still not land on the old home.
+		const legacy = path.join(sandbox, "fm-repo");
+		fs.mkdirSync(path.join(legacy, "state"), { recursive: true });
+		fs.mkdirSync(path.join(legacy, "bin"), { recursive: true });
+		fs.mkdirSync(path.join(legacy, ".git"), { recursive: true });
+		fs.writeFileSync(path.join(legacy, "bin", "fm-watch.sh"), "#!/bin/sh\n");
+		process.env.DECK_V2_ALLOW_REPO_HOME = "1";
+		const { assertHomeIsNotACheckout, assertHomeIsNotAnotherFleet } = await import("../src/home");
+		expect(() => assertHomeIsNotACheckout(legacy)).not.toThrow();
+		expect(() => assertHomeIsNotAnotherFleet(legacy)).toThrow();
+	});
+});

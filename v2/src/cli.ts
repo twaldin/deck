@@ -18,7 +18,7 @@ import {
 import { bootstrapHome, formatBootstrap } from "./bootstrap";
 import { appendStatus, readStatus } from "./events";
 import { buildFrame, renderFrame, renderStatusline } from "./fleet";
-import { assertHomeIsNotACheckout, deckV2Home, stateFiles } from "./home";
+import { assertHomeIsNotACheckout, assertHomeIsNotAnotherFleet, deckV2Home, stateFiles } from "./home";
 import { readMeta } from "./meta";
 import { enqueue, pending } from "./queue";
 import { peekSession, startRun } from "./spawn";
@@ -87,6 +87,7 @@ export async function runCli(argv: string[]): Promise<number> {
 	if (command !== "home" && command !== "help") {
 		try {
 			assertHomeIsNotACheckout();
+			assertHomeIsNotAnotherFleet();
 		} catch (error) {
 			process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
 			return 1;

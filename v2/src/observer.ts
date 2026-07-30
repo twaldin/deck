@@ -36,6 +36,7 @@ import { stateDir } from "./home";
 export type ObservedRun = {
 	id: string;
 	workflow: string;
+	/** Outcome: runState.state when present, else run.status. See RUN_TRANSITIONS. */
 	status: string;
 	step: string | null;
 	rootDir: string | null;
@@ -67,21 +68,34 @@ export type EmittedEvent = {
  * was 49% `working:` lines, each costing the orchestrator a supervision turn to
  * read and discard. Only transitions the orchestrator can act on are events.
  */
+/**
+ * Real vocabulary, read off a live 0.30.0 workspace rather than guessed.
+ *
+ * Two traps confirmed against actual output:
+ *
+ *  - The field is `state`, not `status`, on steps. On the run there is BOTH:
+ *    `run.status` and `runState.state`.
+ *  - `run.status: "finished"` means STOPPED, not succeeded. Outcome lives in
+ *    `runState.state` (`succeeded` / `failed`). Treating "finished" as success
+ *    would report a failed workflow to the orchestrator as `done:`, and done is
+ *    what it acts on.
+ *
+ * So the run verb is decided by runState.state, falling back to run.status.
+ */
 const RUN_TRANSITIONS: Record<string, { verb: StatusVerb; note: string } | undefined> = {
-	completed: { verb: "done", note: "workflow finished" },
+	succeeded: { verb: "done", note: "workflow finished" },
 	failed: { verb: "failed", note: "workflow failed" },
 	cancelled: { verb: "failed", note: "workflow cancelled" },
-	// A run waiting on an approval gate is the one mid-run state that matters:
-	// it is blocked on the captain and nothing advances until he answers.
-	awaiting_approval: { verb: "needs-decision", note: "workflow is waiting for approval" },
-	awaiting_human: { verb: "needs-decision", note: "workflow is waiting for an answer" },
-	// Paused is deliberate waiting, not a fault. It is reported so the fleet view
-	// can show it, and `paused` is explicitly never treated as stale.
+	// Waiting on an approval gate is the one mid-run state that matters: nothing
+	// advances until the captain answers.
+	"waiting-approval": { verb: "needs-decision", note: "workflow is waiting for approval" },
+	"waiting-human": { verb: "needs-decision", note: "workflow is waiting for an answer" },
+	// Paused is deliberate waiting, not a fault, and is never treated as stale.
 	paused: { verb: "paused", note: "workflow paused" },
 };
 
-/** Terminal run states: after one of these the run emits nothing further. */
-const TERMINAL = new Set(["completed", "failed", "cancelled"]);
+/** Terminal states: after one of these the run emits nothing further. */
+const TERMINAL = new Set(["succeeded", "failed", "cancelled"]);
 
 export type ObserverLedger = {
 	/** Emitted transition keys, so a poll never appends the same event twice. */
@@ -147,6 +161,7 @@ export function planEvents(
 	// fix-now doctrine depends on the orchestrator hearing about a red result
 	// without waiting for the whole run to finish.
 	for (const node of nodes) {
+		// Real step states seen live: finished, waiting-approval, failed.
 		if (node.status !== "failed") continue;
 		const key = transitionKey({
 			scope: "node",
@@ -217,4 +232,105 @@ export function observeOnce(taskId: string, observation: Observation): EmittedEv
 /** True once the run can produce no further events, so polling can stop. */
 export function isFinished(observation: Observation): boolean {
 	return TERMINAL.has(observation.run.status);
+}
+
+/**
+ * Poll a Smithers run and write whatever is new, until it is finished.
+ *
+ * Reads go through the public read-only CLI (`inspect --json`), pinned to the
+ * workspace version because bun can silently resolve a newer global build from a
+ * directory without a package.json. Never a mutating command, never the private
+ * store, never a Gateway lifecycle call.
+ *
+ * The poll is what makes the adapter the sole writer: nodes return validated
+ * output rows and stay silent, so a retried node cannot re-announce a transition
+ * the orchestrator already acted on.
+ */
+export async function observeRun(options: {
+	taskId: string;
+	runId: string;
+	workspace: string;
+	run: (command: string, args: readonly string[], cwd: string) => Promise<{ stdout: string; exitCode: number } | null>;
+	intervalMs?: number;
+	sleep?: (ms: number) => Promise<void>;
+	maxCycles?: number;
+}): Promise<EmittedEvent[]> {
+	const interval = options.intervalMs ?? 10_000;
+	const sleep = options.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
+	const emitted: EmittedEvent[] = [];
+
+	for (let cycle = 0; cycle < (options.maxCycles ?? Number.POSITIVE_INFINITY); cycle++) {
+		const result = await options
+			.run("bunx", [SMITHERS_SPEC, "inspect", options.runId, "--format", "json"], options.workspace)
+			.catch(() => null);
+
+		// A failed read is not a failed run. Reporting it as one would append a
+		// terminal status for a workflow that is still working, and terminal status
+		// is what the orchestrator acts on. Silence and retry is correct.
+		if (result === null || result.exitCode !== 0) {
+			await sleep(interval);
+			continue;
+		}
+
+		const observation = parseInspect(result.stdout);
+		if (observation === null) {
+			await sleep(interval);
+			continue;
+		}
+
+		emitted.push(...observeOnce(options.taskId, observation));
+		if (isFinished(observation)) break;
+		await sleep(interval);
+	}
+	return emitted;
+}
+
+/** Pinned CLI spec; see the version-skew note in the repo's AGENTS.md. */
+const SMITHERS_SPEC = "smithers-orchestrator@0.30.0";
+
+/**
+ * Parse `inspect --format json`. Returns null for anything unusable rather than
+ * guessing: a wrong guess here writes a wrong terminal status.
+ */
+export function parseInspect(stdout: string): Observation | null {
+	let payload: any;
+	try {
+		payload = JSON.parse(stdout);
+	} catch {
+		return null;
+	}
+	const run = payload?.run ?? payload;
+	if (typeof run?.id !== "string" || typeof run?.status !== "string") return null;
+
+	// Canonical shape is nodes[].nodeId; steps[].id is the legacy alias kept for
+	// compatibility, so both are accepted.
+	const rawNodes: any[] = Array.isArray(payload?.nodes) && payload.nodes.length > 0
+		? payload.nodes
+		: Array.isArray(payload?.steps)
+			? payload.steps
+			: [];
+	// Steps carry `state`; `status` is accepted too so a shape change does not read
+	// as every node being healthy.
+	const nodes: ObservedNode[] = rawNodes
+		.map((node) => ({
+			nodeId: typeof node?.nodeId === "string" ? node.nodeId : String(node?.id ?? ""),
+			status: String(node?.state ?? node?.status ?? ""),
+			...(typeof node?.attempt === "number" ? { attempt: node.attempt } : {}),
+		}))
+		.filter((node) => node.nodeId.length > 0);
+
+	// runState.state is the outcome; run.status only says it stopped.
+	const outcome =
+		typeof payload?.runState?.state === "string" ? payload.runState.state : run.status;
+
+	return {
+		run: {
+			id: run.id,
+			workflow: String(run.workflow ?? ""),
+			status: outcome,
+			step: typeof run.step === "string" && run.step !== "—" ? run.step : null,
+			rootDir: typeof payload?.config?.rootDir === "string" ? payload.config.rootDir : null,
+		},
+		nodes,
+	};
 }

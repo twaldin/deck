@@ -159,6 +159,32 @@ function realpathOrNearest(target: string): string {
 	}
 }
 
+/**
+ * Refuse a home that is another fleet's home.
+ *
+ * The two systems stay apart only because they use different state directories,
+ * and nothing structural enforced that: the old system's watcher globs every
+ * `*.status` in its own state dir, so sharing one directory means both systems act
+ * on the same task — two owners, conflicting orders. This makes the one rule that
+ * matters a check instead of a comment.
+ */
+export function assertHomeIsNotAnotherFleet(home = deckV2Home()): void {
+	const resolved = realpathOrNearest(path.resolve(home));
+	// The old system is identifiable by its own layout: a state/ dir alongside the
+	// bin/ of fleet scripts that own it.
+	const looksLikeLegacyFleet =
+		fs.existsSync(path.join(resolved, "state")) &&
+		fs.existsSync(path.join(resolved, "bin", "fm-watch.sh"));
+	if (looksLikeLegacyFleet) {
+		throw new Error(
+			`refusing to use ${home} as the orchestrator home: it is the previous fleet's home.\n` +
+				"Both systems would then act on the same task records, and the previous one cannot be told " +
+				"to skip deck-owned tasks — it has no notion of ownership and watches every status file in " +
+				"its state directory. Keep the homes separate.",
+		);
+	}
+}
+
 export function ensureHomeDirs(): void {
 	for (const dir of [dataDir(), stateDir()]) {
 		fs.mkdirSync(dir, { recursive: true, mode: 0o700 });

@@ -30,7 +30,20 @@ export type TaskMeta = {
 	run_id?: string;
 	/** pid of the live run, when one is running. */
 	run_pid?: number;
-	/** Parallel-run ownership marker (report §10.2). fm2's watcher skips "deck". */
+	/**
+	 * Which system owns this task.
+	 *
+	 * Do NOT read this as parallel-run safety: the previous system has no notion of
+	 * owner_system (verified — zero references in its 90 scripts), and its watcher
+	 * globs `$STATE/*.status` unconditionally, so a marker cannot make it skip
+	 * anything.
+	 *
+	 * The actual isolation is that the two systems keep separate state directories
+	 * (`~/.deck/state` versus the old home's `state/`) and neither reads the
+	 * other's. That is incidental, not enforced, so the one rule that matters is:
+	 * never point DECK_V2_HOME at the old home. This marker is for a human reading
+	 * a record and for the eventual migration, nothing more.
+	 */
 	owner_system?: OwnerSystem;
 	pr?: string;
 	pr_head?: string;

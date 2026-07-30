@@ -43,7 +43,7 @@ const run = (status: string, step: string | null = null) => ({
 describe("observer idempotency", () => {
 	test("REGRESSION: polling the same terminal state appends exactly one line", async () => {
 		const { observer, events } = await mods();
-		const observation = { run: run("completed"), nodes: [] };
+		const observation = { run: run("succeeded"), nodes: [] };
 
 		expect(observer.observeOnce("t1", observation)).toHaveLength(1);
 		// Five more polls of an unchanged run: the CLI keeps reporting completed.
@@ -69,13 +69,13 @@ describe("observer idempotency", () => {
 
 	test("a restarted observer does not re-announce history", async () => {
 		const { observer, events } = await mods();
-		observer.observeOnce("t1", { run: run("awaiting_approval", "gate"), nodes: [] });
-		observer.observeOnce("t1", { run: run("completed"), nodes: [] });
+		observer.observeOnce("t1", { run: run("waiting-approval", "gate"), nodes: [] });
+		observer.observeOnce("t1", { run: run("succeeded"), nodes: [] });
 
 		// Simulating a fresh observer process: the ledger is on disk, so a replay of
 		// the whole observed history must add nothing.
-		observer.observeOnce("t1", { run: run("awaiting_approval", "gate"), nodes: [] });
-		observer.observeOnce("t1", { run: run("completed"), nodes: [] });
+		observer.observeOnce("t1", { run: run("waiting-approval", "gate"), nodes: [] });
+		observer.observeOnce("t1", { run: run("succeeded"), nodes: [] });
 
 		const lines = events.readStatus("t1").events;
 		expect(lines).toHaveLength(2);
@@ -84,7 +84,7 @@ describe("observer idempotency", () => {
 
 	test("REGRESSION: a lost ledger is the failure that re-announces everything", async () => {
 		const { observer, events } = await mods();
-		observer.observeOnce("t1", { run: run("completed"), nodes: [] });
+		observer.observeOnce("t1", { run: run("succeeded"), nodes: [] });
 		// The ledger must exist and be complete JSON; a truncated one reads as empty
 		// and every past transition looks new again.
 		const ledger = path.join(home, "state", "t1.observed");
@@ -114,7 +114,7 @@ describe("observer event selection", () => {
 	test("an approval gate is a decision, because nothing advances without him", async () => {
 		const { observer } = await mods();
 		const [event] = observer.observeOnce("t1", {
-			run: run("awaiting_approval", "merge-gate"),
+			run: run("waiting-approval", "merge-gate"),
 			nodes: [],
 		});
 		expect(event?.verb).toBe("needs-decision");
@@ -137,7 +137,7 @@ describe("observer event selection", () => {
 
 	test("planning is pure: it decides without writing", async () => {
 		const { observer, events } = await mods();
-		const planned = observer.planEvents("t1", { run: run("completed"), nodes: [] }, { emitted: [] });
+		const planned = observer.planEvents("t1", { run: run("succeeded"), nodes: [] }, { emitted: [] });
 		expect(planned).toHaveLength(1);
 		expect(events.readStatus("t1").events).toHaveLength(0);
 	});
@@ -151,5 +151,68 @@ describe("observer event selection", () => {
 		});
 		expect(new Set(emitted.map((event) => event.key)).size).toBe(emitted.length);
 		expect(emitted).toHaveLength(2);
+	});
+});
+
+describe("polling a real run shape", () => {
+	// The REAL 0.30.0 shape, read off a live workspace: steps carry `state`, the run
+	// carries both `status` (stopped) and `runState.state` (outcome).
+	const inspectPayload = (state: string, steps: unknown[] = []) =>
+		JSON.stringify({
+			run: { id: "run-1", workflow: "pr-pipeline", status: "finished", step: "implement" },
+			runState: { state },
+			steps,
+			config: { rootDir: "/tmp/wt" },
+		});
+
+	test("polls until the run is terminal, then stops", async () => {
+		const { observer } = await mods();
+		const responses = [
+			inspectPayload("running", [{ id: "implement", state: "running" }]),
+			inspectPayload("running", [{ id: "implement", state: "failed", attempt: 0 }]),
+			inspectPayload("succeeded"),
+		];
+		let calls = 0;
+		const emitted = await observer.observeRun({
+			taskId: "t1",
+			runId: "run-1",
+			workspace: "/tmp/ws",
+			run: async () => ({ stdout: responses[Math.min(calls++, responses.length - 1)] ?? "", exitCode: 0 }),
+			sleep: async () => {},
+			maxCycles: 10,
+		});
+		// It stopped at the terminal state rather than polling forever.
+		expect(calls).toBe(3);
+		expect(emitted.map((event) => event.verb)).toEqual(["working", "done"]);
+	});
+
+	// A failed CLI read is not a failed run. Reporting it as one appends a terminal
+	// status for a workflow that is still working, and terminal status is what the
+	// orchestrator acts on.
+	test("REGRESSION: a failed read does not become a failed status", async () => {
+		const { observer, events } = await mods();
+		let calls = 0;
+		await observer.observeRun({
+			taskId: "t1",
+			runId: "run-1",
+			workspace: "/tmp/ws",
+			run: async () => (++calls < 3 ? { stdout: "", exitCode: 1 } : { stdout: inspectPayload("succeeded"), exitCode: 0 }),
+			sleep: async () => {},
+			maxCycles: 10,
+		});
+		const lines = events.readStatus("t1").events;
+		expect(lines.filter((line) => line.verb === "failed")).toHaveLength(0);
+		expect(lines.filter((line) => line.verb === "done")).toHaveLength(1);
+	});
+
+	test("unparseable output is skipped rather than guessed at", async () => {
+		const { observer } = await mods();
+		expect(observer.parseInspect("not json")).toBeNull();
+		expect(observer.parseInspect("{}")).toBeNull();
+		// Legacy steps[].id is accepted alongside canonical nodes[].nodeId.
+		const legacy = observer.parseInspect(
+			JSON.stringify({ run: { id: "r", status: "running" }, steps: [{ id: "plan", state: "finished" }] }),
+		);
+		expect(legacy?.nodes[0]?.nodeId).toBe("plan");
 	});
 });
