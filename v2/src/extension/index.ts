@@ -386,6 +386,19 @@ export default function deckV2(pi: any): void {
 
 	pi.on("session_start", async (_event: unknown, ctx: any) => {
 		workflowCwd = `${deckV2Home()}/workflows/.smithers`;
+		// The wake loop only runs for an interactive orchestrator.
+		//
+		// Waking means injecting a user message, which needs a live session with a
+		// captain reading it. In print mode there is a single prompt and no one to
+		// wake: the injection is rejected outright ("Agent is already processing")
+		// because the run is already under way by the time a timer fires, and even
+		// at session_start, when isIdle() is still true, the send lands mid-startup.
+		// RPC has a caller driving the conversation, so unsolicited turns are the
+		// caller's business, not ours.
+		//
+		// The tools still work in every mode; only the automatic waking is gated.
+		if (ctx?.mode !== "tui") return;
+
 		// Reconcile at start: the durable baseline means this reports only what is
 		// genuinely new, so a restart is quiet rather than a flood.
 		deliver(ctx);

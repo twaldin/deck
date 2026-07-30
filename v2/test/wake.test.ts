@@ -231,3 +231,55 @@ describe("durable delivery outbox", () => {
 		expect(wake.pendingWakes().some((entry) => entry.note === "real event")).toBe(true);
 	});
 });
+
+describe("wake loop mode gating", () => {
+	// Waking means injecting a user message, which needs a live interactive session.
+	// In print mode the injection is rejected ("Agent is already processing") — the
+	// run is under way by the time any timer fires, and even at session_start,
+	// where isIdle() is still true, the send lands mid-startup. Found by running
+	// real pi, not by a test.
+	test("REGRESSION: the loop does not start outside tui mode", async () => {
+		const handlers: any[] = [];
+		let sends = 0;
+		const fakePi = {
+			registerTool: () => {},
+			registerCommand: () => {},
+			on: (event: string, handler: any) => {
+				if (event === "session_start") handlers.push(handler);
+			},
+			// Real pi throws this once a run is under way. Print mode is always under
+			// way by the time a wake fires.
+			sendUserMessage: () => {
+				sends++;
+				throw new Error("Agent is already processing");
+			},
+		};
+		const { default: register } = await import("../src/extension/index");
+		register(fakePi as any);
+
+		// A pending T0 event exists, so an ungated loop WILL try to deliver it.
+		const { events } = await mods();
+		events.appendStatus("t1", "blocked", "needs a credential");
+
+		const timers: Array<() => void> = [];
+		const realSetInterval = globalThis.setInterval;
+		// Capture the loop's timer instead of waiting 30s for it.
+		(globalThis as any).setInterval = (callback: () => void) => {
+			timers.push(callback);
+			return 0 as any;
+		};
+		try {
+			for (const handler of handlers) {
+				await handler({}, { mode: "print", isIdle: () => true });
+			}
+			// Fire whatever the extension scheduled.
+			for (const tick of timers) tick();
+		} finally {
+			globalThis.setInterval = realSetInterval;
+		}
+
+		// In print mode nothing should have been scheduled and nothing sent.
+		expect(timers).toHaveLength(0);
+		expect(sends).toBe(0);
+	});
+});
