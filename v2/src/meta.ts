@@ -28,6 +28,8 @@ export type TaskMeta = {
 	session_dir?: string;
 	/** Smithers run id when the task is workflow-backed. */
 	run_id?: string;
+	/** pid of the live run, when one is running. */
+	run_pid?: number;
 	/** Parallel-run ownership marker (report §10.2). fm2's watcher skips "deck". */
 	owner_system?: OwnerSystem;
 	pr?: string;
@@ -35,6 +37,9 @@ export type TaskMeta = {
 	created?: string;
 	[key: string]: string | number | undefined;
 };
+
+/** Keys stored as integers. Everything else round-trips as a string. */
+const NUMERIC_KEYS = new Set(["run_epoch", "run_pid"]);
 
 export function readMeta(id: string): TaskMeta | null {
 	assertTaskId(id);
@@ -54,7 +59,7 @@ export function readMeta(id: string): TaskMeta | null {
 		const key = trimmed.slice(0, eq).trim();
 		const value = trimmed.slice(eq + 1).trim();
 		if (key.length === 0) continue;
-		meta[key] = key === "run_epoch" ? Number.parseInt(value, 10) : value;
+		meta[key] = NUMERIC_KEYS.has(key) ? Number.parseInt(value, 10) : value;
 	}
 	return meta;
 }

@@ -142,7 +142,11 @@ export function startRun(request: SpawnRequest, primaryCheckout: string): SpawnR
 	child.stdin?.end(prompt);
 	child.unref();
 
-	return { taskId: request.taskId, epoch, briefPath, sessionDir, pid: child.pid ?? -1, model };
+	const pid = child.pid ?? -1;
+	// Recorded so stale detection can tell "run finished" from "run vanished".
+	if (pid > 0) updateMeta(request.taskId, { run_pid: pid });
+
+	return { taskId: request.taskId, epoch, briefPath, sessionDir, pid, model };
 }
 
 export function hasSession(sessionDir: string): boolean {

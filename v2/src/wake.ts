@@ -1,0 +1,269 @@
+/**
+ * Wake engine: severity-tiered, coalesced, edge-triggered.
+ *
+ * fm2's measured failure, re-measured live before this was written:
+ *   2216-line triage log, 1844 `absorbed stale` records (was 933 at the day-1
+ *   snapshot, so it accumulates rather than converging), and 80 of 163 status
+ *   lines — 49% — were `working:`, each firing a wake that needed no action.
+ *
+ * Three causes, all addressed here:
+ *   level-triggered  -> every condition carries a durable baseline; only CHANGE
+ *                       wakes, so a standing condition stops re-firing.
+ *   no baseline      -> the baseline is on disk, so a restart does not re-fire
+ *                       everything it already reported.
+ *   working: woke     -> T2 never wakes. It updates counters only.
+ *
+ * Reconcile is the source of truth; fs.watch is a latency hint. fs.watch on
+ * macOS misses events, breaks across atomic replace, and coalesces bursts, so
+ * treating it as truth would rebuild the silent-watcher class under a new name.
+ * Because `.status` is append-only and the cursor is identity-aware, a missed
+ * event is LATE, never LOST.
+ */
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { type StatusCursor, loadCursors, readStatusSince, saveCursors } from "./events";
+import { stateDir, wakeFiles } from "./home";
+import { readMeta } from "./meta";
+import { type StatusEvent, type WakeTier, tierFor } from "./status";
+
+export type WakeItem = {
+	taskId: string;
+	tier: WakeTier;
+	event: StatusEvent;
+};
+
+export type ReconcileResult = {
+	/** T0: deliver now, one message per event. */
+	interrupt: WakeItem[];
+	/** T1: deliver as ONE folded summary this cycle. */
+	batched: WakeItem[];
+	/** T2: recorded only. Never delivered. */
+	silent: WakeItem[];
+	/** Cursor invalidations, worth surfacing as source health. */
+	rescanned: string[];
+	/** Malformed status lines, surfaced rather than swallowed. */
+	malformed: Array<{ taskId: string; raw: string; reason: string }>;
+};
+
+type Baseline = Record<string, { lastTier: WakeTier; lastRaw: string; count: number }>;
+
+function loadBaseline(): Baseline {
+	try {
+		const parsed: unknown = JSON.parse(fs.readFileSync(wakeFiles().baseline, "utf8"));
+		if (parsed !== null && typeof parsed === "object") return parsed as Baseline;
+		return {};
+	} catch {
+		return {};
+	}
+}
+
+function saveBaseline(baseline: Baseline): void {
+	const file = wakeFiles().baseline;
+	const tmp = `${file}.tmp`;
+	fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+	fs.writeFileSync(tmp, `${JSON.stringify(baseline, null, 2)}\n`, { mode: 0o600 });
+	fs.renameSync(tmp, file);
+}
+
+/** Tasks deck owns. An fm2-owned task is skipped during the parallel run. */
+export function deckOwnedTasks(): string[] {
+	let entries: string[];
+	try {
+		entries = fs.readdirSync(stateDir());
+	} catch {
+		return [];
+	}
+	const ids = new Set<string>();
+	for (const entry of entries) {
+		if (!entry.endsWith(".status")) continue;
+		const id = entry.slice(0, -".status".length);
+		if (id.startsWith(".")) continue;
+		const meta = readMeta(id);
+		// Absent marker means deck: fm2 sets its own explicitly during migration.
+		if (meta === null || meta.owner_system === undefined || meta.owner_system === "deck") {
+			ids.add(id);
+		}
+	}
+	return [...ids].sort();
+}
+
+/**
+ * One reconcile pass. This is the whole engine: it is safe to call on a timer,
+ * on an fs.watch nudge, and at session start, and it produces the same result
+ * from durable state either way.
+ */
+export function reconcile(taskIds?: string[]): ReconcileResult {
+	const ids = taskIds ?? deckOwnedTasks();
+	const cursors = loadCursors();
+	const baseline = loadBaseline();
+	const result: ReconcileResult = {
+		interrupt: [],
+		batched: [],
+		silent: [],
+		rescanned: [],
+		malformed: [],
+	};
+
+	for (const taskId of ids) {
+		const previous: StatusCursor | null = cursors[taskId] ?? null;
+		const read = readStatusSince(taskId, previous);
+		if (read.cursor !== null) cursors[taskId] = read.cursor;
+		if (read.rescanned) result.rescanned.push(taskId);
+		for (const bad of read.malformed) {
+			result.malformed.push({ taskId, raw: bad.raw, reason: bad.reason });
+		}
+
+		for (const event of read.events) {
+			const tier = tierFor(event.verb);
+			const item: WakeItem = { taskId, tier, event };
+
+			if (tier === "T2") {
+				// The absorbed-noise class. Counted, never delivered.
+				result.silent.push(item);
+				baseline[taskId] = {
+					lastTier: tier,
+					lastRaw: event.raw,
+					count: (baseline[taskId]?.count ?? 0) + 1,
+				};
+				continue;
+			}
+
+			// Edge-triggered: an identical repeat of the last reported line is a
+			// standing condition, not a new event.
+			const previousEntry = baseline[taskId];
+			const unchanged =
+				previousEntry !== undefined &&
+				previousEntry.lastRaw.trim() === event.raw.trim() &&
+				previousEntry.lastTier === tier;
+
+			baseline[taskId] = {
+				lastTier: tier,
+				lastRaw: event.raw,
+				count: (previousEntry?.count ?? 0) + 1,
+			};
+			if (unchanged) {
+				result.silent.push(item);
+				continue;
+			}
+
+			if (tier === "T0") result.interrupt.push(item);
+			else result.batched.push(item);
+		}
+	}
+
+	saveCursors(cursors);
+	saveBaseline(baseline);
+	return result;
+}
+
+/**
+ * Fold a cycle's T1 items into ONE message.
+ *
+ * This is the fix for the captain's screenshot: six queued follow-ups each
+ * burning a turn after the first drain had already handled them. One injection
+ * per cycle, regardless of how many events arrived.
+ */
+export function foldBatched(items: WakeItem[]): string | null {
+	if (items.length === 0) return null;
+	const byTask = new Map<string, StatusEvent[]>();
+	for (const item of items) {
+		const list = byTask.get(item.taskId) ?? [];
+		list.push(item.event);
+		byTask.set(item.taskId, list);
+	}
+	const parts: string[] = [];
+	for (const [taskId, events] of byTask) {
+		const last = events[events.length - 1];
+		if (last === undefined) continue;
+		const extra = events.length > 1 ? ` (+${events.length - 1} earlier)` : "";
+		parts.push(`${taskId}: ${last.verb} — ${last.note}${extra}`);
+	}
+	return `${byTask.size} task(s) updated. ${parts.join(" · ")}`;
+}
+
+/** T0 messages are delivered one per event; latency is the point. */
+export function formatInterrupt(item: WakeItem): string {
+	return `${item.taskId}: ${item.event.verb} — ${item.event.note}`;
+}
+
+export type StaleVerdict = {
+	taskId: string;
+	reason: string;
+};
+
+/**
+ * Staleness, redefined as a FACT rather than a heuristic.
+ *
+ * There is no pane to be idle, so the only real stale conditions are: a run was
+ * recorded and its process is gone with no terminal status, or a workflow row is
+ * running with no transition past a threshold. A `paused:` task is never stale —
+ * that alone removes fm2's 1844 absorbed-stale records.
+ */
+export function detectStale(
+	taskIds?: string[],
+	options: { runAlive?: (pid: number) => boolean } = {},
+): StaleVerdict[] {
+	const alive = options.runAlive ?? defaultAlive;
+	const ids = taskIds ?? deckOwnedTasks();
+	const verdicts: StaleVerdict[] = [];
+	for (const taskId of ids) {
+		const meta = readMeta(taskId);
+		if (meta === null) continue;
+		const pid = typeof meta.run_pid === "number" ? meta.run_pid : undefined;
+		if (pid === undefined) continue;
+		if (alive(pid)) continue;
+		// Process gone. Stale only if the task never reached a terminal event.
+		const { lastEventVerb } = lastVerb(taskId);
+		if (lastEventVerb === "done" || lastEventVerb === "failed") continue;
+		if (lastEventVerb === "paused" || lastEventVerb === "needs-decision") continue;
+		verdicts.push({
+			taskId,
+			reason: `run pid ${pid} is gone and the task never reported a terminal state (last: ${lastEventVerb ?? "no events"})`,
+		});
+	}
+	return verdicts;
+}
+
+function defaultAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+function lastVerb(taskId: string): { lastEventVerb: string | null } {
+	const baseline = loadBaseline()[taskId];
+	if (baseline === undefined) return { lastEventVerb: null };
+	const colon = baseline.lastRaw.indexOf(":");
+	if (colon === -1) return { lastEventVerb: null };
+	const head = baseline.lastRaw.slice(0, colon).trim().split(/\s+/)[0];
+	return { lastEventVerb: head ?? null };
+}
+
+/**
+ * Statusline counters. Rendered by the extension; costs no turn.
+ */
+export type FleetCounters = {
+	activeRuns: number;
+	pendingQuestions: number;
+	t1Pending: number;
+	tasks: number;
+};
+
+/** Watch `.status` files for a nudge. Never the source of truth. */
+export function watchStatusDir(onNudge: () => void): () => void {
+	let watcher: fs.FSWatcher | null = null;
+	try {
+		watcher = fs.watch(stateDir(), { persistent: false }, (_event, filename) => {
+			if (filename !== null && filename.endsWith(".status")) onNudge();
+		});
+	} catch {
+		// No watcher is fine: reconcile on a timer is the contract.
+		return () => {};
+	}
+	return () => {
+		watcher?.close();
+	};
+}
