@@ -16,6 +16,7 @@
  */
 import { Box, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { DECK_OPERATIONAL_PREFIX, registerCalm } from "../calm";
 import { appendStatus, readStatus } from "../events";
 import {
 	buildFleetText,
@@ -53,6 +54,9 @@ const text = (body: string): ToolResult => ({
 const RECONCILE_MS = 30_000;
 
 export default function deckV2(pi: any): void {
+	// Calm is presentation-only (see ../calm.ts); it never touches delivery.
+	registerCalm(pi);
+
 	let timer: ReturnType<typeof setInterval> | undefined;
 	let unwatch: (() => void) | undefined;
 	let workflowCwd: string | undefined;
@@ -368,7 +372,7 @@ export default function deckV2(pi: any): void {
 			// Staleness is derived from live facts, not from a status event, so it
 			// is not an outbox entry; it is recomputed every cycle and is
 			// therefore safe to send directly.
-			send(ctx, `[deck] ${verdict.taskId} stopped responding: ${verdict.reason}`);
+			send(ctx, `${DECK_OPERATIONAL_PREFIX}${verdict.taskId} stopped responding: ${verdict.reason}`);
 		}
 
 		const pending = pendingWakes();
@@ -378,7 +382,7 @@ export default function deckV2(pi: any): void {
 		}
 		const delivered: string[] = [];
 		for (const entry of pending.filter((item) => item.tier === "T0")) {
-			if (send(ctx, `[deck] ${entry.taskId}: ${entry.verb} — ${entry.note}`)) {
+			if (send(ctx, `${DECK_OPERATIONAL_PREFIX}${entry.taskId}: ${entry.verb} — ${entry.note}`)) {
 				delivered.push(entry.id);
 			}
 		}
@@ -394,7 +398,7 @@ export default function deckV2(pi: any): void {
 					event: { verb: entry.verb as any, note: entry.note, raw: entry.raw },
 				})) as any,
 			);
-			if (folded !== null && send(ctx, `[deck] ${folded}`)) {
+			if (folded !== null && send(ctx, `${DECK_OPERATIONAL_PREFIX}${folded}`)) {
 				delivered.push(...batched.map((entry) => entry.id));
 			}
 		}
