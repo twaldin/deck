@@ -286,15 +286,22 @@ export default function deckV2(pi: any): void {
 					const body = new Text(buildFleetText(frame, theme), 0, 0);
 					box.addChild(body);
 
+					// In-flight guard: buildFrame shells out to smithers ps, which can
+					// outlast a tick; overlapping rebuilds would pile up subprocesses.
+					let busy = false;
 					const refresh = async (): Promise<void> => {
+						if (busy) return;
+						busy = true;
 						try {
 							body.setText(buildFleetText(await buildFrame(frameOptions), theme));
 							tui.requestRender();
 						} catch {
 							// keep the last good frame on a failed refresh
+						} finally {
+							busy = false;
 						}
 					};
-					const timer = setInterval(() => void refresh(), 3_000);
+					const timer = setInterval(() => void refresh(), 5_000);
 					timer.unref?.();
 
 					return {

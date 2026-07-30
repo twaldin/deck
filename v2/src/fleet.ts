@@ -380,19 +380,22 @@ export function buildFleetText(frame: FleetFrame, theme: FleetTheme = PLAIN_FLEE
 	for (const task of frame.tasks) {
 		const chip = chipFor(task);
 		const age = task.statusAgeMs === null ? "" : theme.fg("dim", ` ${humanAge(task.statusAgeMs)}`);
+		// Every dynamic field is clamped: the Text component word-wraps rather
+		// than corrupting the TUI, but an unclamped URL or task id would still
+		// wrap across the frame border and break the panel visually.
 		const bits: string[] = [theme.fg("dim", task.kind)];
-		if (task.project !== null) bits.push(theme.fg("text", task.project));
-		if (task.stage !== null) bits.push(theme.fg("accent", `@${task.stage}`));
-		if (task.pane !== null) bits.push(theme.fg("dim", task.pane));
+		if (task.project !== null) bits.push(theme.fg("text", truncate(task.project, 20)));
+		if (task.stage !== null) bits.push(theme.fg("accent", `@${truncate(task.stage, 20)}`));
+		if (task.pane !== null) bits.push(theme.fg("dim", truncate(task.pane, 12)));
 		lines.push(
-			`${theme.fg(chip.color, `[${chip.label.padEnd(8)}]`)} ${theme.bold(task.taskId.padEnd(24))}${bits.join(theme.fg("dim", " · "))}${age}`,
+			`${theme.fg(chip.color, `[${chip.label.padEnd(8)}]`)} ${theme.bold(truncate(task.taskId, 24).padEnd(24))}${bits.join(theme.fg("dim", " · "))}${age}`,
 		);
 		if (task.lastVerb !== null) {
 			lines.push(
 				`           ${theme.fg("dim", `${task.lastVerb}:`)} ${theme.fg("text", truncate(task.lastNote ?? "", 64))}`,
 			);
 		}
-		if (task.pr !== null) lines.push(`           ${theme.fg("accent", task.pr)}`);
+		if (task.pr !== null) lines.push(`           ${theme.fg("accent", truncate(task.pr, 72))}`);
 		const flags: string[] = [];
 		if (task.openDecisions > 0) flags.push(`${task.openDecisions} decision(s) open`);
 		if (task.queuedMessages > 0) flags.push(`${task.queuedMessages} message(s) queued`);
@@ -407,7 +410,9 @@ export function buildFleetText(frame: FleetFrame, theme: FleetTheme = PLAIN_FLEE
 			const bits = [wf.workflow, wf.status, wf.step === null ? null : `@${wf.step}`, wf.taskId]
 				.filter((bit): bit is string => bit !== null)
 				.join(" · ");
-			lines.push(`  ${theme.fg("accent", `wf:${wf.runId}`)}  ${theme.fg("text", bits)}`);
+			lines.push(
+				`  ${theme.fg("accent", `wf:${truncate(wf.runId, 16)}`)}  ${theme.fg("text", truncate(bits, 64))}`,
+			);
 		}
 	}
 
@@ -420,7 +425,7 @@ export function buildFleetText(frame: FleetFrame, theme: FleetTheme = PLAIN_FLEE
 			.join("  "),
 	);
 
-	const footer = `${theme.fg("accent", "[q/Esc]")} ${theme.fg("dim", "close")}   ${theme.fg("accent", "[r]")} ${theme.fg("dim", "refresh")}   ${theme.fg("dim", "live · refreshes every 3s")}`;
+	const footer = `${theme.fg("accent", "[q/Esc]")} ${theme.fg("dim", "close")}   ${theme.fg("accent", "[r]")} ${theme.fg("dim", "refresh")}   ${theme.fg("dim", "live · refreshes every 5s")}`;
 	return framed("deck fleet", lines.join("\n"), footer, theme);
 }
 

@@ -8,7 +8,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { TaskRow } from "../src/fleet";
-import { desiredState, projectionMessage, smithersSummary } from "../src/herdr";
+import { desiredState, mayClosePane, projectionMessage, shellQuote, smithersSummary } from "../src/herdr";
 
 function task(overrides: Partial<TaskRow> = {}): TaskRow {
 	return {
@@ -77,6 +77,32 @@ describe("smithersSummary", () => {
 			{ runId: "r2", workflow: "pr", status: "completed", step: null, taskId: null },
 		]);
 		expect(summary.state).toBe("idle");
+	});
+});
+
+describe("mayClosePane: identity-exact, never less", () => {
+	test("closes only on exact pane id + agent label match", () => {
+		expect(mayClosePane({ pane_id: "w1:p2", agent: "t1" }, "w1:p2", "t1")).toBe(true);
+	});
+
+	test("REGRESSION: a missing agent field is not authorization to close", () => {
+		// A herdr schema change or a reused pane id yields pane info without our
+		// label; closing on that would close somebody else's pane.
+		expect(mayClosePane({ pane_id: "w1:p2" }, "w1:p2", "t1")).toBe(false);
+	});
+
+	test("mismatched agent, mismatched pane, or no pane never close", () => {
+		expect(mayClosePane({ pane_id: "w1:p2", agent: "other" }, "w1:p2", "t1")).toBe(false);
+		expect(mayClosePane({ pane_id: "w1:p9", agent: "t1" }, "w1:p2", "t1")).toBe(false);
+		expect(mayClosePane(null, "w1:p2", "t1")).toBe(false);
+	});
+});
+
+describe("shellQuote", () => {
+	test("spaces and metacharacters stay data", () => {
+		expect(shellQuote("/a b/c.status")).toBe("'/a b/c.status'");
+		expect(shellQuote("/x;rm -rf /")).toBe("'/x;rm -rf /'");
+		expect(shellQuote("it's")).toBe(`'it'\\''s'`);
 	});
 });
 

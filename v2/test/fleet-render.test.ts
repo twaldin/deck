@@ -148,4 +148,33 @@ describe("buildFleetText", () => {
 		const longest = Math.max(...out.split("\n").map(textWidth));
 		expect(longest).toBeLessThan(140);
 	});
+
+	test("REGRESSION: every dynamic field is clamped, not just the note", () => {
+		const out = buildFleetText(
+			frame({
+				tasks: [
+					task({
+						taskId: "a".repeat(80),
+						project: "p".repeat(80),
+						stage: "s".repeat(80),
+						pane: "w".repeat(80),
+						pr: `https://github.com/org/repo/pull/${"9".repeat(80)}`,
+						lastVerb: "working",
+						lastNote: "n".repeat(300),
+					}),
+				],
+				workflows: [
+					{
+						runId: "r".repeat(80),
+						workflow: "w".repeat(80),
+						status: "running",
+						step: "x".repeat(80),
+						taskId: null,
+					},
+				],
+			}),
+		);
+		const longest = Math.max(...out.split("\n").map(textWidth));
+		expect(longest).toBeLessThan(140);
+	});
 });

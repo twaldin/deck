@@ -168,7 +168,7 @@ async function createPane(
 	const pane = (created?.root_pane ?? null) as { pane_id?: string } | null;
 	const tab = (created?.tab ?? null) as { tab_id?: string } | null;
 	if (pane?.pane_id === undefined || tab?.tab_id === undefined) return null;
-	await herdr(["pane", "run", pane.pane_id, `tail -n 40 -F ${stateFiles(task.taskId).status}`]);
+	await herdr(["pane", "run", pane.pane_id, `tail -n 40 -F ${shellQuote(stateFiles(task.taskId).status)}`]);
 	return { pane: pane.pane_id, tab: tab.tab_id };
 }
 
@@ -190,15 +190,33 @@ async function report(pane: string, agent: string, state: HerdrAgentState, messa
 }
 
 /**
+ * Identity proof for a close. Exact-match ONLY: the pane id must be the
+ * recorded one AND the pane must still carry our agent label. A missing agent
+ * field is NOT authorization \u2014 a herdr schema change or a reused pane id
+ * would otherwise close somebody else's pane. Pure; exported for tests.
+ */
+export function mayClosePane(
+	info: { pane_id?: string; agent?: string } | null,
+	pane: string,
+	agent: string,
+): boolean {
+	return info !== null && info.pane_id === pane && info.agent === agent;
+}
+
+/** POSIX single-quote. The pane command runs in a shell; paths are data. */
+export function shellQuote(value: string): string {
+	return `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
+/**
  * Identity-exact teardown: close the pane ONLY when `pane get` proves the
- * recorded pane still carries our agent label. A mismatched pane is somebody
- * else's; we clear our record and touch nothing.
+ * recorded pane still carries our agent label. Anything less \u2014 pane gone,
+ * relabeled, or agent field absent \u2014 clears our record and touches nothing.
  */
 async function releasePane(pane: string, tab: string | undefined, agent: string): Promise<void> {
 	const found = await herdr(["pane", "get", pane]);
 	const info = (found?.pane ?? null) as { pane_id?: string; agent?: string } | null;
-	if (info === null || info.pane_id !== pane) return;
-	if (info.agent !== undefined && info.agent !== agent) return;
+	if (!mayClosePane(info, pane, agent)) return;
 	await herdr(["pane", "release-agent", pane, "--source", "deck", "--agent", agent]);
 	if (tab !== undefined) await herdr(["tab", "close", tab]);
 	else await herdr(["pane", "close", pane]);
