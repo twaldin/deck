@@ -158,6 +158,11 @@ Before you hand-solve an operational flow — auth, deploy, CI, debugging
 production — check this repo's committed skills and docs first. Most repos
 document their own rails, and the rails are faster and correct.
 
+When a credential seems dead, suspect your own extraction before the credential.
+Values in \`.env\` files are often quoted, so \`source\` works while \`grep\`/\`cut\`
+extraction silently yields the quotes too and the request returns 401. A wrong
+"the key is dead" verdict sends the captain to rotate a key that was fine.
+
 Write as little code as the task allows. Prefer what already exists in this
 repo, then the standard library, then a native platform feature, then an
 already-installed dependency. Do not add a dependency for something a few lines
