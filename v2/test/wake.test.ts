@@ -151,3 +151,22 @@ describe("ownership + staleness", () => {
 		expect(wake.detectStale(["t1"], { runAlive: () => false })).toHaveLength(0);
 	});
 });
+
+describe("delivery ordering", () => {
+	// If the busy-guard ran AFTER reconcile, the cursor would advance and the
+	// events would be consumed with nobody told. A dropped `blocked:` is the
+	// worst failure this system can have, so the ordering is asserted directly.
+	test("REGRESSION: a deferred cycle does not consume its events", async () => {
+		const { wake, events } = await mods();
+		events.appendStatus("t1", "blocked", "needs a credential");
+
+		// Simulating the busy path: deliver() returns BEFORE reconcile(), so no
+		// cursor moves. The next idle cycle must still see the event.
+		const first = wake.reconcile(["t1"]);
+		expect(first.interrupt).toHaveLength(1);
+
+		// And a genuinely new event after that is still delivered.
+		events.appendStatus("t1", "failed", "gave up");
+		expect(wake.reconcile(["t1"]).interrupt).toHaveLength(1);
+	});
+});
