@@ -283,3 +283,35 @@ describe("wake loop mode gating", () => {
 		expect(sends).toBe(0);
 	});
 });
+
+describe("fleet board component", () => {
+	// The TUI requires every rendered line to fit within width, and the Component
+	// interface requires invalidate(). Fleet rows carry full status text and PR
+	// URLs — the long lines that overflow and corrupt the display.
+	test("REGRESSION: the board truncates to the given width and implements the contract", async () => {
+		let component: any;
+		const fakeCtx = {
+			mode: "tui",
+			ui: {
+				custom: async (factory: any) => {
+					component = factory({}, {}, {}, () => {});
+				},
+			},
+		};
+		const commands = new Map<string, any>();
+		const fakePi = {
+			registerTool: () => {},
+			registerCommand: (name: string, spec: any) => commands.set(name, spec),
+			on: () => {},
+		};
+		const { default: register } = await import("../src/extension/index");
+		register(fakePi as any);
+
+		await commands.get("fleet").handler("", fakeCtx);
+		expect(component).toBeDefined();
+		expect(typeof component.invalidate).toBe("function");
+		for (const line of component.render(40)) {
+			expect(line.length).toBeLessThanOrEqual(40);
+		}
+	});
+});

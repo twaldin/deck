@@ -268,14 +268,20 @@ export default function deckV2(pi: any): void {
 				ctx.ui?.notify?.(body, "info");
 				return;
 			}
-			await ctx.ui.custom((tui: any, theme: any, _kb: any, done: any) => {
+			await ctx.ui.custom((_tui: any, _theme: any, _kb: any, done: any) => {
+				// The Component contract requires render(width) and invalidate(). A
+				// render that ignores width corrupts the display, because the TUI
+				// requires every line to fit: fleet rows carry full status text and PR
+				// URLs, which are exactly the long lines that overflow.
 				const lines = body.split("\n");
 				return {
-					render: () => lines,
+					render: (width: number) =>
+						lines.map((line) => (line.length > width ? `${line.slice(0, Math.max(0, width - 1))}…` : line)),
 					handleInput: (data: string) => {
 						// Any key closes. A read-only board needs no other control.
 						if (data.length > 0) done(undefined);
 					},
+					invalidate: () => {},
 				};
 			});
 		},
