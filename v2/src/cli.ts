@@ -15,9 +15,10 @@ import {
 	openItems,
 	sweepExpired,
 } from "./backlog";
+import { bootstrapHome, formatBootstrap } from "./bootstrap";
 import { appendStatus, readStatus } from "./events";
 import { buildFrame, renderFrame, renderStatusline } from "./fleet";
-import { deckV2Home, stateFiles } from "./home";
+import { assertHomeIsNotACheckout, deckV2Home, stateFiles } from "./home";
 import { readMeta } from "./meta";
 import { enqueue, pending } from "./queue";
 import { peekSession, startRun } from "./spawn";
@@ -27,6 +28,7 @@ import { detectStale, foldBatched, reconcile } from "./wake";
 
 const USAGE = `deck-v2 — fleet primitives
 
+  bootstrap                        create the orchestrator home (not a checkout)
   spawn <id> --task <text> --accept <text> --worktree <path> [--kind ship|scout]
              [--project <name>] [--branch <name>] [--model <deck/model>]
   send <id> <message>              queue a message for the task's next run
@@ -81,11 +83,30 @@ export async function runCli(argv: string[]): Promise<number> {
 		return 0;
 	}
 
+	// A checkout home is the fm2 mistake; refuse it before any state write.
+	if (command !== "home" && command !== "help") {
+		try {
+			assertHomeIsNotACheckout();
+		} catch (error) {
+			process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+			return 1;
+		}
+	}
+
 	try {
 		switch (command) {
 			case "home":
 				process.stdout.write(`${deckV2Home()}\n`);
 				return 0;
+
+			case "bootstrap": {
+				// import.meta.dir is v2/src, so the package root is one level up.
+				const repoV2Dir = path.resolve(import.meta.dir, "..");
+				process.stdout.write(
+					`${formatBootstrap(bootstrapHome({ repoV2Dir, home: str(args.flags, "home") ?? deckV2Home() }))}\n`,
+				);
+				return 0;
+			}
 
 			case "spawn": {
 				const id = args._[1];

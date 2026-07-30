@@ -16,12 +16,28 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 /**
- * Resolved per call, not frozen at module load: DECK_V2_HOME is a test seam, and
- * a module-load constant bakes whichever value the first import happened to see
- * into every later caller.
+ * The orchestrator's home is NOT a code checkout.
+ *
+ * fm2 conflated the two: FM_HOME was the repo you also developed the fleet
+ * tooling in. That breaks three ways, and the third is the one that gives it
+ * away:
+ *   - the orchestrator loads the REPO's AGENTS.md, which is project memory
+ *     (build, test, architecture notes) — the wrong document for its job, and
+ *     there is no room for a second one
+ *   - live data/ and state/ sit inside a working tree that a crew may rebase or
+ *     check out from under them
+ *   - a crew working ON the tooling shares a directory with the orchestrator's
+ *     running state
+ *
+ * So the home is its own plain directory. The repo becomes an ordinary project
+ * it dispatches against, and the contract arrives by symlink so editing it stays
+ * a normal repo commit.
+ *
+ * Resolved per call, not frozen at module load: a module-load constant bakes
+ * whichever value the first import happened to see into every later caller.
  */
 export function deckV2Home(): string {
-	return process.env.DECK_V2_HOME ?? path.join(os.homedir(), "dev", "deck");
+	return process.env.DECK_V2_HOME ?? path.join(os.homedir(), "deck");
 }
 
 export function dataDir(): string {
@@ -91,6 +107,31 @@ export function assertTaskId(id: string): void {
 		throw new Error(
 			`invalid task id ${JSON.stringify(id)}: use lowercase letters, digits and hyphens (max 64)`,
 		);
+	}
+}
+
+/**
+ * Refuse a home that is inside a git working tree.
+ *
+ * This is the structural guard for the split above: without it, the natural
+ * drift is to point the home back at a checkout and re-create fm2's problem.
+ * A symlinked AGENTS.md is fine — a link into a repo does not make the home one.
+ */
+export function assertHomeIsNotACheckout(home = deckV2Home()): void {
+	if (process.env.DECK_V2_ALLOW_REPO_HOME === "1") return;
+	let dir = path.resolve(home);
+	for (;;) {
+		if (fs.existsSync(path.join(dir, ".git"))) {
+			throw new Error(
+				`refusing to use ${home} as the orchestrator home: it is inside the git working tree at ${dir}.\n` +
+					"The orchestrator's home is a plain directory, not a code checkout: a checkout brings its own AGENTS.md " +
+					"(project memory, not the orchestrator contract) and lets a crew rebase live state out from under it.\n" +
+					"Run `deck-v2 bootstrap` to create a proper home, or set DECK_V2_ALLOW_REPO_HOME=1 if you truly mean this.",
+			);
+		}
+		const parent = path.dirname(dir);
+		if (parent === dir) return;
+		dir = parent;
 	}
 }
 
