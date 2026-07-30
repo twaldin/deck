@@ -140,7 +140,7 @@ describe("registerCalm", () => {
 		const pi = fakePi();
 		registerCalm(pi.api);
 		const read = pi.tools.find((tool) => tool.name === "read")!;
-		const context = { state: {}, isPartial: false, isError: false };
+		const context = { state: {}, cwd: home, isPartial: false, isError: false };
 
 		setCalmPresentation(true);
 		expect(read.renderCall({ path: "/tmp/x" }, fakeTheme, context).render(60)).toEqual([]);
@@ -159,7 +159,12 @@ describe("registerCalm", () => {
 		setCalmStockExportRendering(true);
 		// module-level export override is what /export uses across components
 		expect(
-			read.renderCall({ path: "/tmp/x" }, fakeTheme, { state: {}, isPartial: false, isError: false }),
+			read.renderCall({ path: "/tmp/x" }, fakeTheme, {
+				state: {},
+				cwd: home,
+				isPartial: false,
+				isError: false,
+			}),
 		).toBeDefined();
 		// the wrapped renderCall's own exportRendering flag is session-scoped;
 		// the module-level flag governs the layout adapters:
@@ -209,9 +214,64 @@ describe("registerCalm", () => {
 		const read = pi.tools.find((tool) => tool.name === "read")!;
 		expect(
 			read
-				.renderCall({ path: "/tmp/x" }, fakeTheme, { state: {}, isPartial: false, isError: false })
+				.renderCall({ path: "/tmp/x" }, fakeTheme, {
+					state: {},
+					cwd: home,
+					isPartial: false,
+					isError: false,
+				})
 				.render(60),
 		).toEqual([]);
+	});
+});
+
+describe("presentation-only execution contract", () => {
+	// The reviewer's finding: re-registering built-ins through bare factory calls
+	// silently dropped pi's settings-derived tool options. Both tests fail
+	// against that version.
+	test("REGRESSION: a configured shellCommandPrefix still reaches bash execution", async () => {
+		const agentDir = path.join(home, "agent");
+		fs.mkdirSync(agentDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(agentDir, "settings.json"),
+			JSON.stringify({ shellCommandPrefix: "export CALM_PREFIX_PROOF=yes" }),
+		);
+		process.env.PI_CODING_AGENT_DIR = agentDir;
+		try {
+			const pi = fakePi();
+			registerCalm(pi.api);
+			const bash = pi.tools.find((tool) => tool.name === "bash")!;
+			const result = await bash.execute(
+				"call-1",
+				{ command: 'echo "proof=${CALM_PREFIX_PROOF:-missing}"' },
+				undefined,
+				undefined,
+				{
+					cwd: home,
+					isProjectTrusted: () => true,
+					sessionManager: { getSessionId: () => "calm-test", getSessionFile: () => undefined },
+					model: undefined,
+				},
+			);
+			const output = result.content.map((block: any) => block.text ?? "").join("\n");
+			expect(output).toContain("proof=yes");
+		} finally {
+			delete process.env.PI_CODING_AGENT_DIR;
+		}
+	});
+
+	test("execution resolves the definition for the session cwd, not process.cwd()", async () => {
+		const pi = fakePi();
+		registerCalm(pi.api);
+		const bash = pi.tools.find((tool) => tool.name === "bash")!;
+		const result = await bash.execute("call-2", { command: "pwd" }, undefined, undefined, {
+			cwd: home,
+			isProjectTrusted: () => true,
+			sessionManager: { getSessionId: () => "calm-test", getSessionFile: () => undefined },
+			model: undefined,
+		});
+		const output = result.content.map((block: any) => block.text ?? "").join("\n");
+		expect(output).toContain(fs.realpathSync(home));
 	});
 });
 

@@ -33,6 +33,7 @@ import {
 	createLsToolDefinition,
 	createReadToolDefinition,
 	createWriteToolDefinition,
+	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { Box, Container, getKeybindings, type Component } from "@earendil-works/pi-tui";
 import type { TSchema } from "typebox";
@@ -303,7 +304,26 @@ export function installCalmOperationalUserLayout(): void {
 
 type DefinitionFactory<TParams extends TSchema, TDetails, TState> = (
 	cwd: string,
+	trusted: boolean,
 ) => ToolDefinition<TParams, TDetails, TState>;
+
+/**
+ * The settings-derived options pi's own base build passes to these factories
+ * (agent-session _buildRuntime): dropping them would change tool behavior —
+ * bash shellCommandPrefix/shellPath, read image auto-resize — merely because
+ * Calm is installed, which would break its presentation-only contract.
+ * Untrusted projects get global-only settings, exactly like pi.
+ */
+function builtInToolOptions(cwd: string, trusted: boolean) {
+	const settings = SettingsManager.create(cwd, undefined, { projectTrusted: trusted });
+	return {
+		read: { autoResizeImages: settings.getImageAutoResize() },
+		bash: {
+			commandPrefix: settings.getShellCommandPrefix(),
+			shellPath: settings.getShellPath(),
+		},
+	} as const;
+}
 
 type RenderContext<TParams extends TSchema, TDetails, TState> = Parameters<
 	NonNullable<ToolDefinition<TParams, TDetails, TState>["renderCall"]>
@@ -340,16 +360,24 @@ export function registerCalm(pi: ExtensionAPI): void {
 		factory: DefinitionFactory<TParams, TDetails, TState>,
 	): void {
 		const definitions = new Map<string, ToolDefinition<TParams, TDetails, TState>>();
-		const definitionFor = (cwd: string): ToolDefinition<TParams, TDetails, TState> => {
-			let definition = definitions.get(cwd);
+		const definitionFor = (
+			cwd: string,
+			trusted: boolean,
+		): ToolDefinition<TParams, TDetails, TState> => {
+			const key = `${trusted ? "t" : "u"}:${cwd}`;
+			let definition = definitions.get(key);
 			if (!definition) {
-				definition = factory(cwd);
-				definitions.set(cwd, definition);
+				definition = factory(cwd, trusted);
+				definitions.set(key, definition);
 			}
 			return definition;
 		};
 
-		const original = definitionFor(process.cwd());
+		// The captured renderers are safe across sessions: every built-in renderer
+		// in pi 0.82.0 reads paths from context.cwd, none closes over factory cwd.
+		// Execution is NOT safe that way (bash closes over its factory cwd), so
+		// execute re-resolves per ctx.cwd and trust below.
+		const original = definitionFor(process.cwd(), true);
 		const originalRenderCall = original.renderCall;
 		const originalRenderResult = original.renderResult;
 		const originalSelfShell = original.renderShell === "self";
@@ -397,7 +425,13 @@ export function registerCalm(pi: ExtensionAPI): void {
 			renderShell: "self",
 
 			async execute(toolCallId, params, signal, onUpdate, ctx) {
-				return definitionFor(ctx.cwd).execute(toolCallId, params, signal, onUpdate, ctx);
+				return definitionFor(ctx.cwd, ctx.isProjectTrusted()).execute(
+					toolCallId,
+					params,
+					signal,
+					onUpdate,
+					ctx,
+				);
 			},
 
 			renderCall(
@@ -439,13 +473,13 @@ export function registerCalm(pi: ExtensionAPI): void {
 		});
 	}
 
-	registerBuiltIn(createReadToolDefinition);
-	registerBuiltIn(createBashToolDefinition);
-	registerBuiltIn(createEditToolDefinition);
-	registerBuiltIn(createWriteToolDefinition);
-	registerBuiltIn(createGrepToolDefinition);
-	registerBuiltIn(createFindToolDefinition);
-	registerBuiltIn(createLsToolDefinition);
+	registerBuiltIn((cwd, trusted) => createReadToolDefinition(cwd, builtInToolOptions(cwd, trusted).read));
+	registerBuiltIn((cwd, trusted) => createBashToolDefinition(cwd, builtInToolOptions(cwd, trusted).bash));
+	registerBuiltIn((cwd) => createEditToolDefinition(cwd));
+	registerBuiltIn((cwd) => createWriteToolDefinition(cwd));
+	registerBuiltIn((cwd) => createGrepToolDefinition(cwd));
+	registerBuiltIn((cwd) => createFindToolDefinition(cwd));
+	registerBuiltIn((cwd) => createLsToolDefinition(cwd));
 
 	pi.on("session_start", (_event, ctx) => {
 		exportRendering = false;
