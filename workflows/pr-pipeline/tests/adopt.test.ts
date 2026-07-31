@@ -14,6 +14,7 @@ const goodOverview: PrOverview = {
 	number: 777,
 	url: "https://github.com/lindy-ai/lindy/pull/777",
 	state: "open",
+	draft: false,
 	headRefName: "fm/lin-123",
 	headSha: "abc123",
 	baseRefName: "main",
@@ -37,6 +38,12 @@ describe("assertAdoptable", () => {
 		expect(() =>
 			assertAdoptable({ ...goodOverview, state: "closed" }, goodExpectation),
 		).toThrow(/state is "closed"/);
+	});
+
+	test("rejects a draft PR (open state, but not mergeable until marked ready)", () => {
+		expect(() =>
+			assertAdoptable({ ...goodOverview, draft: true }, goodExpectation),
+		).toThrow(/is a draft/);
 	});
 
 	test("rejects a fork PR (head repo differs from the run's repo)", () => {
@@ -81,6 +88,7 @@ describe("fetchPrOverview (mocked gh, non-dry-run parse path)", () => {
 		number: 777,
 		html_url: "https://github.com/lindy-ai/lindy/pull/777",
 		state: "open",
+		draft: false,
 		head: { ref: "fm/lin-123", sha: "abc123", repo: { full_name: "lindy-ai/lindy" } },
 		base: { ref: "main" },
 	};
@@ -120,6 +128,28 @@ describe("fetchPrOverview (mocked gh, non-dry-run parse path)", () => {
 			777,
 		);
 		expect(() => assertAdoptable(overview, goodExpectation)).toThrow(/not open/);
+	});
+
+	test("a draft PR is fetched with draft=true and rejected by assertAdoptable", async () => {
+		const overview = await fetchPrOverview(
+			{
+				gh: "gh",
+				repo: "lindy-ai/lindy",
+				exec: execReturning(JSON.stringify({ ...payload, draft: true })),
+			},
+			777,
+		);
+		expect(overview.draft).toBe(true);
+		expect(() => assertAdoptable(overview, goodExpectation)).toThrow(/is a draft/);
+	});
+
+	test("a payload without a draft field parses as draft=false", async () => {
+		const { draft: _omit, ...noDraft } = payload;
+		const overview = await fetchPrOverview(
+			{ gh: "gh", repo: "lindy-ai/lindy", exec: execReturning(JSON.stringify(noDraft)) },
+			777,
+		);
+		expect(overview.draft).toBe(false);
 	});
 
 	test("a gh failure surfaces as an error (no silent adopt)", async () => {

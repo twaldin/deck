@@ -8,6 +8,7 @@ export interface PrOverview {
 	number: number;
 	url: string;
 	state: string;
+	draft: boolean;
 	headRefName: string;
 	headSha: string;
 	baseRefName: string;
@@ -27,6 +28,11 @@ export function assertAdoptable(overview: PrOverview, expected: AdoptExpectation
 	const pr = `PR #${overview.number}`;
 	if (overview.state !== "open") {
 		throw new Error(`[escalate] cannot adopt ${pr}: state is "${overview.state}", not open.`);
+	}
+	if (overview.draft) {
+		throw new Error(
+			`[escalate] cannot adopt ${pr}: it is a draft — GitHub reports drafts as open, but the merge would fail because the PR is not ready for review. Mark it ready first.`,
+		);
 	}
 	if (overview.headRepoFullName.toLowerCase() !== expected.repo.toLowerCase()) {
 		throw new Error(

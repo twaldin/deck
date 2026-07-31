@@ -378,6 +378,7 @@ export async function fetchPrOverview(ctx: GhContext, prNumber: number): Promise
 	number: number;
 	url: string;
 	state: string;
+	draft: boolean;
 	headRefName: string;
 	headSha: string;
 	baseRefName: string;
@@ -389,6 +390,7 @@ export async function fetchPrOverview(ctx: GhContext, prNumber: number): Promise
 		number: number;
 		html_url: string;
 		state: string;
+		draft?: boolean;
 		head: { ref: string; sha: string; repo: { full_name: string } | null };
 		base: { ref: string };
 	};
@@ -396,6 +398,7 @@ export async function fetchPrOverview(ctx: GhContext, prNumber: number): Promise
 		number: payload.number,
 		url: payload.html_url,
 		state: payload.state,
+		draft: payload.draft === true,
 		headRefName: payload.head.ref,
 		headSha: payload.head.sha,
 		baseRefName: payload.base.ref,
