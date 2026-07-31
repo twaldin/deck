@@ -1,12 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Personal deck-home bootstrap. Run on the PERSONAL host (deckbox) from a deck
-# checkout. Installs deps, the pi extension + CLI shims, and creates ~/.deck.
-# It never touches secrets: broker login is a separate, deliberate step, and
-# no state is ever copied from another host (see docs/personal-home.md).
+# Personal deck-home bootstrap. Run on the PERSONAL host (deckbox).
+#   curl -fsSL https://raw.githubusercontent.com/twaldin/deck/v2/install-personal.sh | bash
+# or from a clone: ./install-personal.sh
+# Never copies secrets. Broker login is interactive and separate.
 
-REPO="$(cd "$(dirname "$0")" && pwd -P)"
+if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
+  REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+else
+  # piped curl | bash — clone then re-exec
+  REPO="${DECK_REPO:-$HOME/dev/deck}"
+  if [ ! -d "$REPO/.git" ]; then
+    command -v git >/dev/null || { echo "error: git required" >&2; exit 1; }
+    git clone https://github.com/twaldin/deck.git "$REPO"
+  fi
+  git -C "$REPO" fetch origin v2
+  git -C "$REPO" checkout v2
+  git -C "$REPO" pull --ff-only origin v2
+  exec bash "$REPO/install-personal.sh"
+fi
 
 command -v bun >/dev/null || { echo "error: bun is required (https://bun.sh)" >&2; exit 1; }
 
@@ -17,16 +30,42 @@ bun install --cwd "$REPO/cli"
 bash "$REPO/v2/install.sh"
 bun "$REPO/v2/bin/deck-v2" bootstrap
 
-cat <<'EOF'
+# glass entry + inbox
+mkdir -p "$HOME/.deck/data/inbox"
+ENTER="$HOME/.deck/enter.sh"
+cat > "$ENTER" <<'EOF'
+#!/usr/bin/env bash
+export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+nvm use 24 >/dev/null 2>&1 || true
+export PATH="$HOME/.local/bin:$HOME/.bun/bin:$PATH"
+cd "$HOME/.deck" || exit 1
+echo "deck home=$(pwd) pi=$(command -v pi)"
+EOF
+chmod +x "$ENTER"
 
-Done. Next steps (manual, in order — docs/personal-home.md has details):
+# PATH: local bin after nvm in interactive shells
+if ! grep -q 'deck local bin after nvm' "$HOME/.bashrc" 2>/dev/null; then
+  printf '\n# deck local bin after nvm\nexport PATH="$HOME/.local/bin:$PATH"\n' >> "$HOME/.bashrc"
+fi
 
-  1. start the broker:   bun --cwd <repo>/broker src/main.ts
-  2. log in with PERSONAL accounts only:
-                         bun <repo>/broker/src/cli.ts login anthropic
-  3. herdr server:       herdr server   (glass in via `herdr --remote deckbox`)
-  4. ensure ~/.local/bin is on PATH, then verify: deck-v2 fleet
+chmod +x "$REPO/scripts/update-home.sh" 2>/dev/null || true
 
-Never put Lindy keys, prod-readonly credentials, or company checkouts on this
-host. State in ~/.deck stays on this host; deck code syncs via git only.
+cat <<EOF
+
+Done. Code: $REPO
+Home: $HOME/.deck
+
+Next (interactive, personal accounts only):
+
+  1. Broker (user systemd or):  bun --cwd $REPO/broker src/main.ts
+     login:  bun $REPO/broker/src/cli.ts login anthropic
+  2. herdr server (user unit or): herdr server
+  3. Glass:  herdr --remote tim@\$(hostname -I 2>/dev/null | awk '{print \$1}')
+     then:   source ~/.deck/enter.sh && pi
+
+Keep updated:  $REPO/scripts/update-home.sh
+Laptop agents: cat $REPO/docs/LAPTOP-AGENTS.md
+
+Never put Lindy keys, prod tokens, or company checkouts on this host.
 EOF
