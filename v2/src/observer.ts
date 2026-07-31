@@ -257,7 +257,7 @@ function approvalTransition(step: string | null): { verb: StatusVerb; note: stri
 	}
 	return {
 		verb: "needs-decision",
-		note: `workflow is waiting for approval${step === null ? "" : ` at ${step}`}`,
+		note: "workflow is waiting for approval",
 	};
 }
 
@@ -289,13 +289,17 @@ export function observePsSnapshot(rows: readonly PsSnapshotRow[]): EmittedEvent[
 	const emitted: EmittedEvent[] = [];
 	for (const row of rows) {
 		if (typeof row.id !== "string") continue;
-		const inputPath = path.join(stateDir(), "ship", `${row.id}.input.json`);
-		let taskId = row.id;
+		const shipDir = path.resolve(stateDir(), "ship");
+		const inputPath = path.resolve(shipDir, `${row.id}.input.json`);
+		if (inputPath !== shipDir && !inputPath.startsWith(`${shipDir}${path.sep}`)) continue;
+		let taskId: string;
 		try {
 			const input = JSON.parse(fs.readFileSync(inputPath, "utf8")) as { ticket?: unknown };
-			if (typeof input.ticket === "string" && /^[a-z0-9][a-z0-9-]{0,63}$/.test(input.ticket)) taskId = input.ticket;
-		} catch { /* non-ship runs are ignored below */ }
-		if (!fs.existsSync(inputPath)) continue;
+			if (typeof input.ticket !== "string" || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(input.ticket)) continue;
+			taskId = input.ticket;
+		} catch {
+			continue;
+		}
 		const status = typeof row.status === "string" ? row.status : typeof row.state === "string" ? row.state : "";
 		const outcome = typeof row.state === "string" && (TERMINAL.has(row.state) || status === "") ? row.state : status;
 		if (TERMINAL.has(outcome)) continue;

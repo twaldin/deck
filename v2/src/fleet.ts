@@ -307,20 +307,27 @@ export function normalizeStep(step: string | null | undefined): string | null {
 
 /** Public read-only CLI only. Never the private db, never Gateway lifecycle. */
 /** One cheap ps poll for the observer. It must not enrich runs with output calls. */
-export async function collectPsSnapshot(cwd: string): Promise<PsRun[]> {
-	if (!fs.existsSync(cwd)) return [];
+function isPsRun(value: unknown): value is PsRun {
+	if (typeof value !== "object" || value === null) return false;
+	const row = value as Record<string, unknown>;
+	return typeof row.id === "string" &&
+		(row.workflow === undefined || typeof row.workflow === "string") &&
+		(row.status === undefined || typeof row.status === "string") &&
+		(row.state === undefined || typeof row.state === "string") &&
+		(row.step === undefined || typeof row.step === "string") &&
+		(row.rootDir === undefined || typeof row.rootDir === "string");
+}
+
+export async function collectPsSnapshot(cwd: string): Promise<{ runs: PsRun[]; health: SourceHealth }> {
+	if (!fs.existsSync(cwd)) return { runs: [], health: { name: "smithers", state: "skipped", detail: `no workspace at ${cwd} (run v2/install.sh)` } };
 	try {
-		const { stdout } = await run("bunx", [SMITHERS_SPEC, "ps", "--json"], {
-			cwd,
-			timeout: 15_000,
-			maxBuffer: 4_000_000,
-		});
+		const { stdout } = await run("bunx", [SMITHERS_SPEC, "ps", "--json"], { cwd, timeout: 15_000, maxBuffer: 4_000_000 });
 		const parsed: unknown = JSON.parse(stdout);
-		return Array.isArray(parsed)
-			? (parsed as PsRun[])
-			: ((parsed as { runs?: PsRun[] }).runs ?? []);
-	} catch {
-		return [];
+		const rows = Array.isArray(parsed) ? parsed : (parsed as { runs?: unknown })?.runs;
+		if (!Array.isArray(rows) || !rows.every(isPsRun)) throw new Error("invalid ps response");
+		return { runs: rows, health: { name: "smithers", state: "ok", detail: `${rows.length} run(s)` } };
+	} catch (error) {
+		return { runs: [], health: { name: "smithers", state: "missing", detail: error instanceof Error ? (error.message.split("\\n")[0] ?? "ps failed") : "ps failed" } };
 	}
 }
 
@@ -340,7 +347,8 @@ async function collectRuns(
 		};
 	}
 	try {
-		const runs = await collectPsSnapshot(cwd);
+		const snapshot = await collectPsSnapshot(cwd);
+		const runs = snapshot.runs;
 		const enriched = await Promise.all(
 			runs.map(async (psRun) => {
 				const input = readShipInput(psRun.id);
@@ -441,11 +449,9 @@ async function collectRuns(
 		);
 		return {
 			runs: enriched,
-			health: {
-				name: "smithers",
-				state: "ok",
-				detail: `${enriched.length} run(s)`,
-			},
+			health: snapshot.health.state === "ok"
+				? { ...snapshot.health, detail: `${enriched.length} run(s)` }
+				: snapshot.health,
 		};
 	} catch (error) {
 		return {
@@ -540,7 +546,10 @@ export async function buildFrame(
 				: options.psRuns === undefined
 					? collectRuns(options.workflowCwd)
 					: Promise.resolve({
-							runs: options.psRuns,
+							runs: options.psRuns.map((psRun) => {
+							const pendingNode = psRun.pendingApprovals?.find((approval) => approval.status === "requested")?.nodeId;
+							return pendingNode === undefined ? psRun : { ...psRun, blockedNode: pendingNode };
+						}),
 						health: { name: "smithers", state: "ok", detail: `${options.psRuns.length} run(s)` } as SourceHealth,
 					}),
 			collectPanes(),

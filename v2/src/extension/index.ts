@@ -616,9 +616,9 @@ export default function deckV2(pi: any): void {
 
 	async function refreshStatusline(ctx: any): Promise<void> {
 		try {
-			const psRuns = workflowCwd === undefined ? [] : await collectPsSnapshot(workflowCwd);
-			observePsSnapshot(psRuns);
-			const frame = await buildFrame(workflowCwd === undefined ? {} : { workflowCwd, psRuns });
+			const snapshot = workflowCwd === undefined ? { runs: [] as never[] } : await collectPsSnapshot(workflowCwd);
+			observePsSnapshot(snapshot.runs);
+			const frame = await buildFrame(workflowCwd === undefined ? {} : { workflowCwd, psRuns: snapshot.runs });
 			lastFooterFrame = frame;
 			ctx.ui?.setStatus?.("deck-usage", undefined);
 			// Herdr projection rides the same cadence: every reconcile cycle mirrors

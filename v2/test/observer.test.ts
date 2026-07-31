@@ -143,6 +143,9 @@ describe("observer event selection", () => {
 		const emitted = observer.observePsSnapshot([{ id: "run-1", status: "waiting-approval", step: "review-escalation", workflow: "pr-pipeline" }]);
 		expect(emitted[0]?.verb).toBe("failed");
 		expect(events.readStatus("ticket-1").events).toHaveLength(1);
+		const repeated = observer.observePsSnapshot([{ id: "run-1", status: "waiting-approval", step: "review-escalation", workflow: "pr-pipeline" }]);
+		expect(repeated).toHaveLength(0);
+		expect(events.readStatus("ticket-1").events).toHaveLength(1);
 	});
 
 	test("paused is reported as paused, never as failed", async () => {
