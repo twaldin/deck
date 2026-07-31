@@ -55,13 +55,18 @@ export function reviewersNeedingReRequest(
 		const state = reviewer.lastReviewState?.toUpperCase();
 		// GitHub keeps approvals across pushes unless the approval is dismissed.
 		if (reviewer.hasActiveApproval === true || state === "APPROVED") continue;
-		if (state === "DISMISSED" || reviewer.hadDismissedApproval === true) {
-			// A dismissed approval is no longer valid, regardless of when it was submitted.
+		if (state === "DISMISSED") {
+			// The dismissal itself invalidates the approval and requires a fresh request.
 			out.push(reviewer.login);
 			continue;
 		}
 		// Activity after the last push means they have seen the current head.
 		if (reviewer.lastActivityAt >= lastPushAt) continue;
+		if (reviewer.hadDismissedApproval === true) {
+			// A later pre-push review is still stale and must be requested again.
+			out.push(reviewer.login);
+			continue;
+		}
 		out.push(reviewer.login);
 	}
 	return out;

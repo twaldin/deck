@@ -435,10 +435,20 @@ describe("watch helpers", () => {
 		).toEqual(["dismissed"]);
 	});
 
-	test("re-requests a dismissed approval followed by a comment", () => {
+	test("does not re-request a dismissed approval followed by post-push activity", () => {
 		expect(
 			reviewersNeedingReRequest(
 				[{ login: "dismissed", isBot: false, lastActivityAt: "2026-07-27T11:00:00Z", lastReviewState: "COMMENTED", hadDismissedApproval: true }],
+				[],
+				"2026-07-27T10:00:00Z",
+			),
+		).toEqual([]);
+	});
+
+	test("re-requests a dismissed approval followed only by stale activity", () => {
+		expect(
+			reviewersNeedingReRequest(
+				[{ login: "dismissed", isBot: false, lastActivityAt: "2026-07-27T09:00:00Z", lastReviewState: "COMMENTED", hadDismissedApproval: true }],
 				[],
 				"2026-07-27T10:00:00Z",
 			),

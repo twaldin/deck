@@ -828,7 +828,7 @@ export default smithers((ctx) => {
 										const decision = decideAdoptPush({
 											worktreeHead,
 											prHead: overview.headSha,
-											isAncestor: ancestor.code === 0,
+											isAncestor: worktreeIsDescendant,
 										});
 										if (decision === "escalate") {
 											throw new Error(
