@@ -9,6 +9,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { validateBrief } from "../../workflows/pr-pipeline/lib/brief";
 import { profilesFile, seedProfiles, type ProjectProfile } from "../src/projects";
+import { existingPrFromFlag } from "../src/cli";
 import { buildPipelineInput, pipelineDir, startShip, type ShipRequest } from "../src/ship";
 import { assertShipGoesThroughPipeline, shipProfileFor } from "../src/spawn";
 
@@ -43,6 +44,16 @@ const request = (overrides: Partial<ShipRequest> = {}): ShipRequest => ({
 	summary: "Does a thing",
 	acceptance: ["it works"],
 	...overrides,
+});
+
+describe("existingPrFromFlag", () => {
+	test("accepts positive integer values and rejects bare, non-positive, and fractional flags", () => {
+		expect(existingPrFromFlag("42")).toBe(42);
+		expect(existingPrFromFlag(undefined)).toBeUndefined();
+		for (const value of [true, "0", "-1", "1.5"]) {
+			expect(() => existingPrFromFlag(value)).toThrow(/positive PR number/);
+		}
+	});
 });
 
 describe("buildPipelineInput", () => {

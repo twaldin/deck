@@ -155,9 +155,13 @@ describe("fetchPrOverview (mocked gh, non-dry-run parse path)", () => {
 		base: { ref: "main" },
 	};
 
+	const calls: string[][] = [];
 	const execReturning =
 		(stdout: string, code = 0): ExecFn =>
-		async () => ({ code, stdout, stderr: code === 0 ? "" : "boom" });
+		async (argv) => {
+			calls.push(argv);
+			return { code, stdout, stderr: code === 0 ? "" : "boom" };
+		};
 
 	test("parses number, url, state, head ref/sha/repo, and base ref from the live payload", async () => {
 		const overview = await fetchPrOverview(
@@ -165,6 +169,7 @@ describe("fetchPrOverview (mocked gh, non-dry-run parse path)", () => {
 			777,
 		);
 		expect(overview).toEqual(goodOverview);
+		expect(calls.at(-1)).toEqual(["gh", "api", "repos/lindy-ai/lindy/pulls/777"]);
 	});
 
 	test("a deleted fork (head.repo null) yields an empty headRepoFullName, which assertAdoptable rejects", async () => {

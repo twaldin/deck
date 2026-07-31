@@ -92,6 +92,16 @@ function need(flags: Args["flags"], key: string): string {
 	return value;
 }
 
+export function existingPrFromFlag(value: string | boolean | undefined): number | undefined {
+	if (value === undefined) return undefined;
+	if (value === true) throw new Error('--existing-pr must be a positive PR number, got "true"');
+	const prNumber = Number(value);
+	if (!Number.isInteger(prNumber) || prNumber <= 0) {
+		throw new Error(`--existing-pr must be a positive PR number, got "${value}"`);
+	}
+	return prNumber;
+}
+
 export async function runCli(argv: string[]): Promise<number> {
 	const args = parse(argv);
 	const command = args._[0];
@@ -130,11 +140,7 @@ export async function runCli(argv: string[]): Promise<number> {
 				const ticket = args._[1];
 				if (ticket === undefined) throw new Error("ship needs a ticket/effort id");
 				const reviewers = str(args.flags, "reviewers");
-				const existingPrFlag = str(args.flags, "existing-pr");
-				const existingPr = existingPrFlag === undefined ? undefined : Number(existingPrFlag);
-				if (existingPr !== undefined && (!Number.isInteger(existingPr) || existingPr <= 0)) {
-					throw new Error(`--existing-pr must be a positive PR number, got "${existingPrFlag}"`);
-				}
+				const existingPr = existingPrFromFlag(args.flags["existing-pr"]);
 				const result = await startShip({
 					ticket,
 					profile: need(args.flags, "profile"),

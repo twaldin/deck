@@ -166,7 +166,8 @@ export default function deckV2(pi: any): void {
 			deploy_evidence: Type.Optional(Type.String({ description: "shell command that proves the deploy" })),
 			dry_run: Type.Optional(Type.Boolean({ description: "simulate side effects; default false" })),
 			existing_pr: Type.Optional(
-				Type.Number({
+				Type.Integer({
+					minimum: 1,
 					description:
 						"adopt an already-open PR by number: skip implement + local review, seed from gh, enter the same watch/stamp loop (never opens a second PR)",
 				}),

@@ -4,6 +4,7 @@
  * `gh`/`git` binaries so a crewmate can point this at gh-axi.
  */
 
+import type { PrOverview } from "./adopt.ts";
 import type {
 	CheckRun,
 	CommentActivity,
@@ -374,16 +375,7 @@ export async function fetchRequestedReviewers(ctx: GhContext, prNumber: number):
 }
 
 /** Overview of an existing PR (adopt path: verify + seed, never create). */
-export async function fetchPrOverview(ctx: GhContext, prNumber: number): Promise<{
-	number: number;
-	url: string;
-	state: string;
-	draft: boolean;
-	headRefName: string;
-	headSha: string;
-	baseRefName: string;
-	headRepoFullName: string;
-}> {
+export async function fetchPrOverview(ctx: GhContext, prNumber: number): Promise<PrOverview> {
 	const exec = ctx.exec ?? bunExec;
 	const out = await execOrThrow(exec, [ctx.gh, "api", `repos/${ctx.repo}/pulls/${prNumber}`]);
 	const payload = JSON.parse(out) as {
