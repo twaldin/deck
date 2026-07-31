@@ -302,11 +302,12 @@ export default function deckV2(pi: any): void {
 					// Box paints a background across all children — that is what makes
 					// the overlay opaque instead of layering over the transcript.
 					const box = new Box(2, 1, backgroundFn(rawTheme));
-					// Body budget: terminal rows minus overlay margin, box padding,
-					// frame borders and footer, so the bottom border stays on screen
-					// when tasks outnumber rows.
+					// Body budget: terminal rows minus overlay margin (4), box padding
+					// (2), frame borders + blank + footer (4), so the bottom border
+					// stays on screen when tasks outnumber rows. No floor above 1:
+					// a floor that exceeds a tiny viewport reintroduces the overflow.
 					const maxBodyLines = (): number =>
-						Math.max(4, (tui.terminal?.rows ?? 40) - 10);
+						Math.max(1, (tui.terminal?.rows ?? 40) - 10);
 					const render = (): string =>
 						buildFleetText(frame, theme, { showAll, maxBodyLines: maxBodyLines() });
 					const body = new Text(render(), 0, 0);
@@ -350,7 +351,9 @@ export default function deckV2(pi: any): void {
 						},
 					};
 				},
-				{ overlay: true, overlayOptions: { anchor: "center", width: "80%", margin: 2 } },
+				// maxHeight is the last-resort clip for terminals too short for even
+				// a one-line body; the body clamp keeps the border intact above that.
+				{ overlay: true, overlayOptions: { anchor: "center", width: "80%", margin: 2, maxHeight: "100%" } },
 			);
 		},
 	});
