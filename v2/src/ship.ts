@@ -96,13 +96,16 @@ export function buildPipelineInput(request: ShipRequest, profile: ProjectProfile
 	if (profile.yolo && (request.reviewers === undefined || request.reviewers.length === 0)) {
 		input.github = { skipReviewerRequest: true };
 	}
-	// Done is evidence-gated; for a repo with no deploy step, landing on the
-	// base branch IS the deploy. Real (non-dry) runs need this configured.
-	if (request.dryRun !== true) {
+	// Done is evidence-gated. For a yolo repo with no deploy step, landing on
+	// the base branch IS the deploy, so a git-log probe is honest evidence.
+	// A stamp profile (lindy) has REAL deploys: no weak default there — the
+	// pipeline's preflight fails closed until explicit evidence is configured.
+	if (request.deployEvidence !== undefined) {
+		input.commands = { deployEvidence: request.deployEvidence };
+	} else if (request.dryRun !== true && profile.yolo) {
+		const base = request.baseBranch ?? "main";
 		input.commands = {
-			deployEvidence:
-				request.deployEvidence ??
-				`git fetch origin ${request.baseBranch ?? "main"} && git log -1 --oneline origin/${request.baseBranch ?? "main"}`,
+			deployEvidence: `git fetch origin ${base} && git log -1 --oneline origin/${base}`,
 		};
 	}
 	return input;

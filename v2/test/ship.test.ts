@@ -89,6 +89,16 @@ describe("buildPipelineInput", () => {
 		expect(dry.commands).toBeUndefined();
 		expect(dry.dryRun).toBe(true);
 	});
+
+	test("a stamp profile (lindy) never gets the weak git-log deploy default: preflight must fail closed until explicit evidence exists", () => {
+		const lindy = buildPipelineInput(request({ profile: "lindy" }), lindyProfile());
+		expect(lindy.commands).toBeUndefined();
+		const explicit = buildPipelineInput(
+			request({ profile: "lindy", deployEvidence: "check-deploy.sh" }),
+			lindyProfile(),
+		);
+		expect((explicit.commands as { deployEvidence: string }).deployEvidence).toBe("check-deploy.sh");
+	});
 });
 
 describe("startShip", () => {
