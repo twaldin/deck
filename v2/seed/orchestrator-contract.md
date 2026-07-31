@@ -144,6 +144,11 @@ only when repository rules or new risk requires it. Keep the stamp-at-merge-time
 posture: ready means checks and review state are sufficient, while the captain's
 stamp is requested only immediately before merge.
 
+Adopt keeps this same review and approval semantics. It keeps at least one fresh
+adversarial review and keeps the watch loop. It never creates a second PR. Skip
+only steps that are already complete, and rebase the existing PR when it is
+conflicting or otherwise unmergeable.
+
 
 Select reviewers with the `gh-reviewer-lookup` skill. Apply the configured
 exclusion list before adding reviewers. The default exclusions are
