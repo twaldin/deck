@@ -190,7 +190,7 @@ export async function runCli(argv: string[]): Promise<number> {
 					str(args.flags, "workflows") ?? path.join(deckV2Home(), "workflows", ".smithers");
 				const frame = await buildFrame({ workflowCwd });
 				if (args.flags.project === true) {
-					const health = await projectFleet(frame, { workflowCwd });
+					const health = await projectFleet(frame);
 					process.stdout.write(`${health.name}=${health.state} (${health.detail})\n`);
 				}
 				if (args.flags.json === true) process.stdout.write(`${JSON.stringify(frame, null, 2)}\n`);

@@ -16,8 +16,8 @@
  *     working | blocked | idle mapped from run liveness + last status verb
  *   - teardown is identity-exact: a pane is closed only after `pane get`
  *     proves it still carries OUR agent label and the recorded pane id
- *   - smithers runs surface as one "deck-smithers" agent whose message lists
- *     the runs; no smithers on PATH simply means no such pane
+ *   - smithers runs are fleet-only (/fleet, deck-fleet): no herdr pane. A pane
+ *     recorded by an older version is released on the next pass.
  *
  * Pane and agent ids are recorded in the task's meta (herdr_pane, herdr_tab)
  * for recovery, per the brief.
@@ -26,17 +26,13 @@ import { execFile } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { promisify } from "node:util";
-import type { FleetFrame, SourceHealth, TaskRow, WorkflowRow } from "./fleet";
+import type { FleetFrame, SourceHealth, TaskRow } from "./fleet";
 import { stateDir, stateFiles } from "./home";
 import { readMeta, updateMeta } from "./meta";
-import { SMITHERS_SPEC } from "./smithers";
 
 const run = promisify(execFile);
 
 export type HerdrAgentState = "working" | "idle" | "blocked";
-
-/** Smithers statuses that mean a run is still going somewhere. */
-const ACTIVE_WF = new Set(["running", "active", "pending", "paused", "waiting"]);
 
 /**
  * Map a task row to the herdr agent state. Severity mirrors chipFor: a
@@ -79,24 +75,6 @@ export function projectionMessage(task: TaskRow): string {
 	return body.length > 120 ? `${body.slice(0, 119)}…` : body;
 }
 
-/** Aggregate smithers runs into one agent state + message. */
-export function smithersSummary(workflows: WorkflowRow[]): {
-	state: HerdrAgentState;
-	message: string;
-} {
-	const active = workflows.filter(
-		(wf) => wf.status !== null && ACTIVE_WF.has(wf.status.toLowerCase()),
-	);
-	if (active.length === 0) {
-		return { state: "idle", message: `${workflows.length} run(s), none active` };
-	}
-	const parts = active
-		.slice(0, 3)
-		.map((wf) => `${wf.runId}${wf.step === null ? "" : `@${wf.step}`}`);
-	const more = active.length > 3 ? ` +${active.length - 3}` : "";
-	return { state: "working", message: `${active.length} active: ${parts.join(", ")}${more}` };
-}
-
 // ---- herdr CLI plumbing -----------------------------------------------------
 
 async function herdr(args: string[]): Promise<Record<string, unknown> | null> {
@@ -117,6 +95,7 @@ async function herdr(args: string[]): Promise<Record<string, unknown> | null> {
 
 type Projection = {
 	workspaceId?: string;
+	/** Legacy: older versions projected a smithers pane; kept only to release it. */
 	smithersPane?: string;
 	smithersTab?: string;
 };
@@ -249,14 +228,11 @@ let inFlight = false;
  * One projection pass over a built frame. Idempotent; safe on a timer. Never
  * throws — herdr being down turns the pass into a no-op with "skipped" health.
  */
-export async function projectFleet(
-	frame: FleetFrame,
-	options: { workflowCwd?: string } = {},
-): Promise<SourceHealth> {
+export async function projectFleet(frame: FleetFrame): Promise<SourceHealth> {
 	if (inFlight) return { name: "herdr-projection", state: "skipped", detail: "pass already running" };
 	inFlight = true;
 	try {
-		return await pass(frame, options);
+		return await pass(frame);
 	} catch (error) {
 		return {
 			name: "herdr-projection",
@@ -268,7 +244,7 @@ export async function projectFleet(
 	}
 }
 
-async function pass(frame: FleetFrame, options: { workflowCwd?: string }): Promise<SourceHealth> {
+async function pass(frame: FleetFrame): Promise<SourceHealth> {
 	// Liveness probe first: no herdr means no projection, not an error.
 	if ((await herdr(["workspace", "list"])) === null) {
 		return { name: "herdr-projection", state: "skipped", detail: "herdr not running" };
@@ -321,46 +297,9 @@ async function pass(frame: FleetFrame, options: { workflowCwd?: string }): Promi
 		projected += 1;
 	}
 
-	// Smithers: one aggregate agent pane, present only while runs exist.
-	const summary = smithersSummary(frame.workflows);
-	if (frame.workflows.length > 0) {
-		let pane = projection.smithersPane;
-		if (pane !== undefined && (await herdr(["pane", "get", pane])) === null) pane = undefined;
-		if (pane === undefined) {
-			const workspaceId = await ensureWorkspace(projection);
-			if (workspaceId !== null) {
-				const cwd = options.workflowCwd ?? stateDir();
-				const created = await herdr([
-					"tab",
-					"create",
-					"--workspace",
-					workspaceId,
-					"--label",
-					"smithers",
-					"--no-focus",
-					"--cwd",
-					fs.existsSync(cwd) ? cwd : stateDir(),
-				]);
-				const rootPane = (created?.root_pane ?? null) as { pane_id?: string } | null;
-				const tab = (created?.tab ?? null) as { tab_id?: string } | null;
-				if (rootPane?.pane_id !== undefined) {
-					pane = rootPane.pane_id;
-					projection.smithersPane = pane;
-					if (tab?.tab_id !== undefined) projection.smithersTab = tab.tab_id;
-					saveProjection(projection);
-					await herdr([
-						"pane",
-						"run",
-						pane,
-						`while true; do clear; bunx ${SMITHERS_SPEC} ps; sleep 15; done`,
-					]);
-				}
-			}
-		}
-		if (pane !== undefined) {
-			await report(pane, "deck-smithers", summary.state, summary.message);
-		}
-	} else if (projection.smithersPane !== undefined) {
+	// Smithers runs are fleet-only (/fleet, deck-fleet). Release any pane a
+	// previous version created so no ghost survives the upgrade.
+	if (projection.smithersPane !== undefined) {
 		await releasePane(projection.smithersPane, projection.smithersTab, "deck-smithers");
 		delete projection.smithersPane;
 		delete projection.smithersTab;
