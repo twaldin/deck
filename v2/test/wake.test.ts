@@ -143,6 +143,52 @@ describe("ownership + staleness", () => {
 		expect(stale[0]?.reason).toContain("never reported a terminal state");
 	});
 
+	test("a parked (blocked) task is not chased as stale", async () => {
+		const { wake, events, meta } = await mods();
+		events.appendStatus("t1", "blocked", "needs a credential");
+		meta.writeMeta({ id: "t1", run_pid: 999999 });
+		wake.reconcile(["t1"]);
+		// Dead pid, but blocked already fired its T0 wake; a stale chase on top of
+		// it is the spam class.
+		expect(wake.detectStale(["t1"], { runAlive: () => false })).toHaveLength(0);
+	});
+
+	test("a blocked task past its deadline is not called stuck", async () => {
+		const { wake, events } = await mods();
+		const { updateMeta } = await import("../src/meta");
+		updateMeta("t1", { run_pid: 4242, run_deadline: Date.now() - 600_000 });
+		events.appendStatus("t1", "blocked", "waiting on a credential");
+		expect(wake.detectStale(["t1"], { runAlive: () => true })).toHaveLength(0);
+	});
+
+	test("an empty run_pid means no recorded run, never a stale verdict", async () => {
+		const { wake, events } = await mods();
+		const { stateFiles } = await import("../src/home");
+		events.appendStatus("t1", "working", "implementing");
+		// A raw meta file with `run_pid=` parses to NaN.
+		fs.writeFileSync(stateFiles("t1").meta, "id=t1\nrun_pid=\n");
+		const verdicts = wake.detectStale(["t1"], {
+			runAlive: () => {
+				throw new Error("liveness must not be probed without a real pid");
+			},
+		});
+		expect(verdicts).toHaveLength(0);
+	});
+
+	test("a malformed run_pid (123abc) is treated as no recorded run", async () => {
+		const { wake, events } = await mods();
+		const { stateFiles } = await import("../src/home");
+		events.appendStatus("t1", "working", "implementing");
+		// parseInt would truncate this to 123 and probe a pid that was never recorded.
+		fs.writeFileSync(stateFiles("t1").meta, "id=t1\nrun_pid=123abc\n");
+		const verdicts = wake.detectStale(["t1"], {
+			runAlive: () => {
+				throw new Error("liveness must not be probed without a real pid");
+			},
+		});
+		expect(verdicts).toHaveLength(0);
+	});
+
 	test("a finished run is not stale", async () => {
 		const { wake, events, meta } = await mods();
 		events.appendStatus("t1", "done", "PR opened");
@@ -281,6 +327,59 @@ describe("wake loop mode gating", () => {
 		// In print mode nothing should have been scheduled and nothing sent.
 		expect(timers).toHaveLength(0);
 		expect(sends).toBe(0);
+	});
+});
+
+describe("send-failure backoff", () => {
+	// deliver() fires on a 30s timer AND on every fs.watch nudge. Without
+	// backoff, a failing sendUserMessage retries on every trigger — a tight
+	// loop where each status append re-fires the same failing send.
+	test("REGRESSION: a failed send is not retried on the next tick", async () => {
+		const { events } = await mods();
+		events.appendStatus("t1", "blocked", "needs a credential");
+
+		const handlers: any[] = [];
+		const shutdowns: any[] = [];
+		let sends = 0;
+		const fakePi = {
+			registerTool: () => {},
+			registerCommand: () => {},
+			on: (event: string, handler: any) => {
+				if (event === "session_start") handlers.push(handler);
+				if (event === "session_shutdown") shutdowns.push(handler);
+			},
+			sendUserMessage: () => {
+				sends++;
+				throw new Error("send is down");
+			},
+		};
+		const { default: register } = await import("../src/extension/index");
+		register(fakePi as any);
+
+		const timers: Array<() => void> = [];
+		const realSetInterval = globalThis.setInterval;
+		(globalThis as any).setInterval = (callback: () => void) => {
+			timers.push(callback);
+			return 0 as any;
+		};
+		try {
+			for (const handler of handlers) {
+				await handler({}, { mode: "tui", isIdle: () => true });
+			}
+			// The initial deliver attempted the send once and it failed.
+			expect(sends).toBe(1);
+			// Timer ticks and watch nudges inside the backoff window must not retry.
+			for (const tick of timers) tick();
+			for (const tick of timers) tick();
+			expect(sends).toBe(1);
+		} finally {
+			globalThis.setInterval = realSetInterval;
+			for (const shutdown of shutdowns) await shutdown();
+		}
+
+		// The wake is still owed: backoff defers delivery, never drops it.
+		const { pendingWakes } = await import("../src/wake");
+		expect(pendingWakes().some((entry) => entry.verb === "blocked")).toBe(true);
 	});
 });
 
