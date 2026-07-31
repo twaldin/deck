@@ -17,7 +17,7 @@ import {
 } from "./backlog";
 import { bootstrapHome, formatBootstrap } from "./bootstrap";
 import { appendStatus, readStatus } from "./events";
-import { buildFrame, renderFrame, renderStatusline } from "./fleet";
+import { buildFrame, renderFrame } from "./fleet";
 import { projectFleet } from "./herdr";
 import { assertHomeIsNotACheckout, assertHomeIsNotAnotherFleet, deckV2Home, stateFiles } from "./home";
 import { readMeta } from "./meta";
@@ -260,7 +260,7 @@ export async function runCli(argv: string[]): Promise<number> {
 					process.stdout.write(`${health.name}=${health.state} (${health.detail})\n`);
 				}
 				if (args.flags.json === true) process.stdout.write(`${JSON.stringify(frame, null, 2)}\n`);
-				else if (args.flags.statusline === true) process.stdout.write(`${renderStatusline(frame)}\n`);
+				else if (args.flags.statusline === true) process.stdout.write(`${renderFrame(frame)}\n`);
 				else process.stdout.write(`${renderFrame(frame)}\n`);
 				return 0;
 			}
