@@ -72,6 +72,8 @@ export type FleetFrame = {
 	counters: {
 		tasks: number;
 		running: number;
+		/** Tasks whose last report is blocked. */
+		blocked: number;
 		openDecisions: number;
 		queuedMessages: number;
 		/** Captain questions waiting in the /questions queue. */
@@ -240,6 +242,7 @@ export async function buildFrame(options: { workflowCwd?: string } = {}): Promis
 		counters: {
 			tasks: tasks.length,
 			running: tasks.filter((task) => task.runState === "running").length,
+			blocked: tasks.filter((task) => task.lastVerb === "blocked").length,
 			openDecisions: tasks.reduce((sum, task) => sum + task.openDecisions, 0),
 			queuedMessages: tasks.reduce((sum, task) => sum + task.queuedMessages, 0),
 			openQuestions: questionsOpen,
@@ -394,14 +397,16 @@ export function visibleTasks(tasks: TaskRow[], showAll: boolean): { shown: TaskR
 export function framed(title: string, body: string, footer: string, theme: FleetTheme): string {
 	const lines = body.split("\n");
 	const inner = Math.max(textWidth(title) + 4, ...lines.map(textWidth), textWidth(footer)) + 2;
+	// borderAccent, not border: with the panel fill gone (terminal-default
+	// background), the border IS the separator, so it must read clearly.
 	const top =
-		theme.fg("border", "╭─ ") +
+		theme.fg("borderAccent", "╭─ ") +
 		theme.bold(theme.fg("accent", title)) +
-		theme.fg("border", ` ${"─".repeat(Math.max(0, inner - textWidth(title) - 3))}╮`);
-	const bottom = theme.fg("border", `╰${"─".repeat(inner)}╯`);
+		theme.fg("borderAccent", ` ${"─".repeat(Math.max(0, inner - textWidth(title) - 3))}╮`);
+	const bottom = theme.fg("borderAccent", `╰${"─".repeat(inner)}╯`);
 	const padded = lines.map((line) => {
 		const pad = " ".repeat(Math.max(0, inner - textWidth(line) - 1));
-		return `${theme.fg("border", "│")} ${line}${pad}${theme.fg("border", "│")}`;
+		return `${theme.fg("borderAccent", "│")} ${line}${pad}${theme.fg("borderAccent", "│")}`;
 	});
 	return [top, ...padded, bottom, "", footer].join("\n");
 }
@@ -456,14 +461,20 @@ export function sliceVisible(
 export function buildFleetView(
 	frame: FleetFrame,
 	theme: FleetTheme = PLAIN_FLEET_THEME,
-	options: { showAll?: boolean; maxBodyLines?: number; scrollOffset?: number } = {},
+	options: { showAll?: boolean; maxBodyLines?: number; scrollOffset?: number; maxRowWidth?: number } = {},
 ): { text: string; scrollOffset: number; scrollable: boolean } {
 	const showAll = options.showAll ?? false;
+	// Row budget: the caller passes the overlay's usable columns so wide
+	// terminals show whole notes and PR URLs instead of a fixed 64-col clamp.
+	const rowWidth = Math.max(80, Math.min(options.maxRowWidth ?? 110, 200));
+	const noteMax = rowWidth - 24;
+	const prMax = rowWidth - 16;
 	const c = frame.counters;
 	const lines: string[] = [];
 	const header = [
 		`${theme.bold(String(c.running))} running`,
 		`${c.tasks} task(s)`,
+		c.blocked > 0 ? theme.fg("error", `${c.blocked} blocked`) : null,
 		c.openDecisions > 0 ? theme.fg("warning", `${c.openDecisions} decision(s)`) : null,
 		c.openQuestions > 0 ? theme.fg("warning", `${c.openQuestions} question(s) — /questions`) : null,
 		c.queuedMessages > 0 ? theme.fg("accent", `${c.queuedMessages} queued`) : null,
@@ -493,10 +504,10 @@ export function buildFleetView(
 		);
 		if (task.lastVerb !== null) {
 			lines.push(
-				`           ${theme.fg("dim", `${task.lastVerb}:`)} ${theme.fg("text", truncate(task.lastNote ?? "", 64))}`,
+				`           ${theme.fg("dim", `${task.lastVerb}:`)} ${theme.fg("text", truncate(task.lastNote ?? "", noteMax))}`,
 			);
 		}
-		if (task.pr !== null) lines.push(`           ${theme.fg("accent", truncate(task.pr, 72))}`);
+		if (task.pr !== null) lines.push(`           ${theme.fg("accent", truncate(task.pr, prMax))}`);
 		const flags: string[] = [];
 		if (task.openDecisions > 0) flags.push(`${task.openDecisions} decision(s) open`);
 		if (task.queuedMessages > 0) flags.push(`${task.queuedMessages} message(s) queued`);
@@ -508,7 +519,7 @@ export function buildFleetView(
 			.filter((bit): bit is string => bit !== null)
 			.join(" · ");
 		lines.push(
-			`  ${theme.fg("accent", `wf:${truncate(wf.runId, 16)}`)}  ${theme.fg("text", truncate(bits, 64))}`,
+			`  ${theme.fg("accent", `wf:${truncate(wf.runId, 16)}`)}  ${theme.fg("text", truncate(bits, noteMax))}`,
 		);
 	};
 
@@ -567,17 +578,26 @@ export function buildFleetView(
 export function buildFleetText(
 	frame: FleetFrame,
 	theme: FleetTheme = PLAIN_FLEET_THEME,
-	options: { showAll?: boolean; maxBodyLines?: number; scrollOffset?: number } = {},
+	options: { showAll?: boolean; maxBodyLines?: number; scrollOffset?: number; maxRowWidth?: number } = {},
 ): string {
 	return buildFleetView(frame, theme, options).text;
 }
 
-/** Compact statusline. Costs no turn; the captain glances instead of being told. */
+/**
+ * Compact statusline. Costs no turn; the captain glances instead of being told.
+ * Zero counts are noise, not signal: `0▶` reads as a broken glyph, so a quiet
+ * fleet says `idle` and only live signals (running, blocked, questions,
+ * decisions, queued) earn a segment.
+ */
 export function renderStatusline(frame: FleetFrame): string {
 	const c = frame.counters;
-	const parts = [`${c.running}▶`, `${c.tasks} task`];
+	const parts: string[] = [];
+	if (c.running > 0) parts.push(`${c.running}▶`);
+	if (c.blocked > 0) parts.push(`${c.blocked} blocked`);
 	if (c.openQuestions > 0) parts.push(`${c.openQuestions}q`);
 	if (c.openDecisions > 0) parts.push(`${c.openDecisions}?`);
 	if (c.queuedMessages > 0) parts.push(`${c.queuedMessages}✉`);
+	if (parts.length === 0) parts.push("idle");
+	parts.push(`${c.tasks} task`);
 	return parts.join(" · ");
 }

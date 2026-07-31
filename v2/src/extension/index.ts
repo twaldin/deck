@@ -73,6 +73,20 @@ export default function deckV2(pi: any): void {
 	let sendRetryAt = 0;
 	const SEND_BACKOFF_BASE_MS = 60_000;
 	const SEND_BACKOFF_MAX_MS = 15 * 60_000;
+	// Busy fence for the isIdle race: isIdle() can read true, then a turn starts,
+	// then sendUserMessage hits an active run and pi emits
+	// "Agent is already processing" as an extension error (pi's bindCore catches
+	// the rejection; the caller never sees it). agent_start/agent_settled bound
+	// the run window; agent_settled (not agent_end) because pi may auto-retry or
+	// continue with queued follow-ups after agent_end.
+	let agentBusy = false;
+	// Re-entrancy lock: deliver() fires from the interval AND every fs.watch
+	// nudge; two overlapping async passes would drain the same outbox twice.
+	let delivering = false;
+
+	function busy(ctx: any): boolean {
+		return agentBusy || ctx?.isIdle?.() === false || ctx?.hasPendingMessages?.() === true;
+	}
 
 	// ---- tools --------------------------------------------------------------
 
@@ -309,15 +323,20 @@ export default function deckV2(pi: any): void {
 			await ctx.ui.custom(
 				(tui: any, rawTheme: any, _kb: any, done: any) => {
 					const theme = asFleetTheme(rawTheme);
-					// Box paints a background across all children — that is what makes
-					// the overlay opaque instead of layering over the transcript.
-					const box = new Box(2, 1, backgroundFn(rawTheme));
+					// No background fill: the compositor already replaces every cell
+					// under the overlay, so the panel inherits the terminal's default
+					// background instead of a gray slab. The border is the separator.
+					const box = new Box(2, 1);
 					// Body budget: terminal rows minus overlay margin (4), box padding
 					// (2), frame borders + blank + footer (4), so the bottom border
 					// stays on screen when tasks outnumber rows. No floor above 1:
 					// a floor that exceeds a tiny viewport reintroduces the overflow.
 					const maxBodyLines = (): number =>
 						Math.max(1, (tui.terminal?.rows ?? 40) - 10);
+					// Usable row columns: 90% overlay width minus box padding (4) and
+					// frame border + padding (4).
+					const maxRowWidth = (): number =>
+						Math.floor((tui.terminal?.cols ?? 120) * 0.9) - 8;
 					let scrollOffset = 0;
 					let scrollable = false;
 					const render = (): string => {
@@ -325,6 +344,7 @@ export default function deckV2(pi: any): void {
 							showAll,
 							maxBodyLines: maxBodyLines(),
 							scrollOffset,
+							maxRowWidth: maxRowWidth(),
 						});
 						// The view clamps the offset; adopt it so k after over-scrolling
 						// moves immediately instead of unwinding phantom distance.
@@ -390,7 +410,7 @@ export default function deckV2(pi: any): void {
 				},
 				// maxHeight is the last-resort clip for terminals too short for even
 				// a one-line body; the body clamp keeps the border intact above that.
-				{ overlay: true, overlayOptions: { anchor: "center", width: "80%", margin: 2, maxHeight: "100%" } },
+				{ overlay: true, overlayOptions: { anchor: "center", width: "90%", minWidth: 80, margin: 1, maxHeight: "100%" } },
 			);
 		},
 	});
@@ -424,13 +444,22 @@ export default function deckV2(pi: any): void {
 	 * cycle is correct; the events are durable and reconcile is idempotent, so
 	 * nothing is lost by waiting. Only the statusline updates while busy.
 	 */
-	function deliver(ctx: any): void {
+	async function deliver(ctx: any): Promise<void> {
 		// Backing off after a failed send is the same shape as busy: return before
 		// reconcile so no cursor moves and nothing is consumed unsent.
-		if (ctx?.isIdle?.() === false || Date.now() < sendRetryAt) {
+		if (delivering || busy(ctx) || Date.now() < sendRetryAt) {
 			void refreshStatusline(ctx);
 			return;
 		}
+		delivering = true;
+		try {
+			await deliverLocked(ctx);
+		} finally {
+			delivering = false;
+		}
+	}
+
+	async function deliverLocked(ctx: any): Promise<void> {
 		// Reconcile reads the status files and advances the durable cursor, then
 		// persists whatever it found into the wake outbox. Delivery drains the
 		// OUTBOX, not the reconcile result, and acknowledges only what was
@@ -446,14 +475,14 @@ export default function deckV2(pi: any): void {
 			// is not an outbox entry; it is recomputed every cycle and is
 			// therefore safe to send directly.
 			attempted++;
-			if (send(ctx, `${DECK_OPERATIONAL_PREFIX}${verdict.taskId} stopped responding: ${verdict.reason}`)) sent++;
+			if (await send(ctx, `${DECK_OPERATIONAL_PREFIX}${verdict.taskId} stopped responding: ${verdict.reason}`)) sent++;
 		}
 
 		const pending = pendingWakes();
 		const delivered: string[] = [];
 		for (const entry of pending.filter((item) => item.tier === "T0")) {
 			attempted++;
-			if (send(ctx, `${DECK_OPERATIONAL_PREFIX}${entry.taskId}: ${entry.verb} — ${entry.note}`)) {
+			if (await send(ctx, `${DECK_OPERATIONAL_PREFIX}${entry.taskId}: ${entry.verb} — ${entry.note}`)) {
 				sent++;
 				delivered.push(entry.id);
 			}
@@ -471,7 +500,7 @@ export default function deckV2(pi: any): void {
 					event: { verb: entry.verb as any, note: entry.note, raw: entry.raw },
 				})) as any,
 			);
-			if (folded !== null && send(ctx, `${DECK_OPERATIONAL_PREFIX}${folded}`)) {
+			if (folded !== null && (await send(ctx, `${DECK_OPERATIONAL_PREFIX}${folded}`))) {
 				sent++;
 				delivered.push(...batched.map((entry) => entry.id));
 			}
@@ -492,12 +521,17 @@ export default function deckV2(pi: any): void {
 
 	/**
 	 * Send one message, reporting whether it actually went out. A false return
-	 * leaves the wake owed, so the next cycle retries it.
+	 * leaves the wake owed, so the next cycle retries it. Busy is re-checked
+	 * immediately before the call: a turn can start between deliver()'s gate
+	 * and this send. If the API ever returns a promise, a rejection is a
+	 * failed send, never a rethrow.
 	 */
-	function send(ctx: any, text: string): boolean {
+	async function send(ctx: any, text: string): Promise<boolean> {
+		if (busy(ctx)) return false;
 		try {
 			if (typeof pi.sendUserMessage !== "function") return false;
-			pi.sendUserMessage(text, { deliverAs: "followUp" });
+			const out = pi.sendUserMessage(text, { deliverAs: "followUp" }) as unknown;
+			if (out instanceof Promise) await out;
 			return true;
 		} catch {
 			return false;
@@ -534,9 +568,19 @@ export default function deckV2(pi: any): void {
 
 		// Reconcile at start: the durable baseline means this reports only what is
 		// genuinely new, so a restart is quiet rather than a flood.
-		deliver(ctx);
-		timer = setInterval(() => deliver(ctx), RECONCILE_MS);
-		unwatch = (await import("../wake")).watchStatusDir(() => deliver(ctx));
+		void deliver(ctx);
+		timer = setInterval(() => void deliver(ctx), RECONCILE_MS);
+		unwatch = (await import("../wake")).watchStatusDir(() => void deliver(ctx));
+	});
+
+	// Bound the agent's run window for the busy fence. agent_settled is the
+	// "pi will not continue automatically" signal; agent_end can be followed by
+	// auto-retry or queued continuations while isIdle() still reads true.
+	pi.on("agent_start", async () => {
+		agentBusy = true;
+	});
+	pi.on("agent_settled", async () => {
+		agentBusy = false;
 	});
 
 	pi.on("session_shutdown", async () => {
@@ -569,18 +613,6 @@ function asFleetTheme(source: unknown): FleetTheme {
 			const out = themed.bold(text);
 			return typeof out === "string" ? out : text;
 		},
-	};
-}
-
-/** Background fill so the overlay is opaque instead of transparent. */
-function backgroundFn(source: unknown): ((text: string) => string) | undefined {
-	if (typeof source !== "object" || source === null) return undefined;
-	const probe = source as { bg?: unknown };
-	if (typeof probe.bg !== "function") return undefined;
-	const themed = source as { bg: (key: string, text: string) => unknown };
-	return (text) => {
-		const out = themed.bg("customMessageBg", text);
-		return typeof out === "string" ? out : text;
 	};
 }
 
