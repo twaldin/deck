@@ -96,6 +96,7 @@ const DEFAULT_FIXTURES = {
 	changedFiles: ["packages/database-migrations/0042_add_flag.sql", "src/feature.ts"],
 	localReviewRounds: 2,
 	watchPollsToExit: 2,
+	watchWaitPolls: 0,
 	prNumber: 4242,
 	headChangeRounds: [] as number[],
 };
@@ -191,6 +192,7 @@ const inputSchema = z.object({
 			changedFiles: z.array(z.string()).optional(),
 			localReviewRounds: z.number().int().positive().optional(),
 			watchPollsToExit: z.number().int().positive().optional(),
+			watchWaitPolls: z.number().int().nonnegative().optional(),
 			prNumber: z.number().int().positive().optional(),
 			headChangeRounds: z.array(z.number().int().nonnegative()).optional(),
 		})
@@ -243,6 +245,7 @@ const schemas = {
 		poll: z.number().int(),
 		headSha: z.string(),
 		exitOk: z.boolean(),
+		disposition: z.enum(["complete", "wait", "fix"]),
 		actionable: z.boolean(),
 		ci: z.string(),
 		unresolvedThreads: z.number().int(),
@@ -991,19 +994,31 @@ export default smithers((ctx) => {
 														(async () => {
 															const pollNo = watchRows.length;
 															if (dryRun) {
+																const waiting = pollNo < fixtures.watchWaitPolls;
 																const exitOk =
-																	k > 0 || pollNo + 1 >= fixtures.watchPollsToExit;
+																	!waiting &&
+																	(k > 0 || pollNo + 1 >= fixtures.watchPollsToExit);
+																const actionable = !waiting && !exitOk;
 																return {
 																	round: k,
 																	poll: pollNo,
 																	headSha: "dryrun-head-sha",
 																	exitOk,
-																	actionable: !exitOk,
+																	disposition: exitOk
+																		? "complete"
+																		: actionable
+																			? "fix"
+																			: "wait",
+																	actionable,
 																	ci: exitOk ? "green" : "will-be-green",
-																	unresolvedThreads: exitOk ? 0 : 1,
-																	unansweredComments: exitOk ? 0 : 1,
-																	reviewersToReRequest: exitOk ? [] : ["dry-reviewer"],
-																	reasons: exitOk ? [] : ["dry-run: 1 unresolved thread"],
+																	unresolvedThreads: actionable ? 1 : 0,
+																	unansweredComments: actionable ? 1 : 0,
+																	reviewersToReRequest: actionable ? ["dry-reviewer"] : [],
+																	reasons: exitOk
+																		? []
+																		: waiting
+																			? ["dry-run: CI is pending; Smithers owns the next poll"]
+																			: ["dry-run: 1 unresolved thread"],
 																};
 															}
 															if (pollNo > 0) await sleepSeconds(limits.watchPollSeconds);
@@ -1020,6 +1035,7 @@ export default smithers((ctx) => {
 																poll: pollNo,
 																headSha: snapshot.headSha,
 																exitOk: verdict.exitOk,
+																disposition: verdict.disposition,
 																actionable: verdict.actionable,
 																ci: verdict.ci,
 																unresolvedThreads: verdict.unresolvedThreads,

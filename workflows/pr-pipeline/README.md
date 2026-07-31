@@ -20,7 +20,7 @@ Model access goes through pi's `deck/` provider (the deck broker on
 | 2 local adversarial review | `local-review-loop` / `local-review` + `local-fix`, `review-escalation` | agent loop, cross-model, fresh context |
 | 3 push + PR | `push-pr` | compute; PR registered in the watch-set **as a side effect of this node** |
 | 3b request reviewers | `request-reviewers` | compute; CODEOWNERS + recent-author fallback, verified via `requested_reviewers` |
-| 4 watch-ci-review | `r{N}-watch-loop` / `r{N}-watch-poll` + `r{N}-watch-fix`, `r{N}-watch-escalation` | machine-checked exit |
+| 4 watch-ci-review | `r{N}-watch-loop` / `r{N}-watch-poll` + `r{N}-watch-fix`, `r{N}-watch-escalation` | persisted compute polls; bounded agent fixes |
 | 5 migration gate (conditional) | `migration-check`, `migration-gate` (Approval), `migration-scope`, `migration-{stg,prod}-{run,verify}` | mandatory when diff touches `migrations/` or `packages/database-migrations/` |
 | 6 ready-for-stamp | `r{N}-ready-loop` / `r{N}-ready-poll`, `r{N}-ready-exhausted` | human approval + CI green-or-**will-be**-green |
 | 7 stamp + merge word | `r{N}-stamp` (Approval), `r{N}-stamp-validity` | durable park; head-change invalidates |
@@ -49,8 +49,13 @@ Enforcement notes (each maps to a cited incident in the SOP):
 - **watch-ci exit is machine-checked** (`lib/watch.ts`): zero unresolved review
   threads + all actionable comments answered + reviewers re-requested, verified
   against the `requested_reviewers` API (GH review requests silently no-op) + CI
-  not hard-red. The fix agent works in plain commits on the SAME branch — the
-  prompt hard-forbids `gt submit`/child branches (#24026/#24223/#24227 class).
+  green. Pending or absent CI writes a `disposition: "wait"` poll receipt and
+  stays in the persisted Smithers loop. It does not start an agent. Hard-red CI
+  or review work writes `disposition: "fix"` and starts one bounded fix agent.
+  Completed poll iterations survive an owner-process restart and resume from
+  Smithers state.
+  The agent works in plain commits on the SAME branch — the prompt hard-forbids
+  `gt submit`/child branches (#24026/#24223/#24227 class).
 - **Stamp**: `r{N}-stamp` is a real smithers `<Approval>` — the run parks durably
   (a suspended run is a row, not a process) and resumes on `smithers approve`.
   The card is decision-shaped: original issue → fix → danger/blast radius.
@@ -169,6 +174,9 @@ crewmate NEVER approves the stamp itself.
   watch-set gets the PR the moment it exists; nothing untracked.
 - Rework lands as plain commits on the existing PR branch (agent prompts
   hard-forbid child PRs).
+- Workers own code and push only. They exit after each bounded implementation or
+  fix. The Deck orchestrator or persisted Smithers nodes own all CI and review
+  watches. A worker must never sleep-poll CI.
 
 ## Dry-run mode
 
@@ -189,9 +197,10 @@ bunx smithers-orchestrator@0.30.0 up pipeline.tsx --run-id pipeline-dryrun --res
 ```
 
 `fixtures` (dry-run only) steer the script: `changedFiles` (migration path
-on/off), `watchPollsToExit`, `localReviewRounds`, `headChangeRounds` (e.g.
-`[0]` = head moves after round-0 stamp → watch that the workflow re-enters
-watch-ci as round 1 instead of re-stamping).
+on/off), `watchPollsToExit`, `watchWaitPolls` (non-actionable CI polls owned by
+Smithers), `localReviewRounds`, and `headChangeRounds` (e.g. `[0]` = head moves
+after round-0 stamp → watch that the workflow re-enters watch-ci as round 1
+instead of re-stamping).
 
 `bypassApprovals: true` (tests only) swaps each `<Approval>` for an
 auto-approved compute row under the same node id so `simulate()` can traverse
@@ -203,7 +212,7 @@ run can self-approve its gates.
 ```sh
 bun install                       # here
 bun install --cwd ../.smithers    # engine.test.ts loads the pack's seats
-bun test tests/          # 96 tests
+bun test tests/          # 99 tests
 bun run typecheck
 bun run graph            # render-without-execute sanity check
 ```

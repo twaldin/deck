@@ -85,6 +85,8 @@ export interface WatchSnapshot {
 
 export interface WatchExitVerdict {
 	exitOk: boolean;
+	/** Smithers owns wait; an agent is used only for a bounded fix. */
+	disposition: "complete" | "wait" | "fix";
 	unresolvedThreads: number;
 	unansweredComments: number;
 	reviewersNeedingReRequest: string[];
