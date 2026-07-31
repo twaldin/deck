@@ -13,6 +13,7 @@
  */
 import { execFile } from "node:child_process";
 import * as fs from "node:fs";
+import * as path from "node:path";
 import { promisify } from "node:util";
 import { lastEvent, openDecisions } from "./events";
 import { internalSummary } from "./backlog";
@@ -33,6 +34,22 @@ export type SourceHealth = {
 	detail: string;
 };
 
+export type WaitingFor =
+	| "ci-poll"
+	| "review-poll"
+	| "fixing"
+	| "ready-poll"
+	| "stamp"
+	| `gate:${string}`
+	| "migration"
+	| "landing"
+	| "deploy-evidence"
+	| "fallout-window"
+	| "none"
+	| null;
+
+export type FleetActivity = "idle" | "fixing" | "working" | "failed";
+
 export type TaskRow = {
 	taskId: string;
 	kind: string;
@@ -45,6 +62,13 @@ export type TaskRow = {
 	queuedMessages: number;
 	unresolvedSideEffects: number;
 	pr: string | null;
+	/** Pipeline ticket and PR identity from the existing input, when known. */
+	ticket?: string | null;
+	prNumber?: number | null;
+	prTitle?: string | null;
+	phase?: string | null;
+	waitingFor?: WaitingFor;
+	activity?: FleetActivity;
 	worktree: string | null;
 	/** Smithers run id, when workflow-backed. */
 	runId: string | null;
@@ -63,8 +87,15 @@ export type WorkflowRow = {
 	/** smithers ps state, when reported (e.g. "succeeded" beside status "finished"). */
 	state: string | null;
 	step: string | null;
-	/** Task correlated by rootDir == worktree, when one matches. */
+	/** Task correlated by run id or input worktree, when one matches. */
 	taskId: string | null;
+	ticket?: string | null;
+	prNumber?: number | null;
+	prTitle?: string | null;
+	phase?: string | null;
+	waitingFor?: WaitingFor;
+	activity?: FleetActivity;
+	waitAgeMs?: number | null;
 };
 
 export type FleetFrame = {
@@ -86,38 +117,255 @@ export type FleetFrame = {
 	sources: SourceHealth[];
 };
 
-type PsRun = { id: string; workflow?: string; status?: string; state?: string; step?: string; rootDir?: string };
+type PsRun = {
+	id: string;
+	ticket?: string;
+	worktree?: string;
+	prNumber?: number;
+	prTitle?: string;
+	started?: string;
+	pendingApprovals?: Array<{ nodeId?: string; status?: string }>;
+	workflow?: string;
+	status?: string;
+	state?: string;
+	step?: string;
+	rootDir?: string;
+	blockedNode?: string;
+};
+type ShipInput = {
+	existingPr?: unknown;
+	brief?: { title?: unknown };
+	ticket?: unknown;
+	worktree?: unknown;
+};
+
+type ShipIdentity = {
+	prNumber: number | null;
+	prTitle: string | null;
+	ticket: string | null;
+	worktree: string | null;
+};
+
+function readShipInput(runId: string): ShipIdentity {
+	try {
+		const input = JSON.parse(
+			fs.readFileSync(
+				path.join(stateDir(), "ship", `${runId}.input.json`),
+				"utf8",
+			),
+		) as ShipInput;
+		return {
+			prNumber:
+				typeof input.existingPr === "number" &&
+				Number.isInteger(input.existingPr)
+					? input.existingPr
+					: null,
+			prTitle:
+				typeof input.brief?.title === "string"
+					? input.brief.title
+					: null,
+			ticket: typeof input.ticket === "string" ? input.ticket : null,
+			worktree:
+				typeof input.worktree === "string" ? input.worktree : null,
+		};
+	} catch {
+		return { prNumber: null, prTitle: null, ticket: null, worktree: null };
+	}
+}
+
+function pipelinePhase(
+	step: string | null | undefined,
+	status: string | null | undefined,
+): string | null {
+	const value = (step ?? "").toLowerCase();
+	if (value.includes("fallout") || value.includes("deploy")) return "deploy";
+	if (value.includes("watch")) return "watch";
+	if (value.includes("ready")) return "ready";
+	if (/r\d+-stamp$/.test(value)) return "stamp";
+	if (value.includes("review")) return "review";
+	if (value.includes("implement")) return "implement";
+	if (value.includes("migration")) return "migration";
+	return value.length === 0 ? null : value;
+}
+
+export function waitingForFor(
+	step: string | null | undefined,
+	status: string | null | undefined,
+): WaitingFor {
+	const value = (step ?? "").toLowerCase();
+	const runStatus = (status ?? "").toLowerCase();
+	if (/r\d+-stamp$/.test(value)) return "stamp";
+	if (value.includes("watch-poll")) return "ci-poll";
+	if (value.includes("watch-fix")) return "fixing";
+	if (value.includes("ready-poll")) return "ready-poll";
+	if (value.includes("migration-gate")) return "migration";
+	if (value.includes("landing-poll")) return "landing";
+	if (value.includes("deploy-evidence")) return "deploy-evidence";
+	if (value.includes("fallout-wait")) return "fallout-window";
+	if (value.includes("escalation"))
+		return `gate:${value.replace(/^r\d+-/, "")}`;
+	if (runStatus === "waiting-approval") return "gate:approval";
+	if (runStatus === "waiting-human") return "gate:human-review";
+	return "none";
+}
+
+export function activityFor(
+	step: string | null | undefined,
+	status: string | null | undefined,
+): FleetActivity {
+	const value = (step ?? "").toLowerCase();
+	const runStatus = (status ?? "").toLowerCase();
+	if (["failed", "cancelled"].includes(runStatus)) return "failed";
+	if (value.includes("watch-fix")) return "fixing";
+	if (
+		value.includes("poll") ||
+		["waiting-approval", "waiting-human", "paused"].includes(runStatus)
+	)
+		return "idle";
+	return "working";
+}
+
+function prNumberFrom(value: string | null): number | null {
+	if (value === null) return null;
+	const match = /pull\/(\d+)(?:\/|$)|#(\d+)$/.exec(value.trim());
+	const number = match?.[1] ?? match?.[2];
+	return number === undefined ? null : Number(number);
+}
+
+function ageMs(value: string | undefined): number | null {
+	if (value === undefined) return null;
+	const ago = /^(\d+)\s*(s|m|h|d) ago$/.exec(value.trim());
+	if (ago?.[1] !== undefined && ago[2] !== undefined) {
+		const unit = { s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 }[
+			ago[2]
+		];
+		return Number(ago[1]) * unit;
+	}
+	const timestamp = Date.parse(value);
+	return Number.isNaN(timestamp) ? null : Math.max(0, Date.now() - timestamp);
+}
+
+function truncateTail(body: string, max: number): string {
+	return body.length > max ? `…${body.slice(-(max - 1))}` : body;
+}
+
+function workflowAttentionRank(wf: WorkflowRow): number {
+	if (wf.waitingFor === "stamp" || wf.waitingFor?.startsWith("gate:"))
+		return 0;
+	if (wf.activity === "failed") return 1;
+	if (wf.activity === "fixing") return 2;
+	if (wf.activity === "idle") return 4;
+	return 3;
+}
 
 /** smithers ps reports "no step" as an em-dash placeholder, not an absence. */
 export function normalizeStep(step: string | null | undefined): string | null {
 	if (step === undefined || step === null) return null;
 	const trimmed = step.trim();
-	return trimmed === "" || trimmed === "—" || trimmed === "-" ? null : trimmed;
+	return trimmed === "" || trimmed === "—" || trimmed === "-"
+		? null
+		: trimmed;
 }
 
 /** Public read-only CLI only. Never the private db, never Gateway lifecycle. */
-async function collectRuns(cwd: string): Promise<{ runs: PsRun[]; health: SourceHealth }> {
+async function collectRuns(
+	cwd: string,
+): Promise<{ runs: PsRun[]; health: SourceHealth }> {
 	// A home whose workflows link is not installed yet has no runs to miss:
 	// that is "skipped" (run v2/install.sh), not "missing" (smithers broke).
 	if (!fs.existsSync(cwd)) {
 		return {
 			runs: [],
-			health: { name: "smithers", state: "skipped", detail: `no workspace at ${cwd} (run v2/install.sh)` },
+			health: {
+				name: "smithers",
+				state: "skipped",
+				detail: `no workspace at ${cwd} (run v2/install.sh)`,
+			},
 		};
 	}
 	try {
-		const { stdout } = await run(
-			"bunx",
-			[SMITHERS_SPEC, "ps", "--json"],
-			{ cwd, timeout: 15_000, maxBuffer: 4_000_000 },
-		);
+		const { stdout } = await run("bunx", [SMITHERS_SPEC, "ps", "--json"], {
+			cwd,
+			timeout: 15_000,
+			maxBuffer: 4_000_000,
+		});
 		const parsed: unknown = JSON.parse(stdout);
 		const runs = Array.isArray(parsed)
 			? (parsed as PsRun[])
 			: ((parsed as { runs?: PsRun[] }).runs ?? []);
+		const enriched = await Promise.all(
+			runs.map(async (psRun) => {
+				const input = readShipInput(psRun.id);
+				let prNumber = psRun.prNumber;
+				if (prNumber === undefined && input.prNumber === null) {
+					try {
+						const output = await run(
+							"bunx",
+							[
+								SMITHERS_SPEC,
+								"output",
+								psRun.id,
+								"push-pr",
+								"--json",
+							],
+							{ cwd, timeout: 15_000, maxBuffer: 1_000_000 },
+						);
+						const record = JSON.parse(output.stdout) as {
+							pr_number?: unknown;
+							prNumber?: unknown;
+						};
+						const candidate = record.pr_number ?? record.prNumber;
+						if (
+							typeof candidate === "number" &&
+							Number.isInteger(candidate)
+						)
+							prNumber = candidate;
+					} catch {
+						// A run before push-pr has no PR number yet.
+					}
+				}
+				const pendingNode = psRun.pendingApprovals?.find(
+					(approval) => approval.status === "requested",
+				)?.nodeId;
+				if (pendingNode !== undefined)
+					return { ...psRun, blockedNode: pendingNode, prNumber };
+				if (
+					psRun.status !== "waiting-approval" &&
+					psRun.state !== "waiting-approval"
+				)
+					return { ...psRun, prNumber };
+				try {
+					const inspected = await run(
+						"bunx",
+						[
+							SMITHERS_SPEC,
+							"inspect",
+							psRun.id,
+							"--format",
+							"json",
+						],
+						{ cwd, timeout: 15_000, maxBuffer: 4_000_000 },
+					);
+					const payload = JSON.parse(inspected.stdout) as {
+						runState?: { blocked?: { nodeId?: string } };
+					};
+					return {
+						...psRun,
+						blockedNode: payload.runState?.blocked?.nodeId,
+						prNumber,
+					};
+				} catch {
+					return { ...psRun, prNumber };
+				}
+			}),
+		);
 		return {
-			runs,
-			health: { name: "smithers", state: "ok", detail: `${runs.length} run(s)` },
+			runs: enriched,
+			health: {
+				name: "smithers",
+				state: "ok",
+				detail: `${enriched.length} run(s)`,
+			},
 		};
 	} catch (error) {
 		return {
@@ -125,39 +373,63 @@ async function collectRuns(cwd: string): Promise<{ runs: PsRun[]; health: Source
 			health: {
 				name: "smithers",
 				state: "missing",
-				detail: error instanceof Error ? error.message.split("\n")[0] ?? "ps failed" : "ps failed",
+				detail:
+					error instanceof Error
+						? (error.message.split("\n")[0] ?? "ps failed")
+						: "ps failed",
 			},
 		};
 	}
 }
 
-type HerdrAgent = { agent?: string; agent_status?: string; pane_id?: string; foreground_cwd?: string };
+type HerdrAgent = {
+	agent?: string;
+	agent_status?: string;
+	pane_id?: string;
+	foreground_cwd?: string;
+};
 
 /**
  * herdr, view-only. Correlation is on `foreground_cwd` == the task's worktree,
  * a unique exact absolute path — the same key fleet/ uses for Smithers rootDir.
  */
-async function collectPanes(): Promise<{ byWorktree: Map<string, string>; health: SourceHealth }> {
+async function collectPanes(): Promise<{
+	byWorktree: Map<string, string>;
+	health: SourceHealth;
+}> {
 	const byWorktree = new Map<string, string>();
 	try {
-		const { stdout } = await run("herdr", ["agent", "list"], { timeout: 8_000 });
+		const { stdout } = await run("herdr", ["agent", "list"], {
+			timeout: 8_000,
+		});
 		const parsed: unknown = JSON.parse(stdout);
-		const agents = ((parsed as { result?: { agents?: HerdrAgent[] } }).result?.agents ??
-			[]) as HerdrAgent[];
+		const agents = ((parsed as { result?: { agents?: HerdrAgent[] } })
+			.result?.agents ?? []) as HerdrAgent[];
 		for (const agent of agents) {
-			if (agent.foreground_cwd !== undefined && agent.pane_id !== undefined) {
+			if (
+				agent.foreground_cwd !== undefined &&
+				agent.pane_id !== undefined
+			) {
 				byWorktree.set(agent.foreground_cwd, agent.pane_id);
 			}
 		}
 		return {
 			byWorktree,
-			health: { name: "herdr", state: "ok", detail: `${agents.length} agent(s)` },
+			health: {
+				name: "herdr",
+				state: "ok",
+				detail: `${agents.length} agent(s)`,
+			},
 		};
 	} catch {
 		// Headless is the default path, not a degraded one.
 		return {
 			byWorktree,
-			health: { name: "herdr", state: "skipped", detail: "not running (headless is fine)" },
+			health: {
+				name: "herdr",
+				state: "skipped",
+				detail: "not running (headless is fine)",
+			},
 		};
 	}
 }
@@ -170,19 +442,27 @@ function realpath(target: string): string {
 	}
 }
 
-export async function buildFrame(options: { workflowCwd?: string } = {}): Promise<FleetFrame> {
+export async function buildFrame(
+	options: { workflowCwd?: string } = {},
+): Promise<FleetFrame> {
 	const ids = deckOwnedTasks();
-	const [{ runs, health: runHealth }, { byWorktree, health: paneHealth }] = await Promise.all([
-		options.workflowCwd === undefined
-			? Promise.resolve({
-					runs: [] as PsRun[],
-					health: { name: "smithers", state: "skipped", detail: "no workflow dir configured" } as SourceHealth,
-				})
-			: collectRuns(options.workflowCwd),
-		collectPanes(),
-	]);
+	const [{ runs, health: runHealth }, { byWorktree, health: paneHealth }] =
+		await Promise.all([
+			options.workflowCwd === undefined
+				? Promise.resolve({
+						runs: [] as PsRun[],
+						health: {
+							name: "smithers",
+							state: "skipped",
+							detail: "no workflow dir configured",
+						} as SourceHealth,
+					})
+				: collectRuns(options.workflowCwd),
+			collectPanes(),
+		]);
 
 	const runsByRoot = new Map<string, PsRun>();
+	const runsById = new Map(runs.map((psRun) => [psRun.id, psRun]));
 	for (const psRun of runs) {
 		if (psRun.rootDir !== undefined && psRun.rootDir.length > 0) {
 			runsByRoot.set(realpath(psRun.rootDir), psRun);
@@ -196,12 +476,29 @@ export async function buildFrame(options: { workflowCwd?: string } = {}): Promis
 		const event = lastEvent(taskId);
 		const worktree = meta?.worktree ?? null;
 		const resolved = worktree === null ? null : realpath(worktree);
-		const psRun = resolved === null ? undefined : runsByRoot.get(resolved);
+		const fromInput = runs.find((candidate) => {
+			const input = readShipInput(candidate.id);
+			return (
+				input.worktree !== null &&
+				resolved !== null &&
+				realpath(input.worktree) === resolved
+			);
+		});
+		const psRun =
+			(resolved === null ? undefined : runsByRoot.get(resolved)) ??
+			(meta?.run_id === undefined
+				? undefined
+				: runsById.get(meta.run_id)) ??
+			fromInput;
+		const input = psRun === undefined ? null : readShipInput(psRun.id);
+		const sourceStep =
+			normalizeStep(psRun?.step) ?? psRun?.blockedNode ?? null;
 		if (resolved !== null) taskByRoot.set(resolved, taskId);
 		const pid = meta?.run_pid;
 		let statusAgeMs: number | null = null;
 		try {
-			statusAgeMs = Date.now() - fs.statSync(stateFiles(taskId).status).mtimeMs;
+			statusAgeMs =
+				Date.now() - fs.statSync(stateFiles(taskId).status).mtimeMs;
 		} catch {
 			// no status file yet
 		}
@@ -211,32 +508,72 @@ export async function buildFrame(options: { workflowCwd?: string } = {}): Promis
 			kind: meta?.kind ?? "ship",
 			project: meta?.project ?? null,
 			runState:
-				pid === undefined ? "none" : pidAlive(pid) ? "running" : "finished",
+				pid === undefined
+					? "none"
+					: pidAlive(pid)
+						? "running"
+						: "finished",
 			lastVerb: event?.verb ?? null,
 			lastNote: event?.note ?? null,
 			openDecisions: openDecisions(taskId).size,
 			queuedMessages: pending(taskId).length,
 			unresolvedSideEffects: unresolvedReceipts(taskId).length,
 			pr: meta?.pr ?? null,
+			ticket: input?.ticket ?? null,
+			prNumber: prNumberFrom(meta?.pr ?? null) ?? input?.prNumber ?? null,
+			prTitle: input?.prTitle ?? null,
+			phase:
+				psRun === undefined
+					? null
+					: pipelinePhase(sourceStep, psRun.status),
+			waitingFor:
+				psRun === undefined
+					? null
+					: waitingForFor(sourceStep, psRun.status),
+			activity:
+				psRun === undefined
+					? undefined
+					: activityFor(sourceStep, psRun.status),
 			worktree,
 			runId: psRun?.id ?? meta?.run_id ?? null,
-			stage: normalizeStep(psRun?.step),
-			pane: resolved === null ? null : byWorktree.get(resolved) ?? null,
+			stage: sourceStep,
+			pane: resolved === null ? null : (byWorktree.get(resolved) ?? null),
 			statusAgeMs,
 		});
 	}
 
-	const workflows: WorkflowRow[] = runs.map((psRun) => ({
-		runId: psRun.id,
-		workflow: psRun.workflow ?? null,
-		status: psRun.status ?? null,
-		state: psRun.state ?? null,
-		step: normalizeStep(psRun.step),
-		taskId:
-			psRun.rootDir !== undefined && psRun.rootDir.length > 0
-				? taskByRoot.get(realpath(psRun.rootDir)) ?? null
-				: null,
-	}));
+	const taskByRun = new Map(
+		tasks.flatMap((task) =>
+			task.runId === null ? [] : [[task.runId, task.taskId] as const],
+		),
+	);
+	const workflows: WorkflowRow[] = runs.map((psRun) => {
+		const input = readShipInput(psRun.id);
+		const step = normalizeStep(psRun.step) ?? psRun.blockedNode;
+		return {
+			runId: psRun.id,
+			workflow: psRun.workflow ?? null,
+			status: psRun.status ?? null,
+			state: psRun.state ?? null,
+			step,
+			taskId:
+				(psRun.rootDir !== undefined && psRun.rootDir.length > 0
+					? taskByRoot.get(realpath(psRun.rootDir))
+					: undefined) ??
+				taskByRun.get(psRun.id) ??
+				null,
+			ticket: input.ticket,
+			prNumber: psRun.prNumber ?? input.prNumber,
+			prTitle: psRun.prTitle ?? input.prTitle,
+			phase: pipelinePhase(step, psRun.status),
+			waitingFor: waitingForFor(step, psRun.status),
+			activity: activityFor(step, psRun.status),
+			waitAgeMs:
+				waitingForFor(step, psRun.status) === "none"
+					? null
+					: ageMs(psRun.started),
+		};
+	});
 
 	const internal = internalSummary();
 	let questionsOpen = 0;
@@ -253,8 +590,14 @@ export async function buildFrame(options: { workflowCwd?: string } = {}): Promis
 			tasks: tasks.length,
 			running: tasks.filter((task) => task.runState === "running").length,
 			blocked: tasks.filter((task) => task.lastVerb === "blocked").length,
-			openDecisions: tasks.reduce((sum, task) => sum + task.openDecisions, 0),
-			queuedMessages: tasks.reduce((sum, task) => sum + task.queuedMessages, 0),
+			openDecisions: tasks.reduce(
+				(sum, task) => sum + task.openDecisions,
+				0,
+			),
+			queuedMessages: tasks.reduce(
+				(sum, task) => sum + task.queuedMessages,
+				0,
+			),
 			openQuestions: questionsOpen,
 			internalOpen: internal.open,
 			internalCap: internal.cap,
@@ -262,7 +605,11 @@ export async function buildFrame(options: { workflowCwd?: string } = {}): Promis
 		sources: [
 			runHealth,
 			paneHealth,
-			{ name: "home", state: "ok", detail: `${stateDir()} (${ids.length} task(s))` },
+			{
+				name: "home",
+				state: "ok",
+				detail: `${stateDir()} (${ids.length} task(s))`,
+			},
 		],
 	};
 }
@@ -271,21 +618,65 @@ export async function buildFrame(options: { workflowCwd?: string } = {}): Promis
 export function renderFrame(frame: FleetFrame): string {
 	const lines: string[] = [];
 	const c = frame.counters;
+	const workflowFailures = frame.workflows.filter(
+		(wf) => wf.activity === "failed",
+	).length;
+	const stampWaits = frame.workflows.filter(
+		(wf) => wf.waitingFor === "stamp",
+	).length;
 	lines.push(
-		`Fleet · ${c.tasks} task(s), ${c.running} running · ${c.openDecisions} decision(s) · ${c.openQuestions} question(s) · ${c.queuedMessages} queued · internal ${c.internalOpen}/${c.internalCap}`,
+		`Fleet · ${c.tasks} task(s), ${c.running} running · ${c.openDecisions} decision(s) · ${c.openQuestions} question(s) · ${c.queuedMessages} queued · ${workflowFailures} workflow failure(s) · ${stampWaits} stamp · internal ${c.internalOpen}/${c.internalCap}`,
 	);
 	if (frame.tasks.length === 0) {
 		lines.push("  (no tasks)");
 	}
-	for (const wf of frame.workflows) {
+	const visibleWorkflows = [...frame.workflows]
+		.filter((wf) => !isTerminalWorkflow(wf) || wf.activity === "failed")
+		.sort((a, b) => workflowAttentionRank(a) - workflowAttentionRank(b));
+	for (const wf of visibleWorkflows) {
+		const identity = [
+			wf.prNumber === null || wf.prNumber === undefined
+				? null
+				: `PR #${wf.prNumber}`,
+			wf.prTitle === null || wf.prTitle === undefined
+				? null
+				: `"${wf.prTitle}"`,
+		]
+			.filter((bit): bit is string => bit !== null)
+			.join(" ");
+		const fallback = [
+			wf.workflow,
+			wf.status,
+			wf.step === null ? null : `@${wf.step}`,
+			wf.taskId,
+		]
+			.filter((bit): bit is string => bit !== null)
+			.join(" · ");
+		const details = [
+			identity || fallback,
+			wf.ticket === null || wf.ticket === undefined
+				? null
+				: `ticket=${wf.ticket}`,
+			wf.phase === null || wf.phase === undefined
+				? null
+				: `phase=${wf.phase}`,
+			wf.waitingFor === null || wf.waitingFor === undefined
+				? null
+				: `waitingFor=${wf.waitingFor}`,
+		]
+			.filter((bit): bit is string => bit !== null)
+			.join(" · ");
 		lines.push(
-			`▸ wf:${wf.runId}  ${[wf.workflow, wf.status, wf.step === null ? null : `@${wf.step}`, wf.taskId]
-				.filter((bit): bit is string => bit !== null)
-				.join(" · ")}`,
+			`▸ [${wf.activity ?? "working"}] ${wf.prNumber === null || wf.prNumber === undefined ? `wf:${truncateTail(wf.runId, 16)}` : `PR #${wf.prNumber}`}  ${details}`,
 		);
 	}
 	for (const task of frame.tasks) {
-		const mark = task.runState === "running" ? "●" : task.runState === "finished" ? "✓" : "○";
+		const mark =
+			task.runState === "running"
+				? "●"
+				: task.runState === "finished"
+					? "✓"
+					: "○";
 		const bits: string[] = [task.kind];
 		if (task.project !== null) bits.push(task.project);
 		if (task.stage !== null) bits.push(`@${task.stage}`);
@@ -293,13 +684,19 @@ export function renderFrame(frame: FleetFrame): string {
 		if (task.pane !== null) bits.push(task.pane);
 		lines.push(`${mark} ${task.taskId}  ${bits.join(" · ")}`);
 		if (task.lastVerb !== null) {
-			lines.push(`    ${task.lastVerb}: ${(task.lastNote ?? "").slice(0, 90)}`);
+			lines.push(
+				`    ${task.lastVerb}: ${(task.lastNote ?? "").slice(0, 90)}`,
+			);
 		}
 		const flags: string[] = [];
-		if (task.openDecisions > 0) flags.push(`${task.openDecisions} decision(s) open`);
-		if (task.queuedMessages > 0) flags.push(`${task.queuedMessages} message(s) queued`);
+		if (task.openDecisions > 0)
+			flags.push(`${task.openDecisions} decision(s) open`);
+		if (task.queuedMessages > 0)
+			flags.push(`${task.queuedMessages} message(s) queued`);
 		if (task.unresolvedSideEffects > 0) {
-			flags.push(`${task.unresolvedSideEffects} UNRESOLVED side effect(s)`);
+			flags.push(
+				`${task.unresolvedSideEffects} UNRESOLVED side effect(s)`,
+			);
 		}
 		if (flags.length > 0) lines.push(`    ! ${flags.join(" · ")}`);
 	}
@@ -349,7 +746,8 @@ export function chipFor(task: TaskRow): Chip {
 	if (task.lastVerb === "blocked" || task.lastVerb === "failed") {
 		return { label: task.lastVerb, color: "error" };
 	}
-	if (task.runState === "running") return { label: "running", color: "success" };
+	if (task.runState === "running")
+		return { label: "running", color: "success" };
 	if (task.lastVerb === "done") return { label: "done", color: "dim" };
 	if (task.queuedMessages > 0) return { label: "queued", color: "accent" };
 	return { label: "idle", color: "dim" };
@@ -390,7 +788,15 @@ export function attentionRank(task: TaskRow): number {
 }
 
 /** Terminal workflow: finished one way or another. Unknown/null status stays visible. */
-const TERMINAL_STATUSES = ["completed", "failed", "cancelled", "succeeded", "finished", "done", "complete"];
+const TERMINAL_STATUSES = [
+	"completed",
+	"failed",
+	"cancelled",
+	"succeeded",
+	"finished",
+	"done",
+	"complete",
+];
 export function isTerminalWorkflow(wf: WorkflowRow): boolean {
 	return (
 		TERMINAL_STATUSES.includes((wf.status ?? "").toLowerCase()) ||
@@ -399,8 +805,13 @@ export function isTerminalWorkflow(wf: WorkflowRow): boolean {
 }
 
 /** Attention-first order; terminal done/failed rows drop unless showAll. */
-export function visibleTasks(tasks: TaskRow[], showAll: boolean): { shown: TaskRow[]; hidden: number } {
-	const sorted = [...tasks].sort((a, b) => attentionRank(a) - attentionRank(b));
+export function visibleTasks(
+	tasks: TaskRow[],
+	showAll: boolean,
+): { shown: TaskRow[]; hidden: number } {
+	const sorted = [...tasks].sort(
+		(a, b) => attentionRank(a) - attentionRank(b),
+	);
 	if (showAll) return { shown: sorted, hidden: 0 };
 	const shown = sorted.filter((task) => attentionRank(task) < 7);
 	return { shown, hidden: sorted.length - shown.length };
@@ -410,15 +821,28 @@ export function visibleTasks(tasks: TaskRow[], showAll: boolean): { shown: TaskR
  * Wrap the body in a titled border so the overlay reads as a panel — the same
  * frame the usage overlay draws (deck-usage.ts framed()).
  */
-export function framed(title: string, body: string, footer: string, theme: FleetTheme): string {
+export function framed(
+	title: string,
+	body: string,
+	footer: string,
+	theme: FleetTheme,
+): string {
 	const lines = body.split("\n");
-	const inner = Math.max(textWidth(title) + 4, ...lines.map(textWidth), textWidth(footer)) + 2;
+	const inner =
+		Math.max(
+			textWidth(title) + 4,
+			...lines.map(textWidth),
+			textWidth(footer),
+		) + 2;
 	// borderAccent, not border: with the panel fill gone (terminal-default
 	// background), the border IS the separator, so it must read clearly.
 	const top =
 		theme.fg("borderAccent", "╭─ ") +
 		theme.bold(theme.fg("accent", title)) +
-		theme.fg("borderAccent", ` ${"─".repeat(Math.max(0, inner - textWidth(title) - 3))}╮`);
+		theme.fg(
+			"borderAccent",
+			` ${"─".repeat(Math.max(0, inner - textWidth(title) - 3))}╮`,
+		);
 	const bottom = theme.fg("borderAccent", `╰${"─".repeat(inner)}╯`);
 	const padded = lines.map((line) => {
 		const pad = " ".repeat(Math.max(0, inner - textWidth(line) - 1));
@@ -440,7 +864,8 @@ export function sliceVisible(
 	offset: number,
 	max: number,
 ): { visible: string[]; offset: number; above: number; below: number } {
-	if (max >= lines.length) return { visible: lines, offset: 0, above: 0, below: 0 };
+	if (max >= lines.length)
+		return { visible: lines, offset: 0, above: 0, below: 0 };
 	// Furthest useful offset: the last line sits on the last row, with one
 	// above-marker row reserved.
 	const maxOffset = Math.max(0, lines.length - Math.max(1, max - 1));
@@ -499,30 +924,55 @@ export function buildFleetView(
 		`${theme.bold(String(c.running))} running`,
 		`${c.tasks} task(s)`,
 		c.blocked > 0 ? theme.fg("error", `${c.blocked} blocked`) : null,
-		c.openDecisions > 0 ? theme.fg("warning", `${c.openDecisions} decision(s)`) : null,
-		c.openQuestions > 0 ? theme.fg("warning", `${c.openQuestions} question(s) — /questions`) : null,
-		c.queuedMessages > 0 ? theme.fg("accent", `${c.queuedMessages} queued`) : null,
+		c.openDecisions > 0
+			? theme.fg("warning", `${c.openDecisions} decision(s)`)
+			: null,
+		c.openQuestions > 0
+			? theme.fg("warning", `${c.openQuestions} question(s) — /questions`)
+			: null,
+		c.queuedMessages > 0
+			? theme.fg("accent", `${c.queuedMessages} queued`)
+			: null,
 		`internal ${c.internalOpen}/${c.internalCap}`,
 	].filter((bit): bit is string => bit !== null);
 	lines.push(header.join(theme.fg("dim", "  ·  ")));
 	lines.push("");
 
-	const sorted = [...frame.tasks].sort((a, b) => attentionRank(a) - attentionRank(b));
+	const sorted = [...frame.tasks].sort(
+		(a, b) => attentionRank(a) - attentionRank(b),
+	);
 	const activeTasks = sorted.filter((task) => attentionRank(task) < 7);
 	const doneTasks = sorted.filter((task) => attentionRank(task) >= 7);
-	const activeWorkflows = frame.workflows.filter((wf) => !isTerminalWorkflow(wf));
-	const doneWorkflows = frame.workflows.filter(isTerminalWorkflow);
+	const activeWorkflows = frame.workflows
+		.filter((wf) => !isTerminalWorkflow(wf))
+		.sort((a, b) => workflowAttentionRank(a) - workflowAttentionRank(b));
+	const failedWorkflows = frame.workflows.filter(
+		(wf) => isTerminalWorkflow(wf) && wf.activity === "failed",
+	);
+	const doneWorkflows = frame.workflows.filter(
+		(wf) => isTerminalWorkflow(wf) && wf.activity !== "failed",
+	);
 
 	const renderTask = (task: TaskRow): void => {
 		const chip = chipFor(task);
-		const age = task.statusAgeMs === null ? "" : theme.fg("dim", ` ${humanAge(task.statusAgeMs)}`);
+		const age =
+			task.statusAgeMs === null
+				? ""
+				: theme.fg("dim", ` ${humanAge(task.statusAgeMs)}`);
 		// Every dynamic field is clamped: the Text component word-wraps rather
 		// than corrupting the TUI, but an unclamped URL or task id would still
 		// wrap across the frame border and break the panel visually.
 		const bits: string[] = [theme.fg("dim", task.kind)];
-		if (task.project !== null) bits.push(theme.fg("text", truncate(task.project, 20)));
-		if (task.stage !== null) bits.push(theme.fg("accent", `@${truncate(task.stage, 20)}`));
-		if (task.pane !== null) bits.push(theme.fg("dim", truncate(task.pane, 12)));
+		if (task.project !== null)
+			bits.push(theme.fg("text", truncate(task.project, 20)));
+		if (task.stage !== null)
+			bits.push(theme.fg("accent", `@${truncate(task.stage, 20)}`));
+		if (task.pane !== null)
+			bits.push(theme.fg("dim", truncate(task.pane, 12)));
+		if (task.prNumber !== null && task.prNumber !== undefined)
+			bits.push(theme.fg("accent", `PR #${task.prNumber}`));
+		else if (task.ticket !== null && task.ticket !== undefined)
+			bits.push(theme.fg("accent", task.ticket));
 		lines.push(
 			`${theme.fg(chip.color, `[${chip.label.padEnd(8)}]`)} ${theme.bold(truncate(task.taskId, 24).padEnd(24))}${bits.join(theme.fg("dim", " · "))}${age}`,
 		);
@@ -531,33 +981,128 @@ export function buildFleetView(
 				`           ${theme.fg("dim", `${task.lastVerb}:`)} ${theme.fg("text", truncate(task.lastNote ?? "", noteMax))}`,
 			);
 		}
-		if (task.pr !== null) lines.push(`           ${theme.fg("accent", truncate(task.pr, prMax))}`);
+		const prNumber = task.prNumber ?? prNumberFrom(task.pr);
+		if (
+			prNumber !== null ||
+			(task.prTitle !== null && task.prTitle !== undefined)
+		) {
+			const label = [
+				prNumber === null ? null : `PR #${prNumber}`,
+				task.prTitle === null || task.prTitle === undefined
+					? null
+					: `"${task.prTitle}"`,
+			]
+				.filter((bit): bit is string => bit !== null)
+				.join(" ");
+			lines.push(
+				`           ${theme.fg("accent", truncate(label, prMax))}`,
+			);
+		}
+		if (task.pr !== null && !/^\d+$/.test(task.pr))
+			lines.push(
+				`           ${theme.fg("accent", truncate(task.pr, prMax))}`,
+			);
 		const flags: string[] = [];
-		if (task.openDecisions > 0) flags.push(`${task.openDecisions} decision(s) open`);
-		if (task.queuedMessages > 0) flags.push(`${task.queuedMessages} message(s) queued`);
-		if (task.unresolvedSideEffects > 0) flags.push(`${task.unresolvedSideEffects} UNRESOLVED side effect(s)`);
-		if (flags.length > 0) lines.push(`           ${theme.fg("warning", `! ${flags.join(" · ")}`)}`);
+		if (task.openDecisions > 0)
+			flags.push(`${task.openDecisions} decision(s) open`);
+		if (task.queuedMessages > 0)
+			flags.push(`${task.queuedMessages} message(s) queued`);
+		if (task.unresolvedSideEffects > 0)
+			flags.push(
+				`${task.unresolvedSideEffects} UNRESOLVED side effect(s)`,
+			);
+		if (task.phase !== null && task.phase !== undefined)
+			flags.push(`phase=${task.phase}`);
+		if (task.waitingFor !== null && task.waitingFor !== undefined)
+			flags.push(`waitingFor=${task.waitingFor}`);
+		if (task.activity === "fixing") flags.push("fixing");
+		if (flags.length > 0)
+			lines.push(
+				`           ${theme.fg("warning", `! ${flags.join(" · ")}`)}`,
+			);
 	};
 	const renderWorkflow = (wf: WorkflowRow): void => {
-		const bits = [wf.workflow, wf.status, wf.step === null ? null : `@${wf.step}`, wf.taskId]
+		const legacy = [
+			wf.workflow,
+			wf.status,
+			wf.step === null ? null : `@${wf.step}`,
+			wf.taskId,
+		]
 			.filter((bit): bit is string => bit !== null)
 			.join(" · ");
+		const enriched =
+			(wf.prNumber !== null && wf.prNumber !== undefined) ||
+			(wf.prTitle !== null && wf.prTitle !== undefined) ||
+			(wf.phase !== null && wf.phase !== undefined) ||
+			(wf.waitingFor !== null && wf.waitingFor !== undefined);
+		const details = [
+			wf.activity === "failed"
+				? (wf.state ?? wf.status ?? "failed")
+				: null,
+			wf.prNumber === null || wf.prNumber === undefined
+				? null
+				: `PR #${wf.prNumber}`,
+			wf.prTitle === null || wf.prTitle === undefined
+				? null
+				: `"${truncate(wf.prTitle, 20)}"`,
+			wf.phase === null || wf.phase === undefined
+				? null
+				: `phase=${wf.phase}`,
+			wf.waitingFor === null || wf.waitingFor === undefined
+				? null
+				: `waitingFor=${wf.waitingFor}`,
+		]
+			.filter((bit): bit is string => bit !== null)
+			.join(" · ");
+		const content = enriched ? details : legacy;
+		const compact = [
+			wf.activity === "failed"
+				? (wf.state ?? wf.status ?? "failed")
+				: null,
+			wf.prNumber === null || wf.prNumber === undefined
+				? null
+				: `PR #${wf.prNumber}`,
+			wf.prTitle === null || wf.prTitle === undefined
+				? null
+				: `"${truncate(wf.prTitle, 14)}"`,
+			wf.ticket === null || wf.ticket === undefined
+				? null
+				: `ticket=${wf.ticket}`,
+			wf.phase === null || wf.phase === undefined
+				? null
+				: `phase=${wf.phase}`,
+		]
+			.filter((bit): bit is string => bit !== null)
+			.join(" · ");
+		const action =
+			wf.waitingFor === null || wf.waitingFor === undefined
+				? null
+				: `waitingFor=${wf.waitingFor}`;
 		lines.push(
-			`  ${theme.fg("accent", `wf:${truncate(wf.runId, 16)}`)}  ${theme.fg("text", truncate(bits, noteMax))}`,
+			`  ${theme.fg(wf.activity === "fixing" || wf.activity === "failed" ? "warning" : "accent", `[${wf.activity ?? "working"}]`)} ${theme.fg("accent", wf.prNumber === null || wf.prNumber === undefined ? `wf:${truncateTail(wf.runId, 16)}` : `PR #${wf.prNumber}`)}  ${theme.fg("text", truncate(action === null ? content : compact, Math.max(1, noteMax - 12)))}${action === null ? "" : ` ${theme.fg("warning", action)}${wf.waitAgeMs === null || wf.waitAgeMs === undefined ? "" : theme.fg("dim", ` ${humanAge(wf.waitAgeMs)}`)}`}`,
 		);
 	};
 
 	if (frame.tasks.length === 0) lines.push(theme.fg("dim", "  (no tasks)"));
 	for (const task of activeTasks) renderTask(task);
-	if (activeWorkflows.length > 0) {
+	if (
+		activeWorkflows.length > 0 ||
+		(!showAll && failedWorkflows.length > 0)
+	) {
 		lines.push("");
 		lines.push(theme.bold(theme.fg("toolTitle", "workflows")));
-		for (const wf of activeWorkflows) renderWorkflow(wf);
+		for (const wf of [
+			...activeWorkflows,
+			...(!showAll ? failedWorkflows : []),
+		])
+			renderWorkflow(wf);
 	}
 
 	const terminal = doneTasks.length + doneWorkflows.length;
 	if (terminal > 0 && !showAll) {
-		lines.push(theme.fg("dim", `  ${terminal} done/failed hidden — [a] shows all`));
+		lines.push(
+			theme.fg("dim", `  ${terminal} done/failed hidden — [a] shows all`),
+		);
 	} else if (terminal > 0) {
 		for (const task of doneTasks) renderTask(task);
 		if (doneWorkflows.length > 0) {
@@ -571,7 +1116,14 @@ export function buildFleetView(
 	lines.push(
 		frame.sources
 			.map((source) =>
-				theme.fg(source.state === "ok" ? "success" : source.state === "missing" ? "error" : "dim", `${source.name}=${source.state}`),
+				theme.fg(
+					source.state === "ok"
+						? "success"
+						: source.state === "missing"
+							? "error"
+							: "dim",
+					`${source.name}=${source.state}`,
+				),
 			)
 			.join("  "),
 	);
@@ -582,25 +1134,46 @@ export function buildFleetView(
 	let body = lines;
 	let scrollOffset = 0;
 	let scrollable = false;
-	if (options.maxBodyLines !== undefined && body.length > options.maxBodyLines) {
+	if (
+		options.maxBodyLines !== undefined &&
+		body.length > options.maxBodyLines
+	) {
 		scrollable = true;
-		const win = sliceVisible(lines, options.scrollOffset ?? 0, options.maxBodyLines);
+		const win = sliceVisible(
+			lines,
+			options.scrollOffset ?? 0,
+			options.maxBodyLines,
+		);
 		scrollOffset = win.offset;
 		body = [
-			...(win.above > 0 ? [theme.fg("dim", `  … +${win.above} line(s) above`)] : []),
+			...(win.above > 0
+				? [theme.fg("dim", `  … +${win.above} line(s) above`)]
+				: []),
 			...win.visible,
-			...(win.below > 0 ? [theme.fg("dim", `  … +${win.below} more line(s)`)] : []),
+			...(win.below > 0
+				? [theme.fg("dim", `  … +${win.below} more line(s)`)]
+				: []),
 		];
 	}
 
-	const scrollHint = scrollable ? `${theme.fg("accent", "[j/k]")} ${theme.fg("dim", "scroll")}   ` : "";
+	const scrollHint = scrollable
+		? `${theme.fg("accent", "[j/k]")} ${theme.fg("dim", "scroll")}   `
+		: "";
 	const footer = `${theme.fg("accent", "[q/Esc]")} ${theme.fg("dim", "close")}   ${theme.fg("accent", "[r]")} ${theme.fg("dim", "refresh")}   ${theme.fg("accent", "[a]")} ${theme.fg("dim", showAll ? "attention only" : "show all")}   ${scrollHint}${theme.fg("dim", "live · refreshes every 5s")}`;
 	if ((options.chrome ?? "frame") === "bare") {
 		// The caller draws the panel (pi-tui Box); double chrome garbles the TUI.
 		const title = theme.bold(theme.fg("accent", "deck fleet"));
-		return { text: [title, "", ...body, "", footer].join("\n"), scrollOffset, scrollable };
+		return {
+			text: [title, "", ...body, "", footer].join("\n"),
+			scrollOffset,
+			scrollable,
+		};
 	}
-	return { text: framed("deck fleet", body.join("\n"), footer, theme), scrollOffset, scrollable };
+	return {
+		text: framed("deck fleet", body.join("\n"), footer, theme),
+		scrollOffset,
+		scrollable,
+	};
 }
 
 /** Text-only convenience over buildFleetView. */
@@ -621,19 +1194,40 @@ export function buildFleetText(
  * only, so stale leftovers on done work stay silent; questions are global.
  * Failed gets its own segment: visible in the overlay must mean visible here.
  */
-export function renderStatusline(frame: FleetFrame, theme: FleetTheme = PLAIN_FLEET_THEME): string {
+export function renderStatusline(
+	frame: FleetFrame,
+	theme: FleetTheme = PLAIN_FLEET_THEME,
+): string {
 	const c = frame.counters;
 	const liveTasks = frame.tasks.filter((task) => attentionRank(task) < 7);
-	const liveQueued = liveTasks.reduce((sum, task) => sum + task.queuedMessages, 0);
-	const liveDecisions = liveTasks.reduce((sum, task) => sum + task.openDecisions, 0);
-	const failed = frame.tasks.filter((task) => task.lastVerb === "failed").length;
+	const liveQueued = liveTasks.reduce(
+		(sum, task) => sum + task.queuedMessages,
+		0,
+	);
+	const liveDecisions = liveTasks.reduce(
+		(sum, task) => sum + task.openDecisions,
+		0,
+	);
+	const failed = frame.tasks.filter(
+		(task) => task.lastVerb === "failed",
+	).length;
 	const parts: string[] = [];
 	if (c.running > 0) parts.push(theme.fg("success", `${c.running}▶`));
 	if (c.blocked > 0) parts.push(theme.fg("error", `${c.blocked} blocked`));
 	if (failed > 0) parts.push(theme.fg("error", `${failed} failed`));
-	if (c.openQuestions > 0) parts.push(theme.fg("warning", `${c.openQuestions}q`));
+	if (c.openQuestions > 0)
+		parts.push(theme.fg("warning", `${c.openQuestions}q`));
 	if (liveDecisions > 0) parts.push(theme.fg("warning", `${liveDecisions}?`));
 	if (liveQueued > 0) parts.push(theme.fg("accent", `${liveQueued}✉`));
+	const failedWorkflows = frame.workflows.filter(
+		(wf) => wf.activity === "failed",
+	).length;
+	const stamps = frame.workflows.filter(
+		(wf) => wf.waitingFor === "stamp",
+	).length;
+	if (failedWorkflows > 0)
+		parts.push(theme.fg("error", `${failedWorkflows} workflow failed`));
+	if (stamps > 0) parts.push(theme.fg("warning", `${stamps} stamp`));
 	if (parts.length === 0) return theme.fg("dim", "idle");
 	return parts.join(" · ");
 }

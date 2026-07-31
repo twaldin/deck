@@ -5,6 +5,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import {
+	activityFor,
 	attentionRank,
 	buildFleetText,
 	buildFleetView,
@@ -12,6 +13,7 @@ import {
 	framed,
 	isTerminalWorkflow,
 	humanAge,
+	waitingForFor,
 	normalizeStep,
 	PLAIN_FLEET_THEME,
 	renderStatusline,
@@ -68,14 +70,18 @@ function frame(overrides: Partial<FleetFrame> = {}): FleetFrame {
 
 describe("chipFor severity order", () => {
 	test("an open decision outranks a live run", () => {
-		expect(chipFor(task({ runState: "running", openDecisions: 1 }))).toEqual({
+		expect(
+			chipFor(task({ runState: "running", openDecisions: 1 })),
+		).toEqual({
 			label: "decision",
 			color: "warning",
 		});
 	});
 
 	test("blocked outranks running", () => {
-		expect(chipFor(task({ runState: "running", lastVerb: "blocked" }))).toEqual({
+		expect(
+			chipFor(task({ runState: "running", lastVerb: "blocked" })),
+		).toEqual({
 			label: "blocked",
 			color: "error",
 		});
@@ -83,7 +89,9 @@ describe("chipFor severity order", () => {
 
 	test("running, done, queued, idle", () => {
 		expect(chipFor(task({ runState: "running" })).label).toBe("running");
-		expect(chipFor(task({ runState: "finished", lastVerb: "done" })).label).toBe("done");
+		expect(
+			chipFor(task({ runState: "finished", lastVerb: "done" })).label,
+		).toBe("done");
 		expect(chipFor(task({ queuedMessages: 2 })).label).toBe("queued");
 		expect(chipFor(task()).label).toBe("idle");
 	});
@@ -100,9 +108,19 @@ describe("humanAge", () => {
 
 describe("framed", () => {
 	test("every border line has the same width", () => {
-		const out = framed("fleet", "short\na much longer line here", "footer", PLAIN_FLEET_THEME);
+		const out = framed(
+			"fleet",
+			"short\na much longer line here",
+			"footer",
+			PLAIN_FLEET_THEME,
+		);
 		const lines = out.split("\n");
-		const bordered = lines.filter((line) => line.startsWith("╭") || line.startsWith("│") || line.startsWith("╰"));
+		const bordered = lines.filter(
+			(line) =>
+				line.startsWith("╭") ||
+				line.startsWith("│") ||
+				line.startsWith("╰"),
+		);
 		const widths = new Set(bordered.map(textWidth));
 		expect(widths.size).toBe(1);
 	});
@@ -144,7 +162,14 @@ describe("buildFleetText", () => {
 		const out = buildFleetText(
 			frame({
 				workflows: [
-					{ runId: "r42", workflow: "pr-pipeline", status: "running", state: null, step: "review", taskId: "fix-login" },
+					{
+						runId: "r42",
+						workflow: "pr-pipeline",
+						status: "running",
+						state: null,
+						step: "review",
+						taskId: "fix-login",
+					},
 				],
 			}),
 		);
@@ -152,9 +177,106 @@ describe("buildFleetText", () => {
 		expect(out).toContain("pr-pipeline · running · @review · fix-login");
 	});
 
+	test("REGRESSION: a pipeline row carries PR identity, phase, wait reason, and idle/fixing", () => {
+		const out = buildFleetText(
+			frame({
+				workflows: [
+					{
+						runId: "adopt-26865",
+						workflow: "lindy-pr-pipeline",
+						status: "waiting-approval",
+						state: null,
+						step: "r0-stamp",
+						taskId: null,
+						prNumber: 26865,
+						prTitle: "Wire split Anthropic secrets",
+						phase: "stamp",
+						waitingFor: "stamp",
+						activity: "idle",
+						waitAgeMs: 7 * 60_000,
+					},
+					{
+						runId: "adopt-26861",
+						workflow: "lindy-pr-pipeline",
+						status: "running",
+						state: null,
+						step: "r0-watch-fix",
+						taskId: null,
+						prNumber: 26861,
+						prTitle: "Defer raw trigger payload write",
+						phase: "watch",
+						waitingFor: null,
+						activity: "fixing",
+					},
+				],
+			}),
+		);
+		expect(out).toContain("PR #26865");
+		expect(out).toContain('"Wire split An');
+		expect(out).toContain("phase=stamp");
+		expect(out).toContain("waitingFor=stamp");
+		expect(out).toContain("7m");
+		expect(out).toContain("[idle]");
+		expect(out).toContain("PR #26861");
+		expect(out).toContain("[fixing]");
+	});
+
+	test("pipeline state maps poll to idle CI wait and fix to active fixing", () => {
+		expect(waitingForFor("r0-watch-poll", "running")).toBe("ci-poll");
+		expect(activityFor("r0-watch-poll", "running")).toBe("idle");
+		expect(waitingForFor("r0-watch-fix", "running")).toBe("fixing");
+		expect(activityFor("r0-watch-fix", "running")).toBe("fixing");
+		expect(waitingForFor(null, "waiting-approval")).toBe("gate:approval");
+		expect(waitingForFor("r0-stamp-validity", "running")).toBe("none");
+		expect(activityFor("r0-watch-fix", "failed")).toBe("failed");
+	});
+
+	test("REGRESSION: production-shaped no-step and failed rows retain identity and failure", () => {
+		const out = buildFleetText(
+			frame({
+				workflows: [
+					{
+						runId: "adopt-26865",
+						workflow: "lindy-pr-pipeline",
+						status: "waiting-approval",
+						state: "waiting-approval",
+						step: null,
+						taskId: null,
+						prNumber: 26865,
+						prTitle: "Stamp this change",
+						phase: "waiting-approval",
+						waitingFor: "approval",
+						activity: "idle",
+					},
+					{
+						runId: "26819-pipeline",
+						workflow: "lindy-pr-pipeline",
+						status: "failed",
+						state: "failed",
+						step: null,
+						taskId: null,
+						prNumber: 26819,
+						prTitle: "Validator off arm",
+						phase: null,
+						waitingFor: null,
+						activity: "failed",
+					},
+				],
+			}),
+		);
+		expect(out).toContain("PR #26865");
+		expect(out).toContain("waitingFor=approval");
+		expect(out).toContain("[failed]");
+		expect(out).toContain("failed");
+	});
+
 	test("long notes are truncated so rows stay width-safe", () => {
 		const out = buildFleetText(
-			frame({ tasks: [task({ lastVerb: "working", lastNote: "x".repeat(300) })] }),
+			frame({
+				tasks: [
+					task({ lastVerb: "working", lastNote: "x".repeat(300) }),
+				],
+			}),
 		);
 		const longest = Math.max(...out.split("\n").map(textWidth));
 		expect(longest).toBeLessThan(140);
@@ -162,19 +284,26 @@ describe("buildFleetText", () => {
 
 	test("maxRowWidth widens the note clamp on wide terminals", () => {
 		const note = "z".repeat(150);
-		const narrow = buildFleetText(frame({ tasks: [task({ lastVerb: "working", lastNote: note })] }));
+		const narrow = buildFleetText(
+			frame({ tasks: [task({ lastVerb: "working", lastNote: note })] }),
+		);
 		const wide = buildFleetText(
 			frame({ tasks: [task({ lastVerb: "working", lastNote: note })] }),
 			PLAIN_FLEET_THEME,
 			{ maxRowWidth: 200 },
 		);
-		const count = (out: string): number => Math.max(...out.split("\n").map((l) => (l.match(/z/g) ?? []).length));
+		const count = (out: string): number =>
+			Math.max(
+				...out.split("\n").map((l) => (l.match(/z/g) ?? []).length),
+			);
 		expect(count(wide)).toBeGreaterThan(count(narrow));
 		expect(count(wide)).toBe(150);
 	});
 
 	test("blocked tasks surface in the overlay header", () => {
-		const f = frame({ tasks: [task({ lastVerb: "blocked", lastNote: "main is red" })] });
+		const f = frame({
+			tasks: [task({ lastVerb: "blocked", lastNote: "main is red" })],
+		});
 		f.counters.tasks = 1;
 		f.counters.blocked = 1;
 		expect(buildFleetText(f)).toContain("1 blocked");
@@ -213,7 +342,12 @@ describe("buildFleetText", () => {
 
 describe("attention-first default view", () => {
 	const doneTasks = Array.from({ length: 15 }, (_, i) =>
-		task({ taskId: `old-${i}`, runState: "finished", lastVerb: "done", lastNote: "shipped" }),
+		task({
+			taskId: `old-${i}`,
+			runState: "finished",
+			lastVerb: "done",
+			lastNote: "shipped",
+		}),
 	);
 	const live = [
 		task({ taskId: "live-run", runState: "running", lastVerb: "working" }),
@@ -229,16 +363,24 @@ describe("attention-first default view", () => {
 	});
 
 	test("show-all includes the terminal rows", () => {
-		const out = buildFleetText(frame({ tasks: [...doneTasks, ...live] }), PLAIN_FLEET_THEME, {
-			showAll: true,
-		});
+		const out = buildFleetText(
+			frame({ tasks: [...doneTasks, ...live] }),
+			PLAIN_FLEET_THEME,
+			{
+				showAll: true,
+			},
+		);
 		expect(out).toContain("old-3");
 		expect(out).not.toContain("hidden");
 	});
 
 	test("attention order: decision, blocked, then running, before idle", () => {
 		const { shown } = visibleTasks([...doneTasks, ...live], false);
-		expect(shown.map((t) => t.taskId)).toEqual(["ask", "stuck", "live-run"]);
+		expect(shown.map((t) => t.taskId)).toEqual([
+			"ask",
+			"stuck",
+			"live-run",
+		]);
 	});
 
 	test("a failed task with an open decision is not terminal", () => {
@@ -254,7 +396,12 @@ describe("attention-first default view", () => {
 	});
 
 	test("done wins over a stale queue: still terminal, still hidden by default", () => {
-		const t = task({ taskId: "stale-queue", runState: "finished", lastVerb: "done", queuedMessages: 1 });
+		const t = task({
+			taskId: "stale-queue",
+			runState: "finished",
+			lastVerb: "done",
+			queuedMessages: 1,
+		});
 		expect(attentionRank(t)).toBe(7);
 		const out = buildFleetText(frame({ tasks: [t, ...live] }));
 		expect(out).not.toContain("stale-queue");
@@ -262,14 +409,25 @@ describe("attention-first default view", () => {
 	});
 
 	test("done wins over a stale open decision", () => {
-		expect(attentionRank(task({ lastVerb: "done", openDecisions: 1 }))).toBe(7);
+		expect(
+			attentionRank(task({ lastVerb: "done", openDecisions: 1 })),
+		).toBe(7);
 	});
 
 	test("a running workflow renders with the active tasks, above the collapse line", () => {
 		const out = buildFleetText(
 			frame({
 				tasks: [...doneTasks, ...live],
-				workflows: [{ runId: "r1", workflow: "pr-pipeline", status: "running", state: null, step: null, taskId: null }],
+				workflows: [
+					{
+						runId: "r1",
+						workflow: "pr-pipeline",
+						status: "running",
+						state: null,
+						step: null,
+						taskId: null,
+					},
+				],
 			}),
 		);
 		expect(out.indexOf("wf:r1")).toBeGreaterThan(out.indexOf("live-run"));
@@ -280,7 +438,16 @@ describe("attention-first default view", () => {
 		const out = buildFleetText(
 			frame({
 				tasks: [...doneTasks, ...live],
-				workflows: [{ runId: "r9", workflow: "pr-pipeline", status: "Completed", state: null, step: null, taskId: null }],
+				workflows: [
+					{
+						runId: "r9",
+						workflow: "pr-pipeline",
+						status: "Completed",
+						state: null,
+						step: null,
+						taskId: null,
+					},
+				],
 			}),
 		);
 		expect(out).not.toContain("wf:r9");
@@ -292,8 +459,22 @@ describe("attention-first default view", () => {
 			frame({
 				tasks: [...doneTasks, ...live],
 				workflows: [
-					{ runId: "r1", workflow: "pr-pipeline", status: "running", state: null, step: null, taskId: null },
-					{ runId: "r9", workflow: "pr-pipeline", status: "failed", state: null, step: null, taskId: null },
+					{
+						runId: "r1",
+						workflow: "pr-pipeline",
+						status: "running",
+						state: null,
+						step: null,
+						taskId: null,
+					},
+					{
+						runId: "r9",
+						workflow: "pr-pipeline",
+						status: "failed",
+						state: null,
+						step: null,
+						taskId: null,
+					},
 				],
 			}),
 			PLAIN_FLEET_THEME,
@@ -305,11 +486,27 @@ describe("attention-first default view", () => {
 	});
 
 	test("isTerminalWorkflow: terminal statuses case-insensitive, unknown/null stay active", () => {
-		const wf = (status: string | null, state: string | null = null) => ({ runId: "r", workflow: null, status, state, step: null, taskId: null });
-		for (const s of ["completed", "Failed", "CANCELLED", "succeeded", "finished", "done", "Complete"]) {
+		const wf = (status: string | null, state: string | null = null) => ({
+			runId: "r",
+			workflow: null,
+			status,
+			state,
+			step: null,
+			taskId: null,
+		});
+		for (const s of [
+			"completed",
+			"Failed",
+			"CANCELLED",
+			"succeeded",
+			"finished",
+			"done",
+			"Complete",
+		]) {
 			expect(isTerminalWorkflow(wf(s))).toBe(true);
 		}
-		for (const s of ["running", "weird", null]) expect(isTerminalWorkflow(wf(s))).toBe(false);
+		for (const s of ["running", "weird", null])
+			expect(isTerminalWorkflow(wf(s))).toBe(false);
 		// Live smithers ps shape: status "finished" + state "succeeded".
 		expect(isTerminalWorkflow(wf("finished", "succeeded"))).toBe(true);
 		// A state field alone can carry the terminal verdict.
@@ -317,12 +514,15 @@ describe("attention-first default view", () => {
 	});
 
 	test("normalizeStep: em-dash, dash, and empty read as no step", () => {
-		for (const s of ["\u2014", "-", "", "  ", null, undefined]) expect(normalizeStep(s)).toBe(null);
+		for (const s of ["\u2014", "-", "", "  ", null, undefined])
+			expect(normalizeStep(s)).toBe(null);
 		expect(normalizeStep("review")).toBe("review");
 	});
 
 	test("bare chrome: no box-drawing frame, title and footer still present", () => {
-		const f = frame({ tasks: [task({ taskId: "live", runState: "running" })] });
+		const f = frame({
+			tasks: [task({ taskId: "live", runState: "running" })],
+		});
 		const bare = buildFleetText(f, PLAIN_FLEET_THEME, { chrome: "bare" });
 		expect(bare).not.toContain("\u256d");
 		expect(bare).not.toContain("\u2570");
@@ -336,28 +536,41 @@ describe("attention-first default view", () => {
 	});
 
 	test("maxBodyLines clamps the frame height with the border intact", () => {
-		const out = buildFleetText(frame({ tasks: [...doneTasks, ...live] }), PLAIN_FLEET_THEME, {
-			showAll: true,
-			maxBodyLines: 10,
-		});
+		const out = buildFleetText(
+			frame({ tasks: [...doneTasks, ...live] }),
+			PLAIN_FLEET_THEME,
+			{
+				showAll: true,
+				maxBodyLines: 10,
+			},
+		);
 		const lines = out.split("\n");
 		// 10 body lines + top/bottom border + blank + footer
 		expect(lines.length).toBe(14);
 		expect(out).toContain("more line(s)");
 		const bordered = lines.filter(
-			(line) => line.startsWith("\u256d") || line.startsWith("\u2502") || line.startsWith("\u2570"),
+			(line) =>
+				line.startsWith("\u256d") ||
+				line.startsWith("\u2502") ||
+				line.startsWith("\u2570"),
 		);
 		expect(new Set(bordered.map(textWidth)).size).toBe(1);
 	});
 
 	test("truncated view advertises j/k scroll; untruncated view does not", () => {
-		const clamped = buildFleetView(frame({ tasks: [...doneTasks, ...live] }), PLAIN_FLEET_THEME, {
-			showAll: true,
-			maxBodyLines: 10,
-		});
+		const clamped = buildFleetView(
+			frame({ tasks: [...doneTasks, ...live] }),
+			PLAIN_FLEET_THEME,
+			{
+				showAll: true,
+				maxBodyLines: 10,
+			},
+		);
 		expect(clamped.scrollable).toBe(true);
 		expect(clamped.text).toContain("[j/k] scroll");
-		const open = buildFleetView(frame({ tasks: live }), PLAIN_FLEET_THEME, { showAll: true });
+		const open = buildFleetView(frame({ tasks: live }), PLAIN_FLEET_THEME, {
+			showAll: true,
+		});
 		expect(open.scrollable).toBe(false);
 		expect(open.text).not.toContain("[j/k] scroll");
 	});
@@ -365,15 +578,24 @@ describe("attention-first default view", () => {
 	test("scrollOffset moves the window, stays on-budget, and comes back clamped", () => {
 		const opts = { showAll: true, maxBodyLines: 10 };
 		const f = frame({ tasks: [...doneTasks, ...live] });
-		const top = buildFleetView(f, PLAIN_FLEET_THEME, { ...opts, scrollOffset: 0 });
-		const scrolled = buildFleetView(f, PLAIN_FLEET_THEME, { ...opts, scrollOffset: 5 });
+		const top = buildFleetView(f, PLAIN_FLEET_THEME, {
+			...opts,
+			scrollOffset: 0,
+		});
+		const scrolled = buildFleetView(f, PLAIN_FLEET_THEME, {
+			...opts,
+			scrollOffset: 5,
+		});
 		expect(scrolled.scrollOffset).toBe(5);
 		expect(scrolled.text).toContain("line(s) above");
 		expect(scrolled.text).not.toBe(top.text);
 		// Frame height never grows past the budget while scrolled.
 		expect(scrolled.text.split("\n").length).toBe(14);
 		// Over-scroll clamps to the real end of the body.
-		const bottom = buildFleetView(f, PLAIN_FLEET_THEME, { ...opts, scrollOffset: 9_999 });
+		const bottom = buildFleetView(f, PLAIN_FLEET_THEME, {
+			...opts,
+			scrollOffset: 9_999,
+		});
 		expect(bottom.scrollOffset).toBeLessThan(9_999);
 		expect(bottom.text).not.toContain("more line(s)");
 		expect(bottom.text.split("\n").length).toBeLessThanOrEqual(14);
@@ -384,13 +606,23 @@ describe("sliceVisible", () => {
 	const lines = Array.from({ length: 20 }, (_, i) => `L${i}`);
 
 	test("fits: everything visible, no markers", () => {
-		expect(sliceVisible(lines, 0, 20)).toEqual({ visible: lines, offset: 0, above: 0, below: 0 });
+		expect(sliceVisible(lines, 0, 20)).toEqual({
+			visible: lines,
+			offset: 0,
+			above: 0,
+			below: 0,
+		});
 		expect(sliceVisible(lines, 7, 25).offset).toBe(0);
 	});
 
 	test("top of a clamped list: below marker only, budget respected", () => {
 		const win = sliceVisible(lines, 0, 10);
-		expect(win).toEqual({ visible: lines.slice(0, 9), offset: 0, above: 0, below: 11 });
+		expect(win).toEqual({
+			visible: lines.slice(0, 9),
+			offset: 0,
+			above: 0,
+			below: 11,
+		});
 	});
 
 	test("middle: both markers, still on budget", () => {
@@ -413,7 +645,11 @@ describe("sliceVisible", () => {
 		expect(sliceVisible(lines, -3, 10).offset).toBe(0);
 	});
 
-	const bodyRows = (win: { visible: string[]; above: number; below: number }): number =>
+	const bodyRows = (win: {
+		visible: string[];
+		above: number;
+		below: number;
+	}): number =>
 		win.visible.length + (win.above > 0 ? 1 : 0) + (win.below > 0 ? 1 : 0);
 
 	test("max=1 still shows one line and drops the markers to stay on budget", () => {
@@ -442,11 +678,24 @@ describe("sliceVisible", () => {
 	});
 
 	test("buildFleetView honors tiny maxBodyLines budgets when scrolled", () => {
-		const f = frame({ tasks: [...Array.from({ length: 15 }, (_, i) => task({ taskId: `old-${i}`, lastVerb: "done" })), task({ taskId: "live", runState: "running" })] });
+		const f = frame({
+			tasks: [
+				...Array.from({ length: 15 }, (_, i) =>
+					task({ taskId: `old-${i}`, lastVerb: "done" }),
+				),
+				task({ taskId: "live", runState: "running" }),
+			],
+		});
 		for (const maxBodyLines of [1, 2]) {
-			const view = buildFleetView(f, PLAIN_FLEET_THEME, { showAll: true, maxBodyLines, scrollOffset: 1 });
+			const view = buildFleetView(f, PLAIN_FLEET_THEME, {
+				showAll: true,
+				maxBodyLines,
+				scrollOffset: 1,
+			});
 			// top/bottom border + body + blank + footer
-			expect(view.text.split("\n").length).toBeLessThanOrEqual(maxBodyLines + 4);
+			expect(view.text.split("\n").length).toBeLessThanOrEqual(
+				maxBodyLines + 4,
+			);
 		}
 	});
 });
@@ -473,8 +722,17 @@ describe("statusline", () => {
 		f.counters.openQuestions = 1;
 		f.counters.openDecisions = 1;
 		f.counters.queuedMessages = 3;
-		f.tasks = [task({ taskId: "live", runState: "running", queuedMessages: 3, openDecisions: 1 })];
-		expect(renderStatusline(f)).toBe("2\u25b6 \u00b7 1 blocked \u00b7 1q \u00b7 1? \u00b7 3\u2709");
+		f.tasks = [
+			task({
+				taskId: "live",
+				runState: "running",
+				queuedMessages: 3,
+				openDecisions: 1,
+			}),
+		];
+		expect(renderStatusline(f)).toBe(
+			"2\u25b6 \u00b7 1 blocked \u00b7 1q \u00b7 1? \u00b7 3\u2709",
+		);
 	});
 
 	test("a stale queue or decision on a done task earns no segment", () => {
@@ -482,7 +740,14 @@ describe("statusline", () => {
 		f.counters.tasks = 1;
 		f.counters.queuedMessages = 1;
 		f.counters.openDecisions = 1;
-		f.tasks = [task({ lastVerb: "done", runState: "finished", queuedMessages: 1, openDecisions: 1 })];
+		f.tasks = [
+			task({
+				lastVerb: "done",
+				runState: "finished",
+				queuedMessages: 1,
+				openDecisions: 1,
+			}),
+		];
 		expect(renderStatusline(f)).toBe("idle");
 	});
 
@@ -491,6 +756,41 @@ describe("statusline", () => {
 		f.counters.tasks = 1;
 		f.tasks = [task({ lastVerb: "failed", runState: "finished" })];
 		expect(renderStatusline(f)).toBe("1 failed");
+	});
+
+	test("workflow failures and stamp parks prevent a false calm statusline", () => {
+		const f = frame({
+			workflows: [
+				{
+					runId: "r-stamp",
+					workflow: "lindy-pr-pipeline",
+					status: "waiting-approval",
+					state: "waiting-approval",
+					step: null,
+					taskId: null,
+					prNumber: 26865,
+					prTitle: "Stamp",
+					phase: "stamp",
+					waitingFor: "stamp",
+					activity: "idle",
+				},
+				{
+					runId: "r-failed",
+					workflow: "lindy-pr-pipeline",
+					status: "failed",
+					state: "failed",
+					step: null,
+					taskId: null,
+					prNumber: 26819,
+					prTitle: "Failed",
+					phase: null,
+					waitingFor: "none",
+					activity: "failed",
+				},
+			],
+		});
+		expect(renderStatusline(f)).toContain("1 workflow failed");
+		expect(renderStatusline(f)).toContain("1 stamp");
 	});
 
 	test("segments carry the theme's colors", () => {
@@ -502,7 +802,9 @@ describe("statusline", () => {
 		f.counters.running = 1;
 		f.counters.blocked = 1;
 		f.tasks = [task({ runState: "running", openDecisions: 1 })];
-		expect(renderStatusline(f, marked)).toBe("<success>1\u25b6</success> \u00b7 <error>1 blocked</error> \u00b7 <warning>1?</warning>");
+		expect(renderStatusline(f, marked)).toBe(
+			"<success>1\u25b6</success> \u00b7 <error>1 blocked</error> \u00b7 <warning>1?</warning>",
+		);
 	});
 
 	test("the overlay header names /questions so the captain knows the next move", () => {
