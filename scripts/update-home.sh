@@ -20,6 +20,10 @@ bun install --cwd "$REPO/broker"
 bun install --cwd "$REPO/cli"
 bash "$REPO/v2/install.sh"
 
+# Seed the operator contract on first update. Never overwrite captain edits.
+# Use the bootstrap path so stripping, permissions, and DECK_V2_HOME stay aligned.
+deck-v2 bootstrap >/dev/null
+
 # enter.sh for glass shells (PATH after nvm)
 ENTER="$HOME/.deck/enter.sh"
 mkdir -p "$HOME/.deck"
