@@ -57,9 +57,12 @@ used. Unit tests never touch the live API; a live smoke run is just
 Every change except `untracked` is appended to the event log as one JSON
 object per line (`src/deck.ts`, `IntakeEvent`): `{v, ts, kind, url, taskId,
 signal, note}`. `taskId` is the correlated deck task when the PR's URL or head
-branch matches a task's `.meta` record under `$DECK_V2_HOME/state/`
-(PR-URL match wins; an ambiguous branch match correlates to nothing rather
-than to the wrong task). Uncorrelated PRs remain intake records, listable with
+branch matches a task's `.meta` record under `$DECK_V2_HOME/state/`.
+PR-URL match wins; a branch match is rejected when the task's repo (resolved
+from its worktree's origin remote) differs from the PR's repo, and an
+ambiguous branch match correlates to nothing rather than to the wrong task.
+PR titles are sanitized (control characters stripped, length capped) before
+they enter a note — GitHub text is data, never instructions. Uncorrelated PRs remain intake records, listable with
 `deck-intake ls` (tab-separated: `taskId  buckets  ci  review  url  title`).
 
 deck-v2's `reconcile` (v2/src/wake.ts) consumes the log with the same
@@ -73,8 +76,10 @@ exactly once per event across restarts:
 | everything else (uncorrelated CI churn, own new PRs) | T2 | recorded, never delivered |
 
 Idempotence is layered: the diff engine only emits real state changes (same PR
-review state never re-emits), and the consumer's cursor never re-reads a
-consumed line.
+review state never re-emits), the consumer's cursor never re-reads a consumed
+line, and a durable url+kind baseline suppresses the crash-window repeat
+(events append BEFORE the state file advances, so a crash in between re-emits
+the same diff once more — it is recorded, but never wakes twice).
 
 Exit codes: `0` ok (empty diff = quiet run), `1` usage error, `2` poll/IO
 failure. The state file is advanced LAST, after the diff has been printed

@@ -8,6 +8,7 @@ import {
 	correlate,
 	deckHome,
 	intakeEventsFile,
+	parseRepoFromRemote,
 	readTaskRefs,
 } from "../src/deck";
 import type { DiffChange, IntakeState, PrItem } from "../src/schema";
@@ -85,30 +86,74 @@ describe("correlate", () => {
 	const refs = [
 		{ taskId: "t-url", pr: "https://github.com/o/r/pull/7/" },
 		{ taskId: "t-branch", branch: "deck/feature" },
+		{ taskId: "t-repo", branch: "deck/pinned", repo: "o/r" },
 		{ taskId: "t-dup-a", branch: "main-fix" },
 		{ taskId: "t-dup-b", branch: "main-fix" },
 	];
+	const pr = (headRef: string, repo = "o/r") => ({
+		url: "https://github.com/o/r/pull/9",
+		headRef,
+		repo,
+	});
 
 	test("PR url match wins, normalized (trailing slash, case)", () => {
 		expect(
-			correlate({ url: "HTTPS://github.com/o/r/pull/7", headRef: "deck/feature" }, refs),
+			correlate(
+				{ url: "HTTPS://github.com/o/r/pull/7", headRef: "deck/feature", repo: "o/r" },
+				refs,
+			),
 		).toBe("t-url");
 	});
 
 	test("branch match when no url match", () => {
-		expect(correlate({ url: "https://github.com/o/r/pull/9", headRef: "deck/feature" }, refs)).toBe(
-			"t-branch",
-		);
+		expect(correlate(pr("deck/feature"), refs)).toBe("t-branch");
+	});
+
+	test("branch match respects a known task repo: same repo matches", () => {
+		expect(correlate(pr("deck/pinned", "o/r"), refs)).toBe("t-repo");
+	});
+
+	test("branch match rejects a cross-repo collision when the task repo is known", () => {
+		expect(correlate(pr("deck/pinned", "other/repo"), refs)).toBe(null);
 	});
 
 	test("ambiguous branch correlates to nothing, not the wrong task", () => {
-		expect(correlate({ url: "https://github.com/o/r/pull/9", headRef: "main-fix" }, refs)).toBe(
-			null,
-		);
+		expect(correlate(pr("main-fix"), refs)).toBe(null);
 	});
 
 	test("no match is null", () => {
-		expect(correlate({ url: "https://github.com/o/r/pull/9", headRef: "other" }, refs)).toBe(null);
+		expect(correlate(pr("other"), refs)).toBe(null);
+	});
+});
+
+describe("parseRepoFromRemote", () => {
+	test("https, ssh and .git forms all resolve to owner/name", () => {
+		for (const url of [
+			"https://github.com/o/r.git",
+			"https://github.com/o/r",
+			"git@github.com:o/r.git",
+			"ssh://git@github.com/o/r.git",
+		]) {
+			expect(parseRepoFromRemote(url)).toBe("o/r");
+		}
+		expect(parseRepoFromRemote("not a url")).toBe(null);
+	});
+});
+
+describe("sanitization at the GitHub trust boundary", () => {
+	test("control characters are stripped and long titles capped in notes", () => {
+		const url = "https://github.com/o/r/pull/8";
+		const title = `evil\u0000title\n${"x".repeat(400)}`;
+		const events = buildIntakeEvents(
+			[{ kind: "new", url, buckets: ["my-pr"], reviewRequested: false, title }],
+			makeState([makeItem({ url, title })]),
+			EMPTY,
+			[],
+			NOW,
+		);
+		const note = events[0]?.note ?? "";
+		expect(note).not.toMatch(/[\u0000-\u001f]/);
+		expect(note.length).toBeLessThan(250);
 	});
 });
 

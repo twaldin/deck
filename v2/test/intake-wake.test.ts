@@ -80,7 +80,10 @@ describe("intake event consumption", () => {
 
 	test("IDEMPOTENT: a second reconcile over the same log fires nothing", async () => {
 		const { wake, home: h } = await mods();
-		appendLines(h.intakeFiles().events, [event({ signal: true }), event({ taskId: "t1" })]);
+		appendLines(h.intakeFiles().events, [
+			event({ signal: true, url: "https://x/1", note: "new PR: a https://x/1" }),
+			event({ taskId: "t1", url: "https://x/2", note: "ci passing->failing: b https://x/2" }),
+		]);
 		const first = wake.reconcile([]);
 		expect(first.interrupt.length + first.batched.length).toBe(2);
 		const second = wake.reconcile([]);
@@ -106,6 +109,24 @@ describe("intake event consumption", () => {
 		expect(result.malformed).toHaveLength(1);
 		expect(result.malformed[0]?.taskId).toBe(".intake");
 		expect(result.batched).toHaveLength(1);
+	});
+
+	test("crash-window duplicate (same url+kind+note, re-appended) wakes once", async () => {
+		const { wake, home: h } = await mods();
+		// The poller crashed between the event append and its state-file write, so
+		// the next poll re-emitted the same diff with a NEW timestamp.
+		appendLines(h.intakeFiles().events, [event({ signal: true, ts: "2026-02-01T00:00:00Z" })]);
+		wake.reconcile([]);
+		appendLines(h.intakeFiles().events, [event({ signal: true, ts: "2026-02-01T00:02:00Z" })]);
+		const second = wake.reconcile([]);
+		expect(second.interrupt).toHaveLength(0);
+		expect(second.silent).toHaveLength(1);
+		// A REAL new transition on the same url+kind still wakes.
+		appendLines(h.intakeFiles().events, [
+			event({ taskId: "t1", note: "ci failing->passing: t https://x/7" }),
+		]);
+		const third = wake.reconcile([]);
+		expect(third.batched).toHaveLength(1);
 	});
 
 	test("no intake log at all is a clean no-op", async () => {

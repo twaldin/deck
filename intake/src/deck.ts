@@ -8,6 +8,7 @@
  * state file advances: a crash in between re-detects the same diff next run,
  * so delivery is at-least-once, never lost.
  */
+import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -48,7 +49,27 @@ export type TaskRef = {
 	pr?: string;
 	branch?: string;
 	worktree?: string;
+	/** "owner/name", resolved from the worktree's origin remote when possible. */
+	repo?: string;
 };
+
+/** "owner/name" from an https or ssh GitHub remote URL, else null. */
+export function parseRepoFromRemote(url: string): string | null {
+	const match = /^(?:https?:\/\/[^/]+\/|git@[^:]+:|ssh:\/\/git@[^/]+\/)([^/\s]+\/[^/\s]+?)(?:\.git)?\/?$/.exec(
+		url.trim(),
+	);
+	return match?.[1] ?? null;
+}
+
+/** The worktree's origin repo, or null when the worktree is gone/unreadable. */
+function repoFromWorktree(worktree: string): string | null {
+	const run = spawnSync("git", ["-C", worktree, "remote", "get-url", "origin"], {
+		encoding: "utf8",
+		timeout: 5000,
+	});
+	if (run.status !== 0 || typeof run.stdout !== "string") return null;
+	return parseRepoFromRemote(run.stdout);
+}
 
 /**
  * Read every task's correlation keys from the deck state dir. The `.meta`
@@ -82,18 +103,26 @@ export function readTaskRefs(stateDir: string = deckStateDir()): TaskRef[] {
 			else if (key === "branch") ref.branch = value;
 			else if (key === "worktree") ref.worktree = value;
 		}
+		// Branch names are only unique within a repo, so a branch match needs the
+		// task's repo. Resolved from the live worktree's origin remote; a torn-down
+		// worktree leaves it unknown and the branch match falls back to name-only.
+		if (ref.branch !== undefined && ref.worktree !== undefined) {
+			const repo = repoFromWorktree(ref.worktree);
+			if (repo !== null) ref.repo = repo;
+		}
 		refs.push(ref);
 	}
 	return refs;
 }
 
 /**
- * Correlate one PR to a deck task. A PR-URL match wins over a branch match;
- * an ambiguous branch match (two tasks, same branch name across repos)
- * correlates to nothing rather than to the wrong task.
+ * Correlate one PR to a deck task. A PR-URL match wins over a branch match.
+ * A branch match is rejected when the task's repo is known and differs from
+ * the PR's repo, and an ambiguous match (two tasks, same branch) correlates
+ * to nothing rather than to the wrong task.
  */
 export function correlate(
-	item: Pick<PrItem, "url" | "headRef">,
+	item: Pick<PrItem, "url" | "headRef" | "repo">,
 	refs: TaskRef[],
 ): string | null {
 	const url = normalizePrUrl(item.url);
@@ -102,10 +131,23 @@ export function correlate(
 	}
 	const byBranch = new Set<string>();
 	for (const ref of refs) {
-		if (ref.branch !== undefined && ref.branch === item.headRef) byBranch.add(ref.taskId);
+		if (ref.branch === undefined || ref.branch !== item.headRef) continue;
+		if (ref.repo !== undefined && ref.repo !== item.repo) continue;
+		byBranch.add(ref.taskId);
 	}
 	if (byBranch.size === 1) return [...byBranch][0] ?? null;
 	return null;
+}
+
+/**
+ * GitHub-sourced text (PR titles, login names) crosses a trust boundary into
+ * wake messages the orchestrator reads. Strip control characters, collapse
+ * whitespace, cap length. Data stays data.
+ */
+function sanitize(text: string, max = 160): string {
+	// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping them is the point
+	const clean = text.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
+	return clean.length > max ? `${clean.slice(0, max - 1)}\u2026` : clean;
 }
 
 function describe(change: DiffChange, title: string): { note: string; signal: boolean } {
@@ -161,7 +203,7 @@ export function buildIntakeEvents(
 	for (const change of changes) {
 		if (change.kind === "untracked") continue;
 		const item = current.items[change.url] ?? previous.items[change.url];
-		const title = item?.title ?? ("title" in change ? change.title : change.url);
+		const title = sanitize(item?.title ?? ("title" in change ? change.title : change.url));
 		const { note, signal } = describe(change, title);
 		events.push({
 			v: 1,

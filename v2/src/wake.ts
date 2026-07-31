@@ -171,7 +171,7 @@ export function reconcile(taskIds?: string[]): ReconcileResult {
 		}
 	}
 
-	consumeIntake(cursors, result);
+	consumeIntake(cursors, baseline, result);
 
 	saveCursors(cursors);
 	saveBaseline(baseline);
@@ -203,16 +203,22 @@ const INTAKE_CURSOR_KEY = ".intake";
 
 /**
  * Consume new intake events. The intake poller's diff engine is already
- * edge-triggered (same PR review state never re-emits), so the cursor alone
- * makes this idempotent — no baseline needed.
+ * edge-triggered (same PR review state never re-emits) and the durable
+ * cursor never re-reads a consumed line.
  *
  * Tiering: a new review request is T0 (the captain owes a review NOW); an
  * event correlated to a deck task wakes that task as T1, as do removals and
  * review-decision changes on our own PRs (a human approved/blocked something).
  * Everything else — uncorrelated CI churn, new PRs we authored ourselves — is
  * recorded silently and listable via `deck-intake ls`.
+ *
+ * Edge triggering ALSO applies here, via the durable baseline keyed by
+ * url+kind: the poller appends events BEFORE advancing its state file, so a
+ * crash in between re-emits the same diff next run (at-least-once), and an
+ * identical repeat must not wake twice. The note is deterministic (no
+ * timestamp), so identical note = same PR state transition.
  */
-function consumeIntake(cursors: CursorStore, result: ReconcileResult): void {
+function consumeIntake(cursors: CursorStore, baseline: Baseline, result: ReconcileResult): void {
 	const read = readFileSince(intakeFiles().events, cursors[INTAKE_CURSOR_KEY] ?? null);
 	if (read.cursor === null) return;
 	cursors[INTAKE_CURSOR_KEY] = read.cursor;
@@ -242,9 +248,16 @@ function consumeIntake(cursors: CursorStore, result: ReconcileResult): void {
 			tier,
 			event: { verb: "intake", key: "default", note, raw: line },
 		};
-		if (tier === "T0") result.interrupt.push(item);
-		else if (tier === "T1") result.batched.push(item);
-		else result.silent.push(item);
+
+		const dedupKey = `${INTAKE_CURSOR_KEY}:${event.url ?? "?"}#${event.kind ?? "?"}`;
+		const previousEntry = baseline[dedupKey];
+		const duplicate =
+			tier !== "T2" && previousEntry !== undefined && previousEntry.lastRaw === note;
+		baseline[dedupKey] = { lastTier: tier, lastRaw: note, count: (previousEntry?.count ?? 0) + 1 };
+
+		if (tier === "T2" || duplicate) result.silent.push(item);
+		else if (tier === "T0") result.interrupt.push(item);
+		else result.batched.push(item);
 	}
 }
 
