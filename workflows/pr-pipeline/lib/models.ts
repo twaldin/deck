@@ -42,15 +42,18 @@ export const DECK_AGENT_CATALOG: readonly string[] = [
 ];
 
 /**
- * Captain policy 2026-07-30: implementation work defaults to the fable/sol
- * class. opus-5 and sonnet-5 are acceptable but measurably token-heavy and slow,
- * so they are fallbacks rather than defaults.
+ * Captain policy 2026-07-31: luna implements/watches (high TPS); sol is the
+ * only big openai seat; fable reviews/architects/adversaries. No terra in
+ * defaults. opus-5/sonnet-5 stay catalog-only last resorts (token-heavy).
  */
 export const DEFAULT_MODELS = {
-	implementer: "deck/claude-fable-5",
-	reviewer: "deck/gpt-5.6-sol",
-	watcher: "deck/gpt-5.6-terra",
-	fallout: "deck/claude-opus-5",
+	// Captain 2026-07-31: luna = bread-and-butter high-TPS work; sol = big/smart
+	// openai only (no terra); fable = reviewer/architect/adversary. opus/sonnet
+	// stay catalog-only last resorts.
+	implementer: "deck/gpt-5.6-luna",
+	reviewer: "deck/claude-fable-5",
+	watcher: "deck/gpt-5.6-luna",
+	fallout: "deck/gpt-5.6-sol",
 } as const;
 
 export interface ModelPolicy {
@@ -66,8 +69,10 @@ export interface ModelPolicy {
 }
 
 export const DEFAULT_OPPOSITION: Record<string, string> = {
+	// Opposite-family adversary. OpenAI producer -> fable review; anthropic
+	// producer (rare under new defaults) -> sol review.
 	anthropic: "deck/gpt-5.6-sol",
-	openai: "deck/claude-opus-5",
+	openai: "deck/claude-fable-5",
 };
 
 export function defaultModelPolicy(): ModelPolicy {
