@@ -8,7 +8,7 @@ import { describe, expect, test } from "bun:test";
 
 import { validateBrief } from "../lib/brief.ts";
 import { evaluateDone } from "../lib/done.ts";
-import { parseCheckRuns, parseRequestedReviewers, parseReviews, parseReviewThreads } from "../lib/gh.ts";
+import { parseActivity, parseCheckRuns, parseRequestedReviewers, parseReviews, parseReviewThreads } from "../lib/gh.ts";
 import { findLandingCommit } from "../lib/landing.ts";
 import { detectMigrations, migrationEvidenceComplete, missingMigrationStages } from "../lib/migrations.ts";
 import {
@@ -340,6 +340,58 @@ describe("watch helpers", () => {
 			{ login: "me", isBot: false, lastActivityAt: "2026-07-27T09:00:00Z", lastReviewState: null },
 		];
 		expect(reviewersNeedingReRequest(reviewers, ["requested"], lastPush, ["me"])).toEqual(["stale"]);
+	});
+
+	test("parseActivity preserves an approval across a later push", () => {
+		const { reviewers } = parseActivity(
+			[
+				{
+					author: { login: "approved", __typename: "User" },
+					state: "APPROVED",
+					submittedAt: "2026-07-27T09:00:00Z",
+					body: "",
+				},
+			],
+			[],
+		);
+		expect(reviewers).toEqual([
+			{
+				login: "approved",
+				isBot: false,
+				lastActivityAt: "2026-07-27T09:00:00Z",
+				lastReviewState: "APPROVED",
+				hasActiveApproval: true,
+			},
+		]);
+	});
+
+	test("parseActivity marks the latest approval as inactive after dismissal", () => {
+		const { reviewers } = parseActivity(
+			[
+				{
+					author: { login: "dismissed", __typename: "User" },
+					state: "APPROVED",
+					submittedAt: "2026-07-27T09:00:00Z",
+					body: "",
+				},
+				{
+					author: { login: "dismissed", __typename: "User" },
+					state: "DISMISSED",
+					submittedAt: "2026-07-27T11:00:00Z",
+					body: "",
+				},
+			],
+			[],
+		);
+		expect(reviewers).toEqual([
+			{
+				login: "dismissed",
+				isBot: false,
+				lastActivityAt: "2026-07-27T11:00:00Z",
+				lastReviewState: "DISMISSED",
+				hasActiveApproval: false,
+			},
+		]);
 	});
 
 	test("does not re-request an approval that predates the push", () => {
