@@ -271,6 +271,108 @@ export async function fetchPrApprovalsAndCi(ctx: GhContext, prNumber: number): P
 	};
 }
 
+/** Raw CODEOWNERS content, or null when the repo has none (lindy's may be thin). */
+export async function fetchCodeowners(ctx: GhContext): Promise<string | null> {
+	const exec = ctx.exec ?? bunExec;
+	for (const path of [".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"]) {
+		const result = await exec([
+			ctx.gh, "api", `repos/${ctx.repo}/contents/${path}`,
+			"-H", "Accept: application/vnd.github.raw+json",
+		]);
+		if (result.code === 0) return result.stdout;
+	}
+	return null;
+}
+
+/**
+ * One login per recent commit touching the given files (repeats = frequency).
+ * Uses the commits API so we get LOGINS, not display names - the
+ * gh-reviewer-lookup lesson: git log gives names, only the API author.login
+ * is requestable.
+ */
+export async function fetchRecentAuthors(
+	ctx: GhContext,
+	files: string[],
+	perFile = 15,
+): Promise<string[]> {
+	const exec = ctx.exec ?? bunExec;
+	const authors: string[] = [];
+	// ponytail: serial per-file fetch capped at 20 files; parallelize if PRs outgrow it
+	for (const file of files.slice(0, 20)) {
+		const result = await exec([
+			ctx.gh, "api",
+			`repos/${ctx.repo}/commits?path=${encodeURIComponent(file)}&per_page=${perFile}`,
+			"--jq", ".[].author.login // empty",
+		]);
+		if (result.code !== 0) continue;
+		for (const line of result.stdout.split("\n")) {
+			const login = line.trim();
+			if (login !== "") authors.push(login);
+		}
+	}
+	return authors;
+}
+
+/**
+ * Name-or-login -> verified login (gh-reviewer-lookup pattern). An entry that
+ * already IS a login verifies via /users; otherwise search recent commit
+ * authors by display name and take the commit's author.login.
+ */
+export async function resolveReviewerLogin(
+	ctx: GhContext,
+	nameOrLogin: string,
+): Promise<string | null> {
+	const exec = ctx.exec ?? bunExec;
+	// Only a plausible login goes to /users (a display name with spaces would
+	// mangle the URL path).
+	if (/^[A-Za-z0-9-]+$/.test(nameOrLogin)) {
+		const direct = await exec([ctx.gh, "api", `users/${nameOrLogin}`, "--jq", ".login"]);
+		if (direct.code === 0 && direct.stdout.trim() !== "") return direct.stdout.trim();
+	}
+	// Filter in TS, not jq: the name is untrusted input to a jq program.
+	const search = await exec([ctx.gh, "api", `repos/${ctx.repo}/commits?per_page=100`]);
+	if (search.code !== 0) return null;
+	const needle = nameOrLogin.toLowerCase();
+	let commits: unknown;
+	try {
+		commits = JSON.parse(search.stdout);
+	} catch {
+		return null;
+	}
+	if (!Array.isArray(commits)) return null;
+	for (const commit of commits) {
+		if (!isRecord(commit) || !isRecord(commit.commit)) continue;
+		const authorMeta = isRecord(commit.commit.author) ? commit.commit.author : null;
+		const name = authorMeta !== null ? str(authorMeta.name).toLowerCase() : "";
+		if (name === "" || !name.includes(needle)) continue;
+		const login = isRecord(commit.author) ? str(commit.author.login) : "";
+		if (login !== "") return login;
+	}
+	return null;
+}
+
+/** POST review requests. GH silently drops unknown logins - always verify after. */
+export async function requestReviewers(
+	ctx: GhContext,
+	prNumber: number,
+	reviewers: string[],
+): Promise<void> {
+	const exec = ctx.exec ?? bunExec;
+	await execOrThrow(exec, [
+		ctx.gh, "api", "-X", "POST", `repos/${ctx.repo}/pulls/${prNumber}/requested_reviewers`,
+		...reviewers.flatMap((login) => ["-f", `reviewers[]=${login}`]),
+	]);
+}
+
+/** Live requested_reviewers logins (the silent-no-op verification read). */
+export async function fetchRequestedReviewers(ctx: GhContext, prNumber: number): Promise<string[]> {
+	const exec = ctx.exec ?? bunExec;
+	const out = await execOrThrow(exec, [
+		ctx.gh, "api", `repos/${ctx.repo}/pulls/${prNumber}/requested_reviewers`,
+	]);
+	return parseRequestedReviewers(JSON.parse(out));
+}
+
 /** Current head SHA of the PR (stamp-validity check). */
 export async function fetchHeadSha(ctx: GhContext, prNumber: number): Promise<string> {
 	const exec = ctx.exec ?? bunExec;

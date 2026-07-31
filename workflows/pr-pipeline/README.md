@@ -19,6 +19,7 @@ Model access goes through pi's `deck/` provider (the deck broker on
 | 1 implement | `implement` | agent (implementer model) |
 | 2 local adversarial review | `local-review-loop` / `local-review` + `local-fix`, `review-escalation` | agent loop, cross-model, fresh context |
 | 3 push + PR | `push-pr` | compute; PR registered in the watch-set **as a side effect of this node** |
+| 3b request reviewers | `request-reviewers` | compute; CODEOWNERS + recent-author fallback, verified via `requested_reviewers` |
 | 4 watch-ci-review | `r{N}-watch-loop` / `r{N}-watch-poll` + `r{N}-watch-fix`, `r{N}-watch-escalation` | machine-checked exit |
 | 5 migration gate (conditional) | `migration-check`, `migration-gate` (Approval), `migration-scope`, `migration-{stg,prod}-{run,verify}` | mandatory when diff touches `migrations/` or `packages/database-migrations/` |
 | 6 ready-for-stamp | `r{N}-ready-loop` / `r{N}-ready-poll`, `r{N}-ready-exhausted` | human approval + CI green-or-**will-be**-green |
@@ -33,6 +34,18 @@ Enforcement notes (each maps to a cited incident in the SOP):
 - **Preflight fails closed**: missing acceptance criteria, open decision-ledger
   entries, or an undeclared kill-switch (named-or-explicit-none + named
   break-signal) throw with the full open-question list. Nothing downstream renders.
+- **Reviewers are always requested, post-push** (`request-reviewers`, gates the
+  watch loop): CODEOWNERS owners of the touched paths first, then recent commit
+  authors on those files ranked by frequency (lindy CODEOWNERS may be thin).
+  Explicit entries (`brief.suggestedReviewers` merged with `github.reviewers`)
+  may be display names - they resolve to logins via the gh-reviewer-lookup
+  pattern (`/users/{login}` first, then commit-author name search); an entry
+  that resolves to nothing **escalates instead of being dropped**. Self and
+  `github.excludedApprovers` (ali, by default) are never requested. After the
+  POST the node re-reads `requested_reviewers` and **escalates on any login GH
+  silently dropped** (review requests silently no-op on plausible-but-wrong
+  logins). Zero candidates also escalates - the only empty-reviewer path is an
+  explicit `github.skipReviewerRequest: true`, recorded as `explicit-skip`.
 - **watch-ci exit is machine-checked** (`lib/watch.ts`): zero unresolved review
   threads + all actionable comments answered + reviewers re-requested, verified
   against the `requested_reviewers` API (GH review requests silently no-op) + CI
@@ -190,11 +203,17 @@ run can self-approve its gates.
 ```sh
 bun install                       # here
 bun install --cwd ../.smithers    # engine.test.ts loads the pack's seats
-bun test tests/          # 69 tests
+bun test tests/          # 96 tests
 bun run typecheck
 bun run graph            # render-without-execute sanity check
 ```
 
+- `tests/reviewers.test.ts` — request-reviewers stage: CODEOWNERS
+  parsing/matching (GitHub semantics: `docs/*` owns direct children only,
+  `**/` matches zero dirs), frequency fallback, ali/self/bot exclusion, the
+  full `executeReviewerRequest` escalation paths against mocked adapters, and
+  the gh adapters (request POST + silent-no-op verification) against a mocked
+  exec.
 - `tests/gates.test.ts` — pure gate logic: brief validation, watch-exit machine
   check, re-request detection, migration detection + evidence, ready-for-stamp
   (bot/excluded/self approvals never count; will-be-green ruling), landing
@@ -218,6 +237,7 @@ tests/engine.test.ts    pi-only engine invariant (whole workspace)
 lib/watch.ts            watch-ci-review machine-checked exit
 lib/migrations.ts       migration detection + evidence completeness
 lib/ready.ts            ready-for-stamp evaluation
+lib/reviewers.ts        CODEOWNERS parsing/matching + reviewer selection
 lib/landing.ts          squash-commit (#N) landing check
 lib/done.ts             evidence-gated done
 lib/gh.ts               gh/git adapters + pure payload parsers

@@ -13,6 +13,7 @@
  *   1 implement                 [implement]
  *   2 local adversarial review  [local-review-loop / local-review / local-fix, review-escalation]
  *   3 push + PR (+watch-set)    [push-pr]
+ *   3b request reviewers        [request-reviewers]
  *   4 watch-ci-review loop      [r{N}-watch-loop / r{N}-watch-poll / r{N}-watch-fix, r{N}-watch-escalation]
  *   5 migration gate            [migration-check, migration-gate, migration-{stg,prod}-{run,verify}]
  *   6 ready-for-stamp           [r{N}-ready-loop / r{N}-ready-poll, r{N}-ready-exhausted]
@@ -43,10 +44,15 @@ import {
 	bunExec,
 	execOrThrow,
 	fetchChangedFiles,
+	fetchCodeowners,
 	fetchHeadSha,
 	fetchMainCommitSubjects,
 	fetchPrApprovalsAndCi,
+	fetchRecentAuthors,
+	fetchRequestedReviewers,
 	fetchWatchSnapshot,
+	requestReviewers,
+	resolveReviewerLogin,
 } from "./lib/gh.ts";
 import { findLandingCommit } from "./lib/landing.ts";
 import { detectMigrations, MIGRATION_STAGES, migrationEvidenceComplete } from "./lib/migrations.ts";
@@ -65,6 +71,7 @@ import {
 	watchFixPrompt,
 } from "./lib/prompts.ts";
 import { evaluateReadyForStamp } from "./lib/ready.ts";
+import { executeReviewerRequest } from "./lib/reviewers.ts";
 import { assessCi, evaluateWatchExit } from "./lib/watch.ts";
 import type { Brief, MigrationEvidenceEntry } from "./lib/types.ts";
 
@@ -99,6 +106,9 @@ const DEFAULT_GITHUB = {
 	selfLogins: ["twaldin"],
 	excludedApprovers: ["ali"],
 	reviewers: [] as string[],
+	/** Explicit opt-out only: reviewers are always requested by default. */
+	skipReviewerRequest: false,
+	maxReviewers: 2,
 };
 
 const DEFAULT_COMMANDS = {
@@ -160,6 +170,8 @@ const inputSchema = z.object({
 			selfLogins: z.array(z.string()).optional(),
 			excludedApprovers: z.array(z.string()).optional(),
 			reviewers: z.array(z.string()).optional(),
+			skipReviewerRequest: z.boolean().optional(),
+			maxReviewers: z.number().int().positive().optional(),
 		})
 		.optional(),
 	commands: z
@@ -210,6 +222,13 @@ const schemas = {
 		summary: z.string(),
 	}),
 	approvals: approvalDecisionSchema,
+	reviewerRequest: z.object({
+		skipped: z.boolean(),
+		requested: z.array(z.string()),
+		verified: z.array(z.string()),
+		source: z.string(),
+		at: z.string(),
+	}),
 	prRecord: z.object({
 		prNumber: z.number().int(),
 		url: z.string(),
@@ -394,6 +413,7 @@ export default smithers((ctx) => {
 	const localReviewRows = (ctx.outputs.localReview ?? []) as Array<{ round: number }>;
 	const reviewEscalation = ctx.latest(outputs.approvals, "review-escalation");
 	const pr = ctx.latest(outputs.prRecord, "push-pr");
+	const reviewerRequest = ctx.latest(outputs.reviewerRequest, "request-reviewers");
 	const migCheck = ctx.latest(outputs.migrationCheck, "migration-check");
 	const migGate = ctx.latest(outputs.approvals, "migration-gate");
 	const migScope = ctx.latest(outputs.migrationScope, "migration-scope");
@@ -722,9 +742,9 @@ export default smithers((ctx) => {
 									prNumber = existing[0].number;
 									url = existing[0].url;
 								} else {
-									const reviewerFlags = (brief?.suggestedReviewers ?? github.reviewers).flatMap(
-										(login) => ["--reviewer", login],
-									);
+									// Reviewers are NOT requested here: request-reviewers owns
+									// that (create --reviewer is the silent-no-op path with no
+									// verification read).
 									const createOut = await execOrThrow(bunExec, [
 										github.gh, "pr", "create",
 										"--repo", input.repo,
@@ -735,7 +755,6 @@ export default smithers((ctx) => {
 										`${brief?.summary ?? ""}\n\nAcceptance criteria:\n${(brief?.acceptanceCriteria ?? [])
 											.map((criterion) => `- [ ] ${criterion}`)
 											.join("\n")}\n\nManaged by lindy-pr-pipeline run ${ctx.runId}.`,
-										...reviewerFlags,
 									]);
 									url = createOut.trim().split("\n").pop() ?? "";
 									const match = url.match(/\/pull\/(\d+)/);
@@ -767,6 +786,58 @@ export default smithers((ctx) => {
 									receipt: `pushed ${input.branch}; PR #${prNumber}`,
 									createdAt: nowIso(),
 								};
+							})()
+						}
+					</Task>
+				) : null}
+
+				{/* ------------------------------- stage 3b: request reviewers */}
+				{pr !== undefined ? (
+					<Task id="request-reviewers" output={outputs.reviewerRequest} retries={1}>
+						{() =>
+							(async () => {
+								if (github.skipReviewerRequest) {
+									// The ONLY way this stage ends with no reviewers: an
+									// explicit input opt-out, recorded as such.
+									return {
+										skipped: true,
+										requested: [],
+										verified: [],
+										source: "explicit-skip",
+										at: nowIso(),
+									};
+								}
+								if (dryRun) {
+									return {
+										skipped: false,
+										requested: ["dry-reviewer"],
+										verified: ["dry-reviewer"],
+										source: "dry-run",
+										at: nowIso(),
+									};
+								}
+								// Selection + request + silent-no-op verification live in
+								// lib/reviewers.ts (unit-tested against mocked adapters).
+								// Explicit sources MERGE (brief + input config, deduped in
+								// selection); entries may be display names (name->login
+								// lookup; unresolvable entries escalate, never dropped).
+								return executeReviewerRequest(
+									{
+										explicit: [...(brief?.suggestedReviewers ?? []), ...github.reviewers],
+										exclude: [...github.selfLogins, ...github.excludedApprovers],
+										max: github.maxReviewers,
+									},
+									{
+										fetchChangedFiles: () => fetchChangedFiles(ghCtx, pr.prNumber),
+										fetchCodeowners: () => fetchCodeowners(ghCtx),
+										fetchRecentAuthors: (files) => fetchRecentAuthors(ghCtx, files),
+										resolveLogin: (entry) => resolveReviewerLogin(ghCtx, entry),
+										requestReviewers: (logins) =>
+											requestReviewers(ghCtx, pr.prNumber, logins),
+										fetchRequestedReviewers: () =>
+											fetchRequestedReviewers(ghCtx, pr.prNumber),
+									},
+								);
 							})()
 						}
 					</Task>
@@ -879,7 +950,7 @@ export default smithers((ctx) => {
 					</Task>
 				) : null}
 
-				{pr !== undefined && !roundsExhausted
+				{pr !== undefined && reviewerRequest !== undefined && !roundsExhausted
 					? Array.from({ length: currentRound + 1 }, (_, k) => k)
 							.filter((k) => k < limits.stampRounds)
 							.map((k) => {

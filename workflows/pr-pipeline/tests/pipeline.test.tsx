@@ -99,6 +99,7 @@ describe("approval parks (no bypass)", () => {
 		expect(sim.executed).toContain("implement");
 		expect(sim.executed).toContain("local-review");
 		expect(sim.executed).toContain("push-pr");
+		expect(sim.executed).toContain("request-reviewers");
 		expect(sim.executed).toContain("r0-watch-poll");
 		expect(sim.executed).toContain("r0-ready-poll");
 		// Parked: the stamp approval never executed, so nothing merge-ward ran.
@@ -132,6 +133,7 @@ describe("full graph traversal (bypassApprovals, dry-run only)", () => {
 			"implement",
 			"local-review",
 			"push-pr",
+			"request-reviewers",
 			"r0-watch-poll",
 			"r0-ready-poll",
 			"r0-stamp",
@@ -168,6 +170,27 @@ describe("full graph traversal (bypassApprovals, dry-run only)", () => {
 		// PR was registered in the watch-set as a side effect of push-pr:
 		const pr = (sim.outputs.prRecord as Array<Record<string, unknown>>)[0];
 		expect(pr.watchSetRegistered).toBe(true);
+
+		// Reviewers were requested and verified before any watch round ran:
+		const request = (sim.outputs.reviewerRequest as Array<Record<string, unknown>>)[0];
+		expect(request.skipped).toBe(false);
+		expect(request.requested).toEqual(["dry-reviewer"]);
+		expect(request.verified).toEqual(["dry-reviewer"]);
+	});
+
+	test("skipReviewerRequest is the only empty-reviewer path, and it is recorded as explicit", async () => {
+		const { sim, error } = await run({
+			...baseInput,
+			bypassApprovals: true,
+			github: { skipReviewerRequest: true },
+			fixtures: { changedFiles: ["src/feature.ts"] },
+		});
+		expect(error).toBeUndefined();
+		expect(sim.status).toBe("finished");
+		const request = (sim.outputs.reviewerRequest as Array<Record<string, unknown>>)[0];
+		expect(request.skipped).toBe(true);
+		expect(request.requested).toEqual([]);
+		expect(request.source).toBe("explicit-skip");
 	});
 
 	test("migration path: gate + all four stg/prod stages run before done", async () => {
