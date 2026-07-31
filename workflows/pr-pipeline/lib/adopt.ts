@@ -21,6 +21,14 @@ export interface AdoptExpectation {
 	baseBranch: string; // base branch the run declared
 	worktreeBranch: string; // git branch currently checked out in the worktree
 	worktreeHead: string; // git rev-parse HEAD in the worktree
+	worktreeStatus: string; // git status --porcelain output for the worktree
+	worktreeOriginUrl: string; // git remote get-url origin for the worktree
+}
+
+/** Extracts "owner/name" from a git remote URL (ssh, https, or git@ form); "" when unparseable. */
+export function repoFromRemoteUrl(url: string): string {
+	const match = /(?:[/:])([^/:]+\/[^/:]+?)(?:\.git)?\/?$/.exec(url.trim());
+	return match ? match[1] : "";
 }
 
 /** Throws [escalate] on any mismatch; returns void when the PR is adoptable. */
@@ -57,6 +65,17 @@ export function assertAdoptable(overview: PrOverview, expected: AdoptExpectation
 	if (expected.worktreeHead !== overview.headSha) {
 		throw new Error(
 			`[escalate] cannot adopt ${pr}: worktree HEAD is ${expected.worktreeHead} but the PR head is ${overview.headSha} — the worktree is stale or diverged; sync it to the PR head first.`,
+		);
+	}
+	const worktreeRepo = repoFromRemoteUrl(expected.worktreeOriginUrl);
+	if (worktreeRepo.toLowerCase() !== expected.repo.toLowerCase()) {
+		throw new Error(
+			`[escalate] cannot adopt ${pr}: the worktree origin is "${expected.worktreeOriginUrl}" (${worktreeRepo || "unparseable"}), not "${expected.repo}" — the watch fixer and merge run in this worktree and would push to the wrong repository.`,
+		);
+	}
+	if (expected.worktreeStatus.trim() !== "") {
+		throw new Error(
+			`[escalate] cannot adopt ${pr}: the worktree is not clean:\n${expected.worktreeStatus.trim()}\n— the watch fixer commits in this worktree and would push these unrelated changes into the PR. Clean or stash them first.`,
 		);
 	}
 }

@@ -7,7 +7,7 @@
 
 import { describe, expect, test } from "bun:test";
 
-import { assertAdoptable, type PrOverview } from "../lib/adopt.ts";
+import { assertAdoptable, repoFromRemoteUrl, type PrOverview } from "../lib/adopt.ts";
 import { fetchPrOverview, type ExecFn } from "../lib/gh.ts";
 
 const goodOverview: PrOverview = {
@@ -27,6 +27,8 @@ const goodExpectation = {
 	baseBranch: "main",
 	worktreeBranch: "fm/lin-123",
 	worktreeHead: "abc123",
+	worktreeStatus: "",
+	worktreeOriginUrl: "git@github.com:lindy-ai/lindy.git",
 };
 
 describe("assertAdoptable", () => {
@@ -80,6 +82,66 @@ describe("assertAdoptable", () => {
 		expect(() =>
 			assertAdoptable(goodOverview, { ...goodExpectation, worktreeHead: "stale999" }),
 		).toThrow(/worktree HEAD is stale999/);
+	});
+
+	test("rejects a dirty worktree (modified files)", () => {
+		expect(() =>
+			assertAdoptable(goodOverview, { ...goodExpectation, worktreeStatus: " M src/app.ts\n" }),
+		).toThrow(/worktree is not clean/);
+	});
+
+	test("rejects a dirty worktree (untracked files)", () => {
+		expect(() =>
+			assertAdoptable(goodOverview, { ...goodExpectation, worktreeStatus: "?? scratch.txt\n" }),
+		).toThrow(/worktree is not clean/);
+	});
+
+	test("accepts whitespace-only status output as clean", () => {
+		expect(() =>
+			assertAdoptable(goodOverview, { ...goodExpectation, worktreeStatus: "\n" }),
+		).not.toThrow();
+	});
+
+	test("rejects a worktree whose origin is a different repository", () => {
+		expect(() =>
+			assertAdoptable(goodOverview, {
+				...goodExpectation,
+				worktreeOriginUrl: "git@github.com:someone/lindy.git",
+			}),
+		).toThrow(/worktree origin is "git@github.com:someone\/lindy.git"/);
+	});
+
+	test("rejects a worktree with an unparseable origin URL", () => {
+		expect(() =>
+			assertAdoptable(goodOverview, { ...goodExpectation, worktreeOriginUrl: "not-a-url" }),
+		).toThrow(/unparseable/);
+	});
+
+	test("accepts https and ssh origin URL forms for the same repo", () => {
+		for (const url of [
+			"https://github.com/lindy-ai/lindy.git",
+			"https://github.com/lindy-ai/lindy",
+			"ssh://git@github.com/lindy-ai/lindy.git",
+			"git@github.com:Lindy-AI/Lindy.git",
+		]) {
+			expect(() =>
+				assertAdoptable(goodOverview, { ...goodExpectation, worktreeOriginUrl: url }),
+			).not.toThrow();
+		}
+	});
+});
+
+describe("repoFromRemoteUrl", () => {
+	test.each([
+		["git@github.com:lindy-ai/lindy.git", "lindy-ai/lindy"],
+		["https://github.com/lindy-ai/lindy.git", "lindy-ai/lindy"],
+		["https://github.com/lindy-ai/lindy", "lindy-ai/lindy"],
+		["ssh://git@github.com/lindy-ai/lindy.git", "lindy-ai/lindy"],
+		["https://github.com/lindy-ai/lindy/", "lindy-ai/lindy"],
+		["not-a-url", ""],
+		["", ""],
+	])("%s -> %s", (url, expected) => {
+		expect(repoFromRemoteUrl(url)).toBe(expected);
 	});
 });
 

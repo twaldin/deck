@@ -797,12 +797,26 @@ export default smithers((ctx) => {
 											cwd: input.worktree,
 										})
 									).trim();
+									const worktreeStatus = await execOrThrow(
+										bunExec,
+										[github.git, "status", "--porcelain"],
+										{ cwd: input.worktree },
+									);
+									const worktreeOriginUrl = (
+										await execOrThrow(
+											bunExec,
+											[github.git, "remote", "get-url", "origin"],
+											{ cwd: input.worktree },
+										)
+									).trim();
 									assertAdoptable(overview, {
 										repo: input.repo,
 										branch: input.branch,
 										baseBranch,
 										worktreeBranch,
 										worktreeHead,
+										worktreeStatus,
+										worktreeOriginUrl,
 									});
 									const fs = await import("node:fs");
 									const path = await import("node:path");
