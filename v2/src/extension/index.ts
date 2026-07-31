@@ -541,7 +541,7 @@ export default function deckV2(pi: any): void {
 	async function refreshStatusline(ctx: any): Promise<void> {
 		try {
 			const frame = await buildFrame(workflowCwd === undefined ? {} : { workflowCwd });
-			ctx.ui?.setStatus?.("deck", renderStatusline(frame));
+			ctx.ui?.setStatus?.("deck", renderStatusline(frame, asFleetTheme(ctx.ui?.theme)));
 			// Herdr projection rides the same cadence: every reconcile cycle mirrors
 			// worker state into herdr agents (smithers runs are fleet-only). Guarded
 			// inside; herdr being down makes this a no-op, never a fault.
