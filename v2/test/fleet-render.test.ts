@@ -18,7 +18,6 @@ import {
 	normalizeStep,
 	PLAIN_FLEET_THEME,
 	renderFooterLines,
-	renderStatusline,
 	sliceVisible,
 	textWidth,
 	visibleTasks,
@@ -219,7 +218,7 @@ describe("buildFleetText", () => {
 		expect(out).toContain("phase=stamp");
 		expect(out).toContain("waitingFor=stamp");
 		expect(out).toContain("7m");
-		expect(out).toContain("[idle]");
+		expect(out).toContain("[wait]");
 		expect(out).toContain("PR #26861");
 		expect(out).toContain("[fixing]");
 	});
@@ -723,15 +722,17 @@ describe("three-line footer", () => {
 					},
 				],
 			}),
-			{ cwd: "/Users/test/deck", branch: "main", model: "sonnet", contextPercent: 42.5, inputTokens: 1200, outputTokens: 800, cacheReadTokens: 400, cacheWriteTokens: 100, cost: 0.123 },
+			{ cwd: "/Users/test/deck", branch: "main", model: "sonnet", contextPercent: 42.5, inputTokens: 1200, outputTokens: 800, cacheReadTokens: 400, cacheWriteTokens: 100, cost: 0.123, usageLine: "claude 5h █████░ 91% · codex 7d █████░ 86%" },
 			PLAIN_FLEET_THEME,
-			48,
+			140,
 		);
 		expect(out).toHaveLength(3);
 		expect(out[0]).toContain("main");
-		expect(out[1]).toContain("2▶");
-		expect(out[2]).toBe("stamp PR#26866 — your word");
-		for (const line of out) expect(textWidth(line)).toBeLessThanOrEqual(48);
+		expect(out[0]).toContain("CH25%");
+		expect(out[1]).toContain("claude");
+		expect(out[1]).toContain("codex");
+		expect(out[2]).toBe("pause 1 · ask 1");
+		for (const line of out) expect(textWidth(line)).toBeLessThanOrEqual(140);
 	});
 });
 
@@ -740,7 +741,7 @@ describe("zombie workflow failures", () => {
 		const real = { runId: "real", workflow: "pr-pipeline", activity: "failed", status: "failed", state: "failed", step: "watch", taskId: null, ticket: "T-real", prNumber: 1 } satisfies WorkflowRow;
 		const landed = { ...real, runId: "landed", merged: true };
 		const superseded = { ...real, runId: "old", ticket: "T-shared", startedAt: "2026-01-01" };
-		const healthy: WorkflowRow = { ...real, runId: "new", ticket: "T-shared", activity: "working", status: "running", startedAt: "2026-01-02" };
+		const healthy: WorkflowRow = { ...real, runId: "new", ticket: "T-shared", existingPr: null, prNumber: 999, activity: "working", status: "running", startedAt: "2026-01-02" };
 		const pushNull = { ...real, runId: "push-null", pushPrNull: true };
 		expect(actionableWorkflowFailures(frame({ workflows: [real, landed, superseded, healthy, pushNull] }))).toEqual([real]);
 		expect(
@@ -754,118 +755,98 @@ describe("zombie workflow failures", () => {
 			),
 		).toHaveLength(0);
 	});
+
+	test("preflight refusal is hidden when a later healthy adopted run has the same PR", () => {
+		const refusal: WorkflowRow = {
+			runId: "preflight-refusal",
+			workflow: "pr-pipeline",
+			activity: "failed",
+			status: "failed",
+			state: "failed",
+			step: "preflight-refusal",
+			taskId: null,
+			existingPr: 26866,
+			startedAt: "2026-01-01",
+		};
+		const successor: WorkflowRow = {
+			runId: "lindy-adopt-26866-v2",
+			workflow: "pr-pipeline",
+			activity: "working",
+			status: "running",
+			state: "running",
+			step: "r0-watch-poll",
+			taskId: null,
+			existingPr: null,
+			prNumber: 26866,
+			startedAt: "2026-01-02",
+		};
+		expect(actionableWorkflowFailures(frame({ workflows: [refusal, successor] }))).toEqual([]);
+	});
 });
 
-describe("statusline", () => {
-	test("open questions show as Nq; zero-count segments are dropped", () => {
+describe("footer attention counts", () => {
+	test("asks are plain words and zero-count segments are omitted", () => {
 		const f = frame();
-		f.counters.tasks = 10;
 		f.counters.openQuestions = 2;
-		expect(renderStatusline(f)).toBe("2q");
+		expect(renderFooterLines(f)[2]).toBe("ask 2");
+		f.counters.openQuestions = 0;
+		expect(renderFooterLines(f)[2]).toBe("");
 	});
 
-	test("a quiet fleet reads idle with no task total \u2014 the graveyard is not a signal", () => {
-		const f = frame();
-		f.counters.tasks = 10;
-		expect(renderStatusline(f)).toBe("idle");
-	});
-
-	test("live fleet: running, blocked, questions, decisions, queued all show; no task total", () => {
-		const f = frame();
-		f.counters.tasks = 6;
-		f.counters.running = 2;
-		f.counters.blocked = 1;
-		f.counters.openQuestions = 1;
-		f.counters.openDecisions = 1;
-		f.counters.queuedMessages = 3;
-		f.tasks = [
-			task({
-				taskId: "live",
-				runState: "running",
-				queuedMessages: 3,
-				openDecisions: 1,
-			}),
-		];
-		expect(renderStatusline(f)).toBe(
-			"2\u25b6 \u00b7 1 blocked \u00b7 1q \u00b7 1? \u00b7 3\u2709",
-		);
-	});
-
-	test("a stale queue or decision on a done task earns no segment", () => {
-		const f = frame();
-		f.counters.tasks = 1;
-		f.counters.queuedMessages = 1;
-		f.counters.openDecisions = 1;
-		f.tasks = [
-			task({
-				lastVerb: "done",
-				runState: "finished",
-				queuedMessages: 1,
-				openDecisions: 1,
-			}),
-		];
-		expect(renderStatusline(f)).toBe("idle");
-	});
-
-	test("a failed-only fleet never reads idle", () => {
-		const f = frame();
-		f.counters.tasks = 1;
-		f.tasks = [task({ lastVerb: "failed", runState: "finished" })];
-		expect(renderStatusline(f)).toBe("1 failed");
-	});
-
-	test("workflow failures and stamp parks prevent a false calm statusline", () => {
+	test("active work is play and actionable failures are fail", () => {
 		const f = frame({
-			workflows: [
-				{
-					runId: "r-stamp",
-					workflow: "lindy-pr-pipeline",
-					status: "waiting-approval",
-					state: "waiting-approval",
-					step: null,
-					taskId: null,
-					prNumber: 26865,
-					prTitle: "Stamp",
-					phase: "stamp",
-					waitingFor: "stamp",
-					activity: "idle",
-				},
-				{
-					runId: "r-failed",
-					workflow: "lindy-pr-pipeline",
-					status: "failed",
-					state: "failed",
-					step: null,
-					taskId: null,
-					prNumber: 26819,
-					prTitle: "Failed",
-					phase: null,
-					waitingFor: "none",
-					activity: "failed",
-				},
-			],
+			tasks: [task({ runState: "running", lastVerb: "working" })],
+			workflows: [{
+				runId: "failed", workflow: "pr-pipeline", status: "failed", state: "failed",
+				step: "watch", taskId: null, activity: "failed",
+			}],
 		});
-		expect(renderStatusline(f)).toContain("1 workflow failed");
-		expect(renderStatusline(f)).toContain("1 stamp");
+		expect(renderFooterLines(f)[2]).toBe("play 1 · fail 1");
 	});
 
-	test("segments carry the theme's colors", () => {
-		const marked = {
-			fg: (key: string, text: string) => `<${key}>${text}</${key}>`,
-			bold: (text: string) => text,
+	test("paused and blocked work is pause, while terminal task events are not counts", () => {
+		const f = frame({ tasks: [
+			task({ taskId: "paused", runState: "running", lastVerb: "paused" }),
+			task({ taskId: "blocked", runState: "running", lastVerb: "blocked" }),
+			task({ taskId: "done", runState: "finished", lastVerb: "done" }),
+		] });
+		expect(renderFooterLines(f)[2]).toBe("pause 2");
+	});
+
+	test("failed poll rows stay failed and terminal stamp rows do not ask", () => {
+		const failed: WorkflowRow = {
+			runId: "failed-poll", workflow: "pr-pipeline", status: "failed", state: "failed",
+			step: "r0-watch-poll", taskId: null, activity: "failed", waitingFor: "ci-poll",
 		};
-		const f = frame();
-		f.counters.running = 1;
-		f.counters.blocked = 1;
-		f.tasks = [task({ runState: "running", openDecisions: 1 })];
-		expect(renderStatusline(f, marked)).toBe(
-			"<success>1\u25b6</success> \u00b7 <error>1 blocked</error> \u00b7 <warning>1?</warning>",
-		);
+		const cancelledStamp: WorkflowRow = {
+			runId: "cancelled-stamp", workflow: "pr-pipeline", status: "cancelled", state: "cancelled",
+			step: "r0-stamp", taskId: null, activity: "idle", waitingFor: "stamp", prNumber: 9,
+		};
+		const out = buildFleetText(frame({ workflows: [failed, cancelledStamp] }));
+		expect(out).toContain("[failed]");
+		expect(renderFooterLines(frame({ workflows: [cancelledStamp] }))[2]).toBe("");
+	});
+
+	test("zombies do not increase fail", () => {
+		const f = frame({ workflows: [{
+			runId: "preflight", workflow: "pr-pipeline", status: "failed", state: "failed",
+			step: "preflight-refusal", taskId: null, activity: "failed", existingPr: 42, startedAt: "2026-01-01",
+		}, {
+			runId: "successor", workflow: "pr-pipeline", status: "running", state: "running",
+			step: "r0-watch-poll", taskId: null, activity: "working", prNumber: 42, startedAt: "2026-01-02",
+		}] });
+		expect(renderFooterLines(f)[2]).toBe("play 1");
+	});
+
+	test("theme colors attention counts", () => {
+		const marked = { fg: (key: string, text: string) => `<${key}>${text}</${key}>`, bold: (text: string) => text };
+		const f = frame({ tasks: [task({ runState: "running", lastVerb: "working" })] });
+		expect(renderFooterLines(f, {}, marked)[2]).toBe("<warning>play 1</warning>");
 	});
 
 	test("the overlay header names /questions so the captain knows the next move", () => {
 		const f = frame();
 		f.counters.openQuestions = 3;
-		expect(buildFleetText(f)).toContain("3 question(s) \u2014 /questions");
+		expect(buildFleetText(f)).toContain("3 question(s) — /questions");
 	});
 });

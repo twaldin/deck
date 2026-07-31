@@ -25,7 +25,6 @@ import {
 	PLAIN_FLEET_THEME,
 	renderFrame,
 	renderFooterLines,
-	renderStatusline,
 	type FooterSessionBits,
 } from "../fleet";
 import { projectFleet } from "../herdr";
@@ -36,6 +35,7 @@ import { enqueue, pending } from "../queue";
 import { startShip } from "../ship";
 import { peekSession, startRun } from "../spawn";
 import { STATUS_VERBS, type StatusVerb } from "../status";
+import { readUsageRoster, usageStatusLine } from "../usage-roster";
 import { evaluateTeardown, formatVerdict } from "../teardown";
 import { ackWakes, detectStale, foldBatched, pendingWakes, reconcile } from "../wake";
 import {
@@ -616,7 +616,7 @@ export default function deckV2(pi: any): void {
 		try {
 			const frame = await buildFrame(workflowCwd === undefined ? {} : { workflowCwd });
 			lastFooterFrame = frame;
-			ctx.ui?.setStatus?.("deck", renderStatusline(frame, asFleetTheme(ctx.ui?.theme)));
+			ctx.ui?.setStatus?.("deck-usage", undefined);
 			// Herdr projection rides the same cadence: every reconcile cycle mirrors
 			// worker state into herdr agents (smithers runs are fleet-only). Guarded
 			// inside; herdr being down makes this a no-op, never a fault.
@@ -628,6 +628,15 @@ export default function deckV2(pi: any): void {
 
 	pi.on("session_start", async (_event: unknown, ctx: any) => {
 		workflowCwd = `${deckV2Home()}/workflows/.smithers`;
+		// The deck footer owns quota presentation. Block the legacy deck-usage
+		// status slot so its timer cannot paint a second chrome strip.
+		const setStatus = ctx.ui?.setStatus;
+		if (typeof setStatus === "function") {
+			ctx.ui.setStatus = function (id: string, value: unknown): void {
+				if (id === "deck-usage") return;
+				setStatus.call(ctx.ui, id, value);
+			};
+		}
 		ctx.ui?.setFooter?.((tui: any, theme: any, footerData: any) => {
 			const unsub = footerData.onBranchChange(() => tui.requestRender());
 			const usage = (): FooterSessionBits => {
@@ -655,6 +664,7 @@ export default function deckV2(pi: any): void {
 					cacheReadTokens,
 					cacheWriteTokens,
 					cost,
+					usageLine: usageStatusLine(readUsageRoster(), asFleetTheme(theme)),
 				};
 			};
 			return {

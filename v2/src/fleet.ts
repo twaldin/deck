@@ -96,6 +96,8 @@ export type WorkflowRow = {
 	prTitle?: string | null;
 	/** Existing PR identity used to detect superseded failed runs. */
 	existingPr?: number | null;
+	/** Workflow workspace used to avoid cross-repo PR identity collisions. */
+	rootDir?: string | null;
 	/** Landing/supersession evidence supplied by the workflow status payload. */
 	merged?: boolean;
 	tipOnMain?: boolean;
@@ -264,6 +266,25 @@ function ageMs(value: string | undefined): number | null {
 
 function truncateTail(body: string, max: number): string {
 	return body.length > max ? `…${body.slice(-(max - 1))}` : body;
+}
+
+function workflowRowActivity(wf: WorkflowRow): "wait" | FleetActivity {
+	if (wf.activity === "failed" || wf.activity === "fixing") return wf.activity;
+	const waiting = wf.waitingFor;
+	return wf.activity === "idle" ||
+		(waiting !== null && waiting !== undefined && waiting !== "none")
+		? "wait"
+		: (wf.activity ?? "working");
+}
+
+function taskActivity(task: TaskRow): "active" | "waiting" | "none" {
+	if (task.runState !== "running") return "none";
+	if (task.lastVerb === "done" || task.lastVerb === "failed") return "none";
+	return task.lastVerb === "blocked" ||
+		task.lastVerb === "paused" ||
+		task.lastVerb === "needs-decision"
+		? "waiting"
+		: "active";
 }
 
 function workflowAttentionRank(wf: WorkflowRow): number {
@@ -614,6 +635,7 @@ export async function buildFrame(
 			ticket: input.ticket,
 			prNumber: psRun.prNumber ?? input.prNumber,
 			prTitle: psRun.prTitle ?? input.prTitle,
+			rootDir: psRun.rootDir === undefined ? null : realpath(psRun.rootDir),
 			existingPr: input.prNumber,
 			merged: psRun.merged,
 			tipOnMain: psRun.tipOnMain,
@@ -674,12 +696,11 @@ export async function buildFrame(
 export function renderFrame(frame: FleetFrame): string {
 	const lines: string[] = [];
 	const c = frame.counters;
+	const counts = workflowCounts(frame);
 	const workflowFailures = actionableWorkflowFailures(frame).length;
-	const stampWaits = frame.workflows.filter(
-		(wf) => wf.waitingFor === "stamp",
-	).length;
+	const stampWaits = liveStampWaits(frame).length;
 	lines.push(
-		`Fleet · ${c.tasks} task(s), ${c.running} running · ${c.openDecisions} decision(s) · ${c.openQuestions} question(s) · ${c.queuedMessages} queued · ${workflowFailures} workflow failure(s) · ${stampWaits} stamp · internal ${c.internalOpen}/${c.internalCap}`,
+		`Fleet · ${c.tasks} task(s), ${counts.active} active · ${c.openDecisions} decision(s) · ${c.openQuestions} question(s) · ${c.queuedMessages} queued · ${workflowFailures} workflow failure(s) · ${stampWaits} stamp · internal ${c.internalOpen}/${c.internalCap}`,
 	);
 	if (frame.tasks.length === 0) {
 		lines.push("  (no tasks)");
@@ -724,8 +745,9 @@ export function renderFrame(frame: FleetFrame): string {
 		]
 			.filter((bit): bit is string => bit !== null)
 			.join(" · ");
+		const rowActivity = workflowRowActivity(wf);
 		lines.push(
-			`▸ [${wf.activity ?? "working"}] ${wf.prNumber === null || wf.prNumber === undefined ? `wf:${truncateTail(wf.runId, 16)}` : `PR #${wf.prNumber}`}  ${details}`,
+			`▸ [${rowActivity}] ${wf.prNumber === null || wf.prNumber === undefined ? `wf:${truncateTail(wf.runId, 16)}` : `PR #${wf.prNumber}`}  ${details}`,
 		);
 	}
 	for (const task of frame.tasks) {
@@ -855,6 +877,17 @@ const TERMINAL_STATUSES = [
 	"done",
 	"complete",
 ];
+
+function workflowPrIds(wf: WorkflowRow): number[] {
+	return [wf.existingPr, wf.prNumber].filter(
+		(value): value is number => value !== null && value !== undefined,
+	);
+}
+
+function workflowTicket(wf: WorkflowRow): string | null {
+	return wf.ticket ?? null;
+}
+
 export function isTerminalWorkflow(wf: WorkflowRow): boolean {
 	return (
 		TERMINAL_STATUSES.includes((wf.status ?? "").toLowerCase()) ||
@@ -880,14 +913,18 @@ export function isActionableWorkflowFailure(
 		wf.landed === true
 	)
 		return false;
+	const failedPrIds = workflowPrIds(wf);
+	const failedTicket = workflowTicket(wf);
 	const newerHealthy = workflows.some((candidate) => {
 		if (candidate.runId === wf.runId || candidate.activity === "failed") return false;
-		const sameIdentity =
-			(wf.existingPr !== null && wf.existingPr !== undefined && candidate.existingPr === wf.existingPr) ||
-			(wf.ticket !== null && wf.ticket !== undefined && candidate.ticket === wf.ticket);
-		if (!sameIdentity) return false;
+		if (wf.rootDir !== null && wf.rootDir !== undefined &&
+			candidate.rootDir !== null && candidate.rootDir !== undefined &&
+			wf.rootDir !== candidate.rootDir) return false;
+		const samePr = failedPrIds.some((id) => workflowPrIds(candidate).includes(id));
+		const sameTicket = failedTicket !== null && workflowTicket(candidate) === failedTicket;
+		if (!samePr && !sameTicket) return false;
 		if (wf.startedAt === null || wf.startedAt === undefined || candidate.startedAt === null || candidate.startedAt === undefined)
-			return true;
+			return false;
 		const failedAt = Date.parse(wf.startedAt);
 		const candidateAt = Date.parse(candidate.startedAt);
 		if (!Number.isNaN(failedAt) && !Number.isNaN(candidateAt)) return candidateAt > failedAt;
@@ -900,6 +937,12 @@ export function isActionableWorkflowFailure(
 
 export function actionableWorkflowFailures(frame: FleetFrame): WorkflowRow[] {
 	return frame.workflows.filter((wf) => isActionableWorkflowFailure(wf, frame.workflows));
+}
+
+function liveStampWaits(frame: FleetFrame): WorkflowRow[] {
+	return frame.workflows.filter(
+		(wf) => wf.waitingFor === "stamp" && !isTerminalWorkflow(wf),
+	);
 }
 
 /** Attention-first order; terminal done/failed rows drop unless showAll. */
@@ -1017,9 +1060,10 @@ export function buildFleetView(
 	const noteMax = rowWidth - 24;
 	const prMax = rowWidth - 16;
 	const c = frame.counters;
+	const counts = workflowCounts(frame);
 	const lines: string[] = [];
 	const header = [
-		`${theme.bold(String(c.running))} running`,
+		`${theme.bold(String(counts.active))} active`,
 		`${c.tasks} task(s)`,
 		c.blocked > 0 ? theme.fg("error", `${c.blocked} blocked`) : null,
 		c.openDecisions > 0
@@ -1176,8 +1220,9 @@ export function buildFleetView(
 			wf.waitingFor === null || wf.waitingFor === undefined
 				? null
 				: `waitingFor=${wf.waitingFor}`;
+		const rowActivity = workflowRowActivity(wf);
 		lines.push(
-			`  ${theme.fg(wf.activity === "fixing" || wf.activity === "failed" ? "warning" : "accent", `[${wf.activity ?? "working"}]`)} ${theme.fg("accent", wf.prNumber === null || wf.prNumber === undefined ? `wf:${truncateTail(wf.runId, 16)}` : `PR #${wf.prNumber}`)}  ${theme.fg("text", truncate(action === null ? content : compact, Math.max(1, noteMax - 12)))}${action === null ? "" : ` ${theme.fg("warning", action)}${wf.waitAgeMs === null || wf.waitAgeMs === undefined ? "" : theme.fg("dim", ` ${humanAge(wf.waitAgeMs)}`)}`}`,
+			`  ${theme.fg(wf.activity === "fixing" || wf.activity === "failed" ? "warning" : "accent", `[${rowActivity}]`)} ${theme.fg("accent", wf.prNumber === null || wf.prNumber === undefined ? `wf:${truncateTail(wf.runId, 16)}` : `PR #${wf.prNumber}`)}  ${theme.fg("text", truncate(action === null ? content : compact, Math.max(1, noteMax - 12)))}${action === null ? "" : ` ${theme.fg("warning", action)}${wf.waitAgeMs === null || wf.waitAgeMs === undefined ? "" : theme.fg("dim", ` ${humanAge(wf.waitAgeMs)}`)}`}`,
 		);
 	};
 
@@ -1302,6 +1347,7 @@ export type FooterSessionBits = {
 	cacheReadTokens?: number;
 	cacheWriteTokens?: number;
 	cost?: number;
+	usageLine?: string;
 };
 
 function compactNumber(value: number | undefined): string {
@@ -1323,33 +1369,45 @@ function compactCwd(cwd: string | undefined): string {
 function footerIdentity(bits: FooterSessionBits): string {
 	const context = bits.contextPercent === null || bits.contextPercent === undefined
 		? "ctx?"
-		: `ctx${bits.contextPercent.toFixed(1)}%`;
-	const cache = `R${compactNumber(bits.cacheReadTokens)} W${compactNumber(bits.cacheWriteTokens)}`;
-	const cost = `$${(bits.cost ?? 0).toFixed(3)}`;
+		: `ctx${Math.round(bits.contextPercent)}%`;
+	const input = bits.inputTokens ?? 0;
+	const cacheRead = bits.cacheReadTokens ?? 0;
+	const cacheTotal = input + cacheRead;
+	const cacheHit = cacheTotal > 0 ? ` CH${Math.round((cacheRead / cacheTotal) * 100)}%` : "";
+	const cache = `R${compactNumber(bits.cacheReadTokens)} W${compactNumber(bits.cacheWriteTokens)}${cacheHit}`;
+	const cost = `$${(bits.cost ?? 0).toFixed(2)}`;
 	return [
 		compactCwd(bits.cwd),
-		bits.branch ?? "no-branch",
+		bits.branch === null || bits.branch === undefined ? null : bits.branch,
 		bits.model ?? "no-model",
 		context,
 		`↑${compactNumber(bits.inputTokens)} ↓${compactNumber(bits.outputTokens)}`,
 		cache,
 		cost,
-	].join(" · ");
+	].filter((value): value is string => value !== null).join(" · ");
 }
 
-function footerAction(frame: FleetFrame): string {
-	const stamp = frame.workflows.find((wf) => wf.waitingFor === "stamp");
-	if (stamp !== undefined)
-		return `stamp ${stamp.prNumber === null || stamp.prNumber === undefined ? "workflow" : `PR#${stamp.prNumber}`} — your word`;
-	const fixing = frame.workflows.find((wf) => wf.activity === "fixing");
-	if (fixing !== undefined)
-		return `fixing ${fixing.prNumber === null || fixing.prNumber === undefined ? "workflow" : `PR#${fixing.prNumber}`}`;
-	const failed = actionableWorkflowFailures(frame)[0];
-	if (failed !== undefined)
-		return `failed ${failed.prNumber === null || failed.prNumber === undefined ? "workflow" : `PR#${failed.prNumber}`}`;
-	const task = frame.tasks.find((candidate) => candidate.openDecisions > 0 || candidate.lastVerb === "needs-decision");
-	if (task !== undefined) return `decision ${task.prNumber === null || task.prNumber === undefined ? task.taskId : `PR#${task.prNumber}`}`;
-	return "idle";
+function workflowCounts(frame: FleetFrame): { active: number; waiting: number } {
+	const correlatedTasks = new Set(
+		frame.workflows
+			.filter((wf) => !isTerminalWorkflow(wf) && wf.taskId !== null)
+			.map((wf) => wf.taskId),
+	);
+	const active = frame.workflows.filter(
+		(wf) => !isTerminalWorkflow(wf) && workflowRowActivity(wf) !== "wait",
+	).length + frame.tasks.filter(
+		(task) => !correlatedTasks.has(task.taskId) && taskActivity(task) === "active",
+	).length;
+	const waiting = frame.workflows.filter(
+		(wf) =>
+			!isTerminalWorkflow(wf) &&
+			workflowRowActivity(wf) === "wait",
+	).length + frame.tasks.filter(
+		(task) =>
+			!correlatedTasks.has(task.taskId) &&
+			taskActivity(task) === "waiting",
+	).length;
+	return { active, waiting };
 }
 
 /** Exactly three width-safe lines for pi's custom footer. */
@@ -1359,66 +1417,21 @@ export function renderFooterLines(
 	theme: FleetTheme = PLAIN_FLEET_THEME,
 	width = 120,
 ): string[] {
-	const liveTasks = frame.tasks.filter((task) => attentionRank(task) < 7);
-	const decisions = liveTasks.reduce((sum, task) => sum + task.openDecisions, 0);
-	const queued = liveTasks.reduce((sum, task) => sum + task.queuedMessages, 0);
 	const failures = frame.tasks.filter((task) => task.lastVerb === "failed").length + actionableWorkflowFailures(frame).length;
-	const stamps = frame.workflows.filter((wf) => wf.waitingFor === "stamp").length;
+	const counts = workflowCounts(frame);
 	const attention = [
-		`${frame.counters.running}▶`,
-		`${decisions}?`,
-		`${queued}✉`,
-		`${frame.counters.openQuestions}q`,
-		`${failures}fail`,
-		`${stamps}stamp`,
-	];
-	const waiters = frame.workflows
-		.filter((wf) => wf.waitingFor !== "none" && wf.waitingFor !== null && !isTerminalWorkflow(wf))
-		.slice(0, 3)
-		.map((wf) => `${wf.activity === "fixing" ? "fixing" : wf.waitingFor} ${wf.prNumber === null || wf.prNumber === undefined ? "workflow" : `#${wf.prNumber}`}`);
+		counts.active > 0 ? `play ${counts.active}` : null,
+		counts.waiting > 0 ? `pause ${counts.waiting}` : null,
+		failures > 0 ? `fail ${failures}` : null,
+		frame.counters.openQuestions > 0 ? `ask ${frame.counters.openQuestions}` : null,
+	].filter((value): value is string => value !== null);
 	const lines = [
 		footerIdentity(bits),
-		[...attention, ...waiters].join(" · "),
-		footerAction(frame),
+		bits.usageLine ?? "",
+		attention.join(" · "),
 	];
 	return lines.map((line, index) => {
 		const colored = theme.fg(index === 2 ? "warning" : "dim", line);
 		return truncateToWidth(colored, Math.max(1, width));
 	});
-}
-
-export function renderStatusline(
-	frame: FleetFrame,
-	theme: FleetTheme = PLAIN_FLEET_THEME,
-): string {
-	const c = frame.counters;
-	const liveTasks = frame.tasks.filter((task) => attentionRank(task) < 7);
-	const liveQueued = liveTasks.reduce(
-		(sum, task) => sum + task.queuedMessages,
-		0,
-	);
-	const liveDecisions = liveTasks.reduce(
-		(sum, task) => sum + task.openDecisions,
-		0,
-	);
-	const failed = frame.tasks.filter(
-		(task) => task.lastVerb === "failed",
-	).length;
-	const parts: string[] = [];
-	if (c.running > 0) parts.push(theme.fg("success", `${c.running}▶`));
-	if (c.blocked > 0) parts.push(theme.fg("error", `${c.blocked} blocked`));
-	if (failed > 0) parts.push(theme.fg("error", `${failed} failed`));
-	if (c.openQuestions > 0)
-		parts.push(theme.fg("warning", `${c.openQuestions}q`));
-	if (liveDecisions > 0) parts.push(theme.fg("warning", `${liveDecisions}?`));
-	if (liveQueued > 0) parts.push(theme.fg("accent", `${liveQueued}✉`));
-	const failedWorkflows = actionableWorkflowFailures(frame).length;
-	const stamps = frame.workflows.filter(
-		(wf) => wf.waitingFor === "stamp",
-	).length;
-	if (failedWorkflows > 0)
-		parts.push(theme.fg("error", `${failedWorkflows} workflow failed`));
-	if (stamps > 0) parts.push(theme.fg("warning", `${stamps} stamp`));
-	if (parts.length === 0) return theme.fg("dim", "idle");
-	return parts.join(" · ");
 }
