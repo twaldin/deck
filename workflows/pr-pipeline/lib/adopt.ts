@@ -23,6 +23,10 @@ export interface AdoptExpectation {
 	worktreeHead: string; // git rev-parse HEAD in the worktree
 	worktreeStatus: string; // git status --porcelain output for the worktree
 	worktreeOriginUrl: string; // git remote get-url origin for the worktree
+	/** Local adversarial fixes may make the worktree a clean descendant of the PR head. */
+	allowWorktreeAhead?: boolean;
+	/** Result of git merge-base --is-ancestor when the heads differ. */
+	worktreeIsDescendant?: boolean;
 }
 
 /** Extracts "owner/name" from a git remote URL (ssh, https, or git@ form); "" when unparseable. */
@@ -62,7 +66,7 @@ export function assertAdoptable(overview: PrOverview, expected: AdoptExpectation
 			`[escalate] cannot adopt ${pr}: the worktree has branch "${expected.worktreeBranch}" checked out, not "${expected.branch}" — the watch fixer and merge run in this worktree and would act on the wrong branch.`,
 		);
 	}
-	if (expected.worktreeHead !== overview.headSha) {
+	if (expected.worktreeHead !== overview.headSha && (!expected.allowWorktreeAhead || expected.worktreeIsDescendant !== true)) {
 		throw new Error(
 			`[escalate] cannot adopt ${pr}: worktree HEAD is ${expected.worktreeHead} but the PR head is ${overview.headSha} — the worktree is stale or diverged; sync it to the PR head first.`,
 		);
@@ -78,4 +82,16 @@ export function assertAdoptable(overview: PrOverview, expected: AdoptExpectation
 			`[escalate] cannot adopt ${pr}: the worktree is not clean:\n${expected.worktreeStatus.trim()}\n— the watch fixer commits in this worktree and would push these unrelated changes into the PR. Clean or stash them first.`,
 		);
 	}
+}
+
+export type AdoptPushDecision = "proceed" | "push" | "escalate";
+
+/** Decides whether adopt may continue, or may safely overwrite the PR branch. */
+export function decideAdoptPush(args: {
+	worktreeHead: string;
+	prHead: string;
+	isAncestor: boolean;
+}): AdoptPushDecision {
+	if (args.worktreeHead === args.prHead) return "proceed";
+	return args.isAncestor ? "push" : "escalate";
 }

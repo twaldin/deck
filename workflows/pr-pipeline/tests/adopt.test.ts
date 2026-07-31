@@ -84,6 +84,16 @@ describe("assertAdoptable", () => {
 		).toThrow(/worktree HEAD is stale999/);
 	});
 
+	test("allows a clean descendant after a local review fix", () => {
+		expect(() =>
+			assertAdoptable(goodOverview, {
+				...goodExpectation,
+				worktreeHead: "fix456",
+				allowWorktreeAhead: true,
+			}),
+		).not.toThrow();
+	});
+
 	test("rejects a dirty worktree (modified files)", () => {
 		expect(() =>
 			assertAdoptable(goodOverview, { ...goodExpectation, worktreeStatus: " M src/app.ts\n" }),

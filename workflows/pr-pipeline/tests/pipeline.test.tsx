@@ -170,7 +170,7 @@ describe("project profiles (yolo vs stamp is data, not a fork)", () => {
 });
 
 describe("adopt existing PR (input.existingPr)", () => {
-	test("implement is stubbed, local review is skipped, prRecord seeded, and the SAME watch loop reaches done", async () => {
+	test("implement is stubbed, local adversarial review runs, prRecord seeded, and the SAME watch loop reaches done", async () => {
 		const { sim, error } = await run({
 			...baseInput,
 			bypassApprovals: true,
@@ -185,9 +185,8 @@ describe("adopt existing PR (input.existingPr)", () => {
 		expect(impl.commits).toEqual([]);
 		expect(String(impl.summary)).toContain("adopted existing PR #777");
 
-		// Local adversarial review never rendered (code already on the PR):
-		expect(sim.executed).not.toContain("local-review");
-		expect(sim.executed).not.toContain("local-fix");
+		// Adopt skips implementation only; adversarial review still runs:
+		expect(sim.executed).toContain("local-review");
 
 		// prRecord seeded from the existing PR, not fixtures.prNumber:
 		const pr = (sim.outputs.prRecord as Array<Record<string, unknown>>)[0];
@@ -213,7 +212,7 @@ describe("adopt existing PR (input.existingPr)", () => {
 		expect(sim.executed).toContain("push-pr");
 		expect(sim.executed).toContain("r0-watch-poll");
 		expect(sim.executed).toContain("r0-ready-poll");
-		expect(sim.executed).not.toContain("local-review");
+		expect(sim.executed).toContain("local-review");
 		expect(sim.executed).not.toContain("enqueue-merge");
 	});
 
