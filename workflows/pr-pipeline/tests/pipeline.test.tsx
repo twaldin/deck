@@ -19,6 +19,7 @@ import * as path from "node:path";
 import { simulate } from "smithers-orchestrator/testing";
 
 import pipeline from "../pipeline.tsx";
+import { localFixPrompt, localReviewPrompt } from "../lib/prompts.ts";
 
 const validBrief = {
 	ticket: "LIN-123",
@@ -49,6 +50,22 @@ async function run(input: Record<string, unknown>) {
 	}
 	return { sim, error };
 }
+
+describe("local review contracts", () => {
+	test("local fixes receive blockers but not nits", () => {
+		const prompt = localFixPrompt(["broken behavior"], "/tmp/wt", 2);
+		expect(prompt).toContain("broken behavior");
+		expect(prompt).not.toContain("optional polish");
+	});
+
+	test("review prompt requires approval iff blockers are empty", () => {
+		const prompt = localReviewPrompt(validBrief, "/tmp/wt", "main", 3);
+		expect(prompt).toContain('"approved": boolean');
+		expect(prompt).toContain('"blockingFindings": string[]');
+		expect(prompt).toContain('"nits": string[]');
+		expect(prompt).toContain("Set approved=true IFF");
+	});
+});
 
 describe("preflight gate", () => {
 	test("refuses a missing brief with the open-question list; nothing downstream runs", async () => {
@@ -127,6 +144,37 @@ describe("project profiles (yolo vs stamp is data, not a fork)", () => {
 		expect(sim.executed).toContain("done");
 		// yolo skips the stamp PARK only — the adversarial review still gates the PR open:
 		expect(sim.executed.indexOf("local-review")).toBeLessThan(sim.executed.indexOf("push-pr"));
+	});
+
+	test("default local review limit is eight rounds before blocker escalation", async () => {
+		const { sim } = await run({
+			...baseInput,
+			repo: "twaldin/deck",
+			profile: "deck",
+			fixtures: { changedFiles: ["src/feature.ts"], localReviewRounds: 99 },
+		});
+		expect(sim.status).toBe("waiting-approval");
+		expect(sim.executed.filter((id) => id === "local-review")).toHaveLength(8);
+		expect(sim.executed).not.toContain("push-pr");
+	});
+
+	test("nits-only review approves without local fix or escalation", async () => {
+		const { sim, error } = await run({
+			...baseInput,
+			repo: "twaldin/deck",
+			profile: "deck",
+			fixtures: {
+				changedFiles: ["src/feature.ts"],
+				localReviewNitsOnly: true,
+				localReviewRounds: 99,
+			},
+		});
+		expect(error).toBeUndefined();
+		expect(sim.status).toBe("finished");
+		expect(sim.executed.filter((id) => id === "local-review")).toHaveLength(1);
+		expect(sim.executed).not.toContain("local-fix");
+		expect(sim.executed).not.toContain("review-escalation");
+		expect(sim.executed).toContain("push-pr");
 	});
 
 	test("REGRESSION: the adversarial review gate holds under a yolo profile — an unapproved review parks at review-escalation and push-pr never runs", async () => {

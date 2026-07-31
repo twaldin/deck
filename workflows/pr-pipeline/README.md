@@ -32,7 +32,9 @@ deck-v2 ship deck-42 --profile deck --worktree ~/.deck/wt/deck-3 --branch deck/m
 
 Enforcement is machine-shaped on both sides: here, `push-pr` renders only after
 `local-review` approves (or a human approves `review-escalation`) — no input
-can skip it; and in deck, `deck-v2 spawn --kind ship` REFUSES a profiled repo
+can skip it. Local review loops up to eight rounds, fixes only blocking findings,
+and exits when only nits remain. Escalation is available only when blockers
+remain after the limit. In deck, `deck-v2 spawn --kind ship` REFUSES a profiled repo
 without `--no-pipeline` (v2/src/spawn.ts `assertShipGoesThroughPipeline`), so a
 bare worker cannot open the PR that skips this graph. Incident: doctrine PR
 #26865 shipped with zero adversarial review through exactly that bare path.
