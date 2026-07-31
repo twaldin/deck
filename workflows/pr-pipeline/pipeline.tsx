@@ -48,6 +48,7 @@ import {
 	fetchHeadSha,
 	fetchMainCommitSubjects,
 	fetchPrApprovalsAndCi,
+	fetchPrOverview,
 	fetchRecentAuthors,
 	fetchRequestedReviewers,
 	fetchWatchSnapshot,
@@ -140,6 +141,14 @@ const inputSchema = z.object({
 	 * park at the durable <Approval> as always. Omitted = stamp behavior.
 	 */
 	profile: z.string().optional(),
+	/**
+	 * Adopt an already-open PR instead of implementing greenfield: implement is
+	 * stubbed, local adversarial review is skipped (the code is already on the
+	 * PR), push-pr verifies the branch matches the PR head and seeds prRecord
+	 * from gh — it NEVER creates a second PR. Watch/ready/stamp are unchanged:
+	 * the run owns continuous CI/review polling until merge, same as a ship.
+	 */
+	existingPr: z.number().int().positive().optional(),
 	brief: z.unknown().optional(),
 	/** Default TRUE: real GH writes require explicit dryRun:false. */
 	dryRun: z.boolean().optional(),
@@ -397,6 +406,7 @@ export default smithers((ctx) => {
 	const github = { ...DEFAULT_GITHUB, ...(input.github ?? {}) };
 	const commands = { ...DEFAULT_COMMANDS, ...(input.commands ?? {}) };
 	const baseBranch = input.baseBranch ?? "main";
+	const adopt = input.existingPr !== undefined;
 	// Resolved once per render; yolo=false (stamp behavior) when omitted.
 	const profile: ProjectProfile | null =
 		input.profile === undefined ? null : findProfile(input.profile);
@@ -582,7 +592,7 @@ export default smithers((ctx) => {
 	const reviewApproved = latestLocalReview?.approved === true;
 	const reviewExhausted =
 		localReviewRows.length >= limits.localReviewRounds && !reviewApproved;
-	const pushAllowed = reviewApproved || reviewEscalation?.approved === true;
+	const pushAllowed = adopt || reviewApproved || reviewEscalation?.approved === true;
 
 	// ===========================================================================
 	// Render
@@ -653,7 +663,19 @@ export default smithers((ctx) => {
 				) : null}
 
 				{/* ------------------------------------------------ stage 1: implement */}
-				{preflight?.ok === true && brief !== null ? (
+				{/* Adopt path: the code already lives on the PR. The implement node
+				    still runs (downstream gates key off its row) but as a stub compute
+				    task — no agent, no greenfield work. */}
+				{preflight?.ok === true && brief !== null && adopt ? (
+					<Task id="implement" output={outputs.implementation} retries={0}>
+						{() => ({
+							commits: [],
+							summary: `adopted existing PR #${input.existingPr}: implementation lives on the PR`,
+							testEvidence: `adopted existing PR #${input.existingPr}: CI on the PR is the evidence`,
+						})}
+					</Task>
+				) : null}
+				{preflight?.ok === true && brief !== null && !adopt ? (
 					<Task
 						id="implement"
 						output={outputs.implementation}
@@ -671,7 +693,9 @@ export default smithers((ctx) => {
 				) : null}
 
 				{/* ---------------------------------- stage 2: local adversarial review */}
-				{implementation !== undefined && brief !== null ? (
+				{/* Skipped on adopt: the code is already public on the PR; review
+				    pressure comes from the PR's own reviewers via the watch loop. */}
+				{implementation !== undefined && brief !== null && !adopt ? (
 					<Loop
 						id="local-review-loop"
 						until={latestLocalReview?.approved === true}
@@ -740,6 +764,56 @@ export default smithers((ctx) => {
 					<Task id="push-pr" output={outputs.prRecord} retries={1}>
 						{() =>
 							(async () => {
+								if (adopt) {
+									// Adopt: verify + seed from the live PR. NEVER push, NEVER
+									// create — a second PR is the break signal.
+									const prNumber = input.existingPr as number;
+									if (dryRun) {
+										return {
+											prNumber,
+											url: `https://github.com/${input.repo}/pull/${prNumber}`,
+											headSha: "dryrun-head-sha",
+											watchSetRegistered: true,
+											watchSetPath: "(dry-run: not written)",
+											receipt: `dry-run: adopted existing PR #${prNumber}`,
+											createdAt: nowIso(),
+										};
+									}
+									const overview = await fetchPrOverview(ghCtx, prNumber);
+									if (overview.state !== "open") {
+										throw new Error(
+											`[escalate] cannot adopt PR #${prNumber}: state is "${overview.state}", not open.`,
+										);
+									}
+									if (overview.headRefName !== input.branch) {
+										throw new Error(
+											`[escalate] cannot adopt PR #${prNumber}: its head branch is "${overview.headRefName}" but the run was given branch "${input.branch}" — adopting the wrong PR would watch/stamp the wrong diff.`,
+										);
+									}
+									const fs = await import("node:fs");
+									const path = await import("node:path");
+									fs.mkdirSync(path.dirname(watchSetPath), { recursive: true });
+									fs.appendFileSync(
+										watchSetPath,
+										`${JSON.stringify({
+											ticket: input.ticket,
+											repo: input.repo,
+											pr: prNumber,
+											url: overview.url,
+											registeredAt: nowIso(),
+											runId: ctx.runId,
+										})}\n`,
+									);
+									return {
+										prNumber,
+										url: overview.url,
+										headSha: overview.headSha,
+										watchSetRegistered: true,
+										watchSetPath,
+										receipt: `adopted existing PR #${prNumber} (head ${overview.headSha})`,
+										createdAt: nowIso(),
+									};
+								}
 								if (dryRun) {
 									return {
 										prNumber: fixtures.prNumber,

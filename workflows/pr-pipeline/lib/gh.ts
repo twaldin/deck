@@ -373,6 +373,34 @@ export async function fetchRequestedReviewers(ctx: GhContext, prNumber: number):
 	return parseRequestedReviewers(JSON.parse(out));
 }
 
+/** Overview of an existing PR (adopt path: verify + seed, never create). */
+export async function fetchPrOverview(ctx: GhContext, prNumber: number): Promise<{
+	number: number;
+	url: string;
+	state: string;
+	headRefName: string;
+	headSha: string;
+	baseRefName: string;
+}> {
+	const exec = ctx.exec ?? bunExec;
+	const out = await execOrThrow(exec, [ctx.gh, "api", `repos/${ctx.repo}/pulls/${prNumber}`]);
+	const payload = JSON.parse(out) as {
+		number: number;
+		html_url: string;
+		state: string;
+		head: { ref: string; sha: string };
+		base: { ref: string };
+	};
+	return {
+		number: payload.number,
+		url: payload.html_url,
+		state: payload.state,
+		headRefName: payload.head.ref,
+		headSha: payload.head.sha,
+		baseRefName: payload.base.ref,
+	};
+}
+
 /** Current head SHA of the PR (stamp-validity check). */
 export async function fetchHeadSha(ctx: GhContext, prNumber: number): Promise<string> {
 	const exec = ctx.exec ?? bunExec;

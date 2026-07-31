@@ -90,6 +90,13 @@ describe("buildPipelineInput", () => {
 		expect(dry.dryRun).toBe(true);
 	});
 
+	test("existingPr passes through to the pipeline input (adopt path); omitted stays omitted", () => {
+		const adopt = buildPipelineInput(request({ existingPr: 4242 }), deckProfile());
+		expect(adopt.existingPr).toBe(4242);
+		const fresh = buildPipelineInput(request(), deckProfile());
+		expect(fresh.existingPr).toBeUndefined();
+	});
+
 	test("a stamp profile (lindy) never gets the weak git-log deploy default: preflight must fail closed until explicit evidence exists", () => {
 		const lindy = buildPipelineInput(request({ profile: "lindy" }), lindyProfile());
 		expect(lindy.commands).toBeUndefined();

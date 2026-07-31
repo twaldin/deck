@@ -35,11 +35,13 @@ const USAGE = `deck-v2 — fleet primitives
              --title <text> --summary <text> --accept <a;b;c>
              [--base <branch>] [--break-signal <text>] [--kill-switch <name>]
              [--blast-radius <text>] [--reviewers <a,b>] [--deploy-evidence <cmd>]
-             [--run-id <id>] [--dry-run]
+             [--run-id <id>] [--dry-run] [--existing-pr <number>]
                                    DEFAULT ship path: start the project's PR
                                    pipeline (adversarial review gates the PR open;
                                    yolo profiles merge on green, stamp profiles
-                                   park for the captain's word)
+                                   park for the captain's word); --existing-pr
+                                   adopts an already-open PR into the same
+                                   watch/stamp loop (no second PR, no reimplement)
   spawn <id> --task <text> --accept <text> (--repo <path|alias> | --worktree <path>)
              [--kind ship|scout] [--base <branch>] [--desc <text>]
              [--project <name>] [--branch <name>] [--model <deck/model>]
@@ -128,6 +130,11 @@ export async function runCli(argv: string[]): Promise<number> {
 				const ticket = args._[1];
 				if (ticket === undefined) throw new Error("ship needs a ticket/effort id");
 				const reviewers = str(args.flags, "reviewers");
+				const existingPrFlag = str(args.flags, "existing-pr");
+				const existingPr = existingPrFlag === undefined ? undefined : Number(existingPrFlag);
+				if (existingPr !== undefined && (!Number.isInteger(existingPr) || existingPr <= 0)) {
+					throw new Error(`--existing-pr must be a positive PR number, got "${existingPrFlag}"`);
+				}
 				const result = await startShip({
 					ticket,
 					profile: need(args.flags, "profile"),
@@ -152,6 +159,7 @@ export async function runCli(argv: string[]): Promise<number> {
 						: { deployEvidence: need(args.flags, "deploy-evidence") }),
 					...(str(args.flags, "run-id") === undefined ? {} : { runId: need(args.flags, "run-id") }),
 					...(args.flags["dry-run"] === true ? { dryRun: true } : {}),
+					...(existingPr === undefined ? {} : { existingPr }),
 				});
 				process.stdout.write(
 					`ship ${result.runId} started (pid ${result.pid}) — profile ${result.profile} (${result.pipeline})${result.dryRun ? " [DRY RUN]" : ""}\n` +
