@@ -98,6 +98,7 @@ process and are useful for persistent-agent launchers.
 | `PI_IDLE_COMPACTION_MARGIN_MS` | `60000` | Legacy global safety margin; must be less than its TTL. |
 | `PI_IDLE_COMPACTION_ANTHROPIC_TTL_MS` + `PI_IDLE_COMPACTION_ANTHROPIC_MARGIN_MS` | unset | Paired override for `claude-*` models (Anthropic's documented default is 5 minutes). |
 | `PI_IDLE_COMPACTION_OPENAI_TTL_MS` + `PI_IDLE_COMPACTION_OPENAI_MARGIN_MS` | unset | Paired override for `gpt-*` models (calibrate to the actual route; OpenAI in-memory cache is generally 5–10 minutes). |
+| `PI_IDLE_COMPACTION_XAI_TTL_MS` + `PI_IDLE_COMPACTION_XAI_MARGIN_MS` | 120000 + 30000 | Paired override for `grok-*` models. xAI documents automatic caching but no cache lifetime, so a short built-in profile applies by default. |
 | `PI_IDLE_COMPACTION_FLOOR_PERCENT` | `30` | Minimum current context as a percentage of the active model's window. |
 | `PI_IDLE_COMPACTION_MIN_GROWTH_TOKENS` | `1024` | Absolute minimum growth above the post-compaction estimate before another idle compaction. |
 | `PI_IDLE_COMPACTION_MIN_GROWTH_PERCENT` | `5` | Window-relative minimum growth; the effective gate is the larger token/percentage value. |
@@ -116,7 +117,7 @@ pi --no-idle-compaction
 
 Provider TTLs differ. The extension resolves the upstream provider from the
 active model ID, including Deck's gateway models (`claude-*` → Anthropic,
-`gpt-*` → OpenAI). A complete per-provider pair overrides the legacy global
+`gpt-*` → OpenAI, `grok-*` → xAI). A complete per-provider pair overrides the legacy global
 timing only for that family; changing models therefore changes the warm-cache
 deadline safely. Both variables in a pair are required; malformed or incomplete
 profiles are ignored with a session warning (and are written to stderr when
