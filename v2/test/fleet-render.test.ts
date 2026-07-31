@@ -4,6 +4,9 @@
  * runs. All pure — no herdr, no smithers, no TUI.
  */
 import { describe, expect, test } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import {
 	activityFor,
 	actionableWorkflowFailures,
@@ -17,6 +20,7 @@ import {
 	waitingForFor,
 	normalizeStep,
 	parseShipLogEvidence,
+	collectRuns,
 	PLAIN_FLEET_THEME,
 	renderFooterLines,
 	sliceVisible,
@@ -80,6 +84,40 @@ landing-poll {"landed":true}`,
 		expect(parseShipLogEvidence(
 			`push-pr output: {"pr_number":null}`,
 		)).toEqual({ prNumber: null, landed: false, pushPrNull: true });
+		expect(parseShipLogEvidence(
+			`push-pr output: {"pr_number":null}\nwatch cited PR #26865\npush-pr output: {"pr_number":314}`,
+		)).toEqual({ prNumber: 314, landed: false, pushPrNull: false });
+		expect(parseShipLogEvidence(
+			`adversarial review asks whether work already landed\nlanding-poll {"landed":false}`,
+		)).toEqual({ prNumber: null, landed: false, pushPrNull: false });
+		expect(parseShipLogEvidence(
+			`agent discussed landing-poll {"landed":true}`,
+		)).toEqual({ prNumber: null, landed: false, pushPrNull: false });
+		expect(parseShipLogEvidence(
+			`push-pr output: {"pr_number":314}\nwatch cited PR #26865`,
+		)).toEqual({ prNumber: 314, landed: false, pushPrNull: false });
+	});
+});
+
+describe("run collection", () => {
+	test("uses one ps subprocess per tick and deduplicates concurrent collectors", async () => {
+		const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fleet-collect-"));
+		const bin = path.join(directory, "bin");
+		const count = path.join(directory, "count");
+		fs.mkdirSync(bin);
+		fs.writeFileSync(path.join(bin, "bunx"), `#!/bin/sh\nprintf x >> ${JSON.stringify(count)}\nprintf '[]\\n'\n`);
+		fs.chmodSync(path.join(bin, "bunx"), 0o755);
+		const previousPath = process.env.PATH;
+		process.env.PATH = `${bin}:${previousPath ?? ""}`;
+		try {
+			await Promise.all([collectRuns(directory), collectRuns(directory)]);
+			expect(fs.readFileSync(count, "utf8")).toHaveLength(1);
+			await collectRuns(directory);
+			expect(fs.readFileSync(count, "utf8")).toHaveLength(2);
+		} finally {
+			process.env.PATH = previousPath;
+			fs.rmSync(directory, { recursive: true, force: true });
+		}
 	});
 });
 
@@ -750,6 +788,11 @@ describe("three-line footer", () => {
 });
 
 describe("zombie workflow failures", () => {
+	test("does not hide a failed run from unrelated landed chatter", () => {
+		const failed = { runId: "failed", workflow: "pr-pipeline", activity: "failed", status: "failed", state: "failed", step: "watch", taskId: null, ticket: "T-failed", prNumber: 1, landed: false } satisfies WorkflowRow;
+		expect(actionableWorkflowFailures(frame({ workflows: [failed] }))).toEqual([failed]);
+	});
+
 	test("hides landed, superseded, and push-pr-null failures but keeps real failures", () => {
 		const real = { runId: "real", workflow: "pr-pipeline", activity: "failed", status: "failed", state: "failed", step: "watch", taskId: null, ticket: "T-real", prNumber: 1 } satisfies WorkflowRow;
 		const landed = { ...real, runId: "landed", merged: true };

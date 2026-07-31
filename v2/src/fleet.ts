@@ -173,16 +173,26 @@ export type ShipLogEvidence = {
 
 /** Extract durable pipeline evidence without starting a per-run Smithers process. */
 export function parseShipLogEvidence(log: string): ShipLogEvidence {
+	// Only trust the push-pr node for PR identity. Agent chatter can cite other
+	// PRs, and the log is append-only, so the last push-pr record wins.
+	const pushRecords = [...log.matchAll(/^\s*push-pr\b[^\n]*/gim)].map((match) => match[0]);
+	const pushLog = pushRecords.at(-1) ?? "";
 	const prMatches = [
-		...[...log.matchAll(/PR\s+#(\d+)/gi)].map((match) => Number(match[1])),
-		...[...log.matchAll(/["']?pr[_ ]?number["']?\s*[:=]\s*(\d+)/gi)].map((match) => Number(match[1])),
+		...[...pushLog.matchAll(/PR\s+#(\d+)/gi)].map((match) => Number(match[1])),
+		...[...pushLog.matchAll(/["']?pr[_ ]?number["']?\s*[:=]\s*(\d+)/gi)].map((match) => Number(match[1])),
 	];
+	const landingMatches = [...log.matchAll(
+		/^\s*landing-poll\b[^\n]*["']?landed["']?\s*[:=]\s*(true|false)/gim,
+	)];
+	const lastLanding = landingMatches.at(-1)?.[1]?.toLowerCase();
+	const pushNullMatches = [...pushLog.matchAll(
+		/["']?pr[_ ]?number["']?\s*[:=]\s*(null|\d+)/gi,
+	)];
+	const lastPushValue = pushNullMatches.at(-1)?.[1]?.toLowerCase();
 	return {
 		prNumber: prMatches.at(-1) ?? null,
-		landed: /landing-poll[^\n]*["']?landed["']?\s*[:=]\s*true|already landed/i.test(log),
-		pushPrNull:
-			/push-pr[\s\\s\S]{0,1000}["']?(?:pr[_ ]?number|pr)["']?\s*[:=]\s*null/i.test(log) ||
-			/pre-PR zombie/i.test(log),
+		landed: lastLanding === "true",
+		pushPrNull: lastPushValue === "null" || /pre-PR zombie/i.test(pushLog),
 	};
 }
 
