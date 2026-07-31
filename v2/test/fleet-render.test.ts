@@ -78,24 +78,24 @@ function frame(overrides: Partial<FleetFrame> = {}): FleetFrame {
 describe("ship evidence", () => {
 	test("recovers PR and terminal failure evidence from the ship log", () => {
 		expect(parseShipLogEvidence(
-			`push-pr output: {"pr_number": 314}
-landing-poll {"landed":true}`,
+			`info  {"category":"agent-trace","payload":{"text":"{\\"prNumber\\":314}"}} agent-trace=0ms
+      runId=ship node.id=push-pr nodeId=push-pr
+info  {"category":"agent-trace","payload":{"text":"{\\"landed\\":true}"}} agent-trace=0ms
+      runId=ship node.id=landing-poll nodeId=landing-poll`,
 		)).toEqual({ prNumber: 314, landed: true, pushPrNull: false });
 		expect(parseShipLogEvidence(
-			`push-pr output: {"pr_number":null}`,
+			`info  {"category":"agent-trace","payload":{"text":"{\\"pr_number\\":null}"}} agent-trace=0ms
+      node.id=push-pr nodeId=push-pr`,
 		)).toEqual({ prNumber: null, landed: false, pushPrNull: true });
 		expect(parseShipLogEvidence(
-			`push-pr output: {"pr_number":null}\nwatch cited PR #26865\npush-pr output: {"pr_number":314}`,
+			`info  {"category":"agent-trace","payload":{"text":"{\\"pr_number\\":null}"}}\n      node.id=push-pr nodeId=push-pr\ninfo  {"category":"agent-trace","payload":{"text":"{\\"pr_number\\":314}"}}\n      node.id=push-pr nodeId=push-pr`,
 		)).toEqual({ prNumber: 314, landed: false, pushPrNull: false });
 		expect(parseShipLogEvidence(
-			`adversarial review asks whether work already landed\nlanding-poll {"landed":false}`,
+			`info  {"category":"agent-trace","payload":{"text":"agent discussed landing-poll {\\"landed\\":true}"}}\n      node.id=push-pr nodeId=push-pr`,
 		)).toEqual({ prNumber: null, landed: false, pushPrNull: false });
 		expect(parseShipLogEvidence(
-			`agent discussed landing-poll {"landed":true}`,
+			`      push-pr: verify branch matches PR head\n      PR #26865\n      pre-PR zombie`,
 		)).toEqual({ prNumber: null, landed: false, pushPrNull: false });
-		expect(parseShipLogEvidence(
-			`push-pr output: {"pr_number":314}\nwatch cited PR #26865`,
-		)).toEqual({ prNumber: 314, landed: false, pushPrNull: false });
 	});
 });
 

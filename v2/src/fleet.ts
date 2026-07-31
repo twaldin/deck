@@ -173,27 +173,54 @@ export type ShipLogEvidence = {
 
 /** Extract durable pipeline evidence without starting a per-run Smithers process. */
 export function parseShipLogEvidence(log: string): ShipLogEvidence {
-	// Only trust the push-pr node for PR identity. Agent chatter can cite other
-	// PRs, and the log is append-only, so the last push-pr record wins.
-	const pushRecords = [...log.matchAll(/^\s*push-pr\b[^\n]*/gim)].map((match) => match[0]);
-	const pushLog = pushRecords.at(-1) ?? "";
-	const prMatches = [
-		...[...pushLog.matchAll(/PR\s+#(\d+)/gi)].map((match) => Number(match[1])),
-		...[...pushLog.matchAll(/["']?pr[_ ]?number["']?\s*[:=]\s*(\d+)/gi)].map((match) => Number(match[1])),
-	];
-	const landingMatches = [...log.matchAll(
-		/^\s*landing-poll\b[^\n]*["']?landed["']?\s*[:=]\s*(true|false)/gim,
-	)];
-	const lastLanding = landingMatches.at(-1)?.[1]?.toLowerCase();
-	const pushNullMatches = [...pushLog.matchAll(
-		/["']?pr[_ ]?number["']?\s*[:=]\s*(null|\d+)/gi,
-	)];
-	const lastPushValue = pushNullMatches.at(-1)?.[1]?.toLowerCase();
-	return {
-		prNumber: prMatches.at(-1) ?? null,
-		landed: lastLanding === "true",
-		pushPrNull: lastPushValue === "null" || /pre-PR zombie/i.test(pushLog),
-	};
+	// `ship.ts` captures detached `smithers up` stdout. Node output is not a
+	// top-level log line: it is the text in an agent-trace record, followed by
+	// node metadata. Keep the association with the node so agent chatter cannot
+	// supply a PR number or terminal state.
+	const records: Array<{ node: string; text: string }> = [];
+	const lines = log.split("\n");
+	for (let index = 0; index < lines.length; index += 1) {
+		const line = lines[index];
+		if (line === undefined || !/^info\s+\{\"category\":\"agent-trace\"/.test(line)) continue;
+		const start = index;
+		while (index + 1 < lines.length && !/^info\s+\{/.test(lines[index + 1] ?? "")) index += 1;
+		const block = lines.slice(start, index + 1).join("\n");
+		const node = block.match(/(?:node\.id|nodeId)=(push-pr|landing-poll)\b/)?.[1];
+		if (node === undefined) continue;
+		const textMatch = block.match(/\"text\":\"((?:\\.|[^\"\\])*)\"/s);
+		if (textMatch !== null) {
+			try {
+				const text = JSON.parse(`\"${textMatch[1]}\"`) as unknown;
+				if (typeof text === "string") records.push({ node, text });
+			} catch {
+				// Truncated trace records are not evidence.
+			}
+		}
+	}
+
+	let prNumber: number | null = null;
+	let pushPrNull = false;
+	let landed = false;
+	for (const record of records) {
+		try {
+			const value = JSON.parse(record.text) as Record<string, unknown>;
+			if (record.node === "push-pr") {
+				const raw = value.prNumber ?? value.pr_number;
+				if (typeof raw === "number" && Number.isInteger(raw)) {
+					prNumber = raw;
+					pushPrNull = false;
+				} else if (raw === null) {
+					prNumber = null;
+					pushPrNull = true;
+				}
+			} else if (record.node === "landing-poll" && value.landed === true) {
+				landed = true;
+			}
+		} catch {
+			// Agent prose is deliberately ignored. Only structured node output counts.
+		}
+	}
+	return { prNumber, landed, pushPrNull };
 }
 
 function readShipEvidence(runId: string): ShipLogEvidence {
