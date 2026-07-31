@@ -110,6 +110,7 @@ describe("project profiles (yolo vs stamp is data, not a fork)", () => {
 	test("a yolo profile (deck) traverses to done with NO approval bypass: the stamp park is skipped", async () => {
 		const { sim, error } = await run({
 			...baseInput,
+			repo: "twaldin/deck",
 			profile: "deck",
 			fixtures: { changedFiles: ["src/feature.ts"] }, // no migration gate
 		});
@@ -140,6 +141,15 @@ describe("project profiles (yolo vs stamp is data, not a fork)", () => {
 		const { sim, error } = await run({ ...baseInput, profile: "nope" });
 		expect(sim.status).toBe("failed");
 		expect(String(error)).toContain('unknown project profile "nope"');
+	});
+
+	test("REGRESSION: a yolo profile attached to another repo is refused, never a skipped stamp", async () => {
+		// Without the repo binding, any caller could pass the deck profile on a
+		// lindy run and merge without the captain's stamp.
+		const { sim, error } = await run({ ...baseInput, profile: "deck" }); // repo stays lindy-ai/lindy
+		expect(sim.status).toBe("failed");
+		expect(String(error)).toContain('profile "deck" belongs to repo twaldin/deck');
+		expect(sim.executed).not.toContain("enqueue-merge");
 	});
 });
 

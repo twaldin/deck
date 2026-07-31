@@ -401,7 +401,11 @@ export default smithers((ctx) => {
 	const profile: ProjectProfile | null =
 		input.profile === undefined ? null : findProfile(input.profile);
 	const profileUnknown = input.profile !== undefined && profile === null;
-	const yolo = profile?.yolo === true;
+	// The profile must be THIS repo's profile: without the binding, any caller
+	// could attach the deck yolo profile to a lindy run and skip the stamp.
+	const profileRepoMismatch =
+		profile !== null && profile.repo.toLowerCase() !== input.repo.toLowerCase();
+	const yolo = profile !== null && !profileRepoMismatch && profile.yolo;
 	const watchSetPath =
 		input.watchSetPath ?? `${process.env.HOME ?? "~"}/dev/fm2/data/watch-set.jsonl`;
 
@@ -596,6 +600,11 @@ export default smithers((ctx) => {
 						if (profileUnknown) {
 							questions.push(
 								`unknown project profile "${input.profile}": not in config/projects.json (deck home) or the built-in seeds.`,
+							);
+						}
+						if (profileRepoMismatch) {
+							questions.push(
+								`profile "${profile?.id}" belongs to repo ${profile?.repo}, not ${input.repo}: a profile's yolo/stamp policy may never be attached to another repo.`,
 							);
 						}
 						if (bypass && !dryRun) {
