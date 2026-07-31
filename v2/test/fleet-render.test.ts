@@ -12,6 +12,7 @@ import {
 	framed,
 	isTerminalWorkflow,
 	humanAge,
+	normalizeStep,
 	PLAIN_FLEET_THEME,
 	renderStatusline,
 	sliceVisible,
@@ -143,7 +144,7 @@ describe("buildFleetText", () => {
 		const out = buildFleetText(
 			frame({
 				workflows: [
-					{ runId: "r42", workflow: "pr-pipeline", status: "running", step: "review", taskId: "fix-login" },
+					{ runId: "r42", workflow: "pr-pipeline", status: "running", state: null, step: "review", taskId: "fix-login" },
 				],
 			}),
 		);
@@ -198,6 +199,7 @@ describe("buildFleetText", () => {
 						runId: "r".repeat(80),
 						workflow: "w".repeat(80),
 						status: "running",
+						state: null,
 						step: "x".repeat(80),
 						taskId: null,
 					},
@@ -249,7 +251,7 @@ describe("attention-first default view", () => {
 		const out = buildFleetText(
 			frame({
 				tasks: [...doneTasks, ...live],
-				workflows: [{ runId: "r1", workflow: "pr-pipeline", status: "running", step: null, taskId: null }],
+				workflows: [{ runId: "r1", workflow: "pr-pipeline", status: "running", state: null, step: null, taskId: null }],
 			}),
 		);
 		expect(out.indexOf("wf:r1")).toBeGreaterThan(out.indexOf("live-run"));
@@ -260,7 +262,7 @@ describe("attention-first default view", () => {
 		const out = buildFleetText(
 			frame({
 				tasks: [...doneTasks, ...live],
-				workflows: [{ runId: "r9", workflow: "pr-pipeline", status: "Completed", step: null, taskId: null }],
+				workflows: [{ runId: "r9", workflow: "pr-pipeline", status: "Completed", state: null, step: null, taskId: null }],
 			}),
 		);
 		expect(out).not.toContain("wf:r9");
@@ -272,8 +274,8 @@ describe("attention-first default view", () => {
 			frame({
 				tasks: [...doneTasks, ...live],
 				workflows: [
-					{ runId: "r1", workflow: "pr-pipeline", status: "running", step: null, taskId: null },
-					{ runId: "r9", workflow: "pr-pipeline", status: "failed", step: null, taskId: null },
+					{ runId: "r1", workflow: "pr-pipeline", status: "running", state: null, step: null, taskId: null },
+					{ runId: "r9", workflow: "pr-pipeline", status: "failed", state: null, step: null, taskId: null },
 				],
 			}),
 			PLAIN_FLEET_THEME,
@@ -285,9 +287,34 @@ describe("attention-first default view", () => {
 	});
 
 	test("isTerminalWorkflow: terminal statuses case-insensitive, unknown/null stay active", () => {
-		const wf = (status: string | null) => ({ runId: "r", workflow: null, status, step: null, taskId: null });
-		for (const s of ["completed", "Failed", "CANCELLED", "succeeded"]) expect(isTerminalWorkflow(wf(s))).toBe(true);
+		const wf = (status: string | null, state: string | null = null) => ({ runId: "r", workflow: null, status, state, step: null, taskId: null });
+		for (const s of ["completed", "Failed", "CANCELLED", "succeeded", "finished", "done", "Complete"]) {
+			expect(isTerminalWorkflow(wf(s))).toBe(true);
+		}
 		for (const s of ["running", "weird", null]) expect(isTerminalWorkflow(wf(s))).toBe(false);
+		// Live smithers ps shape: status "finished" + state "succeeded".
+		expect(isTerminalWorkflow(wf("finished", "succeeded"))).toBe(true);
+		// A state field alone can carry the terminal verdict.
+		expect(isTerminalWorkflow(wf("weird", "succeeded"))).toBe(true);
+	});
+
+	test("normalizeStep: em-dash, dash, and empty read as no step", () => {
+		for (const s of ["\u2014", "-", "", "  ", null, undefined]) expect(normalizeStep(s)).toBe(null);
+		expect(normalizeStep("review")).toBe("review");
+	});
+
+	test("bare chrome: no box-drawing frame, title and footer still present", () => {
+		const f = frame({ tasks: [task({ taskId: "live", runState: "running" })] });
+		const bare = buildFleetText(f, PLAIN_FLEET_THEME, { chrome: "bare" });
+		expect(bare).not.toContain("\u256d");
+		expect(bare).not.toContain("\u2570");
+		expect(bare).not.toContain("\u2502");
+		expect(bare).toContain("deck fleet");
+		expect(bare).toContain("[q/Esc]");
+		expect(bare).toContain("live");
+		const framedOut = buildFleetText(f);
+		expect(framedOut).toContain("\u256d");
+		expect(framedOut).toContain("\u2570");
 	});
 
 	test("maxBodyLines clamps the frame height with the border intact", () => {

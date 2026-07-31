@@ -60,6 +60,8 @@ export type WorkflowRow = {
 	runId: string;
 	workflow: string | null;
 	status: string | null;
+	/** smithers ps state, when reported (e.g. "succeeded" beside status "finished"). */
+	state: string | null;
 	step: string | null;
 	/** Task correlated by rootDir == worktree, when one matches. */
 	taskId: string | null;
@@ -84,7 +86,14 @@ export type FleetFrame = {
 	sources: SourceHealth[];
 };
 
-type PsRun = { id: string; workflow?: string; status?: string; step?: string; rootDir?: string };
+type PsRun = { id: string; workflow?: string; status?: string; state?: string; step?: string; rootDir?: string };
+
+/** smithers ps reports "no step" as an em-dash placeholder, not an absence. */
+export function normalizeStep(step: string | null | undefined): string | null {
+	if (step === undefined || step === null) return null;
+	const trimmed = step.trim();
+	return trimmed === "" || trimmed === "—" || trimmed === "-" ? null : trimmed;
+}
 
 /** Public read-only CLI only. Never the private db, never Gateway lifecycle. */
 async function collectRuns(cwd: string): Promise<{ runs: PsRun[]; health: SourceHealth }> {
@@ -211,7 +220,7 @@ export async function buildFrame(options: { workflowCwd?: string } = {}): Promis
 			pr: meta?.pr ?? null,
 			worktree,
 			runId: psRun?.id ?? meta?.run_id ?? null,
-			stage: psRun?.step ?? null,
+			stage: normalizeStep(psRun?.step),
 			pane: resolved === null ? null : byWorktree.get(resolved) ?? null,
 			statusAgeMs,
 		});
@@ -221,7 +230,8 @@ export async function buildFrame(options: { workflowCwd?: string } = {}): Promis
 		runId: psRun.id,
 		workflow: psRun.workflow ?? null,
 		status: psRun.status ?? null,
-		step: psRun.step ?? null,
+		state: psRun.state ?? null,
+		step: normalizeStep(psRun.step),
 		taskId:
 			psRun.rootDir !== undefined && psRun.rootDir.length > 0
 				? taskByRoot.get(realpath(psRun.rootDir)) ?? null
@@ -378,8 +388,12 @@ export function attentionRank(task: TaskRow): number {
 }
 
 /** Terminal workflow: finished one way or another. Unknown/null status stays visible. */
+const TERMINAL_STATUSES = ["completed", "failed", "cancelled", "succeeded", "finished", "done", "complete"];
 export function isTerminalWorkflow(wf: WorkflowRow): boolean {
-	return ["completed", "failed", "cancelled", "succeeded"].includes((wf.status ?? "").toLowerCase());
+	return (
+		TERMINAL_STATUSES.includes((wf.status ?? "").toLowerCase()) ||
+		TERMINAL_STATUSES.includes((wf.state ?? "").toLowerCase())
+	);
 }
 
 /** Attention-first order; terminal done/failed rows drop unless showAll. */
@@ -461,7 +475,15 @@ export function sliceVisible(
 export function buildFleetView(
 	frame: FleetFrame,
 	theme: FleetTheme = PLAIN_FLEET_THEME,
-	options: { showAll?: boolean; maxBodyLines?: number; scrollOffset?: number; maxRowWidth?: number } = {},
+	options: {
+		showAll?: boolean;
+		maxBodyLines?: number;
+		scrollOffset?: number;
+		maxRowWidth?: number;
+		/** "frame" draws the unicode border (CLI); "bare" is plain text for callers
+		 * that supply their own chrome, like the extension's pi-tui Box. */
+		chrome?: "frame" | "bare";
+	} = {},
 ): { text: string; scrollOffset: number; scrollable: boolean } {
 	const showAll = options.showAll ?? false;
 	// Row budget: the caller passes the overlay's usable columns so wide
@@ -571,6 +593,11 @@ export function buildFleetView(
 
 	const scrollHint = scrollable ? `${theme.fg("accent", "[j/k]")} ${theme.fg("dim", "scroll")}   ` : "";
 	const footer = `${theme.fg("accent", "[q/Esc]")} ${theme.fg("dim", "close")}   ${theme.fg("accent", "[r]")} ${theme.fg("dim", "refresh")}   ${theme.fg("accent", "[a]")} ${theme.fg("dim", showAll ? "attention only" : "show all")}   ${scrollHint}${theme.fg("dim", "live · refreshes every 5s")}`;
+	if ((options.chrome ?? "frame") === "bare") {
+		// The caller draws the panel (pi-tui Box); double chrome garbles the TUI.
+		const title = theme.bold(theme.fg("accent", "deck fleet"));
+		return { text: [title, "", ...body, "", footer].join("\n"), scrollOffset, scrollable };
+	}
 	return { text: framed("deck fleet", body.join("\n"), footer, theme), scrollOffset, scrollable };
 }
 
@@ -578,7 +605,7 @@ export function buildFleetView(
 export function buildFleetText(
 	frame: FleetFrame,
 	theme: FleetTheme = PLAIN_FLEET_THEME,
-	options: { showAll?: boolean; maxBodyLines?: number; scrollOffset?: number; maxRowWidth?: number } = {},
+	options: Parameters<typeof buildFleetView>[2] = {},
 ): string {
 	return buildFleetView(frame, theme, options).text;
 }
