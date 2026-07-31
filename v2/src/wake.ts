@@ -294,12 +294,27 @@ export function detectStale(
 	for (const taskId of ids) {
 		const meta = readMeta(taskId);
 		if (meta === null) continue;
-		const pid = typeof meta.run_pid === "number" ? meta.run_pid : undefined;
+		// An empty `run_pid=` line parses to NaN; NaN and non-positive values mean
+		// no live run is recorded, and a task with no recorded run cannot be stale.
+		const pid =
+			typeof meta.run_pid === "number" && Number.isInteger(meta.run_pid) && meta.run_pid > 0
+				? meta.run_pid
+				: undefined;
 		if (pid === undefined) continue;
 
 		const { lastEventVerb: currentVerb } = lastVerb(taskId);
-		const terminal = currentVerb === "done" || currentVerb === "failed";
-		const waiting = currentVerb === "paused" || currentVerb === "needs-decision";
+		// A parked task already reported its state: paused and needs-decision wait on
+		// purpose, blocked already fired its T0 wake, done/failed are finished.
+		// Chasing any of them as stale is the absorbed-stale noise class.
+		if (
+			currentVerb === "done" ||
+			currentVerb === "failed" ||
+			currentVerb === "paused" ||
+			currentVerb === "blocked" ||
+			currentVerb === "needs-decision"
+		) {
+			continue;
+		}
 
 		if (alive(pid)) {
 			// A LIVE worker past its deadline is stuck, not working. Liveness alone
@@ -307,7 +322,7 @@ export function detectStale(
 			// exits, so it is invisible forever without this. Observed live — a worker
 			// finished its task, then retried a rate-limited search nine times.
 			const deadline = typeof meta.run_deadline === "number" ? meta.run_deadline : undefined;
-			if (deadline === undefined || terminal || waiting) continue;
+			if (deadline === undefined) continue;
 			if (Date.now() < deadline) continue;
 			const overdueMin = Math.max(1, Math.round((Date.now() - deadline) / 60000));
 			verdicts.push({
@@ -317,7 +332,6 @@ export function detectStale(
 			continue;
 		}
 		// Process gone. Stale only if the task never reached a terminal event.
-		if (terminal || waiting) continue;
 		verdicts.push({
 			taskId,
 			reason: `run pid ${pid} is gone and the task never reported a terminal state (last: ${currentVerb ?? "no events"})`,

@@ -65,6 +65,14 @@ export default function deckV2(pi: any): void {
 	let timer: ReturnType<typeof setInterval> | undefined;
 	let unwatch: (() => void) | undefined;
 	let workflowCwd: string | undefined;
+	// Send-failure backoff. deliver() fires on the 30s timer AND on every fs.watch
+	// nudge, so a failing sendUserMessage with no backoff is a tight retry loop:
+	// every status append re-triggers the same failing send. Events are durable
+	// (outbox + status files), so deferring costs nothing.
+	let sendFailures = 0;
+	let sendRetryAt = 0;
+	const SEND_BACKOFF_BASE_MS = 60_000;
+	const SEND_BACKOFF_MAX_MS = 15 * 60_000;
 
 	// ---- tools --------------------------------------------------------------
 
@@ -361,7 +369,9 @@ export default function deckV2(pi: any): void {
 	 * nothing is lost by waiting. Only the statusline updates while busy.
 	 */
 	function deliver(ctx: any): void {
-		if (ctx?.isIdle?.() === false) {
+		// Backing off after a failed send is the same shape as busy: return before
+		// reconcile so no cursor moves and nothing is consumed unsent.
+		if (ctx?.isIdle?.() === false || Date.now() < sendRetryAt) {
 			void refreshStatusline(ctx);
 			return;
 		}
@@ -373,21 +383,22 @@ export default function deckV2(pi: any): void {
 		// threw, the event was gone for good, and a lost `blocked:` is the worst
 		// failure this system has.
 		reconcile();
+		let attempted = 0;
+		let sent = 0;
 		for (const verdict of detectStale()) {
 			// Staleness is derived from live facts, not from a status event, so it
 			// is not an outbox entry; it is recomputed every cycle and is
 			// therefore safe to send directly.
-			send(ctx, `${DECK_OPERATIONAL_PREFIX}${verdict.taskId} stopped responding: ${verdict.reason}`);
+			attempted++;
+			if (send(ctx, `${DECK_OPERATIONAL_PREFIX}${verdict.taskId} stopped responding: ${verdict.reason}`)) sent++;
 		}
 
 		const pending = pendingWakes();
-		if (pending.length === 0) {
-			void refreshStatusline(ctx);
-			return;
-		}
 		const delivered: string[] = [];
 		for (const entry of pending.filter((item) => item.tier === "T0")) {
+			attempted++;
 			if (send(ctx, `${DECK_OPERATIONAL_PREFIX}${entry.taskId}: ${entry.verb} — ${entry.note}`)) {
+				sent++;
 				delivered.push(entry.id);
 			}
 		}
@@ -396,6 +407,7 @@ export default function deckV2(pi: any): void {
 		// as a unit because it was sent as a unit.
 		const batched = pending.filter((item) => item.tier === "T1");
 		if (batched.length > 0) {
+			attempted++;
 			const folded = foldBatched(
 				batched.map((entry) => ({
 					taskId: entry.taskId,
@@ -404,10 +416,21 @@ export default function deckV2(pi: any): void {
 				})) as any,
 			);
 			if (folded !== null && send(ctx, `${DECK_OPERATIONAL_PREFIX}${folded}`)) {
+				sent++;
 				delivered.push(...batched.map((entry) => entry.id));
 			}
 		}
 		ackWakes(delivered);
+		if (sent < attempted) {
+			// A send failed: back off exponentially, capped. Undelivered wakes stay
+			// owed in the outbox and are retried when the window opens.
+			sendFailures++;
+			sendRetryAt =
+				Date.now() + Math.min(SEND_BACKOFF_BASE_MS * 2 ** (sendFailures - 1), SEND_BACKOFF_MAX_MS);
+		} else if (attempted > 0) {
+			sendFailures = 0;
+			sendRetryAt = 0;
+		}
 		void refreshStatusline(ctx);
 	}
 
