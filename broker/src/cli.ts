@@ -81,8 +81,20 @@ async function run(): Promise<void> {
 
 		async function handleLine(socket: Bun.Socket, line: ServerLine): Promise<void> {
 			if (line.event === "auth") {
-				console.log(`\nOpen to authorize:\n  ${line.launchUrl ?? line.url}\n`);
+				// Always print the real authorize URL. launchUrl is only a short
+				// http://localhost:<port>/launch helper on the machine running the
+				// broker — useless over glass/SSH from another host.
+				if (line.url) {
+					console.log(`\nOpen this URL in ANY browser (works remotely):\n  ${line.url}\n`);
+				}
+				if (line.launchUrl && line.launchUrl !== line.url) {
+					console.log(`(local-only short link — ignore unless browser is on this same host):\n  ${line.launchUrl}\n`);
+				}
 				if (line.instructions) console.log(line.instructions);
+				console.log(
+					"Remote/glass: after approve, the browser may land on a dead localhost page.\n" +
+					"Copy the FULL address-bar URL (has ?code=…) and paste it at the prompt below.\n",
+				);
 				return;
 			}
 			if (line.event === "progress") {
@@ -90,7 +102,10 @@ async function run(): Promise<void> {
 				return;
 			}
 			if (line.event === "prompt" || line.event === "code") {
-				const question = line.event === "code" ? "Paste the code: " : `${line.message ?? "Input"}: `;
+				const question =
+					line.event === "code"
+						? "Paste the full redirect URL (or code): "
+						: `${line.message ?? "Input"}: `;
 				const answer = await rl.question(question);
 				socket.write(`${JSON.stringify({ id: line.id, reply: answer.trim() })}\n`);
 				return;
