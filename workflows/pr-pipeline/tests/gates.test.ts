@@ -19,6 +19,7 @@ import {
 	resolveAdversary,
 	validateModelPolicy,
 } from "../lib/models.ts";
+import { watchFixPrompt } from "../lib/prompts.ts";
 import { evaluateReadyForStamp, findHumanApproval } from "../lib/ready.ts";
 import {
 	assessCi,
@@ -264,18 +265,32 @@ describe("evaluateWatchExit", () => {
 		expect(verdict.exitOk).toBe(true);
 	});
 
-	test("hard red CI blocks; pending CI does not (will-be-green ruling)", () => {
+	test("hard red CI starts a bounded fix; pending CI stays with Smithers", () => {
 		const red = evaluateWatchExit(
 			snapshot({ checkRuns: [{ name: "ci", status: "completed", conclusion: "failure" }] }),
 			{ selfLogins: ["twaldin"] },
 		);
 		expect(red.exitOk).toBe(false);
+		expect(red.disposition).toBe("fix");
+		expect(red.actionable).toBe(true);
 		const pending = evaluateWatchExit(
 			snapshot({ checkRuns: [{ name: "ci", status: "in_progress", conclusion: null }] }),
 			{ selfLogins: ["twaldin"] },
 		);
-		expect(pending.exitOk).toBe(true);
+		expect(pending.exitOk).toBe(false);
 		expect(pending.ci).toBe("will-be-green");
+		expect(pending.disposition).toBe("wait");
+		expect(pending.actionable).toBe(false);
+	});
+
+	test("zero checks is a durable wait, never terminal success or agent work", () => {
+		const verdict = evaluateWatchExit(snapshot({ checkRuns: [] }), {
+			selfLogins: ["twaldin"],
+		});
+		expect(verdict.exitOk).toBe(false);
+		expect(verdict.ci).toBe("none");
+		expect(verdict.disposition).toBe("wait");
+		expect(verdict.actionable).toBe(false);
 	});
 });
 
@@ -318,6 +333,24 @@ describe("watch helpers", () => {
 				"2026-07-27T10:00:00Z",
 			),
 		).toBe(0);
+	});
+});
+
+describe("watch fix worker boundary", () => {
+	test("a fix worker returns after push and never owns the wait", () => {
+		const prompt = watchFixPrompt({
+			worktree: "/tmp/wt",
+			branch: "fix/ci",
+			repo: "owner/repo",
+			prNumber: 42,
+			gh: "gh",
+			pollJson: "{}",
+			round: 0,
+			afterPoll: 1,
+		});
+		expect(prompt).toContain("return the receipt and exit immediately");
+		expect(prompt).toContain("Never sleep-poll CI or review state");
+		expect(prompt).toContain("persisted Smithers poll owns the wait");
 	});
 });
 

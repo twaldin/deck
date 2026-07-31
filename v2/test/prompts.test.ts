@@ -75,6 +75,9 @@ describe("worker brief", () => {
 		expect(brief).toContain("co-author");
 		// Rework goes on the same branch; a stacked child PR was a real incident.
 		expect(brief).toContain("Never open a second PR");
+		// A short-lived ship worker exits after push. Durable orchestration watches.
+		expect(brief).toContain("Do not sleep-poll CI or review state");
+		expect(brief).toContain("You own code and push only");
 		// Queue-merged PRs read closed-not-merged.
 		expect(brief).toContain("(#N)");
 		// The signature is lindy's convention, not global (captain's decision).

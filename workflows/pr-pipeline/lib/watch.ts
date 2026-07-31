@@ -4,7 +4,8 @@
  * Exit requires: zero unresolved review threads + all actionable comments
  * answered + reviewers re-requested after changes (verified via the
  * requested_reviewers list - GH review requests silently no-op) + CI
- * green-or-will-be-green.
+ * green. Pending or absent CI stays in the persisted Smithers poll loop. It
+ * never starts an agent.
  */
 
 import type {
@@ -117,14 +118,16 @@ export function evaluateWatchExit(snapshot: WatchSnapshot, options: WatchExitOpt
 
 	const ci = assessCi(snapshot.checkRuns);
 	if (ci === "red") reasons.push("CI has hard-red check runs (agent-fixable class first).");
+	if (ci === "will-be-green") reasons.push("CI is still running; Smithers will poll again.");
+	if (ci === "none") reasons.push("CI has not reported checks; Smithers will poll again.");
 
-	// Captain ruling: CI green-or-WILL-BE-green is enough to leave the loop;
-	// only hard red keeps us in it.
-	const exitOk = unresolved === 0 && unanswered === 0 && needReRequest.length === 0 && ci !== "red";
 	const actionable = unresolved > 0 || unanswered > 0 || needReRequest.length > 0 || ci === "red";
+	const exitOk = !actionable && ci === "green";
+	const disposition = exitOk ? "complete" : actionable ? "fix" : "wait";
 
 	return {
 		exitOk,
+		disposition,
 		unresolvedThreads: unresolved,
 		unansweredComments: unanswered,
 		reviewersNeedingReRequest: needReRequest,

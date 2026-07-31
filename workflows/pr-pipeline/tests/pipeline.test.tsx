@@ -262,4 +262,23 @@ describe("full graph traversal (bypassApprovals, dry-run only)", () => {
 		// The fixer ran after each failing poll:
 		expect(sim.executed.filter((id) => id === "r0-watch-fix").length).toBe(2);
 	});
+
+	test("pending CI persists poll receipts without starting a worker", async () => {
+		const { sim, error } = await run({
+			...baseInput,
+			bypassApprovals: true,
+			fixtures: {
+				changedFiles: ["src/feature.ts"],
+				watchPollsToExit: 3,
+				watchWaitPolls: 2,
+			},
+		});
+		expect(error).toBeUndefined();
+		expect(sim.status).toBe("finished");
+
+		const polls = sim.outputs.watchPoll as Array<Record<string, unknown>>;
+		expect(polls.map((poll) => poll.disposition)).toEqual(["wait", "wait", "complete"]);
+		expect(sim.executed.filter((id) => id === "r0-watch-poll")).toHaveLength(3);
+		expect(sim.executed).not.toContain("r0-watch-fix");
+	});
 });

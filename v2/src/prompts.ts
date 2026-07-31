@@ -261,11 +261,13 @@ noise, because the ticket is in the commit and the PR.
 
 Never add a co-author or agent-attribution line to a commit.
 
-Then append \`done: PR {url}\` and stop. You never merge; the captain gives that
-word.
+Then append \`done: PR {url}\` and stop. Do not sleep-poll CI or review state.
+Deck orchestration or a durable Smithers workflow owns every watch.
+You own code and push only. You never merge; the captain gives that word.
 
-If you watch your own PR afterwards: review fixes are plain commits on this same
-branch. Never open a second PR or a stacked child PR for rework on this task.
+If the orchestrator later sends a specific review or CI failure, inspect that
+reported item, make the bounded fix, push, report, and stop.
+Never open a second PR or a stacked child PR for rework on this task.
 
 A PR that landed through a merge queue can read as closed and not merged.
 Landing truth is the squash commit \`(#N)\` on the base branch, never the merged
