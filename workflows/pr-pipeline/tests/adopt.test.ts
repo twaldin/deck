@@ -105,6 +105,16 @@ describe("assertAdoptable", () => {
 		).toThrow(/worktree HEAD is rebased999/);
 	});
 
+	test("allows a verified descendant even when ahead worktrees are not generally allowed", () => {
+		expect(() =>
+			assertAdoptable(goodOverview, {
+				...goodExpectation,
+				worktreeHead: "fix456",
+				worktreeIsDescendant: true,
+			}),
+		).not.toThrow();
+	});
+
 	test("rejects a dirty worktree (modified files)", () => {
 		expect(() =>
 			assertAdoptable(goodOverview, { ...goodExpectation, worktreeStatus: " M src/app.ts\n" }),
