@@ -509,9 +509,9 @@ export default function deckV2(pi: any): void {
 			const frame = await buildFrame(workflowCwd === undefined ? {} : { workflowCwd });
 			ctx.ui?.setStatus?.("deck", renderStatusline(frame));
 			// Herdr projection rides the same cadence: every reconcile cycle mirrors
-			// worker + smithers state into herdr agents. Guarded inside; herdr being
-			// down makes this a no-op, never a fault.
-			await projectFleet(frame, workflowCwd === undefined ? {} : { workflowCwd });
+			// worker state into herdr agents (smithers runs are fleet-only). Guarded
+			// inside; herdr being down makes this a no-op, never a fault.
+			await projectFleet(frame);
 		} catch {
 			// A statusline is decoration; never let it break a turn.
 		}

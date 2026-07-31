@@ -1,7 +1,7 @@
 /**
- * The projection's pure decisions: which herdr state a task maps to, and how
- * smithers runs fold into one agent. The herdr CLI itself is not exercised —
- * the pass degrades to "skipped" without it, asserted last.
+ * The projection's pure decisions: which herdr state a task maps to. The herdr
+ * CLI itself is not exercised — the pass degrades to "skipped" without it,
+ * asserted last. Smithers runs are fleet-only and never get a pane.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
@@ -14,7 +14,6 @@ import {
 	projectionMessage,
 	shellQuote,
 	shouldReleasePane,
-	smithersSummary,
 } from "../src/herdr";
 
 function task(overrides: Partial<TaskRow> = {}): TaskRow {
@@ -115,25 +114,6 @@ describe("projectionMessage", () => {
 		expect(projectionMessage(task({ lastVerb: "working", lastNote: "x".repeat(300) })).length).toBe(
 			120,
 		);
-	});
-});
-
-describe("smithersSummary", () => {
-	test("active runs fold into one working agent", () => {
-		const summary = smithersSummary([
-			{ runId: "r1", workflow: "pr", status: "running", step: "build", taskId: null },
-			{ runId: "r2", workflow: "pr", status: "completed", step: null, taskId: null },
-		]);
-		expect(summary.state).toBe("working");
-		expect(summary.message).toContain("1 active");
-		expect(summary.message).toContain("r1@build");
-	});
-
-	test("no active runs is idle", () => {
-		const summary = smithersSummary([
-			{ runId: "r2", workflow: "pr", status: "completed", step: null, taskId: null },
-		]);
-		expect(summary.state).toBe("idle");
 	});
 });
 
