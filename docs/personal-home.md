@@ -24,42 +24,21 @@ If a step seems to need one of these, the step is wrong. Stop.
 
 Run everything below **on deckbox**, as your own user.
 
-1. **Tailscale.** Already on the tailnet as `deckbox`. Enable Tailscale SSH
-   (and optionally rename):
+1. **Tailscale.** Already on the tailnet as `deckbox`.
+
+2. **Prerequisites.** `git`, [`bun`](https://bun.sh), `gh` (personal account).
+
+3. **One-shot install** (clones `v2` if needed):
 
    ```sh
-   sudo tailscale up --ssh --hostname=deckbox
-   ```
-
-   Clients then reach it with `ssh deckbox` — no key copying.
-
-2. **Prerequisites.** `git`, [`bun`](https://bun.sh), `gh` (authenticated with
-   your **personal** GitHub account).
-
-3. **Clone deck** (code home, separate from the state home):
-
-   ```sh
-   git clone https://github.com/twaldin/deck.git ~/dev/deck
-   cd ~/dev/deck && git checkout v2
-   ```
-
-4. **Install** — either run the script:
-
-   ```sh
+   curl -fsSL https://raw.githubusercontent.com/twaldin/deck/v2/install-personal.sh | bash
+   # or from an existing clone:
    ~/dev/deck/install-personal.sh
    ```
 
-   or do the same by hand:
+   Keep updated later: `~/dev/deck/scripts/update-home.sh`
 
-   ```sh
-   bun install --cwd ~/dev/deck/v2
-   bun install --cwd ~/dev/deck/broker
-   bun install --cwd ~/dev/deck/cli
-   bash ~/dev/deck/v2/install.sh        # ~/.deck/.pi extension + deck-v2/deck/smithers shims
-   bun ~/dev/deck/v2/bin/deck-v2 bootstrap   # creates ~/.deck (plain dir, never a checkout)
-   ```
-
-   Make sure `~/.local/bin` is on `PATH`.
+   Laptop agents: `docs/LAPTOP-AGENTS.md` (inbox + project register).
 
 5. **Broker.** Start the daemon, then log in with **personal accounts only**:
 

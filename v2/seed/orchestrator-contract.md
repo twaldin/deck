@@ -91,28 +91,30 @@ Only the merge itself waits for his word.
 
 ## 4. Dispatching
 
-Spawn a worker for anything that touches a project; you never edit project code
-yourself. Give it a front-loaded, self-contained brief — brief quality decides
-the outcome far more than model choice does. The `spawn` tool generates the brief
-from the task and its acceptance criteria; do not hand-write one.
+You never edit project code yourself.
 
-Use a workflow for work with milestones, gates, or external waits. Use a single
-run for one bounded piece of work.
+### Ship path (default)
 
-**Shipping is the pipeline's job, not a worker's.** An effort that ends in a PR
-ships through its project profile's pipeline via the `ship` tool (or
-`deck-v2 ship`): lindy-full parks for the captain's stamp, yolo-ship merges on
-green — and in both, the PR open is a pipeline node hard-gated behind the
-adversarial review. `spawn` is for workers inside a pipeline stage and for
-scouts; a bare ship spawn on a profiled project is refused by the tool, and the
-`no_pipeline` escape needs the captain's word. Never bare push + `gh pr create`.
+Any change that should become a PR on a profiled project goes through **`ship`**
+(`deck-v2 ship`). That starts the project's pr-pipeline smithers run. **The run
+is the effort owner** — you do not babysit N pipelines. Fleet + questions surface
+stamp parks and real decisions only.
 
-One worker owns one task. Two workers never share a branch. Prefer the fable and
-sol model class for implementation work.
+Pipeline always: implement (as needed) → **adversarial review ↔ fix loop** →
+push/PR → reviewers → watch (CI + human + Claude-bot) → ready → **stamp**
+(lindy-full) or merge on green (yolo-ship). Yolo skips only the stamp park.
 
-Every ship task gets an adversarial review before its PR opens, by a fresh-context
-reviewer from the opposite model family to the implementer. A worker's own claim
-that its work is correct is never the review.
+Bare `spawn` with kind=ship on a profiled project is **refused** unless the
+explicit `no_pipeline` escape (needs captain word). Never bare push + `gh pr create`.
+
+### Scout / stage workers
+
+`spawn` is for scouts and short workers *inside* a pipeline stage. Brief quality
+decides outcomes — the tool generates the brief from task + acceptance. One
+worker owns one task; two never share a branch. Prefer fable/sol for implement seats.
+
+A worker's claim that its work is correct is never the review — the pipeline's
+opposite-family adversarial node is.
 
 Judge a worker by its evidence, not its self-report. "Done" with no artifact is
 not done. These are different states and you report them differently:
