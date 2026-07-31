@@ -323,20 +323,19 @@ export default function deckV2(pi: any): void {
 			await ctx.ui.custom(
 				(tui: any, rawTheme: any, _kb: any, done: any) => {
 					const theme = asFleetTheme(rawTheme);
-					// No background fill: the compositor already replaces every cell
-					// under the overlay, so the panel inherits the terminal's default
-					// background instead of a gray slab. The border is the separator.
-					const box = new Box(2, 1);
-					// Body budget: terminal rows minus overlay margin (4), box padding
-					// (2), frame borders + blank + footer (4), so the bottom border
-					// stays on screen when tasks outnumber rows. No floor above 1:
-					// a floor that exceeds a tiny viewport reintroduces the overflow.
+					// The Box owns ALL the chrome: background fill + padding. The view
+					// renders bare text; a second unicode frame inside the Box
+					// width-mismatches and garbles the overlay.
+					const box = new Box(2, 1, asBgFn(rawTheme));
+					// Body budget: terminal rows minus overlay margin (2), box padding
+					// (2), title + blank (2), blank + footer (2), so the panel stays on
+					// screen when tasks outnumber rows. No floor above 1: a floor that
+					// exceeds a tiny viewport reintroduces the overflow.
 					const maxBodyLines = (): number =>
-						Math.max(1, (tui.terminal?.rows ?? 40) - 10);
-					// Usable row columns: 90% overlay width minus box padding (4) and
-					// frame border + padding (4).
+						Math.max(1, (tui.terminal?.rows ?? 40) - 8);
+					// Usable row columns: 90% overlay width minus box padding (2+2).
 					const maxRowWidth = (): number =>
-						Math.floor((tui.terminal?.cols ?? 120) * 0.9) - 8;
+						Math.floor((tui.terminal?.cols ?? 120) * 0.9) - 4;
 					let scrollOffset = 0;
 					let scrollable = false;
 					const render = (): string => {
@@ -345,6 +344,7 @@ export default function deckV2(pi: any): void {
 							maxBodyLines: maxBodyLines(),
 							scrollOffset,
 							maxRowWidth: maxRowWidth(),
+							chrome: "bare",
 						});
 						// The view clamps the offset; adopt it so k after over-scrolling
 						// moves immediately instead of unwinding phantom distance.
@@ -600,6 +600,22 @@ export default function deckV2(pi: any): void {
  * the receiver (Theme.fg reads this.fgColors); see deck-usage.ts for the
  * incident that taught this.
  */
+/**
+ * Panel fill from pi's theme, so the overlay reads as a solid card over the
+ * conversation instead of a border floating on noise. customMessageBg is the
+ * theme's "distinct surface" key; missing/odd themes fall back to no fill.
+ */
+function asBgFn(source: unknown): ((text: string) => string) | undefined {
+	if (typeof source !== "object" || source === null) return undefined;
+	const probe = source as { bg?: unknown };
+	if (typeof probe.bg !== "function") return undefined;
+	const themed = source as { bg: (key: string, text: string) => unknown };
+	return (text) => {
+		const out = themed.bg("customMessageBg", text);
+		return typeof out === "string" ? out : text;
+	};
+}
+
 function asFleetTheme(source: unknown): FleetTheme {
 	if (typeof source !== "object" || source === null) return PLAIN_FLEET_THEME;
 	const probe = source as { fg?: unknown; bold?: unknown };
