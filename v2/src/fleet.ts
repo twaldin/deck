@@ -360,6 +360,29 @@ function truncate(body: string, max: number): string {
 }
 
 /**
+ * Attention rank: lower renders first. Terminal rows (done/failed with nothing
+ * pending) rank last and are hidden by the default view.
+ */
+export function attentionRank(task: TaskRow): number {
+	if (task.openDecisions > 0 || task.lastVerb === "needs-decision") return 0;
+	if (task.lastVerb === "blocked") return 1;
+	if (task.unresolvedSideEffects > 0) return 2;
+	if (task.runState === "running") return 3;
+	if (task.lastVerb === "paused") return 4;
+	if (task.queuedMessages > 0) return 5;
+	if (task.lastVerb === "done" || task.lastVerb === "failed") return 7;
+	return 6;
+}
+
+/** Attention-first order; terminal done/failed rows drop unless showAll. */
+export function visibleTasks(tasks: TaskRow[], showAll: boolean): { shown: TaskRow[]; hidden: number } {
+	const sorted = [...tasks].sort((a, b) => attentionRank(a) - attentionRank(b));
+	if (showAll) return { shown: sorted, hidden: 0 };
+	const shown = sorted.filter((task) => attentionRank(task) < 7);
+	return { shown, hidden: sorted.length - shown.length };
+}
+
+/**
  * Wrap the body in a titled border so the overlay reads as a panel — the same
  * frame the usage overlay draws (deck-usage.ts framed()).
  */
@@ -382,7 +405,12 @@ export function framed(title: string, body: string, footer: string, theme: Fleet
  * The overlay's whole text: counters header, chip-per-task rows, workflow rows,
  * source health, key footer. Pure, so tests assert on it directly.
  */
-export function buildFleetText(frame: FleetFrame, theme: FleetTheme = PLAIN_FLEET_THEME): string {
+export function buildFleetText(
+	frame: FleetFrame,
+	theme: FleetTheme = PLAIN_FLEET_THEME,
+	options: { showAll?: boolean; maxBodyLines?: number } = {},
+): string {
+	const showAll = options.showAll ?? false;
 	const c = frame.counters;
 	const lines: string[] = [];
 	const header = [
@@ -396,8 +424,9 @@ export function buildFleetText(frame: FleetFrame, theme: FleetTheme = PLAIN_FLEE
 	lines.push(header.join(theme.fg("dim", "  ·  ")));
 	lines.push("");
 
+	const { shown, hidden } = visibleTasks(frame.tasks, showAll);
 	if (frame.tasks.length === 0) lines.push(theme.fg("dim", "  (no tasks)"));
-	for (const task of frame.tasks) {
+	for (const task of shown) {
 		const chip = chipFor(task);
 		const age = task.statusAgeMs === null ? "" : theme.fg("dim", ` ${humanAge(task.statusAgeMs)}`);
 		// Every dynamic field is clamped: the Text component word-wraps rather
@@ -422,6 +451,9 @@ export function buildFleetText(frame: FleetFrame, theme: FleetTheme = PLAIN_FLEE
 		if (task.unresolvedSideEffects > 0) flags.push(`${task.unresolvedSideEffects} UNRESOLVED side effect(s)`);
 		if (flags.length > 0) lines.push(`           ${theme.fg("warning", `! ${flags.join(" · ")}`)}`);
 	}
+	if (hidden > 0) {
+		lines.push(theme.fg("dim", `  ${hidden} done/failed hidden — [a] shows all`));
+	}
 
 	if (frame.workflows.length > 0) {
 		lines.push("");
@@ -445,8 +477,16 @@ export function buildFleetText(frame: FleetFrame, theme: FleetTheme = PLAIN_FLEE
 			.join("  "),
 	);
 
-	const footer = `${theme.fg("accent", "[q/Esc]")} ${theme.fg("dim", "close")}   ${theme.fg("accent", "[r]")} ${theme.fg("dim", "refresh")}   ${theme.fg("dim", "live · refreshes every 5s")}`;
-	return framed("deck fleet", lines.join("\n"), footer, theme);
+	// Clamp the body so the framed panel never draws taller than the viewport:
+	// the border must close on screen, not below it.
+	let body = lines;
+	if (options.maxBodyLines !== undefined && body.length > options.maxBodyLines) {
+		const kept = Math.max(1, options.maxBodyLines - 1);
+		body = [...body.slice(0, kept), theme.fg("dim", `  … +${lines.length - kept} more line(s)`)];
+	}
+
+	const footer = `${theme.fg("accent", "[q/Esc]")} ${theme.fg("dim", "close")}   ${theme.fg("accent", "[r]")} ${theme.fg("dim", "refresh")}   ${theme.fg("accent", "[a]")} ${theme.fg("dim", showAll ? "attention only" : "show all")}   ${theme.fg("dim", "live · refreshes every 5s")}`;
+	return framed("deck fleet", body.join("\n"), footer, theme);
 }
 
 /** Compact statusline. Costs no turn; the captain glances instead of being told. */
