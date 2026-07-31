@@ -104,6 +104,26 @@ describe("wake delivery guards", () => {
 		expect(pi.sent).toHaveLength(1);
 	});
 
+	test("before_agent_start already fences: the pre-start window is closed", async () => {
+		appendStatus("t1", "blocked", "main is red");
+		const pi = fakePi();
+		deckV2(pi.api as never);
+		const ctx = tuiCtx();
+		// The earliest turn signal, before agent_start, while isIdle still
+		// reads true: a nudge landing here must not send.
+		await pi.emit("before_agent_start", ctx);
+		await pi.emit("session_start", ctx);
+		await settle();
+		expect(pi.sent).toHaveLength(0);
+		await pi.emit("session_shutdown", ctx);
+
+		await pi.emit("agent_settled", ctx);
+		await pi.emit("session_start", ctx);
+		await settle();
+		await pi.emit("session_shutdown", ctx);
+		expect(pi.sent).toHaveLength(1);
+	});
+
 	test("hasPendingMessages defers delivery", async () => {
 		appendStatus("t1", "blocked", "main is red");
 		const pi = fakePi();

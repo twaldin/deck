@@ -573,9 +573,13 @@ export default function deckV2(pi: any): void {
 		unwatch = (await import("../wake")).watchStatusDir(() => void deliver(ctx));
 	});
 
-	// Bound the agent's run window for the busy fence. agent_settled is the
-	// "pi will not continue automatically" signal; agent_end can be followed by
-	// auto-retry or queued continuations while isIdle() still reads true.
+	// Bound the agent's run window for the busy fence. before_agent_start fires
+	// earlier than agent_start, so fencing there too closes the pre-start window
+	// where isIdle() still reads true. agent_settled (not agent_end) clears it:
+	// pi may auto-retry or continue with queued follow-ups after agent_end.
+	pi.on("before_agent_start", async () => {
+		agentBusy = true;
+	});
 	pi.on("agent_start", async () => {
 		agentBusy = true;
 	});
