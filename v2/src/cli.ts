@@ -30,7 +30,8 @@ import { detectStale, foldBatched, reconcile } from "./wake";
 const USAGE = `deck-v2 — fleet primitives
 
   bootstrap                        create the orchestrator home (not a checkout)
-  spawn <id> --task <text> --accept <text> --worktree <path> [--kind ship|scout]
+  spawn <id> --task <text> --accept <text> (--repo <path|alias> | --worktree <path>)
+             [--kind ship|scout] [--base <branch>] [--desc <text>]
              [--project <name>] [--branch <name>] [--model <deck/model>]
   send <id> <message>              queue a message for the task's next run
   status <id> [--json]             the task's events and current reconciliation
@@ -114,13 +115,17 @@ export async function runCli(argv: string[]): Promise<number> {
 				const id = args._[1];
 				if (id === undefined) throw new Error("spawn needs a task id");
 				const accept = str(args.flags, "accept");
+				const worktreeFlag = str(args.flags, "worktree");
 				const result = startRun(
 					{
 						taskId: id,
 						task: need(args.flags, "task"),
 						acceptance: accept === undefined ? [] : accept.split(";").map((s) => s.trim()),
-						worktree: path.resolve(need(args.flags, "worktree")),
 						kind: str(args.flags, "kind") === "scout" ? "scout" : "ship",
+						...(worktreeFlag === undefined ? {} : { worktree: path.resolve(worktreeFlag) }),
+						...(str(args.flags, "repo") === undefined ? {} : { repo: need(args.flags, "repo") }),
+						...(str(args.flags, "base") === undefined ? {} : { base: need(args.flags, "base") }),
+						...(str(args.flags, "desc") === undefined ? {} : { desc: need(args.flags, "desc") }),
 						...(str(args.flags, "project") === undefined
 							? {}
 							: { project: need(args.flags, "project") }),
@@ -134,7 +139,7 @@ export async function runCli(argv: string[]): Promise<number> {
 					deckV2Home(),
 				);
 				process.stdout.write(
-					`spawned ${result.taskId} epoch=${result.epoch} pid=${result.pid} model=${result.model}\nbrief: ${result.briefPath}\n`,
+					`spawned ${result.taskId} epoch=${result.epoch} pid=${result.pid} model=${result.model}\nworktree: ${result.worktree}${result.wtId === undefined ? "" : ` (${result.wtId}, branch ${result.branch})`}\nbrief: ${result.briefPath}\n`,
 				);
 				return 0;
 			}

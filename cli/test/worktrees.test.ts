@@ -186,6 +186,39 @@ describe("deck wt", () => {
 		expect(second === undefined ? "" : await git(second.path, ["rev-parse", "HEAD"])).toBe(linkedHead);
 	});
 
+	test("records an explicit branch and desc, keeps the alloc line parseable, and shows desc in ls", async () => {
+		const fixture = await createFixture();
+		const allocated = await deck(fixture, [
+			"wt",
+			"alloc",
+			"--repo",
+			fixture.repo,
+			"--effort",
+			"sample--labelled",
+			"--base",
+			"main",
+			"--branch",
+			"deck/custom-branch",
+			"--desc",
+			"fix the flux capacitor",
+		]);
+		expect(allocated.exitCode).toBe(0);
+		const [id, wtPath, branch] = allocated.stdout.trim().split("\t");
+		expect(id).toBe("wt:sample-repo:1");
+		expect(branch).toBe("deck/custom-branch");
+		expect(wtPath === undefined ? "" : await git(wtPath, ["branch", "--show-current"])).toBe(
+			"deck/custom-branch",
+		);
+		const entry = readState(fixture.home).entries[0];
+		expect(entry?.branch).toBe("deck/custom-branch");
+		expect(entry?.desc).toBe("fix the flux capacitor");
+
+		const listed = await deck(fixture, ["wt", "ls"]);
+		expect(listed.exitCode).toBe(0);
+		expect(listed.stdout).toContain("DESC");
+		expect(listed.stdout).toContain("fix the flux capacitor");
+	});
+
 	test("fetches origin/main before a default-base allocation", async () => {
 		const fixture = await createFixture();
 		const remote = path.join(fixture.root, "remote.git");

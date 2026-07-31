@@ -20,6 +20,7 @@ export const worktreeEntrySchema = z
 		path: absolutePathSchema,
 		effort: effortIdSchema,
 		branch: z.string().min(1),
+		desc: z.string().max(200).optional(),
 		created: z.string().datetime({ offset: true }),
 		state: z.enum(["active", "free"]),
 	})
@@ -69,6 +70,8 @@ export const allocCommandSchema = z
 		repo: z.string().min(1),
 		effort: effortIdSchema,
 		base: baseSchema.optional(),
+		branch: baseSchema.optional(),
+		desc: z.string().max(200).optional(),
 	})
 	.strict();
 

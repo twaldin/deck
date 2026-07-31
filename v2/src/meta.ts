@@ -19,6 +19,10 @@ export type TaskMeta = {
 	id: string;
 	project?: string;
 	worktree?: string;
+	/** Pool id from `deck wt alloc` when spawn allocated the worktree. */
+	wt_id?: string;
+	/** Short label for fleet/meta readers. */
+	desc?: string;
 	branch?: string;
 	kind?: TaskKind;
 	model?: string;
