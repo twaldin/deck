@@ -111,6 +111,21 @@ describe("observer event selection", () => {
 		expect(events).toHaveLength(0);
 	});
 
+	test("review escalation is an orch-heal failure and is idempotent", async () => {
+		const { observer, events } = await mods();
+		const observation = { run: run("waiting-approval", "review-escalation"), nodes: [] };
+		expect(observer.observeOnce("t1", observation)[0]?.verb).toBe("failed");
+		expect(observer.observeOnce("t1", observation)).toHaveLength(0);
+		expect(events.readStatus("t1").events[0]?.note).toContain("orch heal");
+	});
+
+	test("stamp remains a captain decision, not an orch failure", async () => {
+		const { observer } = await mods();
+		const [event] = observer.observeOnce("t1", { run: run("waiting-approval", "r0-stamp"), nodes: [] });
+		expect(event?.verb).toBe("needs-decision");
+		expect(event?.note).toBe("stamp ready");
+	});
+
 	test("an approval gate is a decision, because nothing advances without him", async () => {
 		const { observer } = await mods();
 		const [event] = observer.observeOnce("t1", {
@@ -119,6 +134,15 @@ describe("observer event selection", () => {
 		});
 		expect(event?.verb).toBe("needs-decision");
 		expect(event?.note).toContain("merge-gate");
+	});
+
+	test("ps reconcile creates a T0 status for a ship escalation", async () => {
+		const { observer, events } = await mods();
+		fs.mkdirSync(path.join(home, "state", "ship"), { recursive: true });
+		fs.writeFileSync(path.join(home, "state", "ship", "run-1.input.json"), JSON.stringify({ ticket: "ticket-1" }));
+		const emitted = observer.observePsSnapshot([{ id: "run-1", status: "waiting-approval", step: "review-escalation", workflow: "pr-pipeline" }]);
+		expect(emitted[0]?.verb).toBe("failed");
+		expect(events.readStatus("ticket-1").events).toHaveLength(1);
 	});
 
 	test("paused is reported as paused, never as failed", async () => {

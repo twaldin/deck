@@ -55,6 +55,17 @@ export type Observation = {
 	nodes: ObservedNode[];
 };
 
+type PsSnapshotRow = {
+	id?: unknown;
+	workflow?: unknown;
+	status?: unknown;
+	state?: unknown;
+	step?: unknown;
+	rootDir?: unknown;
+	blockedNode?: unknown;
+	pendingApprovals?: Array<{ nodeId?: unknown; status?: unknown }>;
+};
+
 export type EmittedEvent = {
 	taskId: string;
 	verb: StatusVerb;
@@ -87,9 +98,6 @@ const RUN_TRANSITIONS: Record<string, { verb: StatusVerb; note: string } | undef
 	succeeded: { verb: "done", note: "workflow finished" },
 	failed: { verb: "failed", note: "workflow failed" },
 	cancelled: { verb: "failed", note: "workflow cancelled" },
-	// Waiting on an approval gate is the one mid-run state that matters: nothing
-	// advances until the captain answers.
-	"waiting-approval": { verb: "needs-decision", note: "workflow is waiting for approval" },
 	"waiting-human": { verb: "needs-decision", note: "workflow is waiting for an answer" },
 	// Paused is deliberate waiting, not a fault, and is never treated as stale.
 	paused: { verb: "paused", note: "workflow paused" },
@@ -200,12 +208,11 @@ export function planEvents(
 		});
 	}
 
-	const transition = RUN_TRANSITIONS[run.status];
+	const transition = run.status === "waiting-approval"
+		? approvalTransition(run.step)
+		: RUN_TRANSITIONS[run.status];
 	if (transition !== undefined) {
-		// The blocking step discriminates re-entries of a non-terminal state: a
-		// workflow with two approval gates stops twice in `waiting-approval`, and
-		// keying on the state alone reports only the first, leaving the second gate
-		// waiting on a captain who was never told.
+		// The blocking step discriminates re-entries of a non-terminal state.
 		const key = transitionKey({
 			scope: "run",
 			runId: run.id,
@@ -216,10 +223,13 @@ export function planEvents(
 		});
 		if (!seen.has(key)) {
 			const step = run.step === null ? "" : ` at ${run.step}`;
+			const note = transition.note === "stamp ready"
+				? transition.note
+				: `${transition.note}${TERMINAL.has(run.status) ? "" : step}`;
 			events.push({
 				taskId,
 				verb: transition.verb,
-				note: `${transition.note}${TERMINAL.has(run.status) ? "" : step}`,
+				note,
 				key,
 			});
 		}
@@ -237,6 +247,20 @@ export function planEvents(
  * `done:` costs the orchestrator one wasted look. A lost `failed:` means nobody
  * ever hears that the work broke.
  */
+function approvalTransition(step: string | null): { verb: StatusVerb; note: string } {
+	const gate = (step ?? "").toLowerCase();
+	if (gate.includes("review-escalation")) {
+		return { verb: "failed", note: "review-escalation — orch heal; do not wait on captain" };
+	}
+	if (gate.includes("r0-stamp") || gate === "stamp" || gate.endsWith("-stamp")) {
+		return { verb: "needs-decision", note: "stamp ready" };
+	}
+	return {
+		verb: "needs-decision",
+		note: `workflow is waiting for approval${step === null ? "" : ` at ${step}`}`,
+	};
+}
+
 export function commitEvents(taskId: string, events: EmittedEvent[], ledger: ObserverLedger): void {
 	if (events.length === 0) return;
 	const emitted = [...ledger.emitted];
@@ -258,6 +282,33 @@ export function observeOnce(taskId: string, observation: Observation): EmittedEv
 /** True once the run can produce no further events, so polling can stop. */
 export function isFinished(observation: Observation): boolean {
 	return TERMINAL.has(observation.run.status);
+}
+
+/** Observe one `smithers ps --json` snapshot. This is the production poll wire. */
+export function observePsSnapshot(rows: readonly PsSnapshotRow[]): EmittedEvent[] {
+	const emitted: EmittedEvent[] = [];
+	for (const row of rows) {
+		if (typeof row.id !== "string") continue;
+		const inputPath = path.join(stateDir(), "ship", `${row.id}.input.json`);
+		let taskId = row.id;
+		try {
+			const input = JSON.parse(fs.readFileSync(inputPath, "utf8")) as { ticket?: unknown };
+			if (typeof input.ticket === "string" && /^[a-z0-9][a-z0-9-]{0,63}$/.test(input.ticket)) taskId = input.ticket;
+		} catch { /* non-ship runs are ignored below */ }
+		if (!fs.existsSync(inputPath)) continue;
+		const status = typeof row.status === "string" ? row.status : typeof row.state === "string" ? row.state : "";
+		const outcome = typeof row.state === "string" && (TERMINAL.has(row.state) || status === "") ? row.state : status;
+		if (TERMINAL.has(outcome)) continue;
+		const pending = row.pendingApprovals?.find((approval) => approval.status === "requested")?.nodeId
+			?? row.pendingApprovals?.[0]?.nodeId
+			?? row.blockedNode;
+		const step = typeof pending === "string" ? pending : typeof row.step === "string" && row.step !== "—" ? row.step : null;
+		emitted.push(...observeOnce(taskId, {
+			run: { id: row.id, workflow: typeof row.workflow === "string" ? row.workflow : "", status: outcome, step, rootDir: typeof row.rootDir === "string" ? row.rootDir : null },
+			nodes: [],
+		}));
+	}
+	return emitted;
 }
 
 /**
