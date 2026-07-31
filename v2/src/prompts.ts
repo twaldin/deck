@@ -17,6 +17,7 @@
  */
 import * as path from "node:path";
 import { dataDir } from "./home";
+import { findProfile, mergeHint } from "./projects";
 
 /**
  * Projects whose convention is to sign agent-authored comments.
@@ -48,47 +49,27 @@ function signatureProjects(): Set<string> {
 }
 
 /**
- * Frozen copy of the 3 load-bearing traps from data/lindy-domain.md.
- *
- * Inlined verbatim on purpose: a path alone decays (workers skip the read), and
- * reading the live file at brief time would make the brief depend on home-file
- * state. Keep this in sync with lindy-domain.md when the traps change.
- */
-const LINDY_TRAPS = `1. **Graphite lands-and-closes**: a queue-merged PR reads \`state=closed, merged=false\`. Before any "not landed" verdict, search main for the squash commit \`(#N)\`.
-2. **Migration gate**: a diff touching migrations/ or packages/database-migrations/ makes the migration run (stg → verify → prod → verify, with evidence) mandatory before landing is done. Unapplied migrations block ALL of CI repo-wide.
-3. **Review requests silently no-op**: after requesting reviewers (or any GH edit), verify via the requested_reviewers API. Plausible-but-wrong logins return ok.`;
-
-/**
- * Standing doctrine for a worker brief: absolute paths into the knowledge pack
- * plus the frozen traps. Progressive disclosure — paths and one-liners only,
- * never the full pack contents. Exported so smithers seats can share the same
- * doctrine string.
+ * Standing doctrine for a worker brief, driven by the project's PROFILE
+ * (config/projects.json): knowledge paths, project doctrine (e.g. the frozen
+ * lindy traps), and the merge posture derived from yolo/stamp. Progressive
+ * disclosure — paths and one-liners only, never the full pack contents.
+ * Exported so smithers seats can share the same doctrine string.
  */
 export function buildStandingDoctrine(project?: string): string {
 	const data = dataDir();
 	const distill = path.join(data, "ref", "distill");
-	if (project?.toLowerCase() === "lindy") {
-		return `## Standing doctrine (lindy)
-
-Read before you touch prod, a PR, or Linear. Full doctrine (absolute paths):
-
-- ${path.join(data, "KNOWLEDGE.md")} (load index)
-- ${path.join(data, "lindy-domain.md")} · ${path.join(data, "lindy-ops.md")} · ${path.join(data, "lindy-pipeline.md")} · ${path.join(data, "lindy-standing-work.md")} · ${path.join(data, "lindy-learnings.md")}
-- ${path.join(distill, "STANDING-RULES.md")} · ${path.join(distill, "SETUP-CHECKLIST.md")} · ${path.join(distill, "CREDS-AND-TOOLS.md")}
-
-The 3 load-bearing traps (verbatim, non-negotiable):
-
-${LINDY_TRAPS}
-
-And:
-
-- Prod DB reads: \`pnpm repl:prod-readonly\` only. Repo skills live under \`.agent/skills/\`.
-- Sitevars: query the collection sorted \`version: -1\` — never \`getSitevar()\` (REPL cache returns registry defaults) and never unsorted \`findOne\`.
-- Merges: yolo OFF. Per-PR captain stamp + merge word, always. Never run a no-mistakes pipeline.
-- Reviewers: CODEOWNERS + review-frequency + gh-reviewer-lookup skill. Never Ali as code reviewer.
-- CI/review watching belongs to the orchestrator's wake engine — never sleep-poll in your own run; workers that poll-and-exit read as dead.`;
+	const profile = project === undefined ? null : findProfile(project);
+	if (profile !== null && (profile.knowledge.length > 0 || profile.doctrine !== undefined)) {
+		const parts = [
+			`## Standing doctrine (${profile.id})`,
+			`Read before you touch prod, a PR, or the tracker. Full doctrine (absolute paths):`,
+			profile.knowledge.map((file) => `- ${file}`).join("\n"),
+		];
+		if (profile.doctrine !== undefined) parts.push(profile.doctrine);
+		parts.push(`- ${mergeHint(profile)}`);
+		return parts.filter((part) => part.length > 0).join("\n\n");
 	}
-	return `## Standing doctrine
+	const thin = `## Standing doctrine
 
 Distilled fleet rules (absolute paths, open when the topic goes deep):
 
@@ -97,6 +78,8 @@ Distilled fleet rules (absolute paths, open when the topic goes deep):
 - ${path.join(data, "secrets-map.md")} (credential locations, names only — never values)
 
 You never contact the captain directly; every question routes through your status file.`;
+	// A profile with no knowledge pack still carries its merge posture.
+	return profile === null ? thin : `${thin}\n\n- ${mergeHint(profile)}`;
 }
 
 export type WorkerBriefInput = {

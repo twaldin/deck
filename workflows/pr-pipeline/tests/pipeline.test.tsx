@@ -12,7 +12,10 @@
  * self-approve.
  */
 
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { simulate } from "smithers-orchestrator/testing";
 
 import pipeline from "../pipeline.tsx";
@@ -85,6 +88,58 @@ describe("preflight gate", () => {
 		});
 		expect(sim.status).toBe("failed");
 		expect(String(error)).toContain("same family");
+	});
+});
+
+describe("project profiles (yolo vs stamp is data, not a fork)", () => {
+	// Pin the profile source to a fresh temp home so the machine's live
+	// ~/.deck/config never leaks into these assertions (seeds answer).
+	let home: string;
+	let savedHome: string | undefined;
+	beforeEach(() => {
+		home = fs.mkdtempSync(path.join(os.tmpdir(), "deck-pipeline-profiles-"));
+		savedHome = process.env.DECK_V2_HOME;
+		process.env.DECK_V2_HOME = home;
+	});
+	afterEach(() => {
+		if (savedHome === undefined) delete process.env.DECK_V2_HOME;
+		else process.env.DECK_V2_HOME = savedHome;
+		fs.rmSync(home, { recursive: true, force: true });
+	});
+
+	test("a yolo profile (deck) traverses to done with NO approval bypass: the stamp park is skipped", async () => {
+		const { sim, error } = await run({
+			...baseInput,
+			profile: "deck",
+			fixtures: { changedFiles: ["src/feature.ts"] }, // no migration gate
+		});
+		expect(error).toBeUndefined();
+		// Not waiting-approval: the run FINISHED without any human park.
+		expect(sim.status).toBe("finished");
+		// The stamp row exists (same node id), written by the workflow itself.
+		const stamps = sim.outputs.approvals as Array<Record<string, unknown>>;
+		expect(stamps.some((row) => String(row.decidedBy).startsWith("profile:deck"))).toBe(true);
+		// The TOCTOU guards still ran: yolo skips the PARK, never the checks.
+		expect(sim.executed).toContain("r0-stamp-validity");
+		expect(sim.executed).toContain("r0-merge-head-check");
+		expect(sim.executed).toContain("enqueue-merge");
+		expect(sim.executed).toContain("done");
+	});
+
+	test("REGRESSION: a stamp profile (lindy) still parks at the stamp approval", async () => {
+		const { sim } = await run({
+			...baseInput,
+			profile: "lindy",
+			fixtures: { changedFiles: ["src/feature.ts"] },
+		});
+		expect(sim.status).toBe("waiting-approval");
+		expect(sim.executed).not.toContain("enqueue-merge");
+	});
+
+	test("an unknown profile is refused at preflight", async () => {
+		const { sim, error } = await run({ ...baseInput, profile: "nope" });
+		expect(sim.status).toBe("failed");
+		expect(String(error)).toContain('unknown project profile "nope"');
 	});
 });
 

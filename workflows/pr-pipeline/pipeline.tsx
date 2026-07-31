@@ -63,6 +63,7 @@ import {
 	validateModelPolicy,
 	type ModelPolicy,
 } from "./lib/models.ts";
+import { findProfile, type ProjectProfile } from "./lib/profiles.ts";
 import {
 	falloutPrompt,
 	implementPrompt,
@@ -132,6 +133,13 @@ const inputSchema = z.object({
 	worktree: z.string().min(1),
 	branch: z.string().min(1),
 	baseBranch: z.string().optional(),
+	/**
+	 * Project profile id or repo name (config/projects.json under the deck
+	 * home). yolo profiles (e.g. deck) skip the stamp gate: ready is CI-green
+	 * and the workflow auto-approves the stamp row. stamp profiles (e.g. lindy)
+	 * park at the durable <Approval> as always. Omitted = stamp behavior.
+	 */
+	profile: z.string().optional(),
 	brief: z.unknown().optional(),
 	/** Default TRUE: real GH writes require explicit dryRun:false. */
 	dryRun: z.boolean().optional(),
@@ -389,6 +397,11 @@ export default smithers((ctx) => {
 	const github = { ...DEFAULT_GITHUB, ...(input.github ?? {}) };
 	const commands = { ...DEFAULT_COMMANDS, ...(input.commands ?? {}) };
 	const baseBranch = input.baseBranch ?? "main";
+	// Resolved once per render; yolo=false (stamp behavior) when omitted.
+	const profile: ProjectProfile | null =
+		input.profile === undefined ? null : findProfile(input.profile);
+	const profileUnknown = input.profile !== undefined && profile === null;
+	const yolo = profile?.yolo === true;
 	const watchSetPath =
 		input.watchSetPath ?? `${process.env.HOME ?? "~"}/dev/fm2/data/watch-set.jsonl`;
 
@@ -580,6 +593,11 @@ export default smithers((ctx) => {
 						const questions: string[] = validated.ok ? [] : [...validated.openQuestions];
 						const modelViolations = validateModelPolicy(policy);
 						questions.push(...modelViolations);
+						if (profileUnknown) {
+							questions.push(
+								`unknown project profile "${input.profile}": not in config/projects.json (deck home) or the built-in seeds.`,
+							);
+						}
 						if (bypass && !dryRun) {
 							questions.push(
 								"bypassApprovals=true requires dryRun=true: no real run may self-approve its gates.",
@@ -1185,6 +1203,7 @@ export default smithers((ctx) => {
 																{
 																	author: github.selfLogins[0] ?? "",
 																	excludedApprovers: github.excludedApprovers,
+																	yolo,
 																},
 															);
 															return {
@@ -1226,8 +1245,20 @@ export default smithers((ctx) => {
 											</Task>
 										) : null}
 
-										{/* stage 7: stamp + merge word (durable park; decision-shaped card) */}
-										{latestReady?.ready === true && stamp === undefined ? (
+										{/* stage 7: stamp + merge word. A yolo profile skips the park: the
+										    workflow writes the approved row itself (same node id, so
+										    stamp-validity, head re-check and merge run unchanged). */}
+										{latestReady?.ready === true && stamp === undefined && yolo ? (
+											<Task id={`r${k}-stamp`} output={outputs.approvals} retries={0}>
+												{() => ({
+													approved: true,
+													note: `yolo profile "${profile?.id}": stamp gate skipped; merge fires on green (CI: ${latestReady.ci}).`,
+													decidedBy: `profile:${profile?.id}`,
+													decidedAt: nowIso(),
+												})}
+											</Task>
+										) : null}
+										{latestReady?.ready === true && stamp === undefined && !yolo ? (
 											<Gate
 												id={`r${k}-stamp`}
 												title={`STAMP + merge word: ${input.ticket} PR #${pr.prNumber} (round ${k})`}
