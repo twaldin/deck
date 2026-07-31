@@ -300,10 +300,41 @@ describe("sliceVisible", () => {
 		expect(sliceVisible(lines, -3, 10).offset).toBe(0);
 	});
 
-	test("max=1 still shows one line", () => {
-		const win = sliceVisible(lines, 0, 1);
-		expect(win.visible).toEqual(["L0"]);
-		expect(win.below).toBe(19);
+	const bodyRows = (win: { visible: string[]; above: number; below: number }): number =>
+		win.visible.length + (win.above > 0 ? 1 : 0) + (win.below > 0 ? 1 : 0);
+
+	test("max=1 still shows one line and drops the markers to stay on budget", () => {
+		const top = sliceVisible(lines, 0, 1);
+		expect(top.visible).toEqual(["L0"]);
+		expect(bodyRows(top)).toBe(1);
+		const mid = sliceVisible(lines, 5, 1);
+		expect(mid.visible).toEqual(["L5"]);
+		expect(bodyRows(mid)).toBe(1);
+	});
+
+	test("max=2 mid-list keeps one content line inside the budget", () => {
+		const win = sliceVisible(lines, 5, 2);
+		expect(win.visible.length).toBeGreaterThanOrEqual(1);
+		expect(bodyRows(win)).toBeLessThanOrEqual(2);
+	});
+
+	test("body rows never exceed max at any offset for small budgets", () => {
+		for (const max of [1, 2, 3]) {
+			for (let off = 0; off < 25; off++) {
+				const win = sliceVisible(lines, off, max);
+				expect(bodyRows(win)).toBeLessThanOrEqual(max);
+				expect(win.visible.length).toBeGreaterThanOrEqual(1);
+			}
+		}
+	});
+
+	test("buildFleetView honors tiny maxBodyLines budgets when scrolled", () => {
+		const f = frame({ tasks: [...Array.from({ length: 15 }, (_, i) => task({ taskId: `old-${i}`, lastVerb: "done" })), task({ taskId: "live", runState: "running" })] });
+		for (const maxBodyLines of [1, 2]) {
+			const view = buildFleetView(f, PLAIN_FLEET_THEME, { showAll: true, maxBodyLines, scrollOffset: 1 });
+			// top/bottom border + body + blank + footer
+			expect(view.text.split("\n").length).toBeLessThanOrEqual(maxBodyLines + 4);
+		}
 	});
 });
 

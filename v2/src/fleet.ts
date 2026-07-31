@@ -402,8 +402,11 @@ export function framed(title: string, body: string, footer: string, theme: Fleet
 }
 
 /**
- * Pure scroll window: which slice of `lines` fits in `max` rows at `offset`,
- * reserving one row per truncation marker (above/below). Returns the clamped
+ * Pure scroll window: which slice of `lines` fits in `max` rows at `offset`.
+ * Marker rows (above/below) are budgeted INSIDE max, so
+ * visible.length + (above>0) + (below>0) <= max always holds. When the budget
+ * is too small for a marker, its count is 0 and the hidden lines degrade
+ * silently — the border staying on screen beats the hint. Returns the clamped
  * offset so callers can keep their scroll state in bounds.
  */
 export function sliceVisible(
@@ -416,13 +419,27 @@ export function sliceVisible(
 	// above-marker row reserved.
 	const maxOffset = Math.max(0, lines.length - Math.max(1, max - 1));
 	const off = Math.min(Math.max(0, offset), maxOffset);
-	const aboveRows = off > 0 ? 1 : 0;
-	// Without a below marker the window holds max - aboveRows lines; if the
-	// tail still does not fit, give the below marker its row.
-	let cap = Math.max(1, max - aboveRows);
-	if (off + cap < lines.length) cap = Math.max(1, max - aboveRows - 1);
+	let above = off > 0 ? 1 : 0;
+	let below = 0;
+	let cap = max - above;
+	if (off + Math.max(1, cap) < lines.length) below = 1;
+	cap = max - above - below;
+	// Tiny budgets: content wins over markers — drop below first, then above.
+	if (cap < 1) {
+		below = 0;
+		cap = max - above;
+	}
+	if (cap < 1) {
+		above = 0;
+		cap = max;
+	}
 	const visible = lines.slice(off, off + cap);
-	return { visible, offset: off, above: off, below: lines.length - off - visible.length };
+	return {
+		visible,
+		offset: off,
+		above: above === 0 ? 0 : off,
+		below: below === 0 ? 0 : lines.length - off - visible.length,
+	};
 }
 
 /**
