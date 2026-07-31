@@ -8,8 +8,10 @@ export type UsageRoster = {
 	reports?: Array<{
 		provider?: string;
 		limits?: Array<{
+			id?: string;
 			label?: string;
 			window?: { id?: string };
+			scope?: Record<string, unknown>;
 			amount?: { usedFraction?: number; remainingFraction?: number };
 		}>;
 	}>;
@@ -19,8 +21,10 @@ const PLAIN: UsageTheme = { fg: (_key, text) => text, bold: (text) => text };
 const BAR_WIDTH = 6;
 
 type UsageLimit = {
+	id?: string;
 	label?: string;
 	window?: { id?: string };
+	scope?: Record<string, unknown>;
 	amount?: { usedFraction?: number; remainingFraction?: number };
 };
 
@@ -39,6 +43,33 @@ function bar(free: number, theme: UsageTheme): string {
 	return `${theme.fg(severity(free), "█".repeat(full))}${theme.fg("dim", "░".repeat(BAR_WIDTH - full))}`;
 }
 
+function windowTag(limit: UsageLimit): string {
+	const id = limit.window?.id ?? limit.label ?? "limit";
+	const tier = typeof limit.scope?.tier === "string" ? limit.scope.tier : null;
+	return tier === null ? id : `${id}·${tier}`;
+}
+
+export function aggregate(roster: UsageRoster): { provider: string; tag: string; free: number; count: number }[] {
+	const buckets = new Map<string, { provider: string; tag: string; sum: number; count: number }>();
+	for (const report of roster.reports ?? []) {
+		const provider = report.provider;
+		if (provider === undefined) continue;
+		for (const limit of report.limits ?? []) {
+			const free = freeFraction(limit);
+			if (free === null) continue;
+			const tag = windowTag(limit);
+			const key = `${provider}\u0000${limit.id ?? tag}`;
+			const bucket = buckets.get(key) ?? { provider, tag, sum: 0, count: 0 };
+			bucket.sum += free;
+			bucket.count += 1;
+			buckets.set(key, bucket);
+		}
+	}
+	return [...buckets.values()]
+		.map(bucket => ({ provider: bucket.provider, tag: bucket.tag, free: bucket.sum / bucket.count, count: bucket.count }))
+		.sort((a, b) => a.provider.localeCompare(b.provider) || a.tag.localeCompare(b.tag));
+}
+
 export function readUsageRoster(home = homedir()): UsageRoster | null {
 	try {
 		const value: unknown = JSON.parse(readFileSync(join(home, ".deck", "broker", "usage.json"), "utf8"));
@@ -51,16 +82,10 @@ export function readUsageRoster(home = homedir()): UsageRoster | null {
 export function usageStatusLine(roster: UsageRoster | null, theme: UsageTheme = PLAIN): string {
 	if (roster === null) return "";
 	const byProvider = new Map<string, string[]>();
-	for (const report of roster.reports ?? []) {
-		const provider = report.provider === "anthropic" ? "claude" : report.provider === "openai-codex" ? "codex" : report.provider;
-		if (provider === undefined) continue;
-		for (const limit of report.limits ?? []) {
-			const free = freeFraction(limit);
-			if (free === null) continue;
-			const tag = limit.window?.id ?? limit.label ?? "limit";
-			const cell = `${theme.fg("dim", tag)} ${bar(free, theme)} ${theme.fg(severity(free), `${Math.round(free * 100)}%`)}`;
-			(byProvider.get(provider) ?? (byProvider.set(provider, []), byProvider.get(provider)!)).push(cell);
-		}
+	for (const row of aggregate(roster)) {
+		const provider = row.provider === "anthropic" ? "claude" : row.provider === "openai-codex" ? "codex" : row.provider;
+		const cell = `${theme.fg("dim", row.tag)} ${bar(row.free, theme)} ${theme.fg(severity(row.free), `${Math.round(row.free * 100)}%`)}`;
+		(byProvider.get(provider) ?? (byProvider.set(provider, []), byProvider.get(provider)!)).push(cell);
 	}
 	return [...byProvider.entries()].map(([provider, cells]) => `${theme.bold(theme.fg("accent", provider))} ${cells.join("  ")}`).join(theme.fg("dim", "  ·  "));
 }
