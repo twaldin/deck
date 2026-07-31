@@ -62,6 +62,8 @@ export interface ReviewerActivity {
 	lastReviewState: string | null;
 	/** Whether the latest non-comment review state is still APPROVED. */
 	hasActiveApproval?: boolean;
+	/** Whether an approval was dismissed, even if a later comment became latest activity. */
+	hadDismissedApproval?: boolean;
 }
 
 export interface CommentActivity {

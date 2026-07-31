@@ -55,7 +55,7 @@ export function reviewersNeedingReRequest(
 		const state = reviewer.lastReviewState?.toUpperCase();
 		// GitHub keeps approvals across pushes unless the approval is dismissed.
 		if (reviewer.hasActiveApproval === true || state === "APPROVED") continue;
-		if (state === "DISMISSED") {
+		if (state === "DISMISSED" || reviewer.hadDismissedApproval === true) {
 			// A dismissed approval is no longer valid, regardless of when it was submitted.
 			out.push(reviewer.login);
 			continue;

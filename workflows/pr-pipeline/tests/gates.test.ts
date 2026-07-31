@@ -390,6 +390,7 @@ describe("watch helpers", () => {
 				lastActivityAt: "2026-07-27T11:00:00Z",
 				lastReviewState: "DISMISSED",
 				hasActiveApproval: false,
+				hadDismissedApproval: true,
 			},
 		]);
 	});
@@ -428,6 +429,16 @@ describe("watch helpers", () => {
 		expect(
 			reviewersNeedingReRequest(
 				[{ login: "dismissed", isBot: false, lastActivityAt: "2026-07-27T09:00:00Z", lastReviewState: "DISMISSED" }],
+				[],
+				"2026-07-27T10:00:00Z",
+			),
+		).toEqual(["dismissed"]);
+	});
+
+	test("re-requests a dismissed approval followed by a comment", () => {
+		expect(
+			reviewersNeedingReRequest(
+				[{ login: "dismissed", isBot: false, lastActivityAt: "2026-07-27T11:00:00Z", lastReviewState: "COMMENTED", hadDismissedApproval: true }],
 				[],
 				"2026-07-27T10:00:00Z",
 			),

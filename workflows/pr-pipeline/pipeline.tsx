@@ -805,6 +805,14 @@ export default smithers((ctx) => {
 											{ cwd: input.worktree },
 										)
 									).trim();
+									let worktreeIsDescendant = true;
+									if (worktreeHead !== overview.headSha) {
+										const ancestor = await bunExec(
+											[github.git, "merge-base", "--is-ancestor", overview.headSha, worktreeHead],
+											{ cwd: input.worktree },
+										);
+										worktreeIsDescendant = ancestor.code === 0;
+									}
 									assertAdoptable(overview, {
 										repo: input.repo,
 										branch: input.branch,
@@ -814,12 +822,9 @@ export default smithers((ctx) => {
 										worktreeStatus,
 										worktreeOriginUrl,
 										allowWorktreeAhead: true,
+										worktreeIsDescendant,
 									});
 									if (worktreeHead !== overview.headSha) {
-										const ancestor = await bunExec(
-											[github.git, "merge-base", "--is-ancestor", overview.headSha, worktreeHead],
-											{ cwd: input.worktree },
-										);
 										const decision = decideAdoptPush({
 											worktreeHead,
 											prHead: overview.headSha,

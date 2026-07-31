@@ -123,6 +123,7 @@ export function parseActivity(
 	const comments: CommentActivity[] = [];
 	const latestByReviewer = new Map<string, ReviewerActivity>();
 	const approvalByReviewer = new Map<string, { at: string; approved: boolean }>();
+	const dismissedByReviewer = new Set<string>();
 
 	if (Array.isArray(commentNodes)) {
 		for (const node of commentNodes) {
@@ -146,6 +147,7 @@ export function parseActivity(
 			}
 			const key = login.toLowerCase();
 			const state = str(node.state).toUpperCase();
+			if (state === "DISMISSED") dismissedByReviewer.add(key);
 			if (state === "APPROVED" || state === "CHANGES_REQUESTED" || state === "DISMISSED") {
 				const priorApproval = approvalByReviewer.get(key);
 				if (priorApproval === undefined || submittedAt > priorApproval.at) {
@@ -168,6 +170,7 @@ export function parseActivity(
 		reviewers: [...latestByReviewer.entries()].map(([key, reviewer]) => ({
 			...reviewer,
 			hasActiveApproval: approvalByReviewer.get(key)?.approved === true,
+			...(dismissedByReviewer.has(key) ? { hadDismissedApproval: true } : {}),
 		})),
 	};
 }
