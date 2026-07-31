@@ -35,9 +35,18 @@ export interface IdleCompactionModel {
 	id: string;
 }
 
+/**
+ * Built-in timing profiles are keyed by cache ROUTE, not provider family:
+ * the same family has different cache lifetimes depending on which client
+ * stack carries the request (deck broker vs a direct pi provider) and which
+ * model generation serves it. Env overrides stay keyed by family.
+ */
+export type IdleCompactionCacheRoute = IdleCompactionProvider | "anthropic-long" | "openai-long";
+
 export interface ParsedIdleCompactionConfig {
 	config: IdleCompactionConfig;
 	providerConfigs: Readonly<Partial<Record<IdleCompactionProvider, IdleCompactionConfig>>>;
+	builtinConfigs: Readonly<Partial<Record<IdleCompactionCacheRoute, IdleCompactionConfig>>>;
 	warnings: string[];
 }
 
@@ -58,12 +67,44 @@ export function cacheProviderForModel(model: IdleCompactionModel | undefined): I
 	return undefined;
 }
 
+/** GPT-5.6 is the first family with the documented 30m prompt-cache minimum. */
+function isGpt56OrNewer(modelId: string): boolean {
+	const match = /^gpt-(\d+)(?:\.(\d+))?/.exec(modelId);
+	if (match === null) return false;
+	const major = Number(match[1]);
+	const minor = Number(match[2] ?? 0);
+	return major > 5 || (major === 5 && minor >= 6);
+}
+
+/**
+ * Route-sensitive cache lifetime resolution:
+ * - deck claude-* goes through the broker, whose pi-ai layer requests
+ *   `cache_control.ttl: "1h"` (Claude Code behavior) -> anthropic-long.
+ * - direct pi anthropic providers default to plain 5m ephemeral
+ *   (`PI_CACHE_RETENTION=long` is an operator opt-in; pair the ANTHROPIC env
+ *   override with it) -> plain family, no built-in long profile.
+ * - GPT-5.6+ carries the documented 30m minimum on any route -> openai-long;
+ *   older gpt-* stay on the conservative global timing.
+ */
+function cacheRouteForModel(model: IdleCompactionModel | undefined): IdleCompactionCacheRoute | undefined {
+	const provider = cacheProviderForModel(model);
+	if (provider === undefined || model === undefined) return provider;
+	const modelId = model.id.slice(model.id.lastIndexOf("/") + 1);
+	if (provider === "anthropic" && model.provider === "deck") return "anthropic-long";
+	if (provider === "openai" && isGpt56OrNewer(modelId)) return "openai-long";
+	return provider;
+}
+
 export function selectIdleCompactionConfig(
 	parsed: ParsedIdleCompactionConfig,
 	model: IdleCompactionModel | undefined,
 ): IdleCompactionConfig {
 	const provider = cacheProviderForModel(model);
-	return provider === undefined ? parsed.config : (parsed.providerConfigs[provider] ?? parsed.config);
+	if (provider === undefined) return parsed.config;
+	const envProfile = parsed.providerConfigs[provider];
+	if (envProfile !== undefined) return envProfile;
+	const route = cacheRouteForModel(model);
+	return route === undefined ? parsed.config : (parsed.builtinConfigs[route] ?? parsed.config);
 }
 
 export type IdleCompactionDecision =
@@ -164,14 +205,24 @@ interface ConfigVariable {
 const PROVIDER_CACHE_PROFILES: readonly IdleCompactionProvider[] = ["anthropic", "openai", "xai"];
 
 /**
- * xAI documents automatic prompt caching but no cache lifetime; the global
- * 5-minute profile fires too late for its short-lived cache, so xai gets a
- * built-in short profile that the paired XAI env vars still override.
+ * Calibrated built-in cache lifetimes per cache route; the paired
+ * per-family env vars still override every route of that family.
+ *
+ * - anthropic-long: the deck broker requests `cache_control.ttl: "1h"` on its
+ *   anthropic oauth path (Claude Code behavior). Anthropic drops oauth to 5m
+ *   only on usage-credit overage; override with the ANTHROPIC env pair if
+ *   that state persists. Direct anthropic routes keep the global 5m timing.
+ * - openai-long: GPT-5.6+ `prompt_cache_options.ttl` default (and only
+ *   value) is a 30-minute minimum lifetime per OpenAI's prompt-caching docs.
+ *   Older models cache in-memory ~5-10 minutes and keep the global timing.
+ * - xai: documents automatic prompt caching but no cache lifetime.
  */
-// ponytail: 2min TTL / 30s margin is a guess at xAI's undocumented cache life; recalibrate when xAI publishes one.
-const DEFAULT_PROVIDER_TIMINGS: Readonly<
-	Partial<Record<IdleCompactionProvider, Pick<IdleCompactionConfig, "cacheTtlMs" | "marginMs">>>
+// ponytail: xai 2min TTL / 30s margin is a guess at an undocumented cache life; recalibrate when xAI publishes one.
+const DEFAULT_ROUTE_TIMINGS: Readonly<
+	Partial<Record<IdleCompactionCacheRoute, Pick<IdleCompactionConfig, "cacheTtlMs" | "marginMs">>>
 > = {
+	"anthropic-long": { cacheTtlMs: 60 * 60_000, marginMs: 5 * 60_000 },
+	"openai-long": { cacheTtlMs: 30 * 60_000, marginMs: 5 * 60_000 },
 	xai: { cacheTtlMs: 2 * 60_000, marginMs: 30_000 },
 };
 /** Node clamps larger delays to 1ms, which would spin an idle timer. */
@@ -327,12 +378,7 @@ export function parseIdleCompactionConfig(
 		const marginEnv = `PI_IDLE_COMPACTION_${provider.toUpperCase()}_MARGIN_MS`;
 		const ttlValue = env[ttlEnv]?.trim();
 		const marginValue = env[marginEnv]?.trim();
-		const defaultTiming = DEFAULT_PROVIDER_TIMINGS[provider];
 		if ((ttlValue === undefined || ttlValue === "") && (marginValue === undefined || marginValue === "")) {
-			if (defaultTiming === undefined) continue;
-			const profile = { ...config, ...defaultTiming };
-			normalizeTiming(profile, ttlEnv, marginEnv, capCooldown, warnings);
-			providerConfigs[provider] = profile;
 			continue;
 		}
 		if (ttlValue === undefined || ttlValue === "" || marginValue === undefined || marginValue === "") {
@@ -371,5 +417,14 @@ export function parseIdleCompactionConfig(
 		providerConfigs[provider] = profile;
 	}
 
-	return { config, providerConfigs, warnings };
+	const builtinConfigs: Partial<Record<IdleCompactionCacheRoute, IdleCompactionConfig>> = {};
+	for (const [route, timing] of Object.entries(DEFAULT_ROUTE_TIMINGS) as Array<
+		[IdleCompactionCacheRoute, Pick<IdleCompactionConfig, "cacheTtlMs" | "marginMs">]
+	>) {
+		const profile = { ...config, ...timing };
+		normalizeTiming(profile, "builtin ttl", "builtin margin", capCooldown, warnings);
+		builtinConfigs[route] = profile;
+	}
+
+	return { config, providerConfigs, builtinConfigs, warnings };
 }
