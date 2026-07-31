@@ -165,34 +165,6 @@ type ShipIdentity = {
 	worktree: string | null;
 };
 
-export type ShipLogEvidence = {
-	prNumber: number | null;
-	landed: boolean;
-	pushPrNull: boolean;
-};
-
-/** Extract terminal evidence that the detached Smithers log actually records. */
-export function parseShipLogEvidence(log: string): ShipLogEvidence {
-	const prMatches = [...log.matchAll(/PR\s+#(\d+)/gi)].map((match) => Number(match[1]));
-	return {
-		prNumber: prMatches.at(-1) ?? null,
-		landed: /already landed/i.test(log),
-		pushPrNull:
-			/pre-PR zombie/i.test(log) ||
-			/push-pr[\s\S]{0,1000}["']?(?:pr[_ ]?number|pr)["']?\s*[:=]\s*null/i.test(log),
-	};
-}
-
-function readShipEvidence(runId: string): ShipLogEvidence {
-	try {
-		return parseShipLogEvidence(
-			fs.readFileSync(path.join(stateDir(), "ship", `${runId}.log`), "utf8"),
-		);
-	} catch {
-		return { prNumber: null, landed: false, pushPrNull: false };
-	}
-}
-
 function readShipInput(runId: string): ShipIdentity {
 	try {
 		const input = JSON.parse(
@@ -382,10 +354,9 @@ async function collectRunsUnshared(
 		const enriched: PsRun[] = [];
 		for (const psRun of runs) {
 				const input = readShipInput(psRun.id);
-				const evidence = readShipEvidence(psRun.id);
-				let prNumber = psRun.prNumber ?? input.prNumber ?? evidence.prNumber ?? undefined;
-				let landed = psRun.landed ?? (evidence.landed ? true : undefined);
-				let pushPrNull = psRun.pushPrNull ?? (evidence.pushPrNull ? true : undefined);
+				let prNumber = psRun.prNumber ?? input.prNumber ?? undefined;
+				let landed = psRun.landed;
+				let pushPrNull = psRun.pushPrNull;
 
 				// Compute nodes do not write their return value to the detached log. Use
 				// the public output command as the durable fallback for runs without local

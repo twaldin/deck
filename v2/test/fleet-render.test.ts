@@ -19,7 +19,6 @@ import {
 	humanAge,
 	waitingForFor,
 	normalizeStep,
-	parseShipLogEvidence,
 	collectRuns,
 	PLAIN_FLEET_THEME,
 	renderFooterLines,
@@ -74,14 +73,6 @@ function frame(overrides: Partial<FleetFrame> = {}): FleetFrame {
 		...overrides,
 	};
 }
-
-describe("ship evidence", () => {
-	test("does not trust agent traces and recognizes real log markers", () => {
-		expect(parseShipLogEvidence(`info  {"category":"agent-trace","payload":{"text":"{\"prNumber\":314}"}} agent-trace=0ms\n      runId=ship node.id=local-review nodeId=local-review`)).toEqual({ prNumber: null, landed: false, pushPrNull: false });
-		expect(parseShipLogEvidence(`      push-pr: verify branch matches PR head\n      PR #26865\n      already landed`)).toEqual({ prNumber: 26865, landed: true, pushPrNull: false });
-		expect(parseShipLogEvidence(`      nodeId=push-pr\n      error='pr_number: null'\n      pre-PR zombie`)).toEqual({ prNumber: null, landed: false, pushPrNull: true });
-	});
-});
 
 describe("run collection", () => {
 	test("uses one ps subprocess per tick and deduplicates concurrent collectors", async () => {
