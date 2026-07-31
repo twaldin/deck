@@ -381,6 +381,7 @@ export async function fetchPrOverview(ctx: GhContext, prNumber: number): Promise
 	headRefName: string;
 	headSha: string;
 	baseRefName: string;
+	headRepoFullName: string;
 }> {
 	const exec = ctx.exec ?? bunExec;
 	const out = await execOrThrow(exec, [ctx.gh, "api", `repos/${ctx.repo}/pulls/${prNumber}`]);
@@ -388,7 +389,7 @@ export async function fetchPrOverview(ctx: GhContext, prNumber: number): Promise
 		number: number;
 		html_url: string;
 		state: string;
-		head: { ref: string; sha: string };
+		head: { ref: string; sha: string; repo: { full_name: string } | null };
 		base: { ref: string };
 	};
 	return {
@@ -398,6 +399,9 @@ export async function fetchPrOverview(ctx: GhContext, prNumber: number): Promise
 		headRefName: payload.head.ref,
 		headSha: payload.head.sha,
 		baseRefName: payload.base.ref,
+		// head.repo is null when the fork was deleted - that PR is not adoptable
+		// either way, so an empty name fails the same-repo check downstream.
+		headRepoFullName: payload.head.repo?.full_name ?? "",
 	};
 }
 

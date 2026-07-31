@@ -38,6 +38,7 @@ import {
 } from "smithers-orchestrator";
 import { z } from "zod";
 
+import { assertAdoptable } from "./lib/adopt.ts";
 import { validateBrief } from "./lib/brief.ts";
 import { evaluateDone } from "./lib/done.ts";
 import {
@@ -780,16 +781,29 @@ export default smithers((ctx) => {
 										};
 									}
 									const overview = await fetchPrOverview(ghCtx, prNumber);
-									if (overview.state !== "open") {
-										throw new Error(
-											`[escalate] cannot adopt PR #${prNumber}: state is "${overview.state}", not open.`,
-										);
-									}
-									if (overview.headRefName !== input.branch) {
-										throw new Error(
-											`[escalate] cannot adopt PR #${prNumber}: its head branch is "${overview.headRefName}" but the run was given branch "${input.branch}" — adopting the wrong PR would watch/stamp the wrong diff.`,
-										);
-									}
+									// The watch fixer commits/pushes and enqueue-merge runs
+									// `gt merge` in THIS worktree - so the worktree itself must
+									// match the adopted PR (branch AND head), not just the
+									// caller-supplied branch name.
+									const worktreeBranch = (
+										await execOrThrow(
+											bunExec,
+											[github.git, "rev-parse", "--abbrev-ref", "HEAD"],
+											{ cwd: input.worktree },
+										)
+									).trim();
+									const worktreeHead = (
+										await execOrThrow(bunExec, [github.git, "rev-parse", "HEAD"], {
+											cwd: input.worktree,
+										})
+									).trim();
+									assertAdoptable(overview, {
+										repo: input.repo,
+										branch: input.branch,
+										baseBranch,
+										worktreeBranch,
+										worktreeHead,
+									});
 									const fs = await import("node:fs");
 									const path = await import("node:path");
 									fs.mkdirSync(path.dirname(watchSetPath), { recursive: true });
@@ -1467,6 +1481,21 @@ export default smithers((ctx) => {
 								if (headNow !== authorizedRound.headSha) {
 									throw new Error(
 										`[escalate] PR head moved to ${headNow} after the stamp (stamped ${authorizedRound.headSha}) - refusing to submit to the merge queue. The next render re-enters watch-ci via the head-check round guard.`,
+									);
+								}
+								// The merge command runs against the worktree's CURRENT
+								// branch (gt merge is unqualified) - refuse if the worktree
+								// drifted off the PR branch, or the wrong PR gets merged.
+								const mergeBranch = (
+									await execOrThrow(
+										bunExec,
+										[github.git, "rev-parse", "--abbrev-ref", "HEAD"],
+										{ cwd: input.worktree },
+									)
+								).trim();
+								if (mergeBranch !== input.branch) {
+									throw new Error(
+										`[escalate] worktree is on branch "${mergeBranch}", not "${input.branch}" - refusing to run the merge command there (it acts on the current branch and would merge the wrong PR).`,
 									);
 								}
 								const out = await runShell(commands.merge, input.worktree);
