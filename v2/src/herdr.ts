@@ -54,6 +54,24 @@ export function desiredState(task: TaskRow): HerdrAgentState {
 	return task.runState === "running" ? "working" : "idle";
 }
 
+/**
+ * Whether the task's pane should be closed. Terminal verbs (done, failed)
+ * always release; a parked task (paused/blocked with no live run) or a gone
+ * worktree releases too. Only a task that is running — or briefly between
+ * events without a terminal/parked verb — keeps a pane. Pure; exported for
+ * tests.
+ */
+export function shouldReleasePane(input: {
+	runState: TaskRow["runState"];
+	lastVerb: string | null;
+	worktreeExists: boolean;
+}): boolean {
+	if (input.lastVerb === "done" || input.lastVerb === "failed") return true;
+	if (input.runState === "running") return false;
+	if (!input.worktreeExists) return true;
+	return input.lastVerb === "paused" || input.lastVerb === "blocked";
+}
+
 /** One-line message for the agent row. herdr truncates long labels badly. */
 export function projectionMessage(task: TaskRow): string {
 	const body =
@@ -263,6 +281,17 @@ async function pass(frame: FleetFrame, options: { workflowCwd?: string }): Promi
 		const recordedPane = typeof meta?.herdr_pane === "string" ? meta.herdr_pane : undefined;
 		const recordedTab = typeof meta?.herdr_tab === "string" ? meta.herdr_tab : undefined;
 		const active = task.runState === "running";
+		const worktreeExists = task.worktree !== null && fs.existsSync(task.worktree);
+
+		// Terminal or parked: close the pane (identity-exact) instead of leaving
+		// an idle ghost. A worktree still on disk is not a reason to keep one.
+		if (shouldReleasePane({ runState: task.runState, lastVerb: task.lastVerb, worktreeExists })) {
+			if (recordedPane !== undefined) {
+				await releasePane(recordedPane, recordedTab, task.taskId);
+				updateMeta(task.taskId, { herdr_pane: undefined, herdr_tab: undefined });
+			}
+			continue;
+		}
 
 		if (active) {
 			let pane = recordedPane;
@@ -286,17 +315,10 @@ async function pass(frame: FleetFrame, options: { workflowCwd?: string }): Promi
 
 		if (recordedPane === undefined) continue;
 
-		// Run over. Worktree gone means the task was torn down: clear the pane,
-		// identity-exact. Worktree still present means the task may run again
-		// (next event resumes the same session), so it parks as idle.
-		const wtGone = task.worktree === null || !fs.existsSync(task.worktree);
-		if (wtGone) {
-			await releasePane(recordedPane, recordedTab, task.taskId);
-			updateMeta(task.taskId, { herdr_pane: undefined, herdr_tab: undefined });
-		} else {
-			await report(recordedPane, task.taskId, desiredState(task), projectionMessage(task));
-			projected += 1;
-		}
+		// Not running, not terminal/parked: the next event resumes the same
+		// session, so the pane parks as idle until then.
+		await report(recordedPane, task.taskId, desiredState(task), projectionMessage(task));
+		projected += 1;
 	}
 
 	// Smithers: one aggregate agent pane, present only while runs exist.
