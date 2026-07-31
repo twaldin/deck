@@ -32,10 +32,22 @@ orchestrator spawns a worker, and no second copy of the logic to keep in sync.
 
 ```
 deck-v2 bootstrap          # create ~/.deck
+deck-v2 ship <ticket> --profile <id> --worktree <path> --branch <name> ...
+                           # DEFAULT ship path: the project's PR pipeline
 deck-v2 spawn <id> --task "..." --accept "..." --worktree <path>
 deck-v2 status <id>
 deck-v2 fleet              # what everything is doing
 ```
+
+## Shipping goes through the pipeline
+
+`src/ship.ts`: an effort that ends in a PR ships through its project profile's
+pipeline (`workflows/pr-pipeline`), where the PR open is a compute node behind
+a hard adversarial-review gate; `lindy-full` parks for the captain's stamp,
+`yolo-ship` auto-merges on green. `spawn --kind ship` on a profiled repo is
+REFUSED without `--no-pipeline` (`assertShipGoesThroughPipeline` in
+`src/spawn.ts`) — spawn is for workers inside a pipeline stage and scouts. See
+`workflows/pr-pipeline/README.md` "This is the DEFAULT ship path".
 
 ## Roles
 

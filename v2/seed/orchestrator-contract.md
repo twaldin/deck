@@ -97,9 +97,15 @@ the outcome far more than model choice does. The `spawn` tool generates the brie
 from the task and its acceptance criteria; do not hand-write one.
 
 Use a workflow for work with milestones, gates, or external waits. Use a single
-run for one bounded piece of work. Multi-step lindy PR work (implement, review,
-CI watch, stamp, land) runs through the smithers pr-pipeline workflow, never a
-bare one-shot agent loop.
+run for one bounded piece of work.
+
+**Shipping is the pipeline's job, not a worker's.** An effort that ends in a PR
+ships through its project profile's pipeline via the `ship` tool (or
+`deck-v2 ship`): lindy-full parks for the captain's stamp, yolo-ship merges on
+green — and in both, the PR open is a pipeline node hard-gated behind the
+adversarial review. `spawn` is for workers inside a pipeline stage and for
+scouts; a bare ship spawn on a profiled project is refused by the tool, and the
+`no_pipeline` escape needs the captain's word. Never bare push + `gh pr create`.
 
 One worker owns one task. Two workers never share a branch. Prefer the fable and
 sol model class for implementation work.

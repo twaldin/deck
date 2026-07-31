@@ -11,6 +11,32 @@ Runs on **plain smithers 0.30.0** — no deck router/manifest/TUI dependency.
 Model access goes through pi's `deck/` provider (the deck broker on
 `127.0.0.1:8377`).
 
+## This is the DEFAULT ship path
+
+Every profiled project ships through this workflow — the profile
+(`config/projects.json`, `v2/src/projects.ts`) only selects the merge posture:
+
+| pipeline | review gate | stamp park | merge |
+|---|---|---|---|
+| `lindy-full` | adversarial, hard | durable `<Approval>`, captain's word | MQ after stamp |
+| `yolo-ship` | adversarial, hard (SAME gate) | skipped by the profile | auto on CI **green** (`will-be-green` is not enough — nobody decided) |
+
+The one-command entry is the deck orchestrator's ship helper, which resolves
+the profile, builds the input (brief, yolo/stamp, deploy evidence default) and
+starts this workflow detached:
+
+```sh
+deck-v2 ship deck-42 --profile deck --worktree ~/.deck/wt/deck-3 --branch deck/my-change \
+  --base v2 --title "fix(x): y" --summary "..." --accept "tests green;behavior proven"
+```
+
+Enforcement is machine-shaped on both sides: here, `push-pr` renders only after
+`local-review` approves (or a human approves `review-escalation`) — no input
+can skip it; and in deck, `deck-v2 spawn --kind ship` REFUSES a profiled repo
+without `--no-pipeline` (v2/src/spawn.ts `assertShipGoesThroughPipeline`), so a
+bare worker cannot open the PR that skips this graph. Incident: doctrine PR
+#26865 shipped with zero adversarial review through exactly that bare path.
+
 ## Stage graph → node ids
 
 | SOP stage | Node id(s) | Kind |

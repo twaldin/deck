@@ -125,6 +125,22 @@ describe("project profiles (yolo vs stamp is data, not a fork)", () => {
 		expect(sim.executed).toContain("r0-merge-head-check");
 		expect(sim.executed).toContain("enqueue-merge");
 		expect(sim.executed).toContain("done");
+		// yolo skips the stamp PARK only — the adversarial review still gates the PR open:
+		expect(sim.executed.indexOf("local-review")).toBeLessThan(sim.executed.indexOf("push-pr"));
+	});
+
+	test("REGRESSION: the adversarial review gate holds under a yolo profile — an unapproved review parks at review-escalation and push-pr never runs", async () => {
+		const { sim } = await run({
+			...baseInput,
+			repo: "twaldin/deck",
+			profile: "deck",
+			limits: { localReviewRounds: 2 },
+			fixtures: { changedFiles: ["src/feature.ts"], localReviewRounds: 99 },
+		});
+		expect(sim.status).toBe("waiting-approval");
+		expect(sim.executed).toContain("local-review");
+		expect(sim.executed).not.toContain("push-pr");
+		expect(sim.executed).not.toContain("enqueue-merge");
 	});
 
 	test("REGRESSION: a stamp profile (lindy) still parks at the stamp approval", async () => {
@@ -154,6 +170,17 @@ describe("project profiles (yolo vs stamp is data, not a fork)", () => {
 });
 
 describe("approval parks (no bypass)", () => {
+	test("an unapproved adversarial review parks at review-escalation; push-pr never runs (stamp profile)", async () => {
+		const { sim } = await run({
+			...baseInput,
+			limits: { localReviewRounds: 2 },
+			fixtures: { changedFiles: ["src/feature.ts"], localReviewRounds: 99 },
+		});
+		expect(sim.status).toBe("waiting-approval");
+		expect(sim.executed).toContain("local-review");
+		expect(sim.executed).not.toContain("push-pr");
+	});
+
 	test("dry run with real approvals parks at the stamp; merge never runs", async () => {
 		const { sim } = await run({
 			...baseInput,
