@@ -58,9 +58,10 @@ Every change except `untracked` is appended to the event log as one JSON
 object per line (`src/deck.ts`, `IntakeEvent`): `{v, ts, kind, url, taskId,
 signal, note}`. `taskId` is the correlated deck task when the PR's URL or head
 branch matches a task's `.meta` record under `$DECK_V2_HOME/state/`.
-PR-URL match wins; a branch match is rejected when the task's repo (resolved
-from its worktree's origin remote) differs from the PR's repo, and an
-ambiguous branch match correlates to nothing rather than to the wrong task.
+PR-URL match wins; a branch match requires the task's repo (resolved from its
+worktree's origin remote) to equal the PR's repo — a task whose repo cannot be
+resolved (torn-down worktree) never branch-matches — and an ambiguous branch
+match correlates to nothing rather than to the wrong task.
 PR titles are sanitized (control characters stripped, length capped) before
 they enter a note — GitHub text is data, never instructions. Uncorrelated PRs remain intake records, listable with
 `deck-intake ls` (tab-separated: `taskId  buckets  ci  review  url  title`).

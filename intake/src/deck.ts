@@ -105,7 +105,8 @@ export function readTaskRefs(stateDir: string = deckStateDir()): TaskRef[] {
 		}
 		// Branch names are only unique within a repo, so a branch match needs the
 		// task's repo. Resolved from the live worktree's origin remote; a torn-down
-		// worktree leaves it unknown and the branch match falls back to name-only.
+		// worktree leaves it unknown and the ref is then excluded from branch
+		// matching entirely (a finished task correlates by PR URL anyway).
 		if (ref.branch !== undefined && ref.worktree !== undefined) {
 			const repo = repoFromWorktree(ref.worktree);
 			if (repo !== null) ref.repo = repo;
@@ -117,9 +118,10 @@ export function readTaskRefs(stateDir: string = deckStateDir()): TaskRef[] {
 
 /**
  * Correlate one PR to a deck task. A PR-URL match wins over a branch match.
- * A branch match is rejected when the task's repo is known and differs from
- * the PR's repo, and an ambiguous match (two tasks, same branch) correlates
- * to nothing rather than to the wrong task.
+ * A branch match REQUIRES the task's repo to be known and equal to the PR's
+ * repo (a branch name is only unique within a repo), and an ambiguous match
+ * (two tasks, same branch, same repo) correlates to nothing rather than to
+ * the wrong task.
  */
 export function correlate(
 	item: Pick<PrItem, "url" | "headRef" | "repo">,
@@ -132,7 +134,7 @@ export function correlate(
 	const byBranch = new Set<string>();
 	for (const ref of refs) {
 		if (ref.branch === undefined || ref.branch !== item.headRef) continue;
-		if (ref.repo !== undefined && ref.repo !== item.repo) continue;
+		if (ref.repo === undefined || ref.repo !== item.repo) continue;
 		byBranch.add(ref.taskId);
 	}
 	if (byBranch.size === 1) return [...byBranch][0] ?? null;

@@ -85,10 +85,10 @@ describe("readTaskRefs", () => {
 describe("correlate", () => {
 	const refs = [
 		{ taskId: "t-url", pr: "https://github.com/o/r/pull/7/" },
-		{ taskId: "t-branch", branch: "deck/feature" },
-		{ taskId: "t-repo", branch: "deck/pinned", repo: "o/r" },
-		{ taskId: "t-dup-a", branch: "main-fix" },
-		{ taskId: "t-dup-b", branch: "main-fix" },
+		{ taskId: "t-branch", branch: "deck/feature", repo: "o/r" },
+		{ taskId: "t-norepo", branch: "deck/orphan" },
+		{ taskId: "t-dup-a", branch: "main-fix", repo: "o/r" },
+		{ taskId: "t-dup-b", branch: "main-fix", repo: "o/r" },
 	];
 	const pr = (headRef: string, repo = "o/r") => ({
 		url: "https://github.com/o/r/pull/9",
@@ -109,15 +109,18 @@ describe("correlate", () => {
 		expect(correlate(pr("deck/feature"), refs)).toBe("t-branch");
 	});
 
-	test("branch match respects a known task repo: same repo matches", () => {
-		expect(correlate(pr("deck/pinned", "o/r"), refs)).toBe("t-repo");
+	test("branch match rejects a cross-repo collision", () => {
+		expect(correlate(pr("deck/feature", "other/repo"), refs)).toBe(null);
 	});
 
-	test("branch match rejects a cross-repo collision when the task repo is known", () => {
-		expect(correlate(pr("deck/pinned", "other/repo"), refs)).toBe(null);
+	test("REGRESSION: unknown task repo never branch-matches, even for a unique branch", () => {
+		// A torn-down worktree leaves the repo unresolvable; name-only matching
+		// would wake the wrong task on a same-name branch from another repo.
+		expect(correlate(pr("deck/orphan", "other/repo"), refs)).toBe(null);
+		expect(correlate(pr("deck/orphan", "o/r"), refs)).toBe(null);
 	});
 
-	test("ambiguous branch correlates to nothing, not the wrong task", () => {
+	test("ambiguous branch (same repo) correlates to nothing, not the wrong task", () => {
 		expect(correlate(pr("main-fix"), refs)).toBe(null);
 	});
 
@@ -159,7 +162,7 @@ describe("sanitization at the GitHub trust boundary", () => {
 
 describe("buildIntakeEvents", () => {
 	const url = "https://github.com/o/r/pull/7";
-	const refs = [{ taskId: "t1", branch: "feat" }];
+	const refs = [{ taskId: "t1", branch: "feat", repo: "lindy-ai/lindy" }];
 
 	test("new review request carries signal=true", () => {
 		const changes: DiffChange[] = [
