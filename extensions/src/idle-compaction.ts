@@ -8,6 +8,8 @@ import {
 } from "./idle-compaction-policy";
 
 const STATE_ENTRY_TYPE = "deck.idle-compaction.v1";
+const KEEP_WARM_MESSAGE_TYPE = "deck.idle-keepwarm.v1";
+const KEEP_WARM_PROMPT = "Reply with exactly idle. Do not call tools.";
 /**
  * Supplements pi's own structured compaction template (pi appends this as
  * "Additional focus:"), so it names only what a PARKED FLEET AGENT uniquely
@@ -78,6 +80,10 @@ type EventHandler = (event: any, context: IdleCompactionContext) => Promise<void
 export interface IdleCompactionExtensionApi {
 	on(event: string, handler: EventHandler): void;
 	appendEntry(customType: string, data?: unknown): void;
+	sendMessage(
+		message: { customType: string; content: string; display: boolean },
+		options: { triggerTurn: boolean },
+	): void;
 	registerFlag?(
 		name: string,
 		options: { description: string; type: "boolean"; default: boolean },
@@ -155,6 +161,7 @@ export function registerIdleCompaction(
 	let latestContext: IdleCompactionContext | undefined;
 	let compacting = false;
 	let idleCompactionRequested = false;
+	let keepWarmRequested = false;
 	let inFlightToolCalls = 0;
 	let lastCompactedContextMarker: string | null = null;
 	let lastCompactedTokens: number | null = null;
@@ -245,6 +252,32 @@ export function registerIdleCompaction(
 			});
 
 			if (!decision.compact) {
+				if (decision.reason === "keep-warm") {
+					if (
+						!keepWarmRequested &&
+						ctx.isIdle() &&
+						!ctx.hasPendingMessages() &&
+						inFlightToolCalls === 0 &&
+						modelIdentity(ctx) === cacheTouchModelIdentity
+					) {
+						keepWarmRequested = true;
+						notify(ctx, "Idle keep-warm request started");
+						try {
+							pi.sendMessage(
+								{
+									customType: KEEP_WARM_MESSAGE_TYPE,
+									content: KEEP_WARM_PROMPT,
+									display: false,
+								},
+								{ triggerTurn: true },
+							);
+						} catch (error) {
+							keepWarmRequested = false;
+							notify(ctx, `Idle keep-warm failed: ${error instanceof Error ? error.message : String(error)}`, "warning");
+						}
+					}
+					return;
+				}
 				if (decision.reason === "cache-still-fresh" || decision.reason === "cooldown") {
 					scheduleAfter(decision.waitMs ?? currentConfig.retryDelayMs);
 				} else if (decision.reason === "usage-unknown") {
@@ -312,6 +345,7 @@ export function registerIdleCompaction(
 		latestContext = ctx;
 		compacting = false;
 		idleCompactionRequested = false;
+		keepWarmRequested = false;
 		inFlightToolCalls = 0;
 		lastCacheTouchMs = runtime.now();
 		hasCacheTouch = false;
@@ -340,6 +374,7 @@ export function registerIdleCompaction(
 		latestContext = ctx;
 		compacting = false;
 		idleCompactionRequested = false;
+		keepWarmRequested = false;
 		providerResponseThisTurn = false;
 		successfulResponseThisRun = false;
 		inFlightToolCalls = 0;
@@ -405,6 +440,7 @@ export function registerIdleCompaction(
 	});
 	pi.on("session_shutdown", () => {
 		active = false;
+		keepWarmRequested = false;
 		latestContext = undefined;
 		clearScheduled();
 	});
