@@ -25,9 +25,20 @@ export function implementPrompt(brief: Brief, worktree: string, branch: string):
 	].join("\n");
 }
 
-export function localReviewPrompt(brief: Brief, worktree: string, baseBranch: string, round: number): string {
+export function localReviewPrompt(
+	brief: Pick<Brief, "title" | "acceptanceCriteria">,
+	worktree: string,
+	baseBranch: string,
+	round: number,
+	previous?: {
+		blockingFindings: string[];
+		nits: string[];
+		summary: string;
+		lastFix?: { addressed: string[]; summary: string };
+	},
+): string {
 	// NOTE: the JSON contract below must stay in lockstep with the localReview
-	// Zod schema in pipeline.tsx (round, approved, findings, summary).
+	// Zod schema in pipeline.tsx (round, approved, blockingFindings, nits, summary).
 	return [
 		"You are an ADVERSARIAL REVIEWER with fresh context (you did NOT write this change).",
 		"You are deliberately a different model family than the implementer - hunt for what it missed.",
@@ -39,20 +50,30 @@ export function localReviewPrompt(brief: Brief, worktree: string, baseBranch: st
 		"",
 		"Hunt for: acceptance criteria not actually met, missing/weak tests, correctness bugs,",
 		"unhandled edge cases, migration hazards, blast-radius surprises, dead code.",
-		"Only findings that materially matter; no style nits.",
+		...(previous
+			? [
+				"Previous review output and implementer receipt:",
+				"Re-check each prior blocker against the current diff. Drop it only when the diff shows it is fixed; re-raise it with a reason when it is not.",
+				JSON.stringify(previous, null, 2),
+			]
+			: []),
+		"Classify every item as blocking or a nit.",
+		"Blocking findings are correctness, security, data loss, broken tests, contract breaks, or missing required behavior from the brief.",
+		"Naming preferences, optional polish, pre-existing style outside the diff, and 'consider later' items are nits, never blockers.",
+		"From review round 4 onward, actively reclassify remaining items. If only nits remain, approve. Do not keep the loop alive on taste.",
 		"",
-		`Final output: ONLY a JSON object {"round": ${round}, "approved": boolean, "findings": string[], "summary": string}.`,
-		`"round" MUST be exactly ${round}. Set approved=true ONLY if there are zero blocking findings.`,
+		`Final output: ONLY a JSON object {"round": ${round}, "approved": boolean, "blockingFindings": string[], "nits": string[], "summary": string}.`,
+		`"round" MUST be exactly ${round}. Set approved=true IFF "blockingFindings" is empty.`,
 	].join("\n");
 }
 
-export function localFixPrompt(findings: string[], worktree: string, afterRound: number): string {
+export function localFixPrompt(blockingFindings: string[], worktree: string, afterRound: number): string {
 	return [
 		"You are the IMPLEMENTER. An adversarial reviewer produced blocking findings on your change.",
 		`Worktree: ${worktree}. Fix them with plain commits on the current branch. DO NOT push.`,
 		"",
-		"Findings to resolve (all of them):",
-		JSON.stringify(findings, null, 2),
+		"Blocking findings to resolve (all of them):",
+		JSON.stringify(blockingFindings, null, 2),
 		"",
 		`Final output: ONLY a JSON object {"afterRound": ${afterRound}, "addressed": string[], "summary": string}.`,
 		`"afterRound" MUST be exactly ${afterRound}.`,
