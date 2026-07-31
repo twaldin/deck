@@ -50,6 +50,7 @@ function frame(overrides: Partial<FleetFrame> = {}): FleetFrame {
 		counters: {
 			tasks: 0,
 			running: 0,
+			blocked: 0,
 			openDecisions: 0,
 			queuedMessages: 0,
 			openQuestions: 0,
@@ -122,6 +123,7 @@ describe("buildFleetText", () => {
 				counters: {
 					tasks: 1,
 					running: 1,
+					blocked: 0,
 					openDecisions: 0,
 					queuedMessages: 0,
 					openQuestions: 0,
@@ -155,6 +157,26 @@ describe("buildFleetText", () => {
 		);
 		const longest = Math.max(...out.split("\n").map(textWidth));
 		expect(longest).toBeLessThan(140);
+	});
+
+	test("maxRowWidth widens the note clamp on wide terminals", () => {
+		const note = "z".repeat(150);
+		const narrow = buildFleetText(frame({ tasks: [task({ lastVerb: "working", lastNote: note })] }));
+		const wide = buildFleetText(
+			frame({ tasks: [task({ lastVerb: "working", lastNote: note })] }),
+			PLAIN_FLEET_THEME,
+			{ maxRowWidth: 200 },
+		);
+		const count = (out: string): number => Math.max(...out.split("\n").map((l) => (l.match(/z/g) ?? []).length));
+		expect(count(wide)).toBeGreaterThan(count(narrow));
+		expect(count(wide)).toBe(150);
+	});
+
+	test("blocked tasks surface in the overlay header", () => {
+		const f = frame({ tasks: [task({ lastVerb: "blocked", lastNote: "main is red" })] });
+		f.counters.tasks = 1;
+		f.counters.blocked = 1;
+		expect(buildFleetText(f)).toContain("1 blocked");
 	});
 
 	test("REGRESSION: every dynamic field is clamped, not just the note", () => {
@@ -384,18 +406,29 @@ describe("sliceVisible", () => {
 	});
 });
 
-describe("statusline question badge", () => {
-	test("open questions show as Nq next to the task count", () => {
+describe("statusline", () => {
+	test("open questions show as Nq; zero-count segments are dropped", () => {
 		const f = frame();
 		f.counters.tasks = 10;
 		f.counters.openQuestions = 2;
-		expect(renderStatusline(f)).toBe("0\u25b6 \u00b7 10 task \u00b7 2q");
+		expect(renderStatusline(f)).toBe("2q \u00b7 10 task");
 	});
 
-	test("no badge when the queue is clear", () => {
+	test("a quiet fleet reads idle, never 0\u25b6", () => {
 		const f = frame();
 		f.counters.tasks = 10;
-		expect(renderStatusline(f)).toBe("0\u25b6 \u00b7 10 task");
+		expect(renderStatusline(f)).toBe("idle \u00b7 10 task");
+	});
+
+	test("live fleet: running, blocked, questions, decisions, queued all show", () => {
+		const f = frame();
+		f.counters.tasks = 6;
+		f.counters.running = 2;
+		f.counters.blocked = 1;
+		f.counters.openQuestions = 1;
+		f.counters.openDecisions = 1;
+		f.counters.queuedMessages = 3;
+		expect(renderStatusline(f)).toBe("2\u25b6 \u00b7 1 blocked \u00b7 1q \u00b7 1? \u00b7 3\u2709 \u00b7 6 task");
 	});
 
 	test("the overlay header names /questions so the captain knows the next move", () => {
