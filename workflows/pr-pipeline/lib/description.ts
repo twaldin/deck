@@ -8,10 +8,13 @@ export interface PullRequestDescriptionInput {
 
 function clean(value: string): string {
 	return value
-		.replace(/\/Users\/[^\s\n)]+/g, "the local worktree")
+		.replace(/(?:\/Users\/|\/home\/)[^\s\n)]+/gi, "the local worktree")
+		.replace(/[A-Za-z]:[\\\\/]+[^\s\n)]+/g, "the local worktree")
+		.replace(/\b(?:run|execution)[-_ ]?id[:= ]+?[A-Za-z0-9_-]{6,}\b/gi, "")
+		.replace(/\b[0-9a-f]{7,40}\b/gi, "")
 		.replace(/Managed by[^\n]*/gi, "")
 		.replace(/Local review nits[^\n]*(?:\n[-*].*)*/gi, "")
-		.replace(/\b(?:READ|DO NOT)\b[^\n]*/g, "")
+		.replace(/\b(?:READ|DO NOT)\b[^\n]*/gi, "")
 		.trim();
 }
 

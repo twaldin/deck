@@ -205,12 +205,14 @@ export async function executeReviewerRequest(
 		codeowners: owners,
 		recentAuthors,
 		exclude: config.exclude,
-		max: config.max,
+		// Validate every eligible candidate, then stop after max collaborators.
+		max: Number.MAX_SAFE_INTEGER,
 	});
 	const collaborators: string[] = [];
 	for (const login of selection.reviewers) {
+		if (collaborators.length >= config.max) break;
 		if (await adapters.isCollaborator(login)) collaborators.push(login);
-		else adapters.logSkip?.(login, "not a repository collaborator or collaborator check failed");
+		else adapters.logSkip?.(login, "not a repository collaborator");
 	}
 	if (collaborators.length === 0) {
 		throw new Error(
