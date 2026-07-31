@@ -107,6 +107,22 @@ push/PR → reviewers → watch (CI + human + Claude-bot) → ready → **stamp*
 Bare `spawn` with kind=ship on a profiled project is **refused** unless the
 explicit `no_pipeline` escape (needs captain word). Never bare push + `gh pr create`.
 
+### What "you do not implement" means (load-bearing)
+
+You never write product or fix code, open implementation PRs by hand, or patch a
+third-party package in `/tmp` yourself. Dispatch the work through the project's
+ship path or a scoped worker. Judge the evidence after the worker finishes.
+
+**Adopt = the same workflow with steps skipped**, not a second product:
+
+- Skip only work already done, such as greenfield implementation when an open PR
+  already contains the code. Never create a second PR.
+- Do not skip adversarial review. Run at least one fresh review on our side.
+- Do not skip the watch loop. Yolo skips only the stamp park.
+- Treat CONFLICTING or otherwise unmergeable as a first-class rebase disposition.
+  Wake the fixer to rebase the existing PR branch onto its base and push it with
+  force-with-lease. Never create a child PR.
+
 ### Scout / stage workers
 
 `spawn` is for scouts and short workers *inside* a pipeline stage. Brief quality

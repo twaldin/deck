@@ -188,6 +188,8 @@ describe("model policy (deck catalog + family opposition)", () => {
 function snapshot(overrides: Partial<WatchSnapshot> = {}): WatchSnapshot {
 	return {
 		headSha: "abc123",
+		mergeable: "MERGEABLE",
+		mergeStateStatus: "CLEAN",
 		lastPushAt: "2026-07-27T10:00:00Z",
 		threads: [],
 		comments: [],
@@ -203,6 +205,26 @@ describe("evaluateWatchExit", () => {
 		const verdict = evaluateWatchExit(snapshot(), { selfLogins: ["twaldin"] });
 		expect(verdict.exitOk).toBe(true);
 		expect(verdict.actionable).toBe(false);
+	});
+
+	test("CONFLICTING blocks exit and requests a rebase fix", () => {
+		const verdict = evaluateWatchExit(snapshot({ mergeable: "CONFLICTING" }), { selfLogins: ["twaldin"] });
+		expect(verdict.exitOk).toBe(false);
+		expect(verdict.disposition).toBe("fix");
+		expect(verdict.actionable).toBe(true);
+		expect(verdict.reasons.join(" ")).toContain("needs rebase");
+	});
+
+	test("DIRTY blocks exit and requests a rebase fix", () => {
+		const verdict = evaluateWatchExit(snapshot({ mergeStateStatus: "DIRTY" }), { selfLogins: ["twaldin"] });
+		expect(verdict.disposition).toBe("fix");
+		expect(verdict.reasons.join(" ")).toContain("needs rebase");
+	});
+
+	test("BEHIND alone waits for the merge boundary", () => {
+		const verdict = evaluateWatchExit(snapshot({ mergeStateStatus: "BEHIND" }), { selfLogins: ["twaldin"] });
+		expect(verdict.exitOk).toBe(true);
+		expect(verdict.disposition).toBe("complete");
 	});
 
 	test("unresolved thread blocks exit", () => {
@@ -344,11 +366,15 @@ describe("watch fix worker boundary", () => {
 			repo: "owner/repo",
 			prNumber: 42,
 			gh: "gh",
+			baseBranch: "main",
 			pollJson: "{}",
 			round: 0,
 			afterPoll: 1,
 		});
 		expect(prompt).toContain("return the receipt and exit immediately");
+		expect(prompt).toContain("rebase THIS PR branch");
+		expect(prompt).toContain("fetch origin/main");
+		expect(prompt).toContain("force-with-lease");
 		expect(prompt).toContain("Never sleep-poll CI or review state");
 		expect(prompt).toContain("persisted Smithers poll owns the wait");
 	});

@@ -144,8 +144,7 @@ const inputSchema = z.object({
 	profile: z.string().optional(),
 	/**
 	 * Adopt an already-open PR instead of implementing greenfield: implement is
-	 * stubbed, local adversarial review is skipped (the code is already on the
-	 * PR), push-pr verifies the branch matches the PR head and seeds prRecord
+	 * stubbed, local adversarial review still runs, push-pr verifies the branch matches the PR head and seeds prRecord
 	 * from gh — it NEVER creates a second PR. Watch/ready/stamp are unchanged:
 	 * the run owns continuous CI/review polling until merge, same as a ship.
 	 */
@@ -694,9 +693,8 @@ export default smithers((ctx) => {
 				) : null}
 
 				{/* ---------------------------------- stage 2: local adversarial review */}
-				{/* Skipped on adopt: the code is already public on the PR; review
-				    pressure comes from the PR's own reviewers via the watch loop. */}
-				{implementation !== undefined && brief !== null && !adopt ? (
+				{/* Adopt skips implementation only; local adversarial review remains mandatory. */}
+				{implementation !== undefined && brief !== null ? (
 					<Loop
 						id="local-review-loop"
 						until={latestLocalReview?.approved === true}
@@ -766,8 +764,7 @@ export default smithers((ctx) => {
 						{() =>
 							(async () => {
 								if (adopt) {
-									// Adopt: verify + seed from the live PR. NEVER push, NEVER
-									// create — a second PR is the break signal.
+									// Adopt: verify and seed the live PR. Never create a second PR.
 									const prNumber = input.existingPr as number;
 									if (dryRun) {
 										return {
@@ -780,11 +777,10 @@ export default smithers((ctx) => {
 											createdAt: nowIso(),
 										};
 									}
-									const overview = await fetchPrOverview(ghCtx, prNumber);
-									// The watch fixer commits/pushes and enqueue-merge runs
-									// `gt merge` in THIS worktree - so the worktree itself must
-									// match the adopted PR (branch AND head), not just the
-									// caller-supplied branch name.
+									let overview = await fetchPrOverview(ghCtx, prNumber);
+									// The local and watch fixers commit/push, and enqueue-merge runs
+									// in THIS worktree. Verify the branch, repository, and clean state;
+									// a clean descendant is allowed when local review fixed the PR.
 									const worktreeBranch = (
 										await execOrThrow(
 											bunExec,
@@ -817,7 +813,41 @@ export default smithers((ctx) => {
 										worktreeHead,
 										worktreeStatus,
 										worktreeOriginUrl,
+										allowWorktreeAhead: true,
 									});
+									if (worktreeHead !== overview.headSha) {
+										const ancestor = await bunExec(
+											[github.git, "merge-base", "--is-ancestor", overview.headSha, worktreeHead],
+											{ cwd: input.worktree },
+										);
+										if (ancestor.code !== 0) {
+											throw new Error(
+													`[escalate] adopted worktree HEAD ${worktreeHead} is not ahead of PR head ${overview.headSha}; refusing to overwrite the PR branch.`,
+												);
+										}
+										await execOrThrow(
+											bunExec,
+											[
+												github.git,
+												"push",
+												`--force-with-lease=refs/heads/${input.branch}:${overview.headSha}`,
+												"origin",
+												`HEAD:refs/heads/${input.branch}`,
+											],
+											{ cwd: input.worktree },
+										);
+										overview = await fetchPrOverview(ghCtx, prNumber);
+										const pushedHead = (
+											await execOrThrow(bunExec, [github.git, "rev-parse", "HEAD"], {
+												cwd: input.worktree,
+											})
+									).trim();
+										if (pushedHead !== overview.headSha) {
+											throw new Error(
+													`[escalate] existing PR #${prNumber} did not advance to local HEAD ${pushedHead} after the push.`,
+												);
+										}
+									}
 									const fs = await import("node:fs");
 									const path = await import("node:path");
 									fs.mkdirSync(path.dirname(watchSetPath), { recursive: true });
@@ -1200,6 +1230,7 @@ export default smithers((ctx) => {
 															: watchFixPrompt({
 																	worktree: input.worktree,
 																	branch: input.branch,
+																	baseBranch,
 																	repo: input.repo,
 																	prNumber: pr.prNumber,
 																	gh: github.gh,

@@ -62,6 +62,7 @@ export function localFixPrompt(findings: string[], worktree: string, afterRound:
 export function watchFixPrompt(args: {
 	worktree: string;
 	branch: string;
+	baseBranch: string;
 	repo: string;
 	prNumber: number;
 	gh: string;
@@ -72,19 +73,21 @@ export function watchFixPrompt(args: {
 	return [
 		"You are the WATCH-LOOP FIXER for an open PR. You own ALL feedback: review threads,",
 		"actionable comments, reviewer re-requests, and CI.",
-		`Worktree: ${args.worktree} | branch: ${args.branch} | repo: ${args.repo} | PR #${args.prNumber}.`,
+		`Worktree: ${args.worktree} | branch: ${args.branch} | base: ${args.baseBranch} | repo: ${args.repo} | PR #${args.prNumber}.`,
 		`Use the \`${args.gh}\` CLI for every GitHub operation.`,
 		"",
 		"Current machine-checked poll state:",
 		args.pollJson,
 		"",
 		"Do, in order:",
-		"1. Every unresolved review thread: fix the code if warranted (plain commits on THIS branch),",
+		`1. If mergeability is CONFLICTING, or mergeStateStatus is DIRTY, fetch origin/${args.baseBranch}, then rebase THIS PR branch onto origin/${args.baseBranch}.`,
+		"   Resolve conflicts, run relevant tests, then force-with-lease push the existing PR branch. Do not merge.",
+		"2. Every unresolved review thread: fix the code if warranted (plain commits on THIS branch),",
 		"   reply in the thread, and resolve it (or reply why not, and resolve after agreement).",
-		"2. Every unanswered actionable comment: answer it via the gh CLI.",
-		"3. Hard-red CI: flake -> rerun; trivial/correctness fix -> commit + push. Product/decision-class",
+		"3. Every unanswered actionable comment: answer it via the gh CLI.",
+		"4. Hard-red CI: flake -> rerun; trivial/correctness fix -> commit + push. Product/decision-class",
 		"   failures are NOT yours - describe them in the summary instead of guessing.",
-		"4. If you pushed changes, re-request every prior human reviewer:",
+		"5. If you pushed changes, re-request every prior human reviewer:",
 		`   \`${args.gh} api repos/${args.repo}/pulls/${args.prNumber}/requested_reviewers -f 'reviewers[]=LOGIN'\``,
 		"   (the requested_reviewers API is verified by the next poll - silent no-ops are caught).",
 		"",
@@ -92,6 +95,7 @@ export function watchFixPrompt(args: {
 		"never run gt submit / gt create / gh pr create - that creates an accidental child PR.",
 		"Never merge anything. After a rerun or push, return the receipt and exit immediately.",
 		"Never sleep-poll CI or review state. The next persisted Smithers poll owns the wait.",
+
 		"",
 		`Final output: ONLY a JSON object {"round": ${args.round}, "afterPoll": ${args.afterPoll}, "actions": string[], "pushed": boolean, "reRequested": string[], "summary": string}.`,
 		`"round" MUST be exactly ${args.round} and "afterPoll" MUST be exactly ${args.afterPoll}.`,

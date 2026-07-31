@@ -48,9 +48,9 @@ export type ShipRequest = {
 	/** Simulate side effects. Default FALSE here: ship means ship. */
 	dryRun?: boolean;
 	/**
-	 * Adopt an already-open PR: the pipeline skips greenfield implement +
-	 * local adversarial review, verifies the branch matches the PR head, seeds
-	 * its PR record from gh (never creates a second PR), and enters the same
+	 * Adopt an already-open PR: the pipeline skips greenfield implement only,
+	 * runs local adversarial review, verifies the branch matches the PR head,
+	 * seeds its PR record from gh (never creates a second PR), and enters the same
 	 * continuous watch/ready/stamp loop as a normal ship.
 	 */
 	existingPr?: number;

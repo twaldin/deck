@@ -23,6 +23,8 @@ export interface AdoptExpectation {
 	worktreeHead: string; // git rev-parse HEAD in the worktree
 	worktreeStatus: string; // git status --porcelain output for the worktree
 	worktreeOriginUrl: string; // git remote get-url origin for the worktree
+	/** Local adversarial fixes may make the worktree a clean descendant of the PR head. */
+	allowWorktreeAhead?: boolean;
 }
 
 /** Extracts "owner/name" from a git remote URL (ssh, https, or git@ form); "" when unparseable. */
@@ -62,7 +64,7 @@ export function assertAdoptable(overview: PrOverview, expected: AdoptExpectation
 			`[escalate] cannot adopt ${pr}: the worktree has branch "${expected.worktreeBranch}" checked out, not "${expected.branch}" — the watch fixer and merge run in this worktree and would act on the wrong branch.`,
 		);
 	}
-	if (expected.worktreeHead !== overview.headSha) {
+	if (!expected.allowWorktreeAhead && expected.worktreeHead !== overview.headSha) {
 		throw new Error(
 			`[escalate] cannot adopt ${pr}: worktree HEAD is ${expected.worktreeHead} but the PR head is ${overview.headSha} — the worktree is stale or diverged; sync it to the PR head first.`,
 		);

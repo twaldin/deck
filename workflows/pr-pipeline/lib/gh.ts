@@ -180,6 +180,8 @@ query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
       headRefOid
+      mergeable
+      mergeStateStatus
       commits(last: 1) { nodes { commit { committedDate } } }
       reviewThreads(first: 100) {
         nodes {
@@ -227,6 +229,8 @@ export async function fetchWatchSnapshot(ctx: GhContext, prNumber: number, selfL
 
 	return {
 		headSha,
+		mergeable: pr.mergeable === "MERGEABLE" || pr.mergeable === "CONFLICTING" ? pr.mergeable : "UNKNOWN",
+		mergeStateStatus: str(pr.mergeStateStatus),
 		lastPushAt,
 		threads: parseReviewThreads(pr?.reviewThreads?.nodes),
 		comments,

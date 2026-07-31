@@ -98,6 +98,8 @@ export interface WatchExitOptions {
 /** The machine-checked exit condition for the watch-ci-review loop. */
 export function evaluateWatchExit(snapshot: WatchSnapshot, options: WatchExitOptions): WatchExitVerdict {
 	const reasons: string[] = [];
+	const needsRebase = snapshot.mergeable === "CONFLICTING" || snapshot.mergeStateStatus.toUpperCase() === "DIRTY";
+	if (needsRebase) reasons.push("PR is not mergeable; needs rebase onto its base branch.");
 	const unresolved = snapshot.threads.filter((thread) => !thread.isResolved).length;
 	if (unresolved > 0) reasons.push(`${unresolved} unresolved review thread(s).`);
 
@@ -121,7 +123,7 @@ export function evaluateWatchExit(snapshot: WatchSnapshot, options: WatchExitOpt
 	if (ci === "will-be-green") reasons.push("CI is still running; Smithers will poll again.");
 	if (ci === "none") reasons.push("CI has not reported checks; Smithers will poll again.");
 
-	const actionable = unresolved > 0 || unanswered > 0 || needReRequest.length > 0 || ci === "red";
+	const actionable = needsRebase || unresolved > 0 || unanswered > 0 || needReRequest.length > 0 || ci === "red";
 	const exitOk = !actionable && ci === "green";
 	const disposition = exitOk ? "complete" : actionable ? "fix" : "wait";
 
