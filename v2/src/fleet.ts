@@ -171,56 +171,16 @@ export type ShipLogEvidence = {
 	pushPrNull: boolean;
 };
 
-/** Extract durable pipeline evidence without starting a per-run Smithers process. */
+/** Extract terminal evidence that the detached Smithers log actually records. */
 export function parseShipLogEvidence(log: string): ShipLogEvidence {
-	// `ship.ts` captures detached `smithers up` stdout. Node output is not a
-	// top-level log line: it is the text in an agent-trace record, followed by
-	// node metadata. Keep the association with the node so agent chatter cannot
-	// supply a PR number or terminal state.
-	const records: Array<{ node: string; text: string }> = [];
-	const lines = log.split("\n");
-	for (let index = 0; index < lines.length; index += 1) {
-		const line = lines[index];
-		if (line === undefined || !/^info\s+\{\"category\":\"agent-trace\"/.test(line)) continue;
-		const start = index;
-		while (index + 1 < lines.length && !/^info\s+\{/.test(lines[index + 1] ?? "")) index += 1;
-		const block = lines.slice(start, index + 1).join("\n");
-		const node = block.match(/(?:node\.id|nodeId)=(push-pr|landing-poll)\b/)?.[1];
-		if (node === undefined) continue;
-		const textMatch = block.match(/\"text\":\"((?:\\.|[^\"\\])*)\"/s);
-		if (textMatch !== null) {
-			try {
-				const text = JSON.parse(`\"${textMatch[1]}\"`) as unknown;
-				if (typeof text === "string") records.push({ node, text });
-			} catch {
-				// Truncated trace records are not evidence.
-			}
-		}
-	}
-
-	let prNumber: number | null = null;
-	let pushPrNull = false;
-	let landed = false;
-	for (const record of records) {
-		try {
-			const value = JSON.parse(record.text) as Record<string, unknown>;
-			if (record.node === "push-pr") {
-				const raw = value.prNumber ?? value.pr_number;
-				if (typeof raw === "number" && Number.isInteger(raw)) {
-					prNumber = raw;
-					pushPrNull = false;
-				} else if (raw === null) {
-					prNumber = null;
-					pushPrNull = true;
-				}
-			} else if (record.node === "landing-poll" && value.landed === true) {
-				landed = true;
-			}
-		} catch {
-			// Agent prose is deliberately ignored. Only structured node output counts.
-		}
-	}
-	return { prNumber, landed, pushPrNull };
+	const prMatches = [...log.matchAll(/PR\s+#(\d+)/gi)].map((match) => Number(match[1]));
+	return {
+		prNumber: prMatches.at(-1) ?? null,
+		landed: /already landed/i.test(log),
+		pushPrNull:
+			/pre-PR zombie/i.test(log) ||
+			/push-pr[\s\S]{0,1000}["']?(?:pr[_ ]?number|pr)["']?\s*[:=]\s*null/i.test(log),
+	};
 }
 
 function readShipEvidence(runId: string): ShipLogEvidence {
@@ -423,11 +383,55 @@ async function collectRunsUnshared(
 		for (const psRun of runs) {
 				const input = readShipInput(psRun.id);
 				const evidence = readShipEvidence(psRun.id);
-				// Ship input and its log are durable local pipeline records. Never query output per run.
-				const prNumber = psRun.prNumber ?? input.prNumber ?? evidence.prNumber ?? undefined;
-				const landed = psRun.landed ?? (evidence.landed ? true : undefined);
-				const pushPrNull = psRun.pushPrNull ?? (evidence.pushPrNull ? true : undefined);
-				// Failed runs are terminal. Skip post-failure output enrichment.
+				let prNumber = psRun.prNumber ?? input.prNumber ?? evidence.prNumber ?? undefined;
+				let landed = psRun.landed ?? (evidence.landed ? true : undefined);
+				let pushPrNull = psRun.pushPrNull ?? (evidence.pushPrNull ? true : undefined);
+
+				// Compute nodes do not write their return value to the detached log. Use
+				// the public output command as the durable fallback for runs without local
+				// input or ps evidence. This is also required for fresh runs after push.
+				const readOutput = async (node: string): Promise<unknown> => {
+					const output = await run(
+						"bunx",
+						[SMITHERS_SPEC, "output", psRun.id, node, "--json"],
+						{ cwd, timeout: 15_000, maxBuffer: 1_000_000 },
+					);
+					return JSON.parse(output.stdout);
+				};
+				if (prNumber === undefined) {
+					try {
+						const output = await readOutput("push-pr");
+						const record = Array.isArray(output) ? output.at(-1) : output;
+						const candidate =
+							typeof record === "object" && record !== null
+								? ((record as { prNumber?: unknown }).prNumber ??
+									(record as { pr_number?: unknown }).pr_number)
+								: undefined;
+						if (typeof candidate === "number" && Number.isInteger(candidate)) prNumber = candidate;
+					} catch {
+						// A run before push-pr has no PR number yet.
+					}
+				}
+				if (activityFor(psRun.step, psRun.status) === "failed") {
+					try {
+						const output = await readOutput("landing-poll");
+						const record = Array.isArray(output) ? output.at(-1) : output;
+						if (typeof record === "object" && record !== null && (record as { landed?: unknown }).landed === true)
+							landed = true;
+					} catch {
+						// No landing node means no landing evidence.
+					}
+					if (pushPrNull !== true) {
+						try {
+							const output = await readOutput("push-pr");
+							const record = Array.isArray(output) ? output.at(-1) : output;
+							if (record === null || (typeof record === "object" && record !== null && (record as { prNumber?: unknown }).prNumber == null && (record as { pr_number?: unknown }).pr_number == null))
+								pushPrNull = true;
+						} catch {
+							// A missing push-pr node is not evidence of a zombie.
+						}
+					}
+				}
 				const pendingNode = psRun.pendingApprovals?.find(
 					(approval) => approval.status === "requested",
 				)?.nodeId;

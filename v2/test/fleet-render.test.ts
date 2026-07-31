@@ -76,26 +76,10 @@ function frame(overrides: Partial<FleetFrame> = {}): FleetFrame {
 }
 
 describe("ship evidence", () => {
-	test("recovers PR and terminal failure evidence from the ship log", () => {
-		expect(parseShipLogEvidence(
-			`info  {"category":"agent-trace","payload":{"text":"{\\"prNumber\\":314}"}} agent-trace=0ms
-      runId=ship node.id=push-pr nodeId=push-pr
-info  {"category":"agent-trace","payload":{"text":"{\\"landed\\":true}"}} agent-trace=0ms
-      runId=ship node.id=landing-poll nodeId=landing-poll`,
-		)).toEqual({ prNumber: 314, landed: true, pushPrNull: false });
-		expect(parseShipLogEvidence(
-			`info  {"category":"agent-trace","payload":{"text":"{\\"pr_number\\":null}"}} agent-trace=0ms
-      node.id=push-pr nodeId=push-pr`,
-		)).toEqual({ prNumber: null, landed: false, pushPrNull: true });
-		expect(parseShipLogEvidence(
-			`info  {"category":"agent-trace","payload":{"text":"{\\"pr_number\\":null}"}}\n      node.id=push-pr nodeId=push-pr\ninfo  {"category":"agent-trace","payload":{"text":"{\\"pr_number\\":314}"}}\n      node.id=push-pr nodeId=push-pr`,
-		)).toEqual({ prNumber: 314, landed: false, pushPrNull: false });
-		expect(parseShipLogEvidence(
-			`info  {"category":"agent-trace","payload":{"text":"agent discussed landing-poll {\\"landed\\":true}"}}\n      node.id=push-pr nodeId=push-pr`,
-		)).toEqual({ prNumber: null, landed: false, pushPrNull: false });
-		expect(parseShipLogEvidence(
-			`      push-pr: verify branch matches PR head\n      PR #26865\n      pre-PR zombie`,
-		)).toEqual({ prNumber: null, landed: false, pushPrNull: false });
+	test("does not trust agent traces and recognizes real log markers", () => {
+		expect(parseShipLogEvidence(`info  {"category":"agent-trace","payload":{"text":"{\"prNumber\":314}"}} agent-trace=0ms\n      runId=ship node.id=local-review nodeId=local-review`)).toEqual({ prNumber: null, landed: false, pushPrNull: false });
+		expect(parseShipLogEvidence(`      push-pr: verify branch matches PR head\n      PR #26865\n      already landed`)).toEqual({ prNumber: 26865, landed: true, pushPrNull: false });
+		expect(parseShipLogEvidence(`      nodeId=push-pr\n      error='pr_number: null'\n      pre-PR zombie`)).toEqual({ prNumber: null, landed: false, pushPrNull: true });
 	});
 });
 
