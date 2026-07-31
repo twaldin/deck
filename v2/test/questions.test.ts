@@ -1,17 +1,21 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { afterAll, describe, expect, test } from "bun:test";
 import {
 	answer,
 	ask,
+	compact,
 	formatAge,
+	importLegacyQueue,
+	legacyQueueFile,
 	markDelivered,
 	MAX_EVENT_BYTES,
 	openQuestions,
 	pendingAnswersFor,
 	queueFile,
 	readQuestions,
+	STALE_AFTER_MS,
 } from "../src/questions-store";
 import { answerMessage, describe as describeQuestion, registerQuestions } from "../src/questions";
 
@@ -20,6 +24,10 @@ function freshFile(): string {
 	const dir = mkdtempSync(path.join(tmpdir(), "deck-questions-"));
 	dirs.push(dir);
 	return path.join(dir, "queue.jsonl");
+}
+/** PI_CONFIG_DIR is pinned to the temp dir so the legacy-queue import can never touch the live ~/.pi. */
+function envFor(file: string): Record<string, string> {
+	return { DECK_QUESTIONS_FILE: file, PI_CONFIG_DIR: path.dirname(file) };
 }
 afterAll(() => {
 	for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
@@ -212,9 +220,17 @@ describe("questions store", () => {
 		expect(readQuestions(path.join(tmpdir(), "deck-questions-absent", "queue.jsonl"))).toEqual([]);
 	});
 
-	test("queueFile honours the test override and the pi home", () => {
+	test("queueFile honours the test override and lives under the deck home", () => {
 		expect(queueFile({ DECK_QUESTIONS_FILE: "/tmp/q.jsonl" })).toBe("/tmp/q.jsonl");
-		expect(queueFile({ PI_CONFIG_DIR: "/home/x/.pi/agent" })).toBe(
+		const prev = process.env.DECK_V2_HOME;
+		process.env.DECK_V2_HOME = "/home/x/.deck";
+		try {
+			expect(queueFile({})).toBe("/home/x/.deck/questions/queue.jsonl");
+		} finally {
+			if (prev === undefined) delete process.env.DECK_V2_HOME;
+			else process.env.DECK_V2_HOME = prev;
+		}
+		expect(legacyQueueFile({ PI_CONFIG_DIR: "/home/x/.pi/agent" })).toBe(
 			"/home/x/.pi/agent/questions/queue.jsonl",
 		);
 	});
@@ -225,6 +241,128 @@ describe("questions store", () => {
 		expect(formatAge(3_600_000)).toBe("1h");
 		expect(formatAge(90 * 60_000)).toBe("1h30m");
 		expect(formatAge(50 * 3_600_000)).toBe("2d2h");
+	});
+});
+
+describe("compact", () => {
+	test("purges delivered answers and stale or junk asks, keeps open live ones", () => {
+		const file = freshFile();
+		const now = STALE_AFTER_MS * 2;
+
+		const fresh = ask(file, { question: "fresh open", sessionId: "s", cwd: "/", now });
+		ask(file, { question: "stale open", sessionId: "s", cwd: "/", now: now - STALE_AFTER_MS - 1 });
+		const delivered = ask(file, { question: "answered+delivered", sessionId: "s", cwd: "/", now });
+		answer(file, delivered.id, "yes", "answered", now);
+		markDelivered(file, delivered.id, now);
+		const undelivered = ask(file, { question: "answered, not delivered", sessionId: "s", cwd: "/", now });
+		answer(file, undelivered.id, "go", "answered", now);
+		// firstmate-era junk: no usable askedAt, so it can never age out.
+		writeFileSync(
+			file,
+			`${JSON.stringify({ kind: "ask", id: "junk", question: "ghost", urgency: "normal", sessionId: "s", cwd: "/" })}\n`,
+			{ flag: "a" },
+		);
+
+		const result = compact(file, now);
+		expect(result).toEqual({ kept: 2, archived: 3 });
+
+		const kept = readQuestions(file);
+		expect(kept.map((e) => e.question).sort()).toEqual(["answered, not delivered", "fresh open"]);
+		// The undelivered answer survives the rewrite intact, so delivery still happens.
+		expect(pendingAnswersFor(file, "s").map((e) => e.answer)).toEqual(["go"]);
+		expect(openQuestions(file).map((e) => e.id)).toEqual([fresh.id]);
+
+		// Dropped entries are archived beside the queue, not lost.
+		const archive = readFileSync(path.join(path.dirname(file), "archive.jsonl"), "utf8")
+			.trim()
+			.split("\n")
+			.map((line) => JSON.parse(line));
+		expect(archive.map((e: any) => e.question).sort()).toEqual([
+			"answered+delivered",
+			"ghost",
+			"stale open",
+		]);
+	});
+
+	test("REGRESSION: an old answered-but-undelivered question survives compaction and still delivers", async () => {
+		// Compaction runs on session_start BEFORE delivery. Aging these out by
+		// askedAt would destroy a captain answer the asker never saw.
+		const file = freshFile();
+		const asked = ask(file, { question: "old but answered", sessionId: "s", cwd: "/", now: 0 });
+		answer(file, asked.id, "the word", "answered", 1000);
+
+		expect(compact(file, STALE_AFTER_MS * 10)).toEqual({ kept: 1, archived: 0 });
+		expect(pendingAnswersFor(file, "s").map((e) => e.answer)).toEqual(["the word"]);
+
+		const pi = new Harness();
+		pi.currentTime = STALE_AFTER_MS * 10;
+		registerQuestions(pi as any, envFor(file), pi.runtime);
+		await pi.emit("session_start", fakeContext("s"));
+		expect(pi.sent.map((m) => m.content.includes("A: the word"))).toEqual([true]);
+	});
+
+	test("the queue dir and files are private to the operator", () => {
+		const file = freshFile();
+		ask(file, { question: "Q", sessionId: "s", cwd: "/", now: 1000 });
+		answer(file, readQuestions(file)[0]!.id, "a", "answered", 1000);
+		markDelivered(file, readQuestions(file)[0]!.id, 1000);
+		compact(file, STALE_AFTER_MS * 2);
+		const mode = (target: string) => statSync(target).mode & 0o777;
+		expect(mode(file)).toBe(0o600);
+		expect(mode(path.join(path.dirname(file), "archive.jsonl"))).toBe(0o600);
+	});
+
+	test("a clean queue is left untouched", () => {
+		const file = freshFile();
+		ask(file, { question: "Q", sessionId: "s", cwd: "/", now: 1000 });
+		expect(compact(file, 2000)).toEqual({ kept: 1, archived: 0 });
+		expect(openQuestions(file)).toHaveLength(1);
+	});
+});
+
+describe("legacy queue import", () => {
+	test("moves live open questions, leaves the dead, retires the legacy file", () => {
+		const file = freshFile();
+		const legacy = freshFile();
+		const now = STALE_AFTER_MS * 2;
+		ask(legacy, { question: "live", sessionId: "s", cwd: "/", now });
+		ask(legacy, { question: "stale", sessionId: "s", cwd: "/", now: 0 });
+		const done = ask(legacy, { question: "answered", sessionId: "s", cwd: "/", now });
+		answer(legacy, done.id, "yes", "answered", now);
+
+		expect(importLegacyQueue(file, legacy, now)).toBe(1);
+		expect(openQuestions(file).map((e) => e.question)).toEqual(["live"]);
+		// Retired under a new name, so it can neither re-import nor keep growing.
+		expect(readQuestions(legacy)).toEqual([]);
+		expect(readQuestions(`${legacy}.imported`).map((e) => e.question).sort()).toEqual([
+			"answered",
+			"live",
+			"stale",
+		]);
+	});
+
+	test("no legacy file is a no-op", () => {
+		const file = freshFile();
+		expect(importLegacyQueue(file, path.join(tmpdir(), "deck-q-absent", "queue.jsonl"))).toBe(0);
+		expect(readQuestions(file)).toEqual([]);
+	});
+
+	test("import runs once on session_start and ghosts do not survive", async () => {
+		const file = freshFile();
+		// A dedicated fake pi home: PI_CONFIG_DIR/questions/queue.jsonl is the legacy path.
+		const piHome = mkdtempSync(path.join(tmpdir(), "deck-pihome-"));
+		dirs.push(piHome);
+		const legacyFile = path.join(piHome, "questions", "queue.jsonl");
+		const pi = new Harness();
+		pi.currentTime = STALE_AFTER_MS * 2;
+		ask(legacyFile, { question: "live ghost-era Q", sessionId: "old-session", cwd: "/", now: pi.currentTime });
+		ask(legacyFile, { question: ">15h stale", sessionId: "old-session", cwd: "/", now: 0 });
+		registerQuestions(pi as any, { DECK_QUESTIONS_FILE: file, PI_CONFIG_DIR: piHome }, pi.runtime);
+
+		await pi.emit("session_start", fakeContext("orch-session"));
+		expect(openQuestions(file).map((e) => e.question)).toEqual(["live ghost-era Q"]);
+		expect(existsSync(legacyFile)).toBe(false);
+		expect(existsSync(`${legacyFile}.imported`)).toBe(true);
 	});
 });
 
@@ -295,7 +433,7 @@ describe("questions extension", () => {
 	test("ask_captain queues durably and reports the backlog", async () => {
 		const file = freshFile();
 		const pi = new Harness();
-		registerQuestions(pi as any, { DECK_QUESTIONS_FILE: file }, pi.runtime);
+		registerQuestions(pi as any, envFor(file), pi.runtime);
 		const ctx = fakeContext("session-a");
 
 		const result = await pi.tools.get("ask_captain")!.execute(
@@ -314,7 +452,7 @@ describe("questions extension", () => {
 	test("/questions answers with a listed option and delivers to the asker", async () => {
 		const file = freshFile();
 		const pi = new Harness();
-		registerQuestions(pi as any, { DECK_QUESTIONS_FILE: file }, pi.runtime);
+		registerQuestions(pi as any, envFor(file), pi.runtime);
 
 		const asker = fakeContext("session-a");
 		await pi.tools
@@ -342,7 +480,7 @@ describe("questions extension", () => {
 	test("an answer left while the asker was down is delivered on session_start", async () => {
 		const file = freshFile();
 		const pi = new Harness();
-		registerQuestions(pi as any, { DECK_QUESTIONS_FILE: file }, pi.runtime);
+		registerQuestions(pi as any, envFor(file), pi.runtime);
 		const asked = ask(file, { question: "Q", sessionId: "session-a", cwd: "/work/deck" });
 		answer(file, asked.id, "do it");
 
@@ -354,7 +492,7 @@ describe("questions extension", () => {
 	test("the background poll wakes a parked asker when the queue changes", async () => {
 		const file = freshFile();
 		const pi = new Harness();
-		registerQuestions(pi as any, { DECK_QUESTIONS_FILE: file }, pi.runtime);
+		registerQuestions(pi as any, envFor(file), pi.runtime);
 		const asker = fakeContext("session-a");
 		const asked = ask(file, { question: "Q", sessionId: "session-a", cwd: "/work/deck" });
 		await pi.emit("session_start", asker);
@@ -372,7 +510,7 @@ describe("questions extension", () => {
 	test("a failed send leaves the answer pending rather than losing it forever", async () => {
 		const file = freshFile();
 		const pi = new Harness();
-		registerQuestions(pi as any, { DECK_QUESTIONS_FILE: file }, pi.runtime);
+		registerQuestions(pi as any, envFor(file), pi.runtime);
 		const asked = ask(file, { question: "Q", sessionId: "session-a", cwd: "/" });
 		answer(file, asked.id, "go");
 
@@ -391,7 +529,7 @@ describe("questions extension", () => {
 	test("a captain whose answer lost the race is told, and it is not counted", async () => {
 		const file = freshFile();
 		const pi = new Harness();
-		registerQuestions(pi as any, { DECK_QUESTIONS_FILE: file }, pi.runtime);
+		registerQuestions(pi as any, envFor(file), pi.runtime);
 		const asked = ask(file, {
 			question: "Flag?",
 			options: ["flag"],
@@ -415,7 +553,7 @@ describe("questions extension", () => {
 	test("free-text answers, dismissal, skip, and stop all behave", async () => {
 		const file = freshFile();
 		const pi = new Harness();
-		registerQuestions(pi as any, { DECK_QUESTIONS_FILE: file }, pi.runtime);
+		registerQuestions(pi as any, envFor(file), pi.runtime);
 		for (const question of ["Q1", "Q2", "Q3", "Q4"]) {
 			ask(file, { question, sessionId: "session-a", cwd: "/", now: pi.currentTime++ });
 		}
@@ -440,7 +578,7 @@ describe("questions extension", () => {
 		// "Dismiss" option into a dismissal.
 		const file = freshFile();
 		const pi = new Harness();
-		registerQuestions(pi as any, { DECK_QUESTIONS_FILE: file }, pi.runtime);
+		registerQuestions(pi as any, envFor(file), pi.runtime);
 		ask(file, {
 			question: "Q",
 			options: ["Dismiss", "Skip", "Stop reviewing", "Write an answer..."],
@@ -458,7 +596,7 @@ describe("questions extension", () => {
 	test("the real controls still work when the agent shadows their labels", async () => {
 		const file = freshFile();
 		const pi = new Harness();
-		registerQuestions(pi as any, { DECK_QUESTIONS_FILE: file }, pi.runtime);
+		registerQuestions(pi as any, envFor(file), pi.runtime);
 		ask(file, { question: "Q", options: ["Dismiss"], sessionId: "session-a", cwd: "/" });
 		const captain = fakeContext("session-captain", ["Dismiss"]);
 		await pi.commands.get("questions")!.handler("", captain);
@@ -468,7 +606,7 @@ describe("questions extension", () => {
 	test("a truncated captain answer is reported, not silently clipped", async () => {
 		const file = freshFile();
 		const pi = new Harness();
-		registerQuestions(pi as any, { DECK_QUESTIONS_FILE: file }, pi.runtime);
+		registerQuestions(pi as any, envFor(file), pi.runtime);
 		ask(file, { question: "Q", sessionId: "session-a", cwd: "/" });
 		const captain = fakeContext(
 			"session-captain",
@@ -483,7 +621,7 @@ describe("questions extension", () => {
 	test("/questions on an empty queue says so rather than opening a dialog", async () => {
 		const file = freshFile();
 		const pi = new Harness();
-		registerQuestions(pi as any, { DECK_QUESTIONS_FILE: file }, pi.runtime);
+		registerQuestions(pi as any, envFor(file), pi.runtime);
 		const captain = fakeContext("session-captain");
 		await pi.commands.get("questions")!.handler("", captain);
 		expect(captain.prompts).toEqual([]);
@@ -511,7 +649,7 @@ describe("questions extension", () => {
 
 	test("session_shutdown stops the poll", async () => {
 		const pi = new Harness();
-		registerQuestions(pi as any, { DECK_QUESTIONS_FILE: freshFile() }, pi.runtime);
+		registerQuestions(pi as any, envFor(freshFile()), pi.runtime);
 		await pi.emit("session_start", fakeContext("session-a"));
 		expect(pi.intervals).toHaveLength(1);
 		await pi.emit("session_shutdown", fakeContext("session-a"));
@@ -528,7 +666,7 @@ describe("poll does not hold a dead ctx", () => {
 	test("REGRESSION: the poll still delivers after the session ctx goes stale", async () => {
 		const file = freshFile();
 		const pi = new Harness();
-		registerQuestions(pi as any, { DECK_QUESTIONS_FILE: file }, pi.runtime);
+		registerQuestions(pi as any, envFor(file), pi.runtime);
 
 		const asker = fakeContext("session-a");
 		await pi.emit("session_start", asker);
@@ -540,7 +678,7 @@ describe("poll does not hold a dead ctx", () => {
 		};
 
 		// Queue a question and answer it while only the stale ctx exists.
-		const queued = ask(file, { question: "ship it?", sessionId: "session-a" });
+		const queued = ask(file, { question: "ship it?", sessionId: "session-a", cwd: "/" });
 		answer(file, queued.id, "yes");
 
 		// The poll must run without throwing and must deliver the answer.

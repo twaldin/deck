@@ -1,15 +1,21 @@
 /**
- * Durable captain-question queue, shared by every pi session in one pi home.
+ * Durable captain-question queue, owned by the ORCHESTRATOR session only.
  *
  * Storage is one append-only JSONL log of events (`ask`, `answer`, `deliver`)
  * folded into current state on read. Append-only is the point: several pi
  * processes write this file concurrently, and a single `appendFileSync` of one
  * line under 4KB is atomic on the platforms pi runs on, whereas a
  * read-modify-write of a records file would silently drop a concurrent ask.
+ *
+ * The queue lives under the deck home (`~/.deck/questions/`), NOT under
+ * `~/.pi/agent`: the pi home is shared by every pi session on the machine, and
+ * a queue there collected ghost questions from long-dead worker sessions that
+ * nobody would ever deliver answers to.
  */
-import { appendFileSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import * as path from "node:path";
+import { deckV2Home } from "./home";
 
 export type Urgency = "low" | "normal" | "high";
 export type QuestionStatus = "open" | "answered" | "dismissed";
@@ -54,14 +60,15 @@ export interface Question extends AskEvent {
 	delivered: boolean;
 }
 
-/**
- * `DECK_QUESTIONS_FILE` exists so tests and the smoke check never touch the
- * live queue; `PI_CONFIG_DIR`/`INSTALL_TARGET` keep the queue next to the pi
- * home the asking session actually runs in.
- */
+/** `DECK_QUESTIONS_FILE` exists so tests and the smoke check never touch the live queue. */
 export function queueFile(env: Record<string, string | undefined> = process.env): string {
 	const explicit = env.DECK_QUESTIONS_FILE;
 	if (explicit !== undefined && explicit !== "") return explicit;
+	return path.join(deckV2Home(), "questions", "queue.jsonl");
+}
+
+/** The queue the pre-deck extension wrote under the pi home; imported once, then retired. */
+export function legacyQueueFile(env: Record<string, string | undefined> = process.env): string {
 	const home = env.PI_CONFIG_DIR ?? path.join(homedir(), ".pi", "agent");
 	return path.join(home, "questions", "queue.jsonl");
 }
@@ -82,8 +89,9 @@ function append(file: string, event: QueueEvent): void {
 			`queue event is too large (${bytes} bytes > ${MAX_EVENT_BYTES}); shorten the text`,
 		);
 	}
-	mkdirSync(path.dirname(file), { recursive: true });
-	appendFileSync(file, `${line}\n`, "utf8");
+	// Decision text names cwds and project details; keep it out of other users' reach.
+	mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+	appendFileSync(file, `${line}\n`, { encoding: "utf8", mode: 0o600 });
 }
 
 /**
@@ -275,6 +283,98 @@ export function pendingAnswersFor(file: string, sessionId: string): Question[] {
 				entry.sessionId === sessionId && entry.status !== "open" && !entry.delivered,
 		)
 		.sort((a, b) => (a.answeredAt ?? 0) - (b.answeredAt ?? 0));
+}
+
+/** Anything older than this is stale: an unanswered question nobody chased for a week is dead. */
+export const STALE_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * A question worth keeping in the live queue.
+ *
+ * Resolved-but-undelivered is ALWAYS kept, at any age: compaction runs on
+ * session start before delivery, so aging these out would silently destroy a
+ * captain answer the asker never saw — the exact failure the queue exists
+ * to prevent. Resolved-and-delivered is history. Open questions must
+ * be fresh and carry a sane timestamp; junk without a real `askedAt`
+ * (firstmate-era records) can never age out, so it goes immediately.
+ */
+function isLive(entry: Question, now: number): boolean {
+	if (entry.status !== "open") return !entry.delivered;
+	if (typeof entry.askedAt !== "number" || !Number.isFinite(entry.askedAt)) return false;
+	return now - entry.askedAt <= STALE_AFTER_MS;
+}
+
+/** Reconstructs the minimal event lines that fold back into `entry`. */
+function eventLines(entry: Question): string[] {
+	const { status, answer: text, answeredAt, resolvedBy, delivered, ...askEvent } = entry;
+	const lines = [JSON.stringify(askEvent satisfies AskEvent)];
+	if (status !== "open") {
+		lines.push(
+			JSON.stringify({
+				kind: "answer",
+				id: entry.id,
+				eventId: resolvedBy ?? `a-${randomSuffix()}`,
+				answer: text ?? "",
+				status,
+				answeredAt: answeredAt ?? entry.askedAt,
+			} satisfies AnswerEvent),
+		);
+	}
+	if (delivered) {
+		lines.push(
+			JSON.stringify({ kind: "deliver", id: entry.id, deliveredAt: answeredAt ?? entry.askedAt } satisfies DeliverEvent),
+		);
+	}
+	return lines;
+}
+
+/**
+ * Purge answered + stale questions from the live queue, archiving what is
+ * dropped to `archive.jsonl` beside it. Rewrite-in-place is safe here because
+ * only the orchestrator session owns this queue; there is no concurrent writer
+ * to race with, and the write itself goes through a temp file + rename.
+ */
+export function compact(file: string, now = Date.now()): { kept: number; archived: number } {
+	const all = readQuestions(file);
+	if (all.length === 0) return { kept: 0, archived: 0 };
+	const keep = all.filter((entry) => isLive(entry, now));
+	const drop = all.filter((entry) => !isLive(entry, now));
+	if (drop.length === 0) return { kept: keep.length, archived: 0 };
+	const dir = path.dirname(file);
+	mkdirSync(dir, { recursive: true, mode: 0o700 });
+	appendFileSync(
+		path.join(dir, "archive.jsonl"),
+		`${drop.map((entry) => JSON.stringify(entry)).join("\n")}\n`,
+		{ encoding: "utf8", mode: 0o600 },
+	);
+	const tmp = `${file}.tmp`;
+	const body = keep.flatMap(eventLines).join("\n");
+	writeFileSync(tmp, body === "" ? "" : `${body}\n`, { encoding: "utf8", mode: 0o600 });
+	renameSync(tmp, file);
+	return { kept: keep.length, archived: drop.length };
+}
+
+/**
+ * One-time import from the legacy pi-home queue: live questions move over,
+ * everything else is left behind, and the legacy file is renamed so it can
+ * never be imported (or grown) again.
+ */
+export function importLegacyQueue(file: string, legacy: string, now = Date.now()): number {
+	if (legacy === file) return 0;
+	let entries: Question[];
+	try {
+		statSync(legacy);
+		entries = readQuestions(legacy);
+	} catch {
+		return 0; // no legacy queue, nothing to import
+	}
+	const live = entries.filter((entry) => entry.status === "open" && isLive(entry, now));
+	for (const entry of live) {
+		const { status, answer, answeredAt, resolvedBy, delivered, ...askEvent } = entry;
+		append(file, askEvent);
+	}
+	renameSync(legacy, `${legacy}.imported`);
+	return live.length;
 }
 
 export function formatAge(ms: number): string {

@@ -173,7 +173,7 @@ describe("idle-compaction installer", () => {
 		// pi discovers extensions/*.ts as top-level extensions, so a stray
 		// policy symlink beside the directory gets loaded and rejected.
 		const entries = readdirSync(path.join(target, "extensions")).sort();
-		expect(entries).toEqual(["deck-idle-compaction", "deck-questions"]);
+		expect(entries).toEqual(["deck-idle-compaction"]);
 	});
 
 	test("the installed entrypoint exports a factory", async () => {
@@ -189,24 +189,34 @@ describe("idle-compaction installer", () => {
 	});
 });
 
-describe("questions installer", () => {
-	const target = install("extensions/install.sh");
-	const extensionDir = path.join(target, "extensions", "deck-questions");
+describe("questions retirement", () => {
+	// The questions extension moved into deck-v2: a global install put
+	// ask_captain and /questions into every pi session, including workers.
+	test("a previously installed deck-questions of ours is removed", () => {
+		const target = freshTarget();
+		const old = path.join(target, "extensions", "deck-questions");
+		mkdirSync(old, { recursive: true });
+		// The old installer symlinked index.ts at extensions/src/questions.ts;
+		// point at a same-shaped path elsewhere since that file no longer exists.
+		const fakeRepo = path.join(target, "old-repo", "extensions", "src");
+		mkdirSync(fakeRepo, { recursive: true });
+		writeFileSync(path.join(fakeRepo, "questions.ts"), "export default () => {};\n");
+		symlinkSync(path.join(fakeRepo, "questions.ts"), path.join(old, "index.ts"));
 
-	test("installs a directory extension whose sibling store import resolves", () => {
-		expect(lstatSync(extensionDir).isDirectory()).toBe(true);
-		// index.ts imports "./questions-store", so both must sit together.
-		expect(realpathSync(path.join(extensionDir, "index.ts"))).toBe(
-			realpathSync(path.join(repoRoot, "extensions/src/questions.ts")),
-		);
-		expect(realpathSync(path.join(extensionDir, "questions-store.ts"))).toBe(
-			realpathSync(path.join(repoRoot, "extensions/src/questions-store.ts")),
-		);
+		const result = runInstaller("extensions/install.sh", target);
+		expect(result.exitCode).toBe(0);
+		expect(existsSync(old)).toBe(false);
 	});
 
-	test("the installed entrypoint exports a factory", async () => {
-		const loaded = await import(path.join(extensionDir, "index.ts"));
-		expect(typeof loaded.default).toBe("function");
+	test("a deck-questions directory that is not ours is left alone", () => {
+		const target = freshTarget();
+		const foreign = path.join(target, "extensions", "deck-questions");
+		mkdirSync(foreign, { recursive: true });
+		writeFileSync(path.join(foreign, "index.ts"), "// someone else's extension\n");
+
+		const result = runInstaller("extensions/install.sh", target);
+		expect(result.exitCode).toBe(0);
+		expect(existsSync(path.join(foreign, "index.ts"))).toBe(true);
 	});
 });
 
@@ -232,7 +242,7 @@ describe("idle-compaction installer migration from the old flat layout", () => {
 		const result = runInstaller("extensions/install.sh", target);
 		expect(result.stderr).toBe("");
 		expect(result.exitCode).toBe(0);
-		expect(readdirSync(extensions).sort()).toEqual(["deck-idle-compaction", "deck-questions"]);
+		expect(readdirSync(extensions).sort()).toEqual(["deck-idle-compaction"]);
 	});
 
 	test("refuses to delete a user-owned file it cannot prove is ours", () => {

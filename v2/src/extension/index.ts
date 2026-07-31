@@ -29,6 +29,7 @@ import {
 import { projectFleet } from "../herdr";
 import { deckV2Home, stateFiles } from "../home";
 import { readMeta } from "../meta";
+import { registerQuestions } from "../questions";
 import { enqueue, pending } from "../queue";
 import { peekSession, startRun } from "../spawn";
 import { STATUS_VERBS, type StatusVerb } from "../status";
@@ -56,6 +57,10 @@ const RECONCILE_MS = 30_000;
 export default function deckV2(pi: any): void {
 	// Calm is presentation-only (see ../calm.ts); it never touches delivery.
 	registerCalm(pi);
+	// ask_captain + /questions live HERE, not in a globally installed extension:
+	// deck-v2 only installs into the deck home's own .pi, so worker sessions
+	// never register a competing question surface. See ../questions.ts.
+	registerQuestions(pi);
 
 	let timer: ReturnType<typeof setInterval> | undefined;
 	let unwatch: (() => void) | undefined;
@@ -502,6 +507,7 @@ function backgroundFn(source: unknown): ((text: string) => string) | undefined {
 
 /** Exported for the installer's smoke test. */
 export const TOOL_NAMES = [
+	"ask_captain",
 	"spawn",
 	"send",
 	"status",

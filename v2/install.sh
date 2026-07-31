@@ -18,6 +18,8 @@ set -euo pipefail
 # these tools operate one home's fleet, so scoping them there keeps an unrelated
 # pi session in another directory from loading a fleet-control extension.
 # Override INSTALL_TARGET=$HOME/.pi/agent for a global install.
+# Must match deckV2Home() in src/home.ts (~/.deck), or the extension installs
+# into a pi home no orchestrator session ever starts from.
 DECK_V2_HOME_DIR="${DECK_V2_HOME:-$HOME/.deck}"
 INSTALL_TARGET="${INSTALL_TARGET:-$DECK_V2_HOME_DIR/.pi}"
 REPO_V2="$(cd "$(dirname "$0")" && pwd)"

@@ -54,6 +54,31 @@ The orchestrator's operating contract lives in `~/.deck/AGENTS.md`, seeded from
 version was 500 lines, always loaded, and its rules decayed within days — one was
 violated three days after being written.
 
+## The questions queue
+
+`src/questions.ts` + `src/questions-store.ts`: the durable captain-facing
+decision queue — the `ask_captain` tool and the `/questions` review command.
+It registers from the deck-v2 extension only, so it exists exactly where the
+orchestrator runs and nowhere else; worker `pi -p` sessions never surface a
+competing question dialog. (Its previous life as a globally installed
+extension put it in every pi session on the machine, and the queue filled
+with ghost questions from dead sessions.)
+
+The queue lives at `~/.deck/questions/queue.jsonl` (`DECK_QUESTIONS_FILE`
+overrides it for tests). One append-only JSONL event log, folded on read;
+first answer wins; delivery sends before it marks. On session start the store
+imports still-open questions from the legacy `~/.pi/agent/questions/` queue
+once, then purges answered and stale (>7d) entries to `archive.jsonl` beside
+the queue. Open questions show in the statusline as `Nq` next to the task
+count, and in the `/fleet` overlay header.
+
+The opt-in real smoke spans two pi processes sharing only the queue file:
+
+```bash
+cd v2
+bun run smoke/run-questions-smoke.ts
+```
+
 ## The home is not a checkout
 
 `~/.deck` holds `data/` and `state/`. It is deliberately a plain directory, not a
