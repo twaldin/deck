@@ -3,7 +3,8 @@
  * broker/control.token capability (SPEC §6.1).
  *
  *   bun src/cli.ts status
- *   bun src/cli.ts login <anthropic|openai-codex-device|zai>
+ *   bun src/cli.ts login <provider>   # any pi-ai OAuth provider (getOAuthProviders),
+ *                                     # e.g. anthropic, openai-codex-device, zai, xai-oauth
  *   bun src/cli.ts logout <provider>
  *   bun src/cli.ts refresh <credentialId>
  *   bun src/cli.ts usage
