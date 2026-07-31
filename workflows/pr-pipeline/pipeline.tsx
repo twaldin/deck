@@ -84,7 +84,7 @@ import type { Brief, MigrationEvidenceEntry } from "./lib/types.ts";
 // ---------------------------------------------------------------------------
 
 const DEFAULT_LIMITS = {
-	localReviewRounds: 3,
+	localReviewRounds: 8,
 	watchPolls: 60,
 	readyPolls: 40,
 	landingPolls: 60,
@@ -208,12 +208,21 @@ const inputSchema = z.object({
 		.object({
 			changedFiles: z.array(z.string()).optional(),
 			localReviewRounds: z.number().int().positive().optional(),
+			localReviewNitsOnly: z.boolean().optional(),
 			watchPollsToExit: z.number().int().positive().optional(),
 			watchWaitPolls: z.number().int().nonnegative().optional(),
 			prNumber: z.number().int().positive().optional(),
 			headChangeRounds: z.array(z.number().int().nonnegative()).optional(),
 		})
 		.optional(),
+});
+
+export const localReviewSchema = z.object({
+	round: z.number().int(),
+	approved: z.boolean(),
+	blockingFindings: z.array(z.string()),
+	nits: z.array(z.string()),
+	summary: z.string(),
 });
 
 const schemas = {
@@ -229,12 +238,7 @@ const schemas = {
 		summary: z.string(),
 		testEvidence: z.string(),
 	}),
-	localReview: z.object({
-		round: z.number().int(),
-		approved: z.boolean(),
-		findings: z.array(z.string()),
-		summary: z.string(),
-	}),
+	localReview: localReviewSchema,
 	localFix: z.object({
 		afterRound: z.number().int(),
 		addressed: z.array(z.string()),
@@ -712,20 +716,29 @@ export default smithers((ctx) => {
 									? () => {
 											const round = localReviewRows.length;
 											const approved = round + 1 >= fixtures.localReviewRounds;
+											const nitsOnly = fixtures.localReviewNitsOnly === true;
+											const blockingFindings = approved || nitsOnly ? [] : [`dry-run finding in round ${round}`];
 											return {
 												round,
-												approved,
-												findings: approved ? [] : [`dry-run finding in round ${round}`],
-												summary: approved
+												approved: blockingFindings.length === 0,
+												blockingFindings,
+												nits: nitsOnly ? [`dry-run nit in round ${round}`] : [],
+												summary: blockingFindings.length === 0
 													? "dry-run: adversarial review approved"
 													: "dry-run: blocking findings",
 											};
 										}
-									: localReviewPrompt(brief, input.worktree, baseBranch, localReviewRows.length)}
+									: localReviewPrompt(
+												brief,
+												input.worktree,
+												baseBranch,
+												localReviewRows.length,
+												latestLocalReview,
+											)}
 							</Task>
 							{latestLocalReview !== undefined &&
 							!latestLocalReview.approved &&
-							latestLocalReview.findings.length > 0 &&
+							latestLocalReview.blockingFindings.length > 0 &&
 							(latestLocalFix === undefined || latestLocalFix.afterRound < latestLocalReview.round) ? (
 								<Task
 									id="local-fix"
@@ -736,10 +749,10 @@ export default smithers((ctx) => {
 									{dryRun
 										? () => ({
 												afterRound: latestLocalReview.round,
-												addressed: latestLocalReview.findings,
+												addressed: latestLocalReview.blockingFindings,
 												summary: "dry-run: findings addressed",
 											})
-										: localFixPrompt(latestLocalReview.findings, input.worktree, latestLocalReview.round)}
+										: localFixPrompt(latestLocalReview.blockingFindings, input.worktree, latestLocalReview.round)}
 								</Task>
 							) : null}
 						</Sequence>
@@ -752,8 +765,9 @@ export default smithers((ctx) => {
 						title={`Local review not converging: ${input.ticket}`}
 						summary={
 							`Adversarial review did not approve after ${localReviewRows.length} round(s).\n` +
-							`Outstanding findings: ${JSON.stringify(latestLocalReview?.findings ?? [])}\n` +
-							`Approve to push anyway (findings become PR-review work); deny to kill the run.`
+							`Blocking findings remain: ${JSON.stringify(latestLocalReview?.blockingFindings ?? [])}\n` +
+							`Non-blocking nits: ${JSON.stringify(latestLocalReview?.nits ?? [])}\n` +
+							`Approve to push anyway (blocking findings become PR-review work); deny to kill the run.`
 						}
 					/>
 				) : null}
@@ -921,7 +935,9 @@ export default smithers((ctx) => {
 										"--body",
 										`${brief?.summary ?? ""}\n\nAcceptance criteria:\n${(brief?.acceptanceCriteria ?? [])
 											.map((criterion) => `- [ ] ${criterion}`)
-											.join("\n")}\n\nManaged by lindy-pr-pipeline run ${ctx.runId}.`,
+											.join("\n")}${latestLocalReview?.nits?.length
+											? `\n\nLocal review nits (non-blocking):\n${latestLocalReview.nits.map((nit) => `- ${nit}`).join("\n")}`
+											: ""}\n\nManaged by lindy-pr-pipeline run ${ctx.runId}.`,
 									]);
 									url = createOut.trim().split("\n").pop() ?? "";
 									const match = url.match(/\/pull\/(\d+)/);
