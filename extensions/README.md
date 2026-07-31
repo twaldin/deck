@@ -30,11 +30,25 @@ AND context >= configured percentage of the model window
 AND pi is fully idle, has no pending messages, and has no in-flight tools
 ```
 
-For Anthropic's default 5-minute ephemeral cache and the extension defaults,
-that means compacting after 4 minutes idle. The summary request can read the old
+For deck's Anthropic routes the broker requests 1-hour cache retention, so the
+built-in profile compacts after 55 minutes idle. The summary request can read the old
 prefix through the still-warm cache, then future turns use a smaller context.
+
 This lowers subsequent input cost and latency and keeps long-lived agents out of
 the high-context quality-degradation zone.
+
+Calibrated built-in TTLs (docs + live gateway probe, see Verification). The
+built-ins are route-sensitive: the long profiles apply only where the route
+provably requests the long lifetime, everything else keeps the conservative
+global 5-minute timing.
+
+| Route | Cache lifetime | Built-in profile | Source |
+|---|---|---|---|
+| deck `claude-*` (broker oauth) | 1 hour | 1h TTL / 5m margin | broker's pi-ai sends `cache_control.ttl: "1h"` (Claude Code behavior); probe confirms write then hit |
+| direct `anthropic` provider | 5 minutes | global timing | pi defaults to plain `{type: ephemeral}`; `PI_CACHE_RETENTION=long` is an operator opt-in, pair it with the ANTHROPIC env pair |
+| `gpt-5.6+` on any route | 30 minutes minimum | 30m TTL / 5m margin | OpenAI prompt-caching docs (`prompt_cache_options.ttl`, only value 30m) |
+| older `gpt-*` | ~5–10 minutes in-memory | global timing | OpenAI docs |
+| `grok-*` / xAI | undocumented | 2m TTL / 30s margin guess | xAI documents caching but no lifetime |
 
 The extension uses pi's sanctioned `ExtensionContext.compact()` API. It never
 injects `/compact` keystrokes and never shells out to another pi process.
@@ -96,8 +110,8 @@ process and are useful for persistent-agent launchers.
 | `PI_IDLE_COMPACTION_ENGINE` | `client` | `client` uses pi compaction. `native` is a deliberately inert future-engine seam. |
 | `PI_IDLE_COMPACTION_TTL_MS` | `300000` | Legacy global cache TTL fallback for calibrated model families. |
 | `PI_IDLE_COMPACTION_MARGIN_MS` | `60000` | Legacy global safety margin; must be less than its TTL. |
-| `PI_IDLE_COMPACTION_ANTHROPIC_TTL_MS` + `PI_IDLE_COMPACTION_ANTHROPIC_MARGIN_MS` | unset | Paired override for `claude-*` models (Anthropic's documented default is 5 minutes). |
-| `PI_IDLE_COMPACTION_OPENAI_TTL_MS` + `PI_IDLE_COMPACTION_OPENAI_MARGIN_MS` | unset | Paired override for `gpt-*` models (calibrate to the actual route; OpenAI in-memory cache is generally 5–10 minutes). |
+| `PI_IDLE_COMPACTION_ANTHROPIC_TTL_MS` + `PI_IDLE_COMPACTION_ANTHROPIC_MARGIN_MS` | unset | Paired override for all `claude-*` routes. Without it, deck `claude-*` uses the built-in 1h/5m profile (broker retention) and direct anthropic routes keep the global timing. |
+| `PI_IDLE_COMPACTION_OPENAI_TTL_MS` + `PI_IDLE_COMPACTION_OPENAI_MARGIN_MS` | unset | Paired override for all `gpt-*` routes. Without it, GPT-5.6+ uses the built-in 30m/5m profile and older models keep the global timing. |
 | `PI_IDLE_COMPACTION_XAI_TTL_MS` + `PI_IDLE_COMPACTION_XAI_MARGIN_MS` | 120000 + 30000 | Paired override for `grok-*` models. xAI documents automatic caching but no cache lifetime, so a short built-in profile applies by default. |
 | `PI_IDLE_COMPACTION_FLOOR_PERCENT` | `30` | Minimum current context as a percentage of the active model's window. |
 | `PI_IDLE_COMPACTION_MIN_GROWTH_TOKENS` | `1024` | Absolute minimum growth above the post-compaction estimate before another idle compaction. |
@@ -128,11 +142,14 @@ remains an operator override. Unknown families (such as `glm-*`)
 retain the legacy global timing for backwards compatibility; use it only after
 calibrating that route's cache policy.
 
-Keep Anthropic at its documented five-minute default unless the actual route
-proves otherwise. OpenAI's in-memory prompt-cache retention is generally five
-to ten minutes, not a promise, so set a conservative proven value at the crew
-launcher (for example, `PI_IDLE_COMPACTION_OPENAI_TTL_MS=300000` and an
-appropriate margin).
+The 1h built-in applies only to deck `claude-*` routes because only the
+broker's pi-ai layer provably requests `ttl: "1h"`. An oauth account in
+usage-credit overage falls back to 5m on Anthropic's side; drop the ANTHROPIC
+pair to 300000 + 60000 while that state persists. A direct anthropic session
+running with `PI_CACHE_RETENTION=long` can raise the pair to 3600000 + 300000
+to match. The 30m built-in applies only to GPT-5.6+ model IDs; older models
+cache in-memory for roughly five to ten minutes, so set a conservative proven
+pair when calibrating such a route.
 
 ### Safety and interaction with pi auto-compaction
 
@@ -206,6 +223,25 @@ bun run smoke/run-idle-compaction-smoke.ts
 SMOKE_EXTENSION_PATH=~/.pi/agent/extensions/deck-idle-compaction \
   bun run smoke/run-idle-compaction-smoke.ts
 ```
+
+To measure the actual cache lifetime of a live route, use the operator-run
+TTL probe against the deck gateway (sleeps for the waits you pass; each wait
+is measured from the previous request, and a hit refreshes the clock):
+
+```bash
+cd broker
+# write → immediate-hit smoke (seconds):
+bun run test/cache-ttl-probe.ts --provider anthropic --ttl 1h --waits 0,30
+bun run test/cache-ttl-probe.ts --provider openai --waits 0,30
+# TTL bisection (operator-run, takes as long as the waits):
+bun run test/cache-ttl-probe.ts --provider anthropic --ttl 5m --waits 240,120
+```
+
+It prints a hit/miss table from the gateway's usage fields
+(`cache_read_input_tokens` vs `cache_creation_input_tokens`, plus the
+`ephemeral_5m`/`ephemeral_1h` breakdown when the wire exposes it). Codex-class
+cache writes propagate asynchronously, so an immediate 0-second re-read can
+miss; the 30-second read hits.
 
 The committed smoke evidence in `smoke/evidence/` was produced by pi 0.82 with
 `deck/claude-haiku-4-5`. It records the idle notification, `compaction_start`,

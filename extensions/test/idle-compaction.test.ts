@@ -77,7 +77,9 @@ class ExtensionHarness implements IdleCompactionExtensionApi {
 
 class TestContext {
 	hasUI = true;
-	model = { provider: "deck", id: "claude-test", baseUrl: "http://deck.test/v1" };
+	// glm-test: an uncalibrated route, so mechanics tests exercise the global
+	// test timing instead of a built-in provider profile.
+	model = { provider: "deck", id: "glm-test", baseUrl: "http://deck.test/v1" };
 	idle = true;
 	pending = false;
 	tokens: number | null = 80_000;
@@ -354,9 +356,53 @@ describe("idle compaction policy", () => {
 			cacheTtlMs: 900,
 			marginMs: 100,
 		});
+		// No OPENAI env pair and no 5.6+ model: the global timing applies.
 		expect(selectIdleCompactionConfig(parsed, { provider: "openai", id: "gpt-test" })).toMatchObject({
 			cacheTtlMs: 1_000,
 			marginMs: 200,
+		});
+	});
+
+	test("gives deck claude routes the broker's 1h retention and GPT-5.6+ the 30m minimum", () => {
+		const parsed = parseIdleCompactionConfig({});
+		// deck claude-*: the broker's pi-ai layer requests ttl "1h" on oauth.
+		expect(selectIdleCompactionConfig(parsed, { provider: "deck", id: "claude-sonnet-4-5" })).toMatchObject({
+			cacheTtlMs: 3_600_000,
+			marginMs: 300_000,
+		});
+		// direct anthropic: plain 5m ephemeral unless the operator opts into long
+		// retention, so the global timing stands.
+		expect(selectIdleCompactionConfig(parsed, { provider: "anthropic", id: "claude-sonnet-4-5" })).toBe(
+			parsed.config,
+		);
+		// GPT-5.6+ carries the documented 30m minimum on any route.
+		expect(selectIdleCompactionConfig(parsed, { provider: "deck", id: "gpt-5.6-sol" })).toMatchObject({
+			cacheTtlMs: 1_800_000,
+			marginMs: 300_000,
+		});
+		expect(selectIdleCompactionConfig(parsed, { provider: "openai", id: "gpt-6" })).toMatchObject({
+			cacheTtlMs: 1_800_000,
+		});
+		expect(
+			idleThresholdMs(selectIdleCompactionConfig(parsed, { provider: "openai-codex", id: "gpt-5.6-sol" })),
+		).toBe(25 * 60_000);
+		// Older gpt-* stay on the conservative global timing.
+		expect(selectIdleCompactionConfig(parsed, { provider: "openai", id: "gpt-5.1" })).toBe(parsed.config);
+		expect(selectIdleCompactionConfig(parsed, { provider: "deck", id: "glm-test" })).toBe(parsed.config);
+	});
+
+	test("env pair overrides the built-in long profile back to 5m ephemeral", () => {
+		const parsed = parseIdleCompactionConfig({
+			PI_IDLE_COMPACTION_ANTHROPIC_TTL_MS: "300000",
+			PI_IDLE_COMPACTION_ANTHROPIC_MARGIN_MS: "60000",
+		});
+		expect(selectIdleCompactionConfig(parsed, { provider: "deck", id: "claude-test" })).toMatchObject({
+			cacheTtlMs: 300_000,
+			marginMs: 60_000,
+		});
+		expect(selectIdleCompactionConfig(parsed, { provider: "anthropic", id: "claude-test" })).toMatchObject({
+			cacheTtlMs: 300_000,
+			marginMs: 60_000,
 		});
 	});
 
