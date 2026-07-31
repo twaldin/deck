@@ -20,8 +20,8 @@ import { workerBrief } from "./prompts";
 import { buildHydration } from "./hydrate";
 import { ack as ackMessages } from "./queue";
 
-/** Captain policy: implementation work defaults to the fable/sol class. */
-export const DEFAULT_WORKER_MODEL = "deck/claude-fable-5";
+/** Captain policy 2026-07-31: one-shot/spawn bread-and-butter is luna (high TPS). */
+export const DEFAULT_WORKER_MODEL = "deck/gpt-5.6-luna";
 
 /**
  * Tools a worker must not have.
