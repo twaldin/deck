@@ -98,8 +98,10 @@ export interface WatchExitOptions {
 /** The machine-checked exit condition for the watch-ci-review loop. */
 export function evaluateWatchExit(snapshot: WatchSnapshot, options: WatchExitOptions): WatchExitVerdict {
 	const reasons: string[] = [];
-	const needsRebase = snapshot.mergeable === "CONFLICTING" || snapshot.mergeStateStatus.toUpperCase() === "DIRTY";
-	if (needsRebase) reasons.push("PR is not mergeable; needs rebase onto its base branch.");
+	const needsRebase =
+		snapshot.mergeable === "CONFLICTING" ||
+		["DIRTY", "BEHIND"].includes(snapshot.mergeStateStatus.toUpperCase());
+	if (needsRebase) reasons.push("PR is out of date or not mergeable; needs rebase onto its base branch.");
 	const unresolved = snapshot.threads.filter((thread) => !thread.isResolved).length;
 	if (unresolved > 0) reasons.push(`${unresolved} unresolved review thread(s).`);
 

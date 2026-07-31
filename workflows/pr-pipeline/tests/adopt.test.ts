@@ -90,6 +90,7 @@ describe("assertAdoptable", () => {
 				...goodExpectation,
 				worktreeHead: "fix456",
 				allowWorktreeAhead: true,
+				worktreeIsDescendant: true,
 			}),
 		).not.toThrow();
 	});
