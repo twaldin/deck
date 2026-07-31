@@ -5,6 +5,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import {
+	attentionRank,
 	buildFleetText,
 	chipFor,
 	framed,
@@ -12,6 +13,7 @@ import {
 	PLAIN_FLEET_THEME,
 	renderStatusline,
 	textWidth,
+	visibleTasks,
 	type FleetFrame,
 	type TaskRow,
 } from "../src/fleet";
@@ -179,6 +181,58 @@ describe("buildFleetText", () => {
 		);
 		const longest = Math.max(...out.split("\n").map(textWidth));
 		expect(longest).toBeLessThan(140);
+	});
+});
+
+describe("attention-first default view", () => {
+	const doneTasks = Array.from({ length: 15 }, (_, i) =>
+		task({ taskId: `old-${i}`, runState: "finished", lastVerb: "done", lastNote: "shipped" }),
+	);
+	const live = [
+		task({ taskId: "live-run", runState: "running", lastVerb: "working" }),
+		task({ taskId: "stuck", lastVerb: "blocked" }),
+		task({ taskId: "ask", openDecisions: 1 }),
+	];
+
+	test("terminal done/failed rows hide by default and collapse to one line", () => {
+		const out = buildFleetText(frame({ tasks: [...doneTasks, ...live] }));
+		expect(out).not.toContain("old-3");
+		expect(out).toContain("15 done/failed hidden");
+		expect(out).toContain("live-run");
+	});
+
+	test("show-all includes the terminal rows", () => {
+		const out = buildFleetText(frame({ tasks: [...doneTasks, ...live] }), PLAIN_FLEET_THEME, {
+			showAll: true,
+		});
+		expect(out).toContain("old-3");
+		expect(out).not.toContain("hidden");
+	});
+
+	test("attention order: decision, blocked, then running, before idle", () => {
+		const { shown } = visibleTasks([...doneTasks, ...live], false);
+		expect(shown.map((t) => t.taskId)).toEqual(["ask", "stuck", "live-run"]);
+	});
+
+	test("a failed task with an open decision is not terminal", () => {
+		const t = task({ lastVerb: "failed", openDecisions: 1 });
+		expect(attentionRank(t)).toBe(0);
+		expect(visibleTasks([t], false).shown).toHaveLength(1);
+	});
+
+	test("maxBodyLines clamps the frame height with the border intact", () => {
+		const out = buildFleetText(frame({ tasks: [...doneTasks, ...live] }), PLAIN_FLEET_THEME, {
+			showAll: true,
+			maxBodyLines: 10,
+		});
+		const lines = out.split("\n");
+		// 10 body lines + top/bottom border + blank + footer
+		expect(lines.length).toBe(14);
+		expect(out).toContain("more line(s)");
+		const bordered = lines.filter(
+			(line) => line.startsWith("\u256d") || line.startsWith("\u2502") || line.startsWith("\u2570"),
+		);
+		expect(new Set(bordered.map(textWidth)).size).toBe(1);
 	});
 });
 

@@ -285,22 +285,31 @@ export default function deckV2(pi: any): void {
 	// ---- commands -----------------------------------------------------------
 
 	pi.registerCommand("fleet", {
-		description: "Fleet overlay: runs, workflows, PRs, decisions (q/Esc close, r refresh, live)",
-		handler: async (_args: string, ctx: any) => {
+		description:
+			"Fleet overlay: attention-first (q/Esc close, r refresh, a show-all; /fleet all opens expanded)",
+		handler: async (args: string, ctx: any) => {
 			const frameOptions = workflowCwd === undefined ? {} : { workflowCwd };
-			const frame = await buildFrame(frameOptions);
+			let frame = await buildFrame(frameOptions);
 			// ctx.ui.custom is TUI-only; degrade to a printed frame elsewhere.
 			if (ctx.mode !== "tui" || ctx.ui?.custom === undefined) {
 				ctx.ui?.notify?.(renderFrame(frame), "info");
 				return;
 			}
+			let showAll = args.trim() === "all";
 			await ctx.ui.custom(
 				(tui: any, rawTheme: any, _kb: any, done: any) => {
 					const theme = asFleetTheme(rawTheme);
 					// Box paints a background across all children — that is what makes
 					// the overlay opaque instead of layering over the transcript.
 					const box = new Box(2, 1, backgroundFn(rawTheme));
-					const body = new Text(buildFleetText(frame, theme), 0, 0);
+					// Body budget: terminal rows minus overlay margin, box padding,
+					// frame borders and footer, so the bottom border stays on screen
+					// when tasks outnumber rows.
+					const maxBodyLines = (): number =>
+						Math.max(4, (tui.terminal?.rows ?? 40) - 10);
+					const render = (): string =>
+						buildFleetText(frame, theme, { showAll, maxBodyLines: maxBodyLines() });
+					const body = new Text(render(), 0, 0);
 					box.addChild(body);
 
 					// In-flight guard: buildFrame shells out to smithers ps, which can
@@ -310,7 +319,8 @@ export default function deckV2(pi: any): void {
 						if (busy) return;
 						busy = true;
 						try {
-							body.setText(buildFleetText(await buildFrame(frameOptions), theme));
+							frame = await buildFrame(frameOptions);
+							body.setText(render());
 							tui.requestRender();
 						} catch {
 							// keep the last good frame on a failed refresh
@@ -328,6 +338,12 @@ export default function deckV2(pi: any): void {
 							if (data === "q" || data === "\u001b" || data === "\u0003") {
 								clearInterval(timer);
 								done(undefined);
+								return;
+							}
+							if (data === "a") {
+								showAll = !showAll;
+								body.setText(render());
+								tui.requestRender();
 								return;
 							}
 							if (data === "r") void refresh();
