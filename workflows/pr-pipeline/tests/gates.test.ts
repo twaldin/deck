@@ -221,10 +221,12 @@ describe("evaluateWatchExit", () => {
 		expect(verdict.reasons.join(" ")).toContain("needs rebase");
 	});
 
-	test("BEHIND alone waits for the merge boundary", () => {
+	test("BEHIND blocks exit and requests a rebase fix", () => {
 		const verdict = evaluateWatchExit(snapshot({ mergeStateStatus: "BEHIND" }), { selfLogins: ["twaldin"] });
-		expect(verdict.exitOk).toBe(true);
-		expect(verdict.disposition).toBe("complete");
+		expect(verdict.exitOk).toBe(false);
+		expect(verdict.disposition).toBe("fix");
+		expect(verdict.actionable).toBe(true);
+		expect(verdict.reasons.join(" ")).toContain("needs rebase");
 	});
 
 	test("unresolved thread blocks exit", () => {
@@ -373,6 +375,7 @@ describe("watch fix worker boundary", () => {
 		});
 		expect(prompt).toContain("return the receipt and exit immediately");
 		expect(prompt).toContain("rebase THIS PR branch");
+		expect(prompt).toContain("DIRTY or BEHIND");
 		expect(prompt).toContain("fetch origin/main");
 		expect(prompt).toContain("force-with-lease");
 		expect(prompt).toContain("Never sleep-poll CI or review state");
