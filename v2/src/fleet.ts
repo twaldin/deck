@@ -12,6 +12,7 @@
  * down removes decoration, not function.
  */
 import { execFile } from "node:child_process";
+import { truncateToWidth } from "@earendil-works/pi-tui";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { promisify } from "node:util";
@@ -41,6 +42,7 @@ export type WaitingFor =
 	| "ready-poll"
 	| "stamp"
 	| `gate:${string}`
+	| "approval"
 	| "migration"
 	| "landing"
 	| "deploy-evidence"
@@ -92,10 +94,20 @@ export type WorkflowRow = {
 	ticket?: string | null;
 	prNumber?: number | null;
 	prTitle?: string | null;
+	/** Existing PR identity used to detect superseded failed runs. */
+	existingPr?: number | null;
+	/** Landing/supersession evidence supplied by the workflow status payload. */
+	merged?: boolean;
+	tipOnMain?: boolean;
+	superseded?: boolean;
+	pushPrNull?: boolean;
+	/** A landing poll proved the content is already on the base branch. */
+	landed?: boolean;
 	phase?: string | null;
 	waitingFor?: WaitingFor;
 	activity?: FleetActivity;
 	waitAgeMs?: number | null;
+	startedAt?: string | null;
 };
 
 export type FleetFrame = {
@@ -124,6 +136,11 @@ type PsRun = {
 	prNumber?: number;
 	prTitle?: string;
 	started?: string;
+	merged?: boolean;
+	tipOnMain?: boolean;
+	superseded?: boolean;
+	pushPrNull?: boolean;
+	landed?: boolean;
 	pendingApprovals?: Array<{ nodeId?: string; status?: string }>;
 	workflow?: string;
 	status?: string;
@@ -239,7 +256,7 @@ function ageMs(value: string | undefined): number | null {
 		const unit = { s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 }[
 			ago[2]
 		];
-		return Number(ago[1]) * unit;
+		return Number(ago[1]) * (unit ?? 1);
 	}
 	const timestamp = Date.parse(value);
 	return Number.isNaN(timestamp) ? null : Math.max(0, Date.now() - timestamp);
@@ -324,16 +341,46 @@ async function collectRuns(
 						// A run before push-pr has no PR number yet.
 					}
 				}
+				let landed = psRun.landed;
+				let pushPrNull = psRun.pushPrNull;
+				if (activityFor(psRun.step, psRun.status) === "failed") {
+					const readOutput = async (node: string): Promise<unknown> => {
+						const output = await run(
+							"bunx",
+							[SMITHERS_SPEC, "output", psRun.id, node, "--json"],
+							{ cwd, timeout: 15_000, maxBuffer: 1_000_000 },
+						);
+						return JSON.parse(output.stdout);
+					};
+					try {
+						const output = await readOutput("landing-poll");
+						const record = Array.isArray(output) ? output.at(-1) : output;
+						if (typeof record === "object" && record !== null && (record as { landed?: unknown }).landed === true)
+							landed = true;
+					} catch {
+						// No landing node means no landing evidence.
+					}
+					if (pushPrNull !== true) {
+						try {
+							const output = await readOutput("push-pr");
+							const record = Array.isArray(output) ? output.at(-1) : output;
+							if (record === null || (typeof record === "object" && record !== null && (record as { prNumber?: unknown }).prNumber == null && (record as { pr_number?: unknown }).pr_number == null))
+								pushPrNull = true;
+						} catch {
+							// A missing push-pr node is not evidence of a zombie.
+						}
+					}
+				}
 				const pendingNode = psRun.pendingApprovals?.find(
 					(approval) => approval.status === "requested",
 				)?.nodeId;
 				if (pendingNode !== undefined)
-					return { ...psRun, blockedNode: pendingNode, prNumber };
+					return { ...psRun, blockedNode: pendingNode, prNumber, landed, pushPrNull };
 				if (
 					psRun.status !== "waiting-approval" &&
 					psRun.state !== "waiting-approval"
 				)
-					return { ...psRun, prNumber };
+					return { ...psRun, prNumber, landed, pushPrNull };
 				try {
 					const inspected = await run(
 						"bunx",
@@ -353,9 +400,11 @@ async function collectRuns(
 						...psRun,
 						blockedNode: payload.runState?.blocked?.nodeId,
 						prNumber,
+						landed,
+						pushPrNull,
 					};
 				} catch {
-					return { ...psRun, prNumber };
+					return { ...psRun, prNumber, landed, pushPrNull };
 				}
 			}),
 		);
@@ -549,7 +598,7 @@ export async function buildFrame(
 	);
 	const workflows: WorkflowRow[] = runs.map((psRun) => {
 		const input = readShipInput(psRun.id);
-		const step = normalizeStep(psRun.step) ?? psRun.blockedNode;
+		const step = normalizeStep(psRun.step) ?? psRun.blockedNode ?? null;
 		return {
 			runId: psRun.id,
 			workflow: psRun.workflow ?? null,
@@ -565,6 +614,12 @@ export async function buildFrame(
 			ticket: input.ticket,
 			prNumber: psRun.prNumber ?? input.prNumber,
 			prTitle: psRun.prTitle ?? input.prTitle,
+			existingPr: input.prNumber,
+			merged: psRun.merged,
+			tipOnMain: psRun.tipOnMain,
+			superseded: psRun.superseded,
+			pushPrNull: psRun.pushPrNull,
+			landed: psRun.landed,
 			phase: pipelinePhase(step, psRun.status),
 			waitingFor: waitingForFor(step, psRun.status),
 			activity: activityFor(step, psRun.status),
@@ -572,6 +627,7 @@ export async function buildFrame(
 				waitingForFor(step, psRun.status) === "none"
 					? null
 					: ageMs(psRun.started),
+			startedAt: psRun.started ?? null,
 		};
 	});
 
@@ -618,9 +674,7 @@ export async function buildFrame(
 export function renderFrame(frame: FleetFrame): string {
 	const lines: string[] = [];
 	const c = frame.counters;
-	const workflowFailures = frame.workflows.filter(
-		(wf) => wf.activity === "failed",
-	).length;
+	const workflowFailures = actionableWorkflowFailures(frame).length;
 	const stampWaits = frame.workflows.filter(
 		(wf) => wf.waitingFor === "stamp",
 	).length;
@@ -631,7 +685,11 @@ export function renderFrame(frame: FleetFrame): string {
 		lines.push("  (no tasks)");
 	}
 	const visibleWorkflows = [...frame.workflows]
-		.filter((wf) => !isTerminalWorkflow(wf) || wf.activity === "failed")
+		.filter(
+			(wf) =>
+				!isTerminalWorkflow(wf) ||
+				isActionableWorkflowFailure(wf, frame.workflows),
+		)
 		.sort((a, b) => workflowAttentionRank(a) - workflowAttentionRank(b));
 	for (const wf of visibleWorkflows) {
 		const identity = [
@@ -804,6 +862,46 @@ export function isTerminalWorkflow(wf: WorkflowRow): boolean {
 	);
 }
 
+/**
+ * A failed terminal run is attention only while it can still change the
+ * outcome. Workflow status can retain explicit landing/supersession evidence;
+ * a newer healthy run for the same adopted PR or ticket is also enough.
+ */
+export function isActionableWorkflowFailure(
+	wf: WorkflowRow,
+	workflows: WorkflowRow[] = [],
+): boolean {
+	if (wf.activity !== "failed") return false;
+	if (
+		wf.merged === true ||
+		wf.tipOnMain === true ||
+		wf.superseded === true ||
+		wf.pushPrNull === true ||
+		wf.landed === true
+	)
+		return false;
+	const newerHealthy = workflows.some((candidate) => {
+		if (candidate.runId === wf.runId || candidate.activity === "failed") return false;
+		const sameIdentity =
+			(wf.existingPr !== null && wf.existingPr !== undefined && candidate.existingPr === wf.existingPr) ||
+			(wf.ticket !== null && wf.ticket !== undefined && candidate.ticket === wf.ticket);
+		if (!sameIdentity) return false;
+		if (wf.startedAt === null || wf.startedAt === undefined || candidate.startedAt === null || candidate.startedAt === undefined)
+			return true;
+		const failedAt = Date.parse(wf.startedAt);
+		const candidateAt = Date.parse(candidate.startedAt);
+		if (!Number.isNaN(failedAt) && !Number.isNaN(candidateAt)) return candidateAt > failedAt;
+		const failedAge = ageMs(wf.startedAt);
+		const candidateAge = ageMs(candidate.startedAt);
+		return failedAge !== null && candidateAge !== null && candidateAge < failedAge;
+	});
+	return !newerHealthy;
+}
+
+export function actionableWorkflowFailures(frame: FleetFrame): WorkflowRow[] {
+	return frame.workflows.filter((wf) => isActionableWorkflowFailure(wf, frame.workflows));
+}
+
 /** Attention-first order; terminal done/failed rows drop unless showAll. */
 export function visibleTasks(
 	tasks: TaskRow[],
@@ -946,11 +1044,11 @@ export function buildFleetView(
 	const activeWorkflows = frame.workflows
 		.filter((wf) => !isTerminalWorkflow(wf))
 		.sort((a, b) => workflowAttentionRank(a) - workflowAttentionRank(b));
-	const failedWorkflows = frame.workflows.filter(
-		(wf) => isTerminalWorkflow(wf) && wf.activity === "failed",
-	);
+	const failedWorkflows = actionableWorkflowFailures(frame);
 	const doneWorkflows = frame.workflows.filter(
-		(wf) => isTerminalWorkflow(wf) && wf.activity !== "failed",
+		(wf) =>
+			isTerminalWorkflow(wf) &&
+			(wf.activity !== "failed" || !isActionableWorkflowFailure(wf, frame.workflows)),
 	);
 
 	const renderTask = (task: TaskRow): void => {
@@ -1194,6 +1292,101 @@ export function buildFleetText(
  * only, so stale leftovers on done work stay silent; questions are global.
  * Failed gets its own segment: visible in the overlay must mean visible here.
  */
+export type FooterSessionBits = {
+	cwd?: string;
+	branch?: string | null;
+	model?: string | null;
+	contextPercent?: number | null;
+	inputTokens?: number;
+	outputTokens?: number;
+	cacheReadTokens?: number;
+	cacheWriteTokens?: number;
+	cost?: number;
+};
+
+function compactNumber(value: number | undefined): string {
+	if (value === undefined || !Number.isFinite(value)) return "0";
+	if (value < 1_000) return String(Math.round(value));
+	if (value < 10_000) return `${(value / 1_000).toFixed(1)}k`;
+	if (value < 1_000_000) return `${Math.round(value / 1_000)}k`;
+	return `${(value / 1_000_000).toFixed(1)}M`;
+}
+
+function compactCwd(cwd: string | undefined): string {
+	if (cwd === undefined || cwd.length === 0) return "cwd?";
+	const home = process.env.HOME ?? process.env.USERPROFILE;
+	return home !== undefined && (cwd === home || cwd.startsWith(`${home}/`))
+		? `~${cwd.slice(home.length)}`
+		: cwd;
+}
+
+function footerIdentity(bits: FooterSessionBits): string {
+	const context = bits.contextPercent === null || bits.contextPercent === undefined
+		? "ctx?"
+		: `ctx${bits.contextPercent.toFixed(1)}%`;
+	const cache = `R${compactNumber(bits.cacheReadTokens)} W${compactNumber(bits.cacheWriteTokens)}`;
+	const cost = `$${(bits.cost ?? 0).toFixed(3)}`;
+	return [
+		compactCwd(bits.cwd),
+		bits.branch ?? "no-branch",
+		bits.model ?? "no-model",
+		context,
+		`↑${compactNumber(bits.inputTokens)} ↓${compactNumber(bits.outputTokens)}`,
+		cache,
+		cost,
+	].join(" · ");
+}
+
+function footerAction(frame: FleetFrame): string {
+	const stamp = frame.workflows.find((wf) => wf.waitingFor === "stamp");
+	if (stamp !== undefined)
+		return `stamp ${stamp.prNumber === null || stamp.prNumber === undefined ? "workflow" : `PR#${stamp.prNumber}`} — your word`;
+	const fixing = frame.workflows.find((wf) => wf.activity === "fixing");
+	if (fixing !== undefined)
+		return `fixing ${fixing.prNumber === null || fixing.prNumber === undefined ? "workflow" : `PR#${fixing.prNumber}`}`;
+	const failed = actionableWorkflowFailures(frame)[0];
+	if (failed !== undefined)
+		return `failed ${failed.prNumber === null || failed.prNumber === undefined ? "workflow" : `PR#${failed.prNumber}`}`;
+	const task = frame.tasks.find((candidate) => candidate.openDecisions > 0 || candidate.lastVerb === "needs-decision");
+	if (task !== undefined) return `decision ${task.prNumber === null || task.prNumber === undefined ? task.taskId : `PR#${task.prNumber}`}`;
+	return "idle";
+}
+
+/** Exactly three width-safe lines for pi's custom footer. */
+export function renderFooterLines(
+	frame: FleetFrame,
+	bits: FooterSessionBits = {},
+	theme: FleetTheme = PLAIN_FLEET_THEME,
+	width = 120,
+): string[] {
+	const liveTasks = frame.tasks.filter((task) => attentionRank(task) < 7);
+	const decisions = liveTasks.reduce((sum, task) => sum + task.openDecisions, 0);
+	const queued = liveTasks.reduce((sum, task) => sum + task.queuedMessages, 0);
+	const failures = frame.tasks.filter((task) => task.lastVerb === "failed").length + actionableWorkflowFailures(frame).length;
+	const stamps = frame.workflows.filter((wf) => wf.waitingFor === "stamp").length;
+	const attention = [
+		`${frame.counters.running}▶`,
+		`${decisions}?`,
+		`${queued}✉`,
+		`${frame.counters.openQuestions}q`,
+		`${failures}fail`,
+		`${stamps}stamp`,
+	];
+	const waiters = frame.workflows
+		.filter((wf) => wf.waitingFor !== "none" && wf.waitingFor !== null && !isTerminalWorkflow(wf))
+		.slice(0, 3)
+		.map((wf) => `${wf.activity === "fixing" ? "fixing" : wf.waitingFor} ${wf.prNumber === null || wf.prNumber === undefined ? "workflow" : `#${wf.prNumber}`}`);
+	const lines = [
+		footerIdentity(bits),
+		[...attention, ...waiters].join(" · "),
+		footerAction(frame),
+	];
+	return lines.map((line, index) => {
+		const colored = theme.fg(index === 2 ? "warning" : "dim", line);
+		return truncateToWidth(colored, Math.max(1, width));
+	});
+}
+
 export function renderStatusline(
 	frame: FleetFrame,
 	theme: FleetTheme = PLAIN_FLEET_THEME,
@@ -1219,9 +1412,7 @@ export function renderStatusline(
 		parts.push(theme.fg("warning", `${c.openQuestions}q`));
 	if (liveDecisions > 0) parts.push(theme.fg("warning", `${liveDecisions}?`));
 	if (liveQueued > 0) parts.push(theme.fg("accent", `${liveQueued}✉`));
-	const failedWorkflows = frame.workflows.filter(
-		(wf) => wf.activity === "failed",
-	).length;
+	const failedWorkflows = actionableWorkflowFailures(frame).length;
 	const stamps = frame.workflows.filter(
 		(wf) => wf.waitingFor === "stamp",
 	).length;

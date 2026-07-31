@@ -6,6 +6,7 @@
 import { describe, expect, test } from "bun:test";
 import {
 	activityFor,
+	actionableWorkflowFailures,
 	attentionRank,
 	buildFleetText,
 	buildFleetView,
@@ -16,12 +17,14 @@ import {
 	waitingForFor,
 	normalizeStep,
 	PLAIN_FLEET_THEME,
+	renderFooterLines,
 	renderStatusline,
 	sliceVisible,
 	textWidth,
 	visibleTasks,
 	type FleetFrame,
 	type TaskRow,
+	type WorkflowRow,
 } from "../src/fleet";
 
 function task(overrides: Partial<TaskRow> = {}): TaskRow {
@@ -697,6 +700,59 @@ describe("sliceVisible", () => {
 				maxBodyLines + 4,
 			);
 		}
+	});
+});
+
+describe("three-line footer", () => {
+	test("renders exactly three width-safe lines with session and fleet facts", () => {
+		const out = renderFooterLines(
+			frame({
+				counters: { ...frame().counters, running: 2, openQuestions: 1 },
+				workflows: [
+					{
+						runId: "r-stamp",
+						workflow: "pr-pipeline",
+						status: "waiting-approval",
+						state: "waiting-approval",
+						step: "r0-stamp",
+						taskId: null,
+						prNumber: 26866,
+						prTitle: "Footer",
+						waitingFor: "stamp",
+						activity: "idle",
+					},
+				],
+			}),
+			{ cwd: "/Users/test/deck", branch: "main", model: "sonnet", contextPercent: 42.5, inputTokens: 1200, outputTokens: 800, cacheReadTokens: 400, cacheWriteTokens: 100, cost: 0.123 },
+			PLAIN_FLEET_THEME,
+			48,
+		);
+		expect(out).toHaveLength(3);
+		expect(out[0]).toContain("main");
+		expect(out[1]).toContain("2▶");
+		expect(out[2]).toBe("stamp PR#26866 — your word");
+		for (const line of out) expect(textWidth(line)).toBeLessThanOrEqual(48);
+	});
+});
+
+describe("zombie workflow failures", () => {
+	test("hides landed, superseded, and push-pr-null failures but keeps real failures", () => {
+		const real = { runId: "real", workflow: "pr-pipeline", activity: "failed", status: "failed", state: "failed", step: "watch", taskId: null, ticket: "T-real", prNumber: 1 } satisfies WorkflowRow;
+		const landed = { ...real, runId: "landed", merged: true };
+		const superseded = { ...real, runId: "old", ticket: "T-shared", startedAt: "2026-01-01" };
+		const healthy: WorkflowRow = { ...real, runId: "new", ticket: "T-shared", activity: "working", status: "running", startedAt: "2026-01-02" };
+		const pushNull = { ...real, runId: "push-null", pushPrNull: true };
+		expect(actionableWorkflowFailures(frame({ workflows: [real, landed, superseded, healthy, pushNull] }))).toEqual([real]);
+		expect(
+			actionableWorkflowFailures(
+				frame({
+					workflows: [
+						{ ...real, runId: "old-relative", ticket: "T-relative", startedAt: "1h ago" },
+						{ ...healthy, runId: "new-relative", ticket: "T-relative", startedAt: "2m ago" },
+					],
+				}),
+			),
+		).toHaveLength(0);
 	});
 });
 
