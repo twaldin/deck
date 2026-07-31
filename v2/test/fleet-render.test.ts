@@ -16,6 +16,7 @@ import {
 	humanAge,
 	waitingForFor,
 	normalizeStep,
+	parseShipLogEvidence,
 	PLAIN_FLEET_THEME,
 	renderFooterLines,
 	sliceVisible,
@@ -69,6 +70,18 @@ function frame(overrides: Partial<FleetFrame> = {}): FleetFrame {
 		...overrides,
 	};
 }
+
+describe("ship evidence", () => {
+	test("recovers PR and terminal failure evidence from the ship log", () => {
+		expect(parseShipLogEvidence(
+			`push-pr output: {"pr_number": 314}
+landing-poll {"landed":true}`,
+		)).toEqual({ prNumber: 314, landed: true, pushPrNull: false });
+		expect(parseShipLogEvidence(
+			`push-pr output: {"pr_number":null}`,
+		)).toEqual({ prNumber: null, landed: false, pushPrNull: true });
+	});
+});
 
 describe("chipFor severity order", () => {
 	test("an open decision outranks a live run", () => {

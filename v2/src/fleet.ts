@@ -165,6 +165,37 @@ type ShipIdentity = {
 	worktree: string | null;
 };
 
+export type ShipLogEvidence = {
+	prNumber: number | null;
+	landed: boolean;
+	pushPrNull: boolean;
+};
+
+/** Extract durable pipeline evidence without starting a per-run Smithers process. */
+export function parseShipLogEvidence(log: string): ShipLogEvidence {
+	const prMatches = [
+		...[...log.matchAll(/PR\s+#(\d+)/gi)].map((match) => Number(match[1])),
+		...[...log.matchAll(/["']?pr[_ ]?number["']?\s*[:=]\s*(\d+)/gi)].map((match) => Number(match[1])),
+	];
+	return {
+		prNumber: prMatches.at(-1) ?? null,
+		landed: /landing-poll[^\n]*["']?landed["']?\s*[:=]\s*true|already landed/i.test(log),
+		pushPrNull:
+			/push-pr[\s\\s\S]{0,1000}["']?(?:pr[_ ]?number|pr)["']?\s*[:=]\s*null/i.test(log) ||
+			/pre-PR zombie/i.test(log),
+	};
+}
+
+function readShipEvidence(runId: string): ShipLogEvidence {
+	try {
+		return parseShipLogEvidence(
+			fs.readFileSync(path.join(stateDir(), "ship", `${runId}.log`), "utf8"),
+		);
+	} catch {
+		return { prNumber: null, landed: false, pushPrNull: false };
+	}
+}
+
 function readShipInput(runId: string): ShipIdentity {
 	try {
 		const input = JSON.parse(
@@ -306,19 +337,23 @@ export function normalizeStep(step: string | null | undefined): string | null {
 }
 
 /** Public read-only CLI only. Never the private db, never Gateway lifecycle. */
-let runsCollectionInFlight: Promise<{ runs: PsRun[]; health: SourceHealth }> | null = null;
+const runsCollectionInFlight = new Map<
+	string,
+	Promise<{ runs: PsRun[]; health: SourceHealth }>
+>();
 
-async function collectRuns(
+export async function collectRuns(
 	cwd: string,
 ): Promise<{ runs: PsRun[]; health: SourceHealth }> {
-	// Do not start another Smithers process while the footer is still collecting.
-	if (runsCollectionInFlight !== null) return runsCollectionInFlight;
+	// The key must include cwd: the fleet can display more than one workspace.
+	const existing = runsCollectionInFlight.get(cwd);
+	if (existing !== undefined) return existing;
 	const collection = collectRunsUnshared(cwd);
-	runsCollectionInFlight = collection;
+	runsCollectionInFlight.set(cwd, collection);
 	try {
 		return await collection;
 	} finally {
-		if (runsCollectionInFlight === collection) runsCollectionInFlight = null;
+		if (runsCollectionInFlight.get(cwd) === collection) runsCollectionInFlight.delete(cwd);
 	}
 }
 
@@ -350,10 +385,11 @@ async function collectRunsUnshared(
 		const enriched: PsRun[] = [];
 		for (const psRun of runs) {
 				const input = readShipInput(psRun.id);
-				// Ship input is the durable PR identity. Never query output per run.
-				const prNumber = psRun.prNumber ?? input.prNumber ?? undefined;
-				let landed = psRun.landed;
-				let pushPrNull = psRun.pushPrNull;
+				const evidence = readShipEvidence(psRun.id);
+				// Ship input and its log are durable local pipeline records. Never query output per run.
+				const prNumber = psRun.prNumber ?? input.prNumber ?? evidence.prNumber ?? undefined;
+				const landed = psRun.landed ?? (evidence.landed ? true : undefined);
+				const pushPrNull = psRun.pushPrNull ?? (evidence.pushPrNull ? true : undefined);
 				// Failed runs are terminal. Skip post-failure output enrichment.
 				const pendingNode = psRun.pendingApprovals?.find(
 					(approval) => approval.status === "requested",
