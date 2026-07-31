@@ -6,8 +6,9 @@
  * a non-allowed id never resolves, so the gateway rejects it without an
  * upstream request.
  *
- * Defaults below are exact model ids, validated live 2026-07-22 against plan
- * grants; the §6.5 battery re-validates them. Operator overrides at
+ * Defaults admit every bundled catalog provider; plan providers keep exact
+ * ids validated live 2026-07-22 against plan grants, and the §6.5 battery
+ * re-validates them. Operator overrides at
  * ~/.deck/broker/models.allow.json use exact ids by default and an explicit
  * trailing "*" for prefix matches ({ "<provider>": ["<id>", "<prefix>*"] }).
  */
@@ -21,11 +22,13 @@ import { BROKER_DIR } from "./paths";
 const ALLOWLIST_FILE = path.join(BROKER_DIR, "models.allow.json");
 
 /**
- * Per-provider allowlist (PLAN §5.4 providers). Anthropic and OpenAI Codex
- * defaults are exact ids confirmed against the live plan accounts. Z.ai uses
- * the explicit trailing-"*" convention for its family prefix.
+ * Per-provider allowlist. Every bundled catalog provider is admitted with a
+ * full-catalog "*" pattern, then the plan providers below override that with
+ * exact ids confirmed against the live plan accounts — for those, a legacy or
+ * prerelease id still never resolves. Z.ai uses the explicit trailing-"*"
+ * convention for its family prefix.
  */
-export const DEFAULT_ALLOWLIST: Record<string, readonly string[]> = {
+const PLAN_ALLOWLIST: Record<string, readonly string[]> = {
 	anthropic: [
 		"claude-fable-5",
 		"claude-haiku-4-5",
@@ -55,6 +58,11 @@ export const DEFAULT_ALLOWLIST: Record<string, readonly string[]> = {
 	zai: ["glm-*"],
 };
 
+export const DEFAULT_ALLOWLIST: Record<string, readonly string[]> = {
+	...Object.fromEntries(getBundledProviders().map(provider => [provider, ["*"]])),
+	...PLAN_ALLOWLIST,
+};
+
 const allowlistFile = z.record(z.string(), z.array(z.string()));
 
 function loadAllowlist(): Record<string, readonly string[]> {
@@ -82,7 +90,10 @@ export interface ModelIndex {
 
 export function buildModelIndex(allowlist: Record<string, readonly string[]> = loadAllowlist()): ModelIndex {
 	const byId = new Map<string, Model<Api>>();
-	for (const provider of getBundledProviders()) {
+	// Plan providers claim bare ids first: many aggregators re-list the same
+	// model ids, and a bare "gpt-5.5" must keep routing to the plan account.
+	const providers = [...new Set([...Object.keys(PLAN_ALLOWLIST), ...getBundledProviders()])];
+	for (const provider of providers) {
 		if (!allowlist[provider]) continue;
 		for (const model of getBundledModels(provider as GeneratedProvider)) {
 			if (!isModelAllowed(allowlist, provider, model.id)) continue;

@@ -2,7 +2,9 @@
  * Usage roster (SPEC §6.6): broker/usage.json refreshed on probe; TUI renders.
  * AuthStorage already caches per-credential reports at a 5-min jittered TTL and
  * keeps last-good values through transient failures — this module only projects
- * that into the on-disk roster, stripping provider `raw` payloads.
+ * that into the on-disk roster, stripping provider `raw` payloads. Reports are
+ * provider-agnostic: a provider (e.g. xai-oauth) shows up only after a real
+ * `cli.ts login` stores its credential — nothing is fabricated for absent ones.
  */
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
 import { USAGE_JSON, writeJsonAtomic } from "./paths";
