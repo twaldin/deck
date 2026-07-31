@@ -104,8 +104,14 @@ describe("buildPipelineInput", () => {
 	test("existingPr passes through to the pipeline input (adopt path); omitted stays omitted", () => {
 		const adopt = buildPipelineInput(request({ existingPr: 4242 }), deckProfile());
 		expect(adopt.existingPr).toBe(4242);
+		expect((adopt.commands as { deployEvidence: string }).deployEvidence).toContain("adopted existing PR");
 		const fresh = buildPipelineInput(request(), deckProfile());
 		expect(fresh.existingPr).toBeUndefined();
+	});
+
+	test("explicit reviewer skip is passed through even for a stamp profile", () => {
+		const input = buildPipelineInput(request({ profile: "lindy", skipReviewerRequest: true }), lindyProfile());
+		expect(input.github).toEqual({ skipReviewerRequest: true });
 	});
 
 	test("a stamp profile (lindy) never gets the weak git-log deploy default: preflight must fail closed until explicit evidence exists", () => {

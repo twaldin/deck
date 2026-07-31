@@ -290,6 +290,22 @@ describe("executeReviewerRequest", () => {
 		).rejects.toThrow(/\[escalate\] no reviewer candidates/);
 	});
 
+	test("filters non-collaborators and reports them without requesting them", async () => {
+		const requested: string[][] = [];
+		const result = await executeReviewerRequest(config, adapters({
+			isCollaborator: async (login) => login === "Swader",
+			requestReviewers: async (logins) => requested.push(logins),
+		}));
+		expect(requested).toEqual([["Swader"]]);
+		expect(result.skippedNonCollaborators).toEqual(["bgar324"]);
+	});
+
+	test("escalates when all selected reviewers are non-collaborators", async () => {
+		expect(executeReviewerRequest(config, adapters({ isCollaborator: async () => false }))).rejects.toThrow(
+			/no collaborator reviewer candidates.*Swader.*bgar324/,
+		);
+	});
+
 	test("escalates when GH silently drops a requested login", async () => {
 		expect(
 			executeReviewerRequest(
