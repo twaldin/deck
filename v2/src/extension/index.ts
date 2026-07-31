@@ -19,7 +19,7 @@ import { Type } from "typebox";
 import { DECK_OPERATIONAL_PREFIX, registerCalm } from "../calm";
 import { appendStatus, readStatus } from "../events";
 import {
-	buildFleetText,
+	buildFleetView,
 	buildFrame,
 	type FleetTheme,
 	PLAIN_FLEET_THEME,
@@ -286,7 +286,7 @@ export default function deckV2(pi: any): void {
 
 	pi.registerCommand("fleet", {
 		description:
-			"Fleet overlay: attention-first (q/Esc close, r refresh, a show-all; /fleet all opens expanded)",
+			"Fleet overlay: attention-first (q/Esc close, r refresh, a show-all, j/k scroll; /fleet all opens expanded)",
 		handler: async (args: string, ctx: any) => {
 			const frameOptions = workflowCwd === undefined ? {} : { workflowCwd };
 			let frame = await buildFrame(frameOptions);
@@ -308,8 +308,20 @@ export default function deckV2(pi: any): void {
 					// a floor that exceeds a tiny viewport reintroduces the overflow.
 					const maxBodyLines = (): number =>
 						Math.max(1, (tui.terminal?.rows ?? 40) - 10);
-					const render = (): string =>
-						buildFleetText(frame, theme, { showAll, maxBodyLines: maxBodyLines() });
+					let scrollOffset = 0;
+					let scrollable = false;
+					const render = (): string => {
+						const view = buildFleetView(frame, theme, {
+							showAll,
+							maxBodyLines: maxBodyLines(),
+							scrollOffset,
+						});
+						// The view clamps the offset; adopt it so k after over-scrolling
+						// moves immediately instead of unwinding phantom distance.
+						scrollOffset = view.scrollOffset;
+						scrollable = view.scrollable;
+						return view.text;
+					};
 					const body = new Text(render(), 0, 0);
 					box.addChild(body);
 
@@ -343,6 +355,21 @@ export default function deckV2(pi: any): void {
 							}
 							if (data === "a") {
 								showAll = !showAll;
+								scrollOffset = 0;
+								body.setText(render());
+								tui.requestRender();
+								return;
+							}
+							if (data === "j" || data === "\u001b[B") {
+								if (!scrollable) return;
+								scrollOffset += 1;
+								body.setText(render());
+								tui.requestRender();
+								return;
+							}
+							if (data === "k" || data === "\u001b[A") {
+								if (scrollOffset === 0) return;
+								scrollOffset -= 1;
 								body.setText(render());
 								tui.requestRender();
 								return;

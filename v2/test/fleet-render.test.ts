@@ -7,11 +7,13 @@ import { describe, expect, test } from "bun:test";
 import {
 	attentionRank,
 	buildFleetText,
+	buildFleetView,
 	chipFor,
 	framed,
 	humanAge,
 	PLAIN_FLEET_THEME,
 	renderStatusline,
+	sliceVisible,
 	textWidth,
 	visibleTasks,
 	type FleetFrame,
@@ -233,6 +235,106 @@ describe("attention-first default view", () => {
 			(line) => line.startsWith("\u256d") || line.startsWith("\u2502") || line.startsWith("\u2570"),
 		);
 		expect(new Set(bordered.map(textWidth)).size).toBe(1);
+	});
+
+	test("truncated view advertises j/k scroll; untruncated view does not", () => {
+		const clamped = buildFleetView(frame({ tasks: [...doneTasks, ...live] }), PLAIN_FLEET_THEME, {
+			showAll: true,
+			maxBodyLines: 10,
+		});
+		expect(clamped.scrollable).toBe(true);
+		expect(clamped.text).toContain("[j/k] scroll");
+		const open = buildFleetView(frame({ tasks: live }), PLAIN_FLEET_THEME, { showAll: true });
+		expect(open.scrollable).toBe(false);
+		expect(open.text).not.toContain("[j/k] scroll");
+	});
+
+	test("scrollOffset moves the window, stays on-budget, and comes back clamped", () => {
+		const opts = { showAll: true, maxBodyLines: 10 };
+		const f = frame({ tasks: [...doneTasks, ...live] });
+		const top = buildFleetView(f, PLAIN_FLEET_THEME, { ...opts, scrollOffset: 0 });
+		const scrolled = buildFleetView(f, PLAIN_FLEET_THEME, { ...opts, scrollOffset: 5 });
+		expect(scrolled.scrollOffset).toBe(5);
+		expect(scrolled.text).toContain("line(s) above");
+		expect(scrolled.text).not.toBe(top.text);
+		// Frame height never grows past the budget while scrolled.
+		expect(scrolled.text.split("\n").length).toBe(14);
+		// Over-scroll clamps to the real end of the body.
+		const bottom = buildFleetView(f, PLAIN_FLEET_THEME, { ...opts, scrollOffset: 9_999 });
+		expect(bottom.scrollOffset).toBeLessThan(9_999);
+		expect(bottom.text).not.toContain("more line(s)");
+		expect(bottom.text.split("\n").length).toBeLessThanOrEqual(14);
+	});
+});
+
+describe("sliceVisible", () => {
+	const lines = Array.from({ length: 20 }, (_, i) => `L${i}`);
+
+	test("fits: everything visible, no markers", () => {
+		expect(sliceVisible(lines, 0, 20)).toEqual({ visible: lines, offset: 0, above: 0, below: 0 });
+		expect(sliceVisible(lines, 7, 25).offset).toBe(0);
+	});
+
+	test("top of a clamped list: below marker only, budget respected", () => {
+		const win = sliceVisible(lines, 0, 10);
+		expect(win).toEqual({ visible: lines.slice(0, 9), offset: 0, above: 0, below: 11 });
+	});
+
+	test("middle: both markers, still on budget", () => {
+		const win = sliceVisible(lines, 5, 10);
+		expect(win.above).toBe(5);
+		expect(win.visible).toEqual(lines.slice(5, 13));
+		expect(win.below).toBe(7);
+		expect(win.visible.length + 2).toBe(10);
+	});
+
+	test("bottom: offset clamps so the last line lands on screen", () => {
+		const win = sliceVisible(lines, 9_999, 10);
+		expect(win.offset).toBe(11);
+		expect(win.below).toBe(0);
+		expect(win.visible[win.visible.length - 1]).toBe("L19");
+		expect(win.visible.length + 1).toBeLessThanOrEqual(10);
+	});
+
+	test("negative offset clamps to 0", () => {
+		expect(sliceVisible(lines, -3, 10).offset).toBe(0);
+	});
+
+	const bodyRows = (win: { visible: string[]; above: number; below: number }): number =>
+		win.visible.length + (win.above > 0 ? 1 : 0) + (win.below > 0 ? 1 : 0);
+
+	test("max=1 still shows one line and drops the markers to stay on budget", () => {
+		const top = sliceVisible(lines, 0, 1);
+		expect(top.visible).toEqual(["L0"]);
+		expect(bodyRows(top)).toBe(1);
+		const mid = sliceVisible(lines, 5, 1);
+		expect(mid.visible).toEqual(["L5"]);
+		expect(bodyRows(mid)).toBe(1);
+	});
+
+	test("max=2 mid-list keeps one content line inside the budget", () => {
+		const win = sliceVisible(lines, 5, 2);
+		expect(win.visible.length).toBeGreaterThanOrEqual(1);
+		expect(bodyRows(win)).toBeLessThanOrEqual(2);
+	});
+
+	test("body rows never exceed max at any offset for small budgets", () => {
+		for (const max of [1, 2, 3]) {
+			for (let off = 0; off < 25; off++) {
+				const win = sliceVisible(lines, off, max);
+				expect(bodyRows(win)).toBeLessThanOrEqual(max);
+				expect(win.visible.length).toBeGreaterThanOrEqual(1);
+			}
+		}
+	});
+
+	test("buildFleetView honors tiny maxBodyLines budgets when scrolled", () => {
+		const f = frame({ tasks: [...Array.from({ length: 15 }, (_, i) => task({ taskId: `old-${i}`, lastVerb: "done" })), task({ taskId: "live", runState: "running" })] });
+		for (const maxBodyLines of [1, 2]) {
+			const view = buildFleetView(f, PLAIN_FLEET_THEME, { showAll: true, maxBodyLines, scrollOffset: 1 });
+			// top/bottom border + body + blank + footer
+			expect(view.text.split("\n").length).toBeLessThanOrEqual(maxBodyLines + 4);
+		}
 	});
 });
 
