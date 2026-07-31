@@ -22,6 +22,7 @@ import { projectFleet } from "./herdr";
 import { assertHomeIsNotACheckout, assertHomeIsNotAnotherFleet, deckV2Home, stateFiles } from "./home";
 import { readMeta } from "./meta";
 import { enqueue, pending } from "./queue";
+import { startShip } from "./ship";
 import { peekSession, startRun } from "./spawn";
 import { STATUS_VERBS, type StatusVerb } from "./status";
 import { evaluateTeardown, formatVerdict } from "./teardown";
@@ -30,9 +31,21 @@ import { detectStale, foldBatched, reconcile } from "./wake";
 const USAGE = `deck-v2 — fleet primitives
 
   bootstrap                        create the orchestrator home (not a checkout)
+  ship <ticket> --profile <id> --worktree <path> --branch <name>
+             --title <text> --summary <text> --accept <a;b;c>
+             [--base <branch>] [--break-signal <text>] [--kill-switch <name>]
+             [--blast-radius <text>] [--reviewers <a,b>] [--deploy-evidence <cmd>]
+             [--run-id <id>] [--dry-run]
+                                   DEFAULT ship path: start the project's PR
+                                   pipeline (adversarial review gates the PR open;
+                                   yolo profiles merge on green, stamp profiles
+                                   park for the captain's word)
   spawn <id> --task <text> --accept <text> (--repo <path|alias> | --worktree <path>)
              [--kind ship|scout] [--base <branch>] [--desc <text>]
              [--project <name>] [--branch <name>] [--model <deck/model>]
+             [--no-pipeline]     workers inside a pipeline stage, scouts; bare
+                                 ship on a profiled project is refused without
+                                 --no-pipeline
   send <id> <message>              queue a message for the task's next run
   status <id> [--json]             the task's events and current reconciliation
   peek <id> [--limit N]            tail the task's session transcript
@@ -111,6 +124,44 @@ export async function runCli(argv: string[]): Promise<number> {
 				return 0;
 			}
 
+			case "ship": {
+				const ticket = args._[1];
+				if (ticket === undefined) throw new Error("ship needs a ticket/effort id");
+				const reviewers = str(args.flags, "reviewers");
+				const result = startShip({
+					ticket,
+					profile: need(args.flags, "profile"),
+					worktree: path.resolve(need(args.flags, "worktree")),
+					branch: need(args.flags, "branch"),
+					title: need(args.flags, "title"),
+					summary: need(args.flags, "summary"),
+					acceptance: need(args.flags, "accept").split(";").map((s) => s.trim()),
+					...(str(args.flags, "base") === undefined ? {} : { baseBranch: need(args.flags, "base") }),
+					...(str(args.flags, "break-signal") === undefined
+						? {}
+						: { breakSignal: need(args.flags, "break-signal") }),
+					...(str(args.flags, "kill-switch") === undefined
+						? {}
+						: { killSwitch: need(args.flags, "kill-switch") }),
+					...(str(args.flags, "blast-radius") === undefined
+						? {}
+						: { blastRadius: need(args.flags, "blast-radius") }),
+					...(reviewers === undefined ? {} : { reviewers: reviewers.split(",").map((s) => s.trim()) }),
+					...(str(args.flags, "deploy-evidence") === undefined
+						? {}
+						: { deployEvidence: need(args.flags, "deploy-evidence") }),
+					...(str(args.flags, "run-id") === undefined ? {} : { runId: need(args.flags, "run-id") }),
+					...(args.flags["dry-run"] === true ? { dryRun: true } : {}),
+				});
+				process.stdout.write(
+					`ship ${result.runId} started (pid ${result.pid}) — profile ${result.profile} (${result.pipeline})${result.dryRun ? " [DRY RUN]" : ""}\n` +
+						`input: ${result.inputPath}\nlog: ${result.logPath}\n` +
+						`watch: (cd ${result.pipelineDir} && smithers ps; smithers why ${result.runId})\n` +
+						`a stamp park resumes with: smithers approve ${result.runId} --node r0-stamp --by tim; smithers up pipeline.tsx --run-id ${result.runId} --resume true\n`,
+				);
+				return 0;
+			}
+
 			case "spawn": {
 				const id = args._[1];
 				if (id === undefined) throw new Error("spawn needs a task id");
@@ -122,6 +173,7 @@ export async function runCli(argv: string[]): Promise<number> {
 						task: need(args.flags, "task"),
 						acceptance: accept === undefined ? [] : accept.split(";").map((s) => s.trim()),
 						kind: str(args.flags, "kind") === "scout" ? "scout" : "ship",
+						...(args.flags["no-pipeline"] === true ? { noPipeline: true } : {}),
 						...(worktreeFlag === undefined ? {} : { worktree: path.resolve(worktreeFlag) }),
 						...(str(args.flags, "repo") === undefined ? {} : { repo: need(args.flags, "repo") }),
 						...(str(args.flags, "base") === undefined ? {} : { base: need(args.flags, "base") }),

@@ -3,8 +3,14 @@
 This file is the project's committed home for project-intrinsic agent knowledge: build, test, release, architecture, and sharp-edge notes that should travel with the code.
 
 - Smithers workflows live under `workflows/` (workspace anchor: `workflows/.smithers`,
-  pinned smithers-orchestrator **0.30.0**). The lindy PR pipeline is
+  pinned smithers-orchestrator **0.30.0**). The PR pipeline is
   `workflows/pr-pipeline/` - dispatch/babysit docs in its README.
+  **It is the DEFAULT ship path for every profiled project** (`deck-v2 ship` /
+  the orchestrator `ship` tool): the PR open is a pipeline node hard-gated
+  behind adversarial review; lindy-full parks for the captain's stamp,
+  yolo-ship auto-merges on green. `deck-v2 spawn --kind ship` on a profiled
+  repo is refused without `--no-pipeline` (`v2/src/spawn.ts`
+  `assertShipGoesThroughPipeline`; entry `v2/src/ship.ts`).
   **Smithers is the standard crew tool for multi-step PR work** (durable state,
   replayable attempts, real approval gates); rationale in `workflows/README.md`.
 - **Pi is Deck's ONLY Smithers engine.** Every agent seat is a `PiAgent` on

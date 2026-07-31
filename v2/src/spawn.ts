@@ -15,7 +15,7 @@ import * as path from "node:path";
 import { appendStatus } from "./events";
 import { ensureTaskDirs, stateFiles, taskFiles } from "./home";
 import { bumpEpoch, readMeta, updateMeta, type TaskKind } from "./meta";
-import { findProfile, loadProfiles } from "./projects";
+import { findProfile, loadProfiles, type ProjectProfile } from "./projects";
 import { workerBrief } from "./prompts";
 import { buildHydration } from "./hydrate";
 import { ack as ackMessages } from "./queue";
@@ -65,6 +65,12 @@ export type SpawnRequest = {
 	project?: string;
 	/** Wall-clock budget for the run. Default DEFAULT_DEADLINE_MS. */
 	deadlineMs?: number;
+	/**
+	 * Escape hatch: this ship spawn deliberately bypasses the project's PR
+	 * pipeline (a worker inside a pipeline stage, or captain-authorized bare
+	 * work). Default false: profiled ship work goes through `deck-v2 ship`.
+	 */
+	noPipeline?: boolean;
 	branch?: string;
 	model?: string;
 	context?: string;
@@ -98,6 +104,45 @@ export function resolveRepo(repo: string): string {
 		);
 	}
 	return profile.primary;
+}
+
+/**
+ * The profile a ship spawn would belong to, if any: match by project name,
+ * repo alias, or the repo's primary checkout path.
+ */
+export function shipProfileFor(request: SpawnRequest): ProjectProfile | null {
+	if (request.project !== undefined) {
+		const byProject = findProfile(request.project);
+		if (byProject !== null) return byProject;
+	}
+	if (request.repo !== undefined) {
+		if (!path.isAbsolute(request.repo)) return findProfile(request.repo);
+		const resolved = path.resolve(request.repo);
+		for (const profile of loadProfiles()) {
+			if (path.resolve(profile.primary) === resolved) return profile;
+		}
+	}
+	return null;
+}
+
+/**
+ * Machine enforcement of the default ship path (doctrine PR #26865: a bare
+ * spawn shipped a PR with no adversarial review). A ship spawn on a profiled
+ * project is refused unless noPipeline is explicit: the effort ships through
+ * the pr-pipeline (`deck-v2 ship`), where the PR open is a compute node hard-
+ * gated behind the adversarial review. Raw spawn stays available for workers
+ * inside a pipeline stage, scouts, and captain-authorized escapes.
+ */
+export function assertShipGoesThroughPipeline(request: SpawnRequest): void {
+	if (request.kind !== "ship" || request.noPipeline === true) return;
+	const profile = shipProfileFor(request);
+	if (profile === null) return;
+	throw new Error(
+		`refusing a bare ship spawn on profiled project "${profile.id}" (pipeline: ${profile.pipeline}).\n` +
+			`Ship the effort through its pipeline instead: deck-v2 ship <ticket> --profile ${profile.id} ... \n` +
+			`(adversarial review is a hard gate before the PR opens there).\n` +
+			`spawn is for workers inside a pipeline stage and for scouts; pass --no-pipeline only with the captain's word.`,
+	);
 }
 
 export type AllocatedWorktree = { wtId: string; worktree: string; branch: string };
@@ -224,6 +269,7 @@ export function startRun(request: SpawnRequest, primaryCheckout: string): SpawnR
 	if ((request.worktree === undefined) === (request.repo === undefined)) {
 		throw new Error("spawn needs exactly one of worktree (absolute path) or repo (path or alias)");
 	}
+	assertShipGoesThroughPipeline(request);
 	const allocated = request.worktree === undefined ? allocateWorktree(request) : undefined;
 	const worktree = allocated?.worktree ?? (request.worktree as string);
 	const branch = allocated?.branch ?? request.branch;

@@ -89,6 +89,29 @@ Run everything below **on deckbox**, as your own user.
    deck-v2 fleet    # empty fleet, no errors
    ```
 
+## Shipping a personal project (yolo-ship)
+
+Personal projects on deckbox ship through the same PR pipeline as everything
+else; the profile just selects the yolo posture. One-time per project: add a
+profile to `~/.deck/config/projects.json` (the deck seed is the template —
+`pipeline: "yolo-ship", yolo: true, stamp: false`).
+
+Then one command ships an effort:
+
+```sh
+deck-v2 ship myproj-7 --profile myproj \
+  --worktree ~/.deck/wt/myproj-1 --branch deck/myproj-7 --base main \
+  --title "feat(x): y" --summary "what and why" \
+  --accept "tests green;behavior proven"
+```
+
+That starts the pr-pipeline workflow detached: adversarial review (opposite
+model family) hard-gates the PR open, CI/review watch keeps it mergeable, and
+the merge fires automatically on CI green — no stamp park. Watch it with
+`smithers ps` / `smithers why <run-id>` from `~/dev/deck/workflows/pr-pipeline`.
+A bare `deck-v2 spawn --kind ship` on a profiled repo is refused; that is the
+point — the pipeline is the default, `--no-pipeline` is the escape hatch.
+
 ## How deck code moves between hosts
 
 | Host | Authors deck? | Gets new deck by |

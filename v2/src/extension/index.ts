@@ -31,6 +31,7 @@ import { deckV2Home, stateFiles } from "../home";
 import { readMeta } from "../meta";
 import { registerQuestions } from "../questions";
 import { enqueue, pending } from "../queue";
+import { startShip } from "../ship";
 import { peekSession, startRun } from "../spawn";
 import { STATUS_VERBS, type StatusVerb } from "../status";
 import { evaluateTeardown, formatVerdict } from "../teardown";
@@ -108,6 +109,12 @@ export default function deckV2(pi: any): void {
 			base: Type.Optional(Type.String({ description: "base branch/commit for allocation; default origin/main" })),
 			desc: Type.Optional(Type.String({ description: "short label recorded on the worktree entry" })),
 			kind: Type.Union([Type.Literal("ship"), Type.Literal("scout")]),
+			no_pipeline: Type.Optional(
+				Type.Boolean({
+					description:
+						"escape hatch: bare ship on a profiled project (refused otherwise). Ship efforts with the ship tool instead.",
+				}),
+			),
 			project: Type.Optional(Type.String()),
 			branch: Type.Optional(Type.String()),
 			model: Type.Optional(Type.String({ description: "deck/<model>; defaults to the fable class" })),
@@ -120,6 +127,7 @@ export default function deckV2(pi: any): void {
 					task: params.task as string,
 					acceptance: (params.acceptance as string[]) ?? [],
 					kind: params.kind as "ship" | "scout",
+					...(params.no_pipeline === true ? { noPipeline: true } : {}),
 					...(params.worktree === undefined ? {} : { worktree: params.worktree as string }),
 					...(params.repo === undefined ? {} : { repo: params.repo as string }),
 					...(params.base === undefined ? {} : { base: params.base as string }),
@@ -133,6 +141,55 @@ export default function deckV2(pi: any): void {
 			);
 			return text(
 				`spawned ${result.taskId} (epoch ${result.epoch}, pid ${result.pid}, ${result.model})\nworktree: ${result.worktree}${result.wtId === undefined ? "" : ` (${result.wtId}, branch ${result.branch})`}\nbrief: ${result.briefPath}\nIt reports through its status file; it cannot contact the captain.`,
+			);
+		},
+	});
+
+	pi.registerTool({
+		name: "ship",
+		label: "Ship",
+		description:
+			"DEFAULT ship path for a profiled project: start its PR pipeline (adversarial review hard-gates the PR open; lindy-full parks for the captain's stamp, yolo-ship merges on green). The worktree must exist with the branch checked out and the work committed or described in the brief fields.",
+		parameters: Type.Object({
+			ticket: Type.String({ description: "ticket / effort id; seeds the run id" }),
+			profile: Type.String({ description: "project profile id (lindy, deck, ...)" }),
+			worktree: Type.String({ description: "absolute path to the task worktree" }),
+			branch: Type.String(),
+			title: Type.String(),
+			summary: Type.String(),
+			acceptance: Type.Array(Type.String(), { description: "concrete, checkable criteria" }),
+			base: Type.Optional(Type.String({ description: "base branch; default main" })),
+			break_signal: Type.Optional(Type.String({ description: "fallout signal to watch after landing" })),
+			kill_switch: Type.Optional(Type.String({ description: "named kill-switch; omitted = explicit none" })),
+			blast_radius: Type.Optional(Type.String()),
+			reviewers: Type.Optional(Type.Array(Type.String())),
+			deploy_evidence: Type.Optional(Type.String({ description: "shell command that proves the deploy" })),
+			dry_run: Type.Optional(Type.Boolean({ description: "simulate side effects; default false" })),
+		}),
+		async execute(_id: string, params: Record<string, unknown>) {
+			const result = startShip({
+				ticket: params.ticket as string,
+				profile: params.profile as string,
+				worktree: params.worktree as string,
+				branch: params.branch as string,
+				title: params.title as string,
+				summary: params.summary as string,
+				acceptance: (params.acceptance as string[]) ?? [],
+				...(params.base === undefined ? {} : { baseBranch: params.base as string }),
+				...(params.break_signal === undefined ? {} : { breakSignal: params.break_signal as string }),
+				...(params.kill_switch === undefined ? {} : { killSwitch: params.kill_switch as string }),
+				...(params.blast_radius === undefined ? {} : { blastRadius: params.blast_radius as string }),
+				...(params.reviewers === undefined ? {} : { reviewers: params.reviewers as string[] }),
+				...(params.deploy_evidence === undefined
+					? {}
+					: { deployEvidence: params.deploy_evidence as string }),
+				...(params.dry_run === true ? { dryRun: true } : {}),
+			});
+			return text(
+				`ship ${result.runId} started (pid ${result.pid}) \u2014 profile ${result.profile} (${result.pipeline})${result.dryRun ? " [DRY RUN]" : ""}\n` +
+					`log: ${result.logPath}\n` +
+					`watch from ${result.pipelineDir}: smithers ps; smithers why ${result.runId}\n` +
+					`stamp parks resume with smithers approve + up --resume true. The pipeline owns the PR open, CI watch and merge; do not open a PR by hand.`,
 			);
 		},
 	});
@@ -640,6 +697,7 @@ function asFleetTheme(source: unknown): FleetTheme {
 export const TOOL_NAMES = [
 	"ask_captain",
 	"spawn",
+	"ship",
 	"send",
 	"status",
 	"peek",
