@@ -7,6 +7,7 @@
 import { describe, expect, test } from "bun:test";
 import { getBundledProviders } from "@oh-my-pi/pi-catalog/models";
 import { buildModelIndex, DEFAULT_ALLOWLIST } from "../src/models";
+import { parseFastModel } from "../src/fast-gateway";
 
 describe("default allowlist covers the full catalog", () => {
 	test("every bundled provider is admitted", () => {
@@ -35,6 +36,16 @@ describe("default allowlist covers the full catalog", () => {
 		expect(index.resolve("claude-opus-4-6")?.provider).toBe("anthropic");
 		expect(index.resolve("gpt-5.6-sol")?.provider).toBe("openai-codex");
 		expect(index.resolve("glm-4.7")?.provider).toBe("zai");
+	});
+
+	test(":fast strips the suffix and selects priority for OpenAI", () => {
+		const index = buildModelIndex(DEFAULT_ALLOWLIST);
+		expect(parseFastModel("openai-codex/gpt-5.6-luna:fast", index.resolve)).toEqual({ modelId: "openai-codex/gpt-5.6-luna", serviceTier: "priority" });
+	});
+
+	test(":fast rejects non-OpenAI models", () => {
+		const index = buildModelIndex(DEFAULT_ALLOWLIST);
+		expect(() => parseFastModel("anthropic/claude-haiku-4-5:fast", index.resolve)).toThrow(":fast is supported only for OpenAI models");
 	});
 
 	test("an explicit allowlist argument still tightens down", () => {
