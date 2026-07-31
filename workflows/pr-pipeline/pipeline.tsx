@@ -38,7 +38,7 @@ import {
 } from "smithers-orchestrator";
 import { z } from "zod";
 
-import { assertAdoptable } from "./lib/adopt.ts";
+import { assertAdoptable, decideAdoptPush } from "./lib/adopt.ts";
 import { validateBrief } from "./lib/brief.ts";
 import { evaluateDone } from "./lib/done.ts";
 import {
@@ -820,10 +820,15 @@ export default smithers((ctx) => {
 											[github.git, "merge-base", "--is-ancestor", overview.headSha, worktreeHead],
 											{ cwd: input.worktree },
 										);
-										if (ancestor.code !== 0) {
+										const decision = decideAdoptPush({
+											worktreeHead,
+											prHead: overview.headSha,
+											isAncestor: ancestor.code === 0,
+										});
+										if (decision === "escalate") {
 											throw new Error(
-													`[escalate] adopted worktree HEAD ${worktreeHead} is not ahead of PR head ${overview.headSha}; refusing to overwrite the PR branch.`,
-												);
+												`[escalate] adopted worktree HEAD ${worktreeHead} is not ahead of PR head ${overview.headSha}; refusing to overwrite the PR branch.`,
+											);
 										}
 										await execOrThrow(
 											bunExec,

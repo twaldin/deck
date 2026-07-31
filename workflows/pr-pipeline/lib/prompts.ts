@@ -33,7 +33,7 @@ export function localReviewPrompt(brief: Brief, worktree: string, baseBranch: st
 		"You are deliberately a different model family than the implementer - hunt for what it missed.",
 		`Worktree: ${worktree}. Review round: ${round}.`,
 		"",
-		`Review the full diff: \`git diff ${baseBranch}...HEAD\` plus the repo context you need.`,
+		`Review the full diff: \`git fetch origin ${baseBranch} && git diff origin/${baseBranch}...HEAD\` plus the repo context you need.`,
 		"Brief the change claims to implement:",
 		JSON.stringify({ title: brief.title, acceptanceCriteria: brief.acceptanceCriteria }, null, 2),
 		"",
@@ -95,8 +95,6 @@ export function watchFixPrompt(args: {
 		"never run gt submit / gt create / gh pr create - that creates an accidental child PR.",
 		"Never merge anything. After a rerun or push, return the receipt and exit immediately.",
 		"Never sleep-poll CI or review state. The next persisted Smithers poll owns the wait.",
-
-		"",
 		`Final output: ONLY a JSON object {"round": ${args.round}, "afterPoll": ${args.afterPoll}, "actions": string[], "pushed": boolean, "reRequested": string[], "summary": string}.`,
 		`"round" MUST be exactly ${args.round} and "afterPoll" MUST be exactly ${args.afterPoll}.`,
 	].join("\n");
