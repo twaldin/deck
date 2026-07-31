@@ -6,11 +6,12 @@ const FAST_SUFFIX = ":fast";
 export function parseFastModel(modelId: string, resolveModel: ModelResolver): { modelId: string; serviceTier?: "priority" } {
 	if (!modelId.endsWith(FAST_SUFFIX)) return { modelId };
 	const baseId = modelId.slice(0, -FAST_SUFFIX.length);
-	const model = resolveModel(baseId);
+	const resolverId = baseId.startsWith("deck/") ? baseId.slice("deck/".length) : baseId;
+	const model = resolveModel(resolverId);
 	if (!model || !isOpenAIModel(model)) {
 		throw new Error(`:fast is supported only for OpenAI models (received ${JSON.stringify(modelId)})`);
 	}
-	return { modelId: baseId, serviceTier: "priority" };
+	return { modelId: resolverId, serviceTier: "priority" };
 }
 
 function isOpenAIModel(model: Model<Api>): boolean {
