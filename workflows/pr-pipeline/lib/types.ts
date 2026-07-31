@@ -60,6 +60,8 @@ export interface ReviewerActivity {
 	lastActivityAt: string;
 	/** APPROVED | CHANGES_REQUESTED | COMMENTED | DISMISSED */
 	lastReviewState: string | null;
+	/** Whether the latest non-comment review state is still APPROVED. */
+	hasActiveApproval?: boolean;
 }
 
 export interface CommentActivity {

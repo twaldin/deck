@@ -342,6 +342,46 @@ describe("watch helpers", () => {
 		expect(reviewersNeedingReRequest(reviewers, ["requested"], lastPush, ["me"])).toEqual(["stale"]);
 	});
 
+	test("does not re-request an approval that predates the push", () => {
+		expect(
+			reviewersNeedingReRequest(
+				[{ login: "approved", isBot: false, lastActivityAt: "2026-07-27T09:00:00Z", lastReviewState: "APPROVED" }],
+				[],
+				"2026-07-27T10:00:00Z",
+			),
+		).toEqual([]);
+	});
+
+	test("re-requests changes requested before the push", () => {
+		expect(
+			reviewersNeedingReRequest(
+				[{ login: "changes", isBot: false, lastActivityAt: "2026-07-27T09:00:00Z", lastReviewState: "CHANGES_REQUESTED" }],
+				[],
+				"2026-07-27T10:00:00Z",
+			),
+		).toEqual(["changes"]);
+	});
+
+	test("does not re-request an approval after the push", () => {
+		expect(
+			reviewersNeedingReRequest(
+				[{ login: "approved", isBot: false, lastActivityAt: "2026-07-27T11:00:00Z", lastReviewState: "APPROVED" }],
+				[],
+				"2026-07-27T10:00:00Z",
+			),
+		).toEqual([]);
+	});
+
+	test("re-requests an approval dismissed after the push", () => {
+		expect(
+			reviewersNeedingReRequest(
+				[{ login: "dismissed", isBot: false, lastActivityAt: "2026-07-27T09:00:00Z", lastReviewState: "DISMISSED" }],
+				[],
+				"2026-07-27T10:00:00Z",
+			),
+		).toEqual(["dismissed"]);
+	});
+
 	test("unansweredComments counts only others' comments newer than our latest activity", () => {
 		const comments = [
 			{ author: "rev", isBot: false, createdAt: "2026-07-27T11:00:00Z" },
@@ -377,6 +417,9 @@ describe("watch fix worker boundary", () => {
 		expect(prompt).toContain("force-with-lease");
 		expect(prompt).toContain("Never sleep-poll CI or review state");
 		expect(prompt).toContain("persisted Smithers poll owns the wait");
+		expect(prompt).toContain("reviewersToReRequest");
+		expect(prompt).toContain("-- tim's agent");
+		expect(prompt).not.toContain("re-request every prior human reviewer");
 	});
 });
 

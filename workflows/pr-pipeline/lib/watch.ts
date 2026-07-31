@@ -37,8 +37,8 @@ export function assessCi(checkRuns: CheckRun[]): CiState {
 /**
  * Reviewers whose last activity predates the last push and who are not
  * currently in requested_reviewers: these are the silent no-ops the SOP
- * calls out. Bots and reviewers whose latest state is APPROVED after the
- * push are excluded.
+ * calls out. A current, non-dismissed approval remains valid across pushes;
+ * a dismissal after the push needs a fresh request.
  */
 export function reviewersNeedingReRequest(
 	reviewers: ReviewerActivity[],
@@ -52,10 +52,16 @@ export function reviewersNeedingReRequest(
 	for (const reviewer of reviewers) {
 		const login = reviewer.login.toLowerCase();
 		if (reviewer.isBot || self.has(login) || requested.has(login)) continue;
-		// Activity after the last push means they have seen the current head.
-		if (reviewer.lastActivityAt >= lastPushAt) {
+		const state = reviewer.lastReviewState?.toUpperCase();
+		// GitHub keeps approvals across pushes unless the approval is dismissed.
+		if (reviewer.hasActiveApproval === true || state === "APPROVED") continue;
+		if (state === "DISMISSED") {
+			// A dismissed approval is no longer valid, regardless of when it was submitted.
+			out.push(reviewer.login);
 			continue;
 		}
+		// Activity after the last push means they have seen the current head.
+		if (reviewer.lastActivityAt >= lastPushAt) continue;
 		out.push(reviewer.login);
 	}
 	return out;

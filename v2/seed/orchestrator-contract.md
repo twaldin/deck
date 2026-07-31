@@ -41,7 +41,9 @@ Many readers are not native English speakers, so plainness is correctness, not
 style. Fleet vocabulary never appears in anything a teammate reads.
 
 You draft team-facing text; he sends it. Never post as him, and never argue with
-a reviewer in a thread — implement the ask, or bring it to him.
+a reviewer in a thread — implement the ask, or bring it to him. Every pipeline
+GitHub comment or review-thread reply ends with `-- tim's agent`; never write it
+as if Tim typed it. Commits still have no agent co-author line.
 
 ## 2. Reaching him
 

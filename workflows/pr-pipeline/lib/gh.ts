@@ -122,6 +122,7 @@ export function parseActivity(
 ): { comments: CommentActivity[]; reviewers: ReviewerActivity[] } {
 	const comments: CommentActivity[] = [];
 	const latestByReviewer = new Map<string, ReviewerActivity>();
+	const approvalByReviewer = new Map<string, { at: string; approved: boolean }>();
 
 	if (Array.isArray(commentNodes)) {
 		for (const node of commentNodes) {
@@ -143,18 +144,32 @@ export function parseActivity(
 			if (str(node.body) !== "") {
 				comments.push({ author: login, isBot: isBotAuthor(author), createdAt: submittedAt });
 			}
-			const prior = latestByReviewer.get(login.toLowerCase());
+			const key = login.toLowerCase();
+			const state = str(node.state).toUpperCase();
+			if (state === "APPROVED" || state === "CHANGES_REQUESTED" || state === "DISMISSED") {
+				const priorApproval = approvalByReviewer.get(key);
+				if (priorApproval === undefined || submittedAt > priorApproval.at) {
+					approvalByReviewer.set(key, { at: submittedAt, approved: state === "APPROVED" });
+				}
+			}
+			const prior = latestByReviewer.get(key);
 			if (prior === undefined || submittedAt > prior.lastActivityAt) {
-				latestByReviewer.set(login.toLowerCase(), {
+				latestByReviewer.set(key, {
 					login,
 					isBot: isBotAuthor(author),
 					lastActivityAt: submittedAt,
-					lastReviewState: str(node.state) !== "" ? str(node.state) : null,
+					lastReviewState: state !== "" ? state : null,
 				});
 			}
 		}
 	}
-	return { comments, reviewers: [...latestByReviewer.values()] };
+	return {
+		comments,
+		reviewers: [...latestByReviewer.entries()].map(([key, reviewer]) => ({
+			...reviewer,
+			hasActiveApproval: approvalByReviewer.get(key)?.approved === true,
+		})),
+	};
 }
 
 /** requested_reviewers REST payload -> logins. */
