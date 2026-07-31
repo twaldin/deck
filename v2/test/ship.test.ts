@@ -115,6 +115,12 @@ describe("startShip", () => {
 		);
 	});
 
+	test("a non-positive or fractional existingPr refuses before anything is written", async () => {
+		await expect(startShip(request({ existingPr: 0 }), home)).rejects.toThrow(/existingPr/);
+		await expect(startShip(request({ existingPr: -3 }), home)).rejects.toThrow(/existingPr/);
+		await expect(startShip(request({ existingPr: 1.5 }), home)).rejects.toThrow(/existingPr/);
+	});
+
 	test("empty acceptance refuses (preflight fails closed downstream anyway)", async () => {
 		await expect(startShip(request({ acceptance: [] }), home)).rejects.toThrow(/acceptance/);
 	});

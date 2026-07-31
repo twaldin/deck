@@ -145,6 +145,12 @@ export async function startShip(request: ShipRequest, home = deckV2Home()): Prom
 			`unknown project profile "${request.profile}": add it to config/projects.json (deck home) first`,
 		);
 	}
+	if (
+		request.existingPr !== undefined &&
+		(!Number.isInteger(request.existingPr) || request.existingPr <= 0)
+	) {
+		throw new Error(`existingPr must be a positive PR number, got ${request.existingPr}`);
+	}
 	if (request.acceptance.length === 0) {
 		throw new Error("ship needs at least one acceptance criterion (preflight fails closed without them)");
 	}
