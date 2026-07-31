@@ -273,6 +273,57 @@ describe("idle compaction policy", () => {
 		expect(selectIdleCompactionConfig(parsed, { provider: "deck", id: "glm-test" })).toBe(parsed.config);
 	});
 
+	test("gives grok/xai routes a built-in short cache profile with env override", () => {
+		const parsed = parseIdleCompactionConfig({});
+		const xai = { cacheTtlMs: 120_000, marginMs: 30_000 };
+		expect(selectIdleCompactionConfig(parsed, { provider: "xai", id: "grok-4-fast" })).toMatchObject(xai);
+		expect(selectIdleCompactionConfig(parsed, { provider: "xai-oauth", id: "custom-id" })).toMatchObject(xai);
+		expect(selectIdleCompactionConfig(parsed, { provider: "deck", id: "xai/grok-code-fast-1" })).toMatchObject(xai);
+		expect(selectIdleCompactionConfig(parsed, { provider: "deck", id: "glm-test" })).toBe(parsed.config);
+
+		const overridden = parseIdleCompactionConfig({
+			PI_IDLE_COMPACTION_XAI_TTL_MS: "60000",
+			PI_IDLE_COMPACTION_XAI_MARGIN_MS: "10000",
+			PI_IDLE_COMPACTION_ANTHROPIC_TTL_MS: "900",
+			PI_IDLE_COMPACTION_ANTHROPIC_MARGIN_MS: "100",
+		});
+		expect(selectIdleCompactionConfig(overridden, { provider: "deck", id: "grok-test" })).toMatchObject({
+			cacheTtlMs: 60_000,
+			marginMs: 10_000,
+		});
+		expect(selectIdleCompactionConfig(overridden, { provider: "anthropic", id: "claude-test" })).toMatchObject({
+			cacheTtlMs: 900,
+			marginMs: 100,
+		});
+	});
+
+	test("compacts after the xai idle threshold, well before the global one", () => {
+		const config = selectIdleCompactionConfig(parseIdleCompactionConfig({}), {
+			provider: "deck",
+			id: "grok-4-fast",
+		});
+		expect(idleThresholdMs(config)).toBe(90_000);
+		const input = {
+			config,
+			nowMs: 90_000,
+			lastCacheTouchMs: 0,
+			isIdle: true,
+			hasPendingMessages: false,
+			inFlightToolCalls: 0,
+			contextTokens: 100_000,
+			contextWindow: 200_000,
+			currentContextMarker: "m1",
+			lastCompactedContextMarker: null,
+			lastCompactedTokens: null,
+			lastCompactedAtMs: null,
+		};
+		expect(decideIdleCompaction(input)).toMatchObject({ compact: true, idleForMs: 90_000 });
+		expect(decideIdleCompaction({ ...input, nowMs: 89_999 })).toMatchObject({
+			compact: false,
+			reason: "cache-still-fresh",
+		});
+	});
+
 	test("rejects incomplete and invalid provider timing profiles", () => {
 		const incomplete = parseIdleCompactionConfig({ PI_IDLE_COMPACTION_OPENAI_TTL_MS: "1000" });
 		expect(incomplete.providerConfigs.openai).toBeUndefined();

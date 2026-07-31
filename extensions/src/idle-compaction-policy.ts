@@ -1,5 +1,5 @@
 export type IdleCompactionEngine = "client" | "native";
-export type IdleCompactionProvider = "anthropic" | "openai";
+export type IdleCompactionProvider = "anthropic" | "openai" | "xai";
 
 export interface IdleCompactionConfig {
 	enabled: boolean;
@@ -50,9 +50,11 @@ export function cacheProviderForModel(model: IdleCompactionModel | undefined): I
 	if (model === undefined) return undefined;
 	if (model.provider === "anthropic") return "anthropic";
 	if (model.provider === "openai" || model.provider === "openai-codex") return "openai";
+	if (model.provider === "xai" || model.provider === "xai-oauth") return "xai";
 	const modelId = model.id.slice(model.id.lastIndexOf("/") + 1);
 	if (modelId.startsWith("claude-")) return "anthropic";
 	if (modelId.startsWith("gpt-")) return "openai";
+	if (modelId.startsWith("grok-")) return "xai";
 	return undefined;
 }
 
@@ -159,7 +161,19 @@ interface ConfigVariable {
 	maximum?: number;
 }
 
-const PROVIDER_CACHE_PROFILES: readonly IdleCompactionProvider[] = ["anthropic", "openai"];
+const PROVIDER_CACHE_PROFILES: readonly IdleCompactionProvider[] = ["anthropic", "openai", "xai"];
+
+/**
+ * xAI documents automatic prompt caching but no cache lifetime; the global
+ * 5-minute profile fires too late for its short-lived cache, so xai gets a
+ * built-in short profile that the paired XAI env vars still override.
+ */
+// ponytail: 2min TTL / 30s margin is a guess at xAI's undocumented cache life; recalibrate when xAI publishes one.
+const DEFAULT_PROVIDER_TIMINGS: Readonly<
+	Partial<Record<IdleCompactionProvider, Pick<IdleCompactionConfig, "cacheTtlMs" | "marginMs">>>
+> = {
+	xai: { cacheTtlMs: 2 * 60_000, marginMs: 30_000 },
+};
 /** Node clamps larger delays to 1ms, which would spin an idle timer. */
 export const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
@@ -304,13 +318,23 @@ export function parseIdleCompactionConfig(
 		warnings,
 	);
 
+	const capCooldown =
+		env.PI_IDLE_COMPACTION_MIN_INTERVAL_MS?.trim() === "" ||
+		env.PI_IDLE_COMPACTION_MIN_INTERVAL_MS === undefined;
 	const providerConfigs: Partial<Record<IdleCompactionProvider, IdleCompactionConfig>> = {};
 	for (const provider of PROVIDER_CACHE_PROFILES) {
 		const ttlEnv = `PI_IDLE_COMPACTION_${provider.toUpperCase()}_TTL_MS`;
 		const marginEnv = `PI_IDLE_COMPACTION_${provider.toUpperCase()}_MARGIN_MS`;
 		const ttlValue = env[ttlEnv]?.trim();
 		const marginValue = env[marginEnv]?.trim();
-		if ((ttlValue === undefined || ttlValue === "") && (marginValue === undefined || marginValue === "")) continue;
+		const defaultTiming = DEFAULT_PROVIDER_TIMINGS[provider];
+		if ((ttlValue === undefined || ttlValue === "") && (marginValue === undefined || marginValue === "")) {
+			if (defaultTiming === undefined) continue;
+			const profile = { ...config, ...defaultTiming };
+			normalizeTiming(profile, ttlEnv, marginEnv, capCooldown, warnings);
+			providerConfigs[provider] = profile;
+			continue;
+		}
 		if (ttlValue === undefined || ttlValue === "" || marginValue === undefined || marginValue === "") {
 			warnings.push(`${ttlEnv}/${marginEnv} must both be set; ignoring the incomplete provider profile`);
 			continue;
@@ -343,14 +367,7 @@ export function parseIdleCompactionConfig(
 			warnings.push(`${ttlEnv}/${marginEnv} must be valid timing values; ignoring the provider profile`);
 			continue;
 		}
-		normalizeTiming(
-			profile,
-			ttlEnv,
-			marginEnv,
-			env.PI_IDLE_COMPACTION_MIN_INTERVAL_MS?.trim() === "" ||
-				env.PI_IDLE_COMPACTION_MIN_INTERVAL_MS === undefined,
-			warnings,
-		);
+		normalizeTiming(profile, ttlEnv, marginEnv, capCooldown, warnings);
 		providerConfigs[provider] = profile;
 	}
 
