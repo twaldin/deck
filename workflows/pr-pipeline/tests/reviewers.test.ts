@@ -262,6 +262,7 @@ function adapters(overrides: Partial<ReviewerRequestAdapters> = {}): ReviewerReq
 		fetchCodeowners: async () => null,
 		fetchRecentAuthors: async () => ["Swader", "Swader", "bgar324"],
 		resolveLogin: async (entry) => entry,
+		isCollaborator: async () => true,
 		requestReviewers: async () => {},
 		fetchRequestedReviewers: async () => ["Swader", "bgar324"],
 		...overrides,
@@ -305,6 +306,25 @@ describe("executeReviewerRequest", () => {
 				adapters({ resolveLogin: async () => null }),
 			),
 		).rejects.toThrow(/Ghost Person/);
+	});
+
+	test("never requests denylisted logins even when suggested upstream", async () => {
+		const requested: string[][] = [];
+		await executeReviewerRequest(
+			{ ...config, explicit: ["mackcooper1408"], exclude: [...config.exclude, "mackcooper1408"] },
+			adapters({ requestReviewers: async (logins) => { requested.push(logins); } }),
+		);
+		expect(requested[0]).not.toContain("mackcooper1408");
+	});
+
+	test("drops non-collaborators without requesting them", async () => {
+		const requested: string[][] = [];
+		await executeReviewerRequest(config, adapters({
+			isCollaborator: async (login) => login === "Swader",
+			requestReviewers: async (logins) => { requested.push(logins); },
+			fetchRequestedReviewers: async () => ["Swader"],
+		}));
+		expect(requested).toEqual([["Swader"]]);
 	});
 
 	test("never requests ali even when ali dominates recent authors", async () => {

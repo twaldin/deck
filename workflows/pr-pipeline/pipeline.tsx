@@ -53,11 +53,13 @@ import {
 	fetchRecentAuthors,
 	fetchRequestedReviewers,
 	fetchWatchSnapshot,
+	isCollaborator,
 	requestReviewers,
 	resolveReviewerLogin,
 } from "./lib/gh.ts";
 import { findLandingCommit } from "./lib/landing.ts";
 import { detectMigrations, MIGRATION_STAGES, migrationEvidenceComplete } from "./lib/migrations.ts";
+import { generatePullRequestDescription } from "./lib/description.ts";
 import {
 	defaultModelPolicy,
 	parseModelRef,
@@ -109,6 +111,7 @@ const DEFAULT_GITHUB = {
 	git: "git",
 	selfLogins: ["twaldin"],
 	excludedApprovers: ["ali"],
+	reviewerDenylist: ["mackcooper1408", "spencer-negri", "daniel-covelli", "akshat-lindy"],
 	reviewers: [] as string[],
 	/** Explicit opt-out only: reviewers are always requested by default. */
 	skipReviewerRequest: false,
@@ -187,6 +190,7 @@ const inputSchema = z.object({
 			git: z.string().optional(),
 			selfLogins: z.array(z.string()).optional(),
 			excludedApprovers: z.array(z.string()).optional(),
+			reviewerDenylist: z.array(z.string()).optional(),
 			reviewers: z.array(z.string()).optional(),
 			skipReviewerRequest: z.boolean().optional(),
 			maxReviewers: z.number().int().positive().optional(),
@@ -933,11 +937,11 @@ export default smithers((ctx) => {
 										"--base", baseBranch,
 										"--title", `${input.ticket}: ${brief?.title ?? input.ticket}`,
 										"--body",
-										`${brief?.summary ?? ""}\n\nAcceptance criteria:\n${(brief?.acceptanceCriteria ?? [])
-											.map((criterion) => `- [ ] ${criterion}`)
-											.join("\n")}${latestLocalReview?.nits?.length
-											? `\n\nLocal review nits (non-blocking):\n${latestLocalReview.nits.map((nit) => `- ${nit}`).join("\n")}`
-											: ""}\n\nManaged by lindy-pr-pipeline run ${ctx.runId}.`,
+										generatePullRequestDescription({
+											brief: brief ?? { summary: "", acceptanceCriteria: [] },
+											testing: implementation.testEvidence,
+											reviewOutcome: latestLocalReview?.summary,
+										}),
 									]);
 									url = createOut.trim().split("\n").pop() ?? "";
 									const match = url.match(/\/pull\/(\d+)/);
@@ -1007,7 +1011,7 @@ export default smithers((ctx) => {
 								return executeReviewerRequest(
 									{
 										explicit: [...(brief?.suggestedReviewers ?? []), ...github.reviewers],
-										exclude: [...github.selfLogins, ...github.excludedApprovers],
+										exclude: [...github.selfLogins, ...github.excludedApprovers, ...github.reviewerDenylist],
 										max: github.maxReviewers,
 									},
 									{
@@ -1015,6 +1019,8 @@ export default smithers((ctx) => {
 										fetchCodeowners: () => fetchCodeowners(ghCtx),
 										fetchRecentAuthors: (files) => fetchRecentAuthors(ghCtx, files),
 										resolveLogin: (entry) => resolveReviewerLogin(ghCtx, entry),
+										isCollaborator: (login) => isCollaborator(ghCtx, login),
+										logSkip: (login, reason) => console.warn(`[reviewer-skip] ${login}: ${reason}`),
 										requestReviewers: (logins) =>
 											requestReviewers(ghCtx, pr.prNumber, logins),
 										fetchRequestedReviewers: () =>

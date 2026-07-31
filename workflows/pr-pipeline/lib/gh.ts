@@ -356,6 +356,13 @@ export async function resolveReviewerLogin(
 	return null;
 }
 
+/** Check repository collaboration before requesting a review. */
+export async function isCollaborator(ctx: GhContext, login: string): Promise<boolean> {
+	const exec = ctx.exec ?? bunExec;
+	const result = await exec([ctx.gh, "api", `repos/${ctx.repo}/collaborators/${login}`]);
+	return result.code === 0;
+}
+
 /** POST review requests. GH silently drops unknown logins - always verify after. */
 export async function requestReviewers(
 	ctx: GhContext,

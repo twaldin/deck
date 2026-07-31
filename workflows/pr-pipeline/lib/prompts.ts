@@ -6,6 +6,15 @@
 
 import type { Brief } from "./types.ts";
 
+export function reviewersDecisionPrompt(denylist: string[]): string {
+	return [
+		"Choose GitHub reviewer logins for this pull request.",
+		"When given names instead of logins, use the gh-reviewer-lookup skill at ~/.pi/agent/skills/gh-reviewer-lookup.",
+		"Never emit a denylisted login. The denylist is supplied by pipeline config.",
+		`Configured denylist: ${denylist.join(", ")}`,
+	].join("\\n");
+}
+
 export function implementPrompt(brief: Brief, worktree: string, branch: string): string {
 	return [
 		"You are the IMPLEMENTER inside an enforced PR pipeline for the lindy repo.",
