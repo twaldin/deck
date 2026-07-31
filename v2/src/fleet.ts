@@ -373,17 +373,19 @@ function truncate(body: string, max: number): string {
 }
 
 /**
- * Attention rank: lower renders first. Terminal rows (done/failed with nothing
- * pending) rank last and are hidden by the default view.
+ * Attention rank: lower renders first. A done task is terminal no matter what
+ * else it carries — a stale queued message or open decision on finished work
+ * must not resurrect it into the default view. Failed stays visible: the
+ * captain hides only done.
  */
 export function attentionRank(task: TaskRow): number {
+	if (task.lastVerb === "done") return 7;
 	if (task.openDecisions > 0 || task.lastVerb === "needs-decision") return 0;
-	if (task.lastVerb === "blocked") return 1;
+	if (task.lastVerb === "blocked" || task.lastVerb === "failed") return 1;
 	if (task.unresolvedSideEffects > 0) return 2;
 	if (task.runState === "running") return 3;
 	if (task.lastVerb === "paused") return 4;
 	if (task.queuedMessages > 0) return 5;
-	if (task.lastVerb === "done" || task.lastVerb === "failed") return 7;
 	return 6;
 }
 
@@ -614,17 +616,24 @@ export function buildFleetText(
  * Compact statusline. Costs no turn; the captain glances instead of being told.
  * Zero counts are noise, not signal: `0▶` reads as a broken glyph, so a quiet
  * fleet says `idle` and only live signals (running, blocked, questions,
- * decisions, queued) earn a segment.
+ * decisions, queued) earn a segment. No total task count — the graveyard is
+ * not a signal. Task-scoped counts (decisions, queued) come from live tasks
+ * only, so stale leftovers on done work stay silent; questions are global.
+ * Failed gets its own segment: visible in the overlay must mean visible here.
  */
-export function renderStatusline(frame: FleetFrame): string {
+export function renderStatusline(frame: FleetFrame, theme: FleetTheme = PLAIN_FLEET_THEME): string {
 	const c = frame.counters;
+	const liveTasks = frame.tasks.filter((task) => attentionRank(task) < 7);
+	const liveQueued = liveTasks.reduce((sum, task) => sum + task.queuedMessages, 0);
+	const liveDecisions = liveTasks.reduce((sum, task) => sum + task.openDecisions, 0);
+	const failed = frame.tasks.filter((task) => task.lastVerb === "failed").length;
 	const parts: string[] = [];
-	if (c.running > 0) parts.push(`${c.running}▶`);
-	if (c.blocked > 0) parts.push(`${c.blocked} blocked`);
-	if (c.openQuestions > 0) parts.push(`${c.openQuestions}q`);
-	if (c.openDecisions > 0) parts.push(`${c.openDecisions}?`);
-	if (c.queuedMessages > 0) parts.push(`${c.queuedMessages}✉`);
-	if (parts.length === 0) parts.push("idle");
-	parts.push(`${c.tasks} task`);
+	if (c.running > 0) parts.push(theme.fg("success", `${c.running}▶`));
+	if (c.blocked > 0) parts.push(theme.fg("error", `${c.blocked} blocked`));
+	if (failed > 0) parts.push(theme.fg("error", `${failed} failed`));
+	if (c.openQuestions > 0) parts.push(theme.fg("warning", `${c.openQuestions}q`));
+	if (liveDecisions > 0) parts.push(theme.fg("warning", `${liveDecisions}?`));
+	if (liveQueued > 0) parts.push(theme.fg("accent", `${liveQueued}✉`));
+	if (parts.length === 0) return theme.fg("dim", "idle");
 	return parts.join(" · ");
 }

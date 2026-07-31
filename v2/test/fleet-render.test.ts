@@ -247,6 +247,24 @@ describe("attention-first default view", () => {
 		expect(visibleTasks([t], false).shown).toHaveLength(1);
 	});
 
+	test("a failed task stays visible by default even with nothing pending", () => {
+		const t = task({ lastVerb: "failed" });
+		expect(attentionRank(t)).toBe(1);
+		expect(visibleTasks([t], false).shown).toHaveLength(1);
+	});
+
+	test("done wins over a stale queue: still terminal, still hidden by default", () => {
+		const t = task({ taskId: "stale-queue", runState: "finished", lastVerb: "done", queuedMessages: 1 });
+		expect(attentionRank(t)).toBe(7);
+		const out = buildFleetText(frame({ tasks: [t, ...live] }));
+		expect(out).not.toContain("stale-queue");
+		expect(out).toContain("1 done/failed hidden");
+	});
+
+	test("done wins over a stale open decision", () => {
+		expect(attentionRank(task({ lastVerb: "done", openDecisions: 1 }))).toBe(7);
+	});
+
 	test("a running workflow renders with the active tasks, above the collapse line", () => {
 		const out = buildFleetText(
 			frame({
@@ -438,16 +456,16 @@ describe("statusline", () => {
 		const f = frame();
 		f.counters.tasks = 10;
 		f.counters.openQuestions = 2;
-		expect(renderStatusline(f)).toBe("2q \u00b7 10 task");
+		expect(renderStatusline(f)).toBe("2q");
 	});
 
-	test("a quiet fleet reads idle, never 0\u25b6", () => {
+	test("a quiet fleet reads idle with no task total \u2014 the graveyard is not a signal", () => {
 		const f = frame();
 		f.counters.tasks = 10;
-		expect(renderStatusline(f)).toBe("idle \u00b7 10 task");
+		expect(renderStatusline(f)).toBe("idle");
 	});
 
-	test("live fleet: running, blocked, questions, decisions, queued all show", () => {
+	test("live fleet: running, blocked, questions, decisions, queued all show; no task total", () => {
 		const f = frame();
 		f.counters.tasks = 6;
 		f.counters.running = 2;
@@ -455,7 +473,36 @@ describe("statusline", () => {
 		f.counters.openQuestions = 1;
 		f.counters.openDecisions = 1;
 		f.counters.queuedMessages = 3;
-		expect(renderStatusline(f)).toBe("2\u25b6 \u00b7 1 blocked \u00b7 1q \u00b7 1? \u00b7 3\u2709 \u00b7 6 task");
+		f.tasks = [task({ taskId: "live", runState: "running", queuedMessages: 3, openDecisions: 1 })];
+		expect(renderStatusline(f)).toBe("2\u25b6 \u00b7 1 blocked \u00b7 1q \u00b7 1? \u00b7 3\u2709");
+	});
+
+	test("a stale queue or decision on a done task earns no segment", () => {
+		const f = frame();
+		f.counters.tasks = 1;
+		f.counters.queuedMessages = 1;
+		f.counters.openDecisions = 1;
+		f.tasks = [task({ lastVerb: "done", runState: "finished", queuedMessages: 1, openDecisions: 1 })];
+		expect(renderStatusline(f)).toBe("idle");
+	});
+
+	test("a failed-only fleet never reads idle", () => {
+		const f = frame();
+		f.counters.tasks = 1;
+		f.tasks = [task({ lastVerb: "failed", runState: "finished" })];
+		expect(renderStatusline(f)).toBe("1 failed");
+	});
+
+	test("segments carry the theme's colors", () => {
+		const marked = {
+			fg: (key: string, text: string) => `<${key}>${text}</${key}>`,
+			bold: (text: string) => text,
+		};
+		const f = frame();
+		f.counters.running = 1;
+		f.counters.blocked = 1;
+		f.tasks = [task({ runState: "running", openDecisions: 1 })];
+		expect(renderStatusline(f, marked)).toBe("<success>1\u25b6</success> \u00b7 <error>1 blocked</error> \u00b7 <warning>1?</warning>");
 	});
 
 	test("the overlay header names /questions so the captain knows the next move", () => {
