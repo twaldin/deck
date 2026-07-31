@@ -106,9 +106,46 @@ export function resolveRepo(repo: string): string {
 	return profile.primary;
 }
 
+/** Realpath when the path exists; the input otherwise. */
+function realpathIfExists(target: string): string {
+	try {
+		return fs.realpathSync(target);
+	} catch {
+		return path.resolve(target);
+	}
+}
+
+function profileByPrimary(candidate: string): ProjectProfile | null {
+	const resolved = realpathIfExists(candidate);
+	for (const profile of loadProfiles()) {
+		if (realpathIfExists(profile.primary) === resolved) return profile;
+	}
+	return null;
+}
+
+/**
+ * The primary checkout a worktree belongs to. A linked worktree's
+ * --git-common-dir is <primary>/.git, so its parent is the primary. Null when
+ * the path is not a git worktree (isolation checks refuse that later anyway).
+ */
+function worktreePrimary(worktree: string): string | null {
+	const run = spawnSync(
+		"git",
+		["-C", worktree, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+		{ encoding: "utf8", env: { ...process.env } },
+	);
+	if (run.status !== 0) return null;
+	const commonDir = run.stdout.trim();
+	if (commonDir.length === 0) return null;
+	return path.dirname(commonDir);
+}
+
 /**
  * The profile a ship spawn would belong to, if any: match by project name,
- * repo alias, or the repo's primary checkout path.
+ * repo alias, the repo's primary checkout path, or — for the worktree escape
+ * hatch — the primary checkout the worktree was created from. The worktree
+ * path matters: without it, `spawn --kind ship --worktree <wt>` on a profiled
+ * project would bypass the pipeline the other two paths enforce.
  */
 export function shipProfileFor(request: SpawnRequest): ProjectProfile | null {
 	if (request.project !== undefined) {
@@ -117,10 +154,11 @@ export function shipProfileFor(request: SpawnRequest): ProjectProfile | null {
 	}
 	if (request.repo !== undefined) {
 		if (!path.isAbsolute(request.repo)) return findProfile(request.repo);
-		const resolved = path.resolve(request.repo);
-		for (const profile of loadProfiles()) {
-			if (path.resolve(profile.primary) === resolved) return profile;
-		}
+		return profileByPrimary(request.repo);
+	}
+	if (request.worktree !== undefined) {
+		const primary = worktreePrimary(request.worktree);
+		if (primary !== null) return profileByPrimary(primary);
 	}
 	return null;
 }

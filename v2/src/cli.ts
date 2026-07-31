@@ -128,7 +128,7 @@ export async function runCli(argv: string[]): Promise<number> {
 				const ticket = args._[1];
 				if (ticket === undefined) throw new Error("ship needs a ticket/effort id");
 				const reviewers = str(args.flags, "reviewers");
-				const result = startShip({
+				const result = await startShip({
 					ticket,
 					profile: need(args.flags, "profile"),
 					worktree: path.resolve(need(args.flags, "worktree")),

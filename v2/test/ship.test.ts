@@ -102,21 +102,39 @@ describe("buildPipelineInput", () => {
 });
 
 describe("startShip", () => {
-	test("unknown profile refuses before anything is written", () => {
-		expect(() => startShip(request({ profile: "nope" }), home)).toThrow(/unknown project profile/);
+	test("unknown profile refuses before anything is written", async () => {
+		await expect(startShip(request({ profile: "nope" }), home)).rejects.toThrow(
+			/unknown project profile/,
+		);
 	});
 
-	test("empty acceptance refuses (preflight fails closed downstream anyway)", () => {
-		expect(() => startShip(request({ acceptance: [] }), home)).toThrow(/acceptance/);
+	test("empty acceptance refuses (preflight fails closed downstream anyway)", async () => {
+		await expect(startShip(request({ acceptance: [] }), home)).rejects.toThrow(/acceptance/);
 	});
 
-	test("missing pipeline dir refuses with the override hint", () => {
+	test("missing pipeline dir refuses with the override hint", async () => {
 		process.env.DECK_PIPELINE_DIR = path.join(home, "not-there");
-		expect(() => startShip(request(), home)).toThrow(/DECK_PIPELINE_DIR/);
+		await expect(startShip(request(), home)).rejects.toThrow(/DECK_PIPELINE_DIR/);
 	});
 
 	test("pipelineDir resolves to the repo's pr-pipeline workflow", () => {
 		expect(fs.existsSync(path.join(pipelineDir(), "pipeline.tsx"))).toBe(true);
+	});
+
+	test("REGRESSION: a launch that never starts REJECTS instead of reporting started", async () => {
+		// A fake pipeline dir satisfies the existence check; an empty PATH makes
+		// bunx unspawnable, so the child emits error instead of spawn.
+		const fakeDir = path.join(home, "fake-pipeline");
+		fs.mkdirSync(fakeDir, { recursive: true });
+		fs.writeFileSync(path.join(fakeDir, "pipeline.tsx"), "// fake\n");
+		process.env.DECK_PIPELINE_DIR = fakeDir;
+		const savedPath = process.env.PATH;
+		process.env.PATH = path.join(home, "empty-bin");
+		try {
+			await expect(startShip(request(), home)).rejects.toThrow(/could not start the pipeline run/);
+		} finally {
+			process.env.PATH = savedPath;
+		}
 	});
 });
 
@@ -127,6 +145,49 @@ describe("spawn enforcement: pipeline is the default ship path", () => {
 		expect(shipProfileFor({ ...base, project: "lindy", worktree: "/tmp/wt" })?.id).toBe("lindy");
 		expect(shipProfileFor({ ...base, repo: deckProfile().primary })?.id).toBe("deck");
 		expect(shipProfileFor({ ...base, repo: "/somewhere/unprofiled" })).toBeNull();
+	});
+
+	test("REGRESSION: a worktree-only ship spawn on a profiled repo is refused too (the worktree resolves to its primary)", async () => {
+		// Build a real repo (the profile primary) and a linked worktree from it.
+		const primary = path.join(home, "repo");
+		fs.mkdirSync(primary, { recursive: true });
+		const git = (args: string[], cwd: string) => {
+			const run = Bun.spawnSync(["git", ...args], { cwd });
+			if (run.exitCode !== 0) throw new Error(new TextDecoder().decode(run.stderr));
+		};
+		git(["init", "-b", "main"], primary);
+		fs.writeFileSync(path.join(primary, "f.txt"), "x\n");
+		git(["add", "f.txt"], primary);
+		git(
+			["-c", "user.name=t", "-c", "user.email=t@e.t", "commit", "-m", "x"],
+			primary,
+		);
+		const wt = path.join(home, "wt-1");
+		git(["worktree", "add", wt, "-b", "task-branch", "main"], primary);
+
+		const file = profilesFile(home);
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		fs.writeFileSync(
+			file,
+			JSON.stringify([
+				{
+					id: "repoproj",
+					repo: "twaldin/repoproj",
+					primary,
+					pipeline: "yolo-ship",
+					yolo: true,
+					stamp: false,
+					knowledge: [],
+				},
+			]),
+		);
+
+		const req = { taskId: "t", task: "x", acceptance: [], kind: "ship" as const, worktree: wt };
+		expect(shipProfileFor(req)?.id).toBe("repoproj");
+		expect(() => assertShipGoesThroughPipeline(req)).toThrow(/repoproj/);
+		// A worktree of an UNPROFILED repo still spawns bare.
+		fs.writeFileSync(file, JSON.stringify([]));
+		expect(() => assertShipGoesThroughPipeline(req)).not.toThrow();
 	});
 
 	test("REGRESSION: a bare ship spawn on a profiled repo is refused and points at deck-v2 ship", () => {

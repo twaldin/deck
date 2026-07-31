@@ -126,8 +126,11 @@ export type ShipResult = {
  * Start the pipeline run, detached. The run is durable smithers state: watch it
  * with `smithers ps|why|inspect <runId>` from the pipeline directory; a stamp
  * park resumes with `smithers approve` + `up --resume true`.
+ *
+ * Async: child startup errors are emitted asynchronously, so a sync return
+ * would report "started" for a process that never launched.
  */
-export function startShip(request: ShipRequest, home = deckV2Home()): ShipResult {
+export async function startShip(request: ShipRequest, home = deckV2Home()): Promise<ShipResult> {
 	const profile = findProfile(request.profile, home);
 	if (profile === null) {
 		throw new Error(
@@ -152,10 +155,9 @@ export function startShip(request: ShipRequest, home = deckV2Home()): ShipResult
 	fs.writeFileSync(inputPath, `${JSON.stringify(input, null, 2)}\n`, { mode: 0o600 });
 
 	const log = fs.openSync(logPath, "a");
-	const [cmd, ...spec] = ["bunx", SMITHERS_SPEC];
 	const child = spawnProcess(
-		cmd as string,
-		[...spec, "up", "pipeline.tsx", "--input", JSON.stringify(input), "--run-id", runId],
+		"bunx",
+		[SMITHERS_SPEC, "up", "pipeline.tsx", "--input", JSON.stringify(input), "--run-id", runId],
 		{
 			cwd: dir,
 			detached: true,
@@ -163,9 +165,20 @@ export function startShip(request: ShipRequest, home = deckV2Home()): ShipResult
 			env: { ...process.env },
 		},
 	);
-	child.on("error", () => {});
+	// Child startup errors arrive asynchronously; without this wait, a launch
+	// that never happened (bunx missing, spawn EPERM) would still print
+	// "started" — a silent false positive on the default ship path.
+	try {
+		await new Promise<void>((resolve, reject) => {
+			child.once("spawn", () => resolve());
+			child.once("error", (error) =>
+				reject(new Error(`could not start the pipeline run (${error.message}); see ${logPath}`)),
+			);
+		});
+	} finally {
+		fs.closeSync(log);
+	}
 	child.unref();
-	fs.closeSync(log);
 
 	return {
 		runId,

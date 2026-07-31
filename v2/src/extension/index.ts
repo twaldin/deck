@@ -167,7 +167,7 @@ export default function deckV2(pi: any): void {
 			dry_run: Type.Optional(Type.Boolean({ description: "simulate side effects; default false" })),
 		}),
 		async execute(_id: string, params: Record<string, unknown>) {
-			const result = startShip({
+			const result = await startShip({
 				ticket: params.ticket as string,
 				profile: params.profile as string,
 				worktree: params.worktree as string,
