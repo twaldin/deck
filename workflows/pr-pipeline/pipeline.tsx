@@ -406,7 +406,7 @@ export default smithers((ctx) => {
 	const github = { ...DEFAULT_GITHUB, ...(input.github ?? {}) };
 	const commands = { ...DEFAULT_COMMANDS, ...(input.commands ?? {}) };
 	const baseBranch = input.baseBranch ?? "main";
-	const adopt = input.existingPr !== undefined;
+	const adopt = input.existingPr != null;
 	// Resolved once per render; yolo=false (stamp behavior) when omitted.
 	const profile: ProjectProfile | null =
 		input.profile === undefined ? null : findProfile(input.profile);
@@ -592,7 +592,7 @@ export default smithers((ctx) => {
 	const reviewApproved = latestLocalReview?.approved === true;
 	const reviewExhausted =
 		localReviewRows.length >= limits.localReviewRounds && !reviewApproved;
-	const pushAllowed = adopt || reviewApproved || reviewEscalation?.approved === true;
+	const pushAllowed = reviewApproved || reviewEscalation?.approved === true;
 
 	// ===========================================================================
 	// Render
