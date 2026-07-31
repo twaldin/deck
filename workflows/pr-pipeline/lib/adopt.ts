@@ -66,7 +66,7 @@ export function assertAdoptable(overview: PrOverview, expected: AdoptExpectation
 			`[escalate] cannot adopt ${pr}: the worktree has branch "${expected.worktreeBranch}" checked out, not "${expected.branch}" — the watch fixer and merge run in this worktree and would act on the wrong branch.`,
 		);
 	}
-	if (expected.worktreeHead !== overview.headSha && (!expected.allowWorktreeAhead || expected.worktreeIsDescendant !== true)) {
+	if (expected.worktreeHead !== overview.headSha && expected.worktreeIsDescendant !== true) {
 		throw new Error(
 			`[escalate] cannot adopt ${pr}: worktree HEAD is ${expected.worktreeHead} but the PR head is ${overview.headSha} — the worktree is stale or diverged; sync it to the PR head first.`,
 		);

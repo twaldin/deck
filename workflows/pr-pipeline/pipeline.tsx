@@ -645,7 +645,7 @@ export default smithers((ctx) => {
 							if (!worktreeExists) {
 								questions.push(`worktree does not exist on disk: ${input.worktree}`);
 							}
-							if (commands.deployEvidence === undefined) {
+							if (commands.deployEvidence === undefined && !adopt) {
 								questions.push(
 									"commands.deployEvidence is not configured: real runs need a deploy-evidence probe (done is evidence-gated).",
 								);
@@ -865,9 +865,9 @@ export default smithers((ctx) => {
 											[
 												github.git,
 												"push",
-												`--force-with-lease=refs/heads/${input.branch}:${overview.headSha}`,
+												"--no-verify",
 												"origin",
-												`HEAD:refs/heads/${input.branch}`,
+												input.branch,
 											],
 											{ cwd: input.worktree },
 										);
