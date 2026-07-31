@@ -62,8 +62,10 @@ PR-URL match wins; a branch match requires the task's repo (resolved from its
 worktree's origin remote) to equal the PR's repo — a task whose repo cannot be
 resolved (torn-down worktree) never branch-matches — and an ambiguous branch
 match correlates to nothing rather than to the wrong task.
-PR titles are sanitized (control characters stripped, length capped) before
-they enter a note — GitHub text is data, never instructions. Uncorrelated PRs remain intake records, listable with
+PR titles never enter a note: the note is injected into the orchestrator's
+context, and a title is attacker-writable free text. Notes are built only from
+enums, logins, `owner/name#N` and API URLs; titles stay on human-facing
+surfaces (the markdown report, `deck-intake ls`). Uncorrelated PRs remain intake records, listable with
 `deck-intake ls` (tab-separated: `taskId  buckets  ci  review  url  title`).
 
 deck-v2's `reconcile` (v2/src/wake.ts) consumes the log with the same

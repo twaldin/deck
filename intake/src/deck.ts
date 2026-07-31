@@ -53,11 +53,16 @@ export type TaskRef = {
 	repo?: string;
 };
 
-/** "owner/name" from an https or ssh GitHub remote URL, else null. */
+/**
+ * "owner/name" from a GITHUB remote URL, else null. The host must be
+ * github.com: a gitlab/mirror remote with the same owner/name is NOT the same
+ * repo, and returning it would let a same-branch collision correlate wrongly.
+ */
 export function parseRepoFromRemote(url: string): string | null {
-	const match = /^(?:https?:\/\/[^/]+\/|git@[^:]+:|ssh:\/\/git@[^/]+\/)([^/\s]+\/[^/\s]+?)(?:\.git)?\/?$/.exec(
-		url.trim(),
-	);
+	const match =
+		/^(?:https?:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([^/\s]+\/[^/\s]+?)(?:\.git)?\/?$/i.exec(
+			url.trim(),
+		);
 	return match?.[1] ?? null;
 }
 
@@ -142,30 +147,27 @@ export function correlate(
 }
 
 /**
- * GitHub-sourced text (PR titles, login names) crosses a trust boundary into
- * wake messages the orchestrator reads. Strip control characters, collapse
- * whitespace, cap length. Data stays data.
+ * Note text stays within enums, GitHub logins ([a-zA-Z0-9-]), "owner/name#N"
+ * and API-provided URLs. PR TITLES ARE DELIBERATELY EXCLUDED: the note is
+ * injected into the orchestrator's context as an operational message, and a
+ * title is attacker-writable free text (anyone who can open or retitle a PR
+ * in a polled repo). Titles live on human-facing surfaces only — the markdown
+ * report and `deck-intake ls`.
  */
-function sanitize(text: string, max = 160): string {
-	// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping them is the point
-	const clean = text.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
-	return clean.length > max ? `${clean.slice(0, max - 1)}\u2026` : clean;
-}
-
-function describe(change: DiffChange, title: string): { note: string; signal: boolean } {
+function describe(change: DiffChange, ref: string): { note: string; signal: boolean } {
 	switch (change.kind) {
 		case "new":
 			return {
-				note: `new PR (${change.buckets.join(",")}): ${title} ${change.url}`,
+				note: `new PR (${change.buckets.join(",")}): ${ref} ${change.url}`,
 				signal: change.reviewRequested,
 			};
 		case "removed":
-			return { note: `PR ${change.resolution}: ${title} ${change.url}`, signal: false };
+			return { note: `PR ${change.resolution}: ${ref} ${change.url}`, signal: false };
 		case "ci":
-			return { note: `ci ${change.from}->${change.to}: ${title} ${change.url}`, signal: false };
+			return { note: `ci ${change.from}->${change.to}: ${ref} ${change.url}`, signal: false };
 		case "review-decision":
 			return {
-				note: `review ${change.from}->${change.to}: ${title} ${change.url}`,
+				note: `review ${change.from}->${change.to}: ${ref} ${change.url}`,
 				signal: false,
 			};
 		case "reviewers": {
@@ -174,17 +176,17 @@ function describe(change: DiffChange, title: string): { note: string; signal: bo
 				...change.removed.map((login) => `-${login}`),
 			];
 			return {
-				note: `reviewers ${parts.join(",")}: ${title} ${change.url}`,
+				note: `reviewers ${parts.join(",")}: ${ref} ${change.url}`,
 				signal: change.selfRequested,
 			};
 		}
 		case "buckets":
 			return {
-				note: `buckets ${change.from.join(",")}->${change.to.join(",")}: ${title} ${change.url}`,
+				note: `buckets ${change.from.join(",")}->${change.to.join(",")}: ${ref} ${change.url}`,
 				signal: change.reviewRequested,
 			};
 		case "untracked":
-			return { note: `untracked: ${title} ${change.url}`, signal: false };
+			return { note: `untracked: ${ref} ${change.url}`, signal: false };
 	}
 }
 
@@ -205,8 +207,8 @@ export function buildIntakeEvents(
 	for (const change of changes) {
 		if (change.kind === "untracked") continue;
 		const item = current.items[change.url] ?? previous.items[change.url];
-		const title = sanitize(item?.title ?? ("title" in change ? change.title : change.url));
-		const { note, signal } = describe(change, title);
+		const ref = item === undefined ? "" : `${item.repo}#${item.number}`;
+		const { note, signal } = describe(change, ref);
 		events.push({
 			v: 1,
 			ts: now().toISOString(),
