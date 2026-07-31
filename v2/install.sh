@@ -82,6 +82,16 @@ mkdir -p "$BIN_TARGET"
 ln -sfn "$REPO_V2/bin/deck-v2" "$BIN_TARGET/deck-v2"
 printf 'installed deck-v2 CLI at %s/deck-v2\n' "$BIN_TARGET"
 
+# deck: the worktree allocator CLI (repo cli/bin/deck). spawn shells out to it,
+# so it must be on PATH wherever deck-v2 is.
+DECK_SHIM="$BIN_TARGET/deck"
+if [ -e "$DECK_SHIM" ] && [ ! -L "$DECK_SHIM" ]; then
+  printf 'error: %s exists and is not a symlink; remove it by hand.\n' "$DECK_SHIM" >&2
+  exit 1
+fi
+ln -sfn "$REPO_V2/../cli/bin/deck" "$DECK_SHIM"
+printf 'installed deck CLI at %s\n' "$DECK_SHIM"
+
 # smithers: a pinned PATH shim, never a global npm install. The version is read
 # from src/smithers.ts — the one pin deck code shells out with — so shim and
 # code cannot skew. bunx from a directory without a package.json can silently

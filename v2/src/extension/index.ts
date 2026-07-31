@@ -80,12 +80,19 @@ export default function deckV2(pi: any): void {
 		name: "spawn",
 		label: "Spawn",
 		description:
-			"Start a worker run for a task in an isolated worktree. The brief is generated from the task and acceptance criteria; do not write one by hand.",
+			"Start a worker run for a task in an isolated worktree. Pass repo (path or alias) to allocate a fresh worktree; worktree (absolute path) is the escape hatch. The brief is generated from the task and acceptance criteria; do not write one by hand.",
 		parameters: Type.Object({
 			task_id: Type.String({ description: "slug: lowercase letters, digits, hyphens" }),
 			task: Type.String({ description: "what to do, front-loaded and self-contained" }),
 			acceptance: Type.Array(Type.String(), { description: "criteria that must pass" }),
-			worktree: Type.String({ description: "absolute path to the disposable worktree" }),
+			repo: Type.Optional(
+				Type.String({ description: "repo to allocate a worktree from: absolute path or alias (lindy, deck)" }),
+			),
+			worktree: Type.Optional(
+				Type.String({ description: "escape hatch: absolute path to an existing disposable worktree" }),
+			),
+			base: Type.Optional(Type.String({ description: "base branch/commit for allocation; default origin/main" })),
+			desc: Type.Optional(Type.String({ description: "short label recorded on the worktree entry" })),
 			kind: Type.Union([Type.Literal("ship"), Type.Literal("scout")]),
 			project: Type.Optional(Type.String()),
 			branch: Type.Optional(Type.String()),
@@ -98,8 +105,11 @@ export default function deckV2(pi: any): void {
 					taskId: params.task_id as string,
 					task: params.task as string,
 					acceptance: (params.acceptance as string[]) ?? [],
-					worktree: params.worktree as string,
 					kind: params.kind as "ship" | "scout",
+					...(params.worktree === undefined ? {} : { worktree: params.worktree as string }),
+					...(params.repo === undefined ? {} : { repo: params.repo as string }),
+					...(params.base === undefined ? {} : { base: params.base as string }),
+					...(params.desc === undefined ? {} : { desc: params.desc as string }),
 					...(params.project === undefined ? {} : { project: params.project as string }),
 					...(params.branch === undefined ? {} : { branch: params.branch as string }),
 					...(params.model === undefined ? {} : { model: params.model as string }),
@@ -108,7 +118,7 @@ export default function deckV2(pi: any): void {
 				deckV2Home(),
 			);
 			return text(
-				`spawned ${result.taskId} (epoch ${result.epoch}, pid ${result.pid}, ${result.model})\nbrief: ${result.briefPath}\nIt reports through its status file; it cannot contact the captain.`,
+				`spawned ${result.taskId} (epoch ${result.epoch}, pid ${result.pid}, ${result.model})\nworktree: ${result.worktree}${result.wtId === undefined ? "" : ` (${result.wtId}, branch ${result.branch})`}\nbrief: ${result.briefPath}\nIt reports through its status file; it cannot contact the captain.`,
 			);
 		},
 	});

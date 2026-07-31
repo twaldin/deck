@@ -12,7 +12,7 @@ import {
 import { allocateWorktree, listWorktrees, reapWorktrees, releaseWorktree } from "./worktrees";
 
 const USAGE = `Usage:
-  deck wt alloc --repo <path> --effort <effort_id> [--base <branch>]
+  deck wt alloc --repo <path> --effort <effort_id> [--base <branch>] [--branch <name>] [--desc <text>]
   deck wt release <wt-id> [--delete-branch]
   deck wt ls [--json]
   deck wt reap`;
@@ -40,6 +40,8 @@ function parseAlloc(args: string[]): WorktreeCommand {
 		"--repo": "repo",
 		"--effort": "effort",
 		"--base": "base",
+		"--branch": "branch",
+		"--desc": "desc",
 	};
 	for (let index = 0; index < args.length; index += 2) {
 		const option = args[index];
@@ -65,6 +67,8 @@ function parseAlloc(args: string[]): WorktreeCommand {
 		repo: options.repo,
 		effort: options.effort,
 		base: options.base,
+		branch: options.branch,
+		desc: options.desc,
 	});
 	if (!parsed.success) {
 		throw argumentError(z.prettifyError(parsed.error));
@@ -135,7 +139,7 @@ function printHumanTable(entries: WorktreeEntry[]): void {
 		return;
 	}
 
-	const headers = ["ID", "STATE", "REPO", "PATH", "EFFORT", "BRANCH", "CREATED"];
+	const headers = ["ID", "STATE", "REPO", "PATH", "EFFORT", "BRANCH", "DESC", "CREATED"];
 	const rows = entries.map((entry) => [
 		entry.id,
 		entry.state,
@@ -143,6 +147,7 @@ function printHumanTable(entries: WorktreeEntry[]): void {
 		entry.path,
 		entry.effort,
 		entry.branch,
+		entry.desc ?? "",
 		entry.created,
 	]);
 	const widths = headers.map((header, column) =>

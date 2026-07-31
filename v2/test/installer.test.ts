@@ -105,6 +105,23 @@ describe("installer layout", () => {
 		expect(fs.realpathSync(shim)).toBe(path.join(REPO_V2, "bin", "deck-v2"));
 	});
 
+	test("installs the deck allocator shim pointing at cli/bin/deck", () => {
+		install();
+		const shim = path.join(target, "bin", "deck");
+		expect(fs.lstatSync(shim).isSymbolicLink()).toBe(true);
+		expect(fs.realpathSync(shim)).toBe(
+			fs.realpathSync(path.join(REPO_V2, "..", "cli", "bin", "deck")),
+		);
+	});
+
+	test("refuses a foreign non-symlink deck on the bin path", () => {
+		const bin = path.join(target, "bin");
+		fs.mkdirSync(bin, { recursive: true });
+		fs.writeFileSync(path.join(bin, "deck"), "#!/bin/sh\n# someone else's deck\n");
+		expect(() => install()).toThrow();
+		expect(fs.readFileSync(path.join(bin, "deck"), "utf8")).toContain("someone else's");
+	});
+
 	test("installs a pinned smithers shim that matches src/smithers.ts", () => {
 		install();
 		const shim = path.join(target, "bin", "smithers");

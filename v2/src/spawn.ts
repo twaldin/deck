@@ -10,6 +10,7 @@
  * The brief is generated here (prompts.ts), not hand-written per task.
  */
 import { spawn as spawnProcess, spawnSync } from "node:child_process";
+import * as os from "node:os";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { appendStatus } from "./events";
@@ -52,7 +53,14 @@ export type SpawnRequest = {
 	taskId: string;
 	task: string;
 	acceptance: string[];
-	worktree: string;
+	/** Absolute path to an existing disposable worktree (escape hatch). */
+	worktree?: string;
+	/** Repo to allocate a fresh worktree from: absolute path or alias. */
+	repo?: string;
+	/** Base branch/commit for allocation. Default: origin/main. */
+	base?: string;
+	/** Short label recorded on the allocated worktree entry. */
+	desc?: string;
 	kind: TaskKind;
 	project?: string;
 	/** Wall-clock budget for the run. Default DEFAULT_DEADLINE_MS. */
@@ -71,7 +79,63 @@ export type SpawnResult = {
 	sessionDir: string;
 	pid: number;
 	model: string;
+	worktree: string;
+	wtId?: string;
+	branch?: string;
 };
+
+/** Known repo aliases on this machine. An absolute path always works too. */
+export const REPO_ALIASES: Record<string, string> = {
+	lindy: path.join(os.homedir(), "dev", "fm2", "projects", "lindy"),
+	deck: path.join(os.homedir(), "dev", "deck"),
+};
+
+export function resolveRepo(repo: string): string {
+	if (path.isAbsolute(repo)) return repo;
+	const aliased = REPO_ALIASES[repo];
+	if (aliased === undefined) {
+		throw new Error(
+			`unknown repo alias "${repo}"; use an absolute path or one of: ${Object.keys(REPO_ALIASES).join(", ")}`,
+		);
+	}
+	return aliased;
+}
+
+export type AllocatedWorktree = { wtId: string; worktree: string; branch: string };
+
+/**
+ * Allocate an isolated worktree via `deck wt alloc` (the sole allocator; state
+ * and locking live there). Machine-readable stdout: `id\tpath\tbranch`.
+ */
+export function allocateWorktree(request: SpawnRequest): AllocatedWorktree {
+	if (request.repo === undefined) throw new Error("allocateWorktree needs a repo");
+	const args = [
+		"wt",
+		"alloc",
+		"--repo",
+		resolveRepo(request.repo),
+		"--effort",
+		request.taskId,
+	];
+	if (request.base !== undefined) args.push("--base", request.base);
+	if (request.branch !== undefined) args.push("--branch", request.branch);
+	if (request.desc !== undefined) args.push("--desc", request.desc);
+	const bin = process.env.DECK_CLI_BIN ?? "deck";
+	// env passed explicitly: under bun, spawnSync without it hands the child the
+	// process's ORIGINAL environment, not the current process.env (verified).
+	const run = spawnSync(bin, args, { encoding: "utf8", env: { ...process.env } });
+	if (run.error !== undefined) {
+		throw new Error(`cannot run ${bin}: ${run.error.message}; is the deck CLI installed?`);
+	}
+	if (run.status !== 0) {
+		throw new Error(`deck wt alloc failed: ${(run.stderr ?? "").trim() || `exit ${run.status}`}`);
+	}
+	const [wtId, worktree, branch] = run.stdout.trim().split("\t");
+	if (wtId === undefined || worktree === undefined || branch === undefined) {
+		throw new Error(`unparseable deck wt alloc output: ${run.stdout.trim()}`);
+	}
+	return { wtId, worktree, branch };
+}
 
 /** Isolation assertion. A worker must never run in the primary checkout. */
 export function assertIsolatedWorktree(worktree: string, primaryCheckout: string): void {
@@ -89,19 +153,28 @@ export function assertIsolatedWorktree(worktree: string, primaryCheckout: string
 	}
 }
 
-/** Write the generated brief. Immutable once dispatched. */
-export function writeBrief(request: SpawnRequest): string {
+/**
+ * Write the generated brief. Immutable once dispatched.
+ *
+ * `checkoutBranch` is the branch the brief tells the worker to create; an
+ * allocated worktree already sits on its branch, so it passes undefined.
+ */
+export function writeBrief(
+	request: SpawnRequest,
+	worktree: string,
+	checkoutBranch?: string,
+): string {
 	ensureTaskDirs(request.taskId);
 	const files = taskFiles(request.taskId);
 	const brief = workerBrief({
 		taskId: request.taskId,
 		task: request.task,
 		acceptance: request.acceptance,
-		worktree: request.worktree,
+		worktree,
 		statusFile: stateFiles(request.taskId).status,
 		kind: request.kind,
 		...(request.project === undefined ? {} : { project: request.project }),
-		...(request.branch === undefined ? {} : { branch: request.branch }),
+		...(checkoutBranch === undefined ? {} : { branch: checkoutBranch }),
 		...(request.kind === "scout" ? { reportPath: files.report } : {}),
 		...(request.context === undefined ? {} : { context: request.context }),
 	});
@@ -127,25 +200,35 @@ function piArgs(sessionDir: string, model: string, thinking: string | undefined,
  * not by a status line.
  */
 export function startRun(request: SpawnRequest, primaryCheckout: string): SpawnResult {
-	assertIsolatedWorktree(request.worktree, primaryCheckout);
+	if ((request.worktree === undefined) === (request.repo === undefined)) {
+		throw new Error("spawn needs exactly one of worktree (absolute path) or repo (path or alias)");
+	}
+	const allocated = request.worktree === undefined ? allocateWorktree(request) : undefined;
+	const worktree = allocated?.worktree ?? (request.worktree as string);
+	const branch = allocated?.branch ?? request.branch;
+	assertIsolatedWorktree(worktree, primaryCheckout);
 	ensureTaskDirs(request.taskId);
 
 	const model = request.model ?? DEFAULT_WORKER_MODEL;
 	const sessionDir = stateFiles(request.taskId).sessions;
 	fs.mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
 
-	const briefPath = writeBrief(request);
+	// An allocated worktree is already on its branch; only an escape-hatch
+	// worktree with an explicit branch needs the checkout instruction.
+	const briefPath = writeBrief(request, worktree, allocated === undefined ? request.branch : undefined);
 	const epoch = bumpEpoch(request.taskId);
 
 	updateMeta(request.taskId, {
 		kind: request.kind,
-		worktree: request.worktree,
+		worktree,
 		model,
 		session_dir: sessionDir,
 		owner_system: "deck",
 		created: readMeta(request.taskId)?.created ?? new Date().toISOString(),
 		...(request.project === undefined ? {} : { project: request.project }),
-		...(request.branch === undefined ? {} : { branch: request.branch }),
+		...(branch === undefined ? {} : { branch }),
+		...(allocated === undefined ? {} : { wt_id: allocated.wtId }),
+		...(request.desc === undefined ? {} : { desc: request.desc }),
 	});
 
 	const resume = hasSession(sessionDir);
@@ -155,7 +238,7 @@ export function startRun(request: SpawnRequest, primaryCheckout: string): SpawnR
 		: `${fs.readFileSync(briefPath, "utf8")}\n\n${hydration.text}`;
 
 	const child = spawnProcess("pi", piArgs(sessionDir, model, request.thinking, resume), {
-		cwd: request.worktree,
+		cwd: worktree,
 		detached: true,
 		stdio: ["pipe", "ignore", "ignore"],
 		env: { ...process.env, DECK_TASK_ID: request.taskId, DECK_RUN_EPOCH: String(epoch) },
@@ -182,7 +265,17 @@ export function startRun(request: SpawnRequest, primaryCheckout: string): SpawnR
 	// old way. A message left pending is redelivered, which is the safe direction.
 	if (pid > 0) ackMessages(request.taskId, hydration.messageIds, epoch);
 
-	return { taskId: request.taskId, epoch, briefPath, sessionDir, pid, model };
+	return {
+		taskId: request.taskId,
+		epoch,
+		briefPath,
+		sessionDir,
+		pid,
+		model,
+		worktree,
+		...(allocated === undefined ? {} : { wtId: allocated.wtId }),
+		...(branch === undefined ? {} : { branch }),
+	};
 }
 
 export function hasSession(sessionDir: string): boolean {

@@ -65,6 +65,8 @@ export interface AllocateRequest {
 	repo: string;
 	effort: string;
 	base?: string;
+	branch?: string;
+	desc?: string;
 }
 
 export async function allocateWorktree(request: AllocateRequest): Promise<WorktreeEntry> {
@@ -106,7 +108,7 @@ export async function allocateWorktree(request: AllocateRequest): Promise<Worktr
 
 		// Keep the entropy-bearing tail. The timestamp-bearing ULID prefix is a
 		// poor discriminator for branches allocated in the same millisecond.
-		const branch = `deck/${effort}/${ulid().slice(-8)}`;
+		const branch = request.branch ?? `deck/${effort}/${ulid().slice(-8)}`;
 		await validateBranchName(repo, branch);
 		const base = await prepareBase(resolvedRepo.context, request.base);
 		const entry: WorktreeEntry = {
@@ -115,6 +117,7 @@ export async function allocateWorktree(request: AllocateRequest): Promise<Worktr
 			path: worktreePath,
 			effort,
 			branch,
+			...(request.desc === undefined ? {} : { desc: request.desc }),
 			created: new Date().toISOString(),
 			state: "active",
 		};
