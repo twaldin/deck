@@ -19,7 +19,8 @@ import * as path from "node:path";
 import { simulate } from "smithers-orchestrator/testing";
 
 import pipeline from "../pipeline.tsx";
-import { localFixPrompt, localReviewPrompt } from "../lib/prompts.ts";
+import { localFixPrompt, localReviewPrompt, reviewersDecisionPrompt } from "../lib/prompts.ts";
+import { DEFAULT_GITHUB, reviewerExcludeList } from "../pipeline.tsx";
 
 const validBrief = {
 	ticket: "LIN-123",
@@ -50,6 +51,29 @@ async function run(input: Record<string, unknown>) {
 	}
 	return { sim, error };
 }
+
+describe("reviewer selection contracts", () => {
+	test("reviewer prompt uses the lookup skill and real line breaks", () => {
+		const prompt = reviewersDecisionPrompt(["mackcooper1408"]);
+		expect(prompt).toContain("gh-reviewer-lookup");
+		expect(prompt).toContain("\n");
+		expect(prompt).not.toContain("\\n");
+	});
+
+	test("default ex-employee denylist is merged into reviewer exclusions", () => {
+		expect(DEFAULT_GITHUB.reviewerDenylist).toEqual([
+			"mackcooper1408",
+			"spencer-negri",
+			"daniel-covelli",
+			"akshat-lindy",
+		]);
+		expect(reviewerExcludeList(DEFAULT_GITHUB)).toEqual([
+			...DEFAULT_GITHUB.selfLogins,
+			...DEFAULT_GITHUB.excludedApprovers,
+			...DEFAULT_GITHUB.reviewerDenylist,
+		]);
+	});
+});
 
 describe("local review contracts", () => {
 	test("local fixes receive blockers but not nits", () => {

@@ -12,7 +12,7 @@ export function reviewersDecisionPrompt(denylist: string[]): string {
 		"When given names instead of logins, use the gh-reviewer-lookup skill at ~/.pi/agent/skills/gh-reviewer-lookup.",
 		"Never emit a denylisted login. The denylist is supplied by pipeline config.",
 		`Configured denylist: ${denylist.join(", ")}`,
-	].join("\\n");
+	].join("\n");
 }
 
 export function implementPrompt(brief: Brief, worktree: string, branch: string): string {

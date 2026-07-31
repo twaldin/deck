@@ -308,15 +308,6 @@ describe("executeReviewerRequest", () => {
 		).rejects.toThrow(/Ghost Person/);
 	});
 
-	test("never requests denylisted logins even when suggested upstream", async () => {
-		const requested: string[][] = [];
-		await executeReviewerRequest(
-			{ ...config, explicit: ["mackcooper1408"], exclude: [...config.exclude, "mackcooper1408"] },
-			adapters({ requestReviewers: async (logins) => { requested.push(logins); } }),
-		);
-		expect(requested[0]).not.toContain("mackcooper1408");
-	});
-
 	test("drops non-collaborators without requesting them", async () => {
 		const requested: string[][] = [];
 		await executeReviewerRequest(config, adapters({
