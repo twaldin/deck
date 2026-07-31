@@ -39,6 +39,13 @@ export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
 [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
 nvm use 24 >/dev/null 2>&1 || true
 export PATH="$HOME/.local/bin:$HOME/.bun/bin:$PATH"
+# Home secrets (LINEAR_API_KEY, …). chmod 600. Never commit.
+if [ -f "$HOME/.deck/.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . "$HOME/.deck/.env"
+  set +a
+fi
 cd "$HOME/.deck" || exit 1
 echo "deck home=$(pwd) pi=$(command -v pi)"
 EOF
@@ -61,7 +68,7 @@ Next (interactive, personal accounts only):
   1. Broker (user systemd or):  bun --cwd $REPO/broker src/main.ts
      login:  bun $REPO/broker/src/cli.ts login anthropic
   2. herdr server (user unit or): herdr server
-  3. Glass:  herdr --remote tim@\$(hostname -I 2>/dev/null | awk '{print \$1}')
+  3. Glass:  herdr --remote <user>@<host>
      then:   source ~/.deck/enter.sh && pi
 
 Keep updated:  $REPO/scripts/update-home.sh

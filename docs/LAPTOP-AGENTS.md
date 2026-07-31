@@ -1,29 +1,28 @@
-# Laptop agents → deckbox handoff
+# Laptop agents → orch-host handoff
 
-For agents running on **twaldin-home** (or any glass laptop). You are **not** the deck orchestrator. You prepare work and drop files the orch will read. The orch lives on **deckbox** and owns pipelines.
+For agents running on a **glass laptop**. You are **not** the deck orchestrator. You prepare work and drop files the orch will read. The orch lives on a durable host and owns pipelines.
 
-## Reach deckbox
+## Reach the orch host
 
 ```sh
-# Tailscale IP if MagicDNS missing (brew Tailscale on macOS):
-ssh tim@100.107.83.38
-# or after /etc/hosts: ssh tim@deckbox
+# Prefer a hosts-file or MagicDNS name; fall back to the host's tailnet address.
+ssh <user>@<orch-host>
 ```
 
-User is always **`tim`**. Do not use the laptop username.
+Use the host's own login user. Do not assume the laptop username.
 
-## What you may put on deckbox
+## What you may put on the orch host
 
 | OK | Never |
 |---|---|
-| Personal git clones under `~/dev/<name>` | `lindy-ai/*`, company code |
+| Personal git clones under `~/dev/<name>` | Company product checkouts |
 | Handoff / brief markdown under `~/.deck/data/inbox/` | Work OAuth, eng-agent keys, prod tokens |
-| Personal project notes | Copy of work `~/.deck` or broker store |
+| Personal project notes | Copy of another host's `~/.deck` or broker store |
 
 ## Install or update a personal project
 
 ```sh
-ssh tim@100.107.83.38 'bash -s' <<'EOF'
+ssh <user>@<orch-host> 'bash -s' <<'EOF'
 set -euo pipefail
 # example: clone or pull a personal repo
 REPO_URL="https://github.com/YOU/PROJECT.git"
@@ -67,9 +66,9 @@ Edit `repo` / paths to match reality. Pipeline stays **`yolo-ship`** on personal
 ## Drop work for the orch (inbox)
 
 ```sh
-ssh tim@100.107.83.38 'mkdir -p ~/.deck/data/inbox'
+ssh <user>@<orch-host> 'mkdir -p ~/.deck/data/inbox'
 # copy a handoff
-scp ./HANDOFF-my-feature.md tim@100.107.83.38:~/.deck/data/inbox/
+scp ./HANDOFF-my-feature.md <user>@<orch-host>:~/.deck/data/inbox/
 ```
 
 ### Handoff file shape
@@ -101,13 +100,13 @@ Captain (or orch when he says “drain inbox”) turns these into `ship` runs. *
 ## Update deck code on the box
 
 ```sh
-ssh tim@100.107.83.38 '~/dev/deck/scripts/update-home.sh'
+ssh <user>@<orch-host> '~/dev/deck/scripts/update-home.sh'
 ```
 
 ## Glass in (human)
 
 ```sh
-herdr --remote tim@100.107.83.38
+herdr --remote <user>@<orch-host>
 # remote shell:
 source ~/.deck/enter.sh && pi
 ```
@@ -117,5 +116,5 @@ Then talk to the orch: describe work, point at inbox files, stamp when asked.
 ## One-liner the laptop agent can cat first
 
 ```sh
-ssh tim@100.107.83.38 'cat ~/dev/deck/docs/LAPTOP-AGENTS.md'
+ssh <user>@<orch-host> 'cat ~/dev/deck/docs/LAPTOP-AGENTS.md'
 ```

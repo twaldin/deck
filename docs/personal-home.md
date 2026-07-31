@@ -1,9 +1,8 @@
-# Personal deck-home bootstrap (deckbox)
+# Personal deck-home bootstrap
 
-How to stand up a second, fully separate deck home on the personal host
-(`deckbox`, 124 GB / 24c, Tailscale `100.107.83.38`). Context:
-work topology and access steps live in the operator's `data/ref/topology.md`
-and `data/ref/access-checklist.md`.
+How to stand up a second, fully separate deck home on a durable personal host.
+Operator topology and access steps live in that operator's private notes — not
+in this public repo.
 
 ## The one rule
 
@@ -14,54 +13,54 @@ not `broker/store.db` (OAuth credentials), not `.env`, not `data/`, not
 
 Forbidden on the personal host, permanently:
 
-- Lindy eng-agent keys, Lindy broker credentials, or any work OAuth account
+- Company eng-agent keys, company broker credentials, or any work OAuth account
 - prod-readonly credentials of any kind
-- `lindy-ai/*` checkouts or any company code
+- Company product checkouts
 
 If a step seems to need one of these, the step is wrong. Stop.
 
 ## Checklist
 
-Run everything below **on deckbox**, as your own user.
+Run everything below **on the personal host**, as your own user.
 
-1. **Tailscale.** Already on the tailnet as `deckbox`.
+1. **Private network.** Host reachable from your laptop (Tailscale or equivalent).
 
 2. **Prerequisites.** `git`, [`bun`](https://bun.sh), `gh` (personal account).
 
-3. **One-shot install** (clones `v2` if needed):
+3. **One-shot install**:
 
    ```sh
-   curl -fsSL https://raw.githubusercontent.com/twaldin/deck/v2/install-personal.sh | bash
-   # or from an existing clone:
-   ~/dev/deck/install-personal.sh
+   git clone https://github.com/twaldin/deck.git ~/dev/deck
+   cd ~/dev/deck && git checkout main
+   ./install-personal.sh
    ```
 
    Keep updated later: `~/dev/deck/scripts/update-home.sh`
 
    Laptop agents: `docs/LAPTOP-AGENTS.md` (inbox + project register).
 
-5. **Broker.** Start the daemon, then log in with **personal accounts only**:
+4. **Broker.** Start the daemon, then log in with **personal accounts only**:
 
    ```sh
-   bun --cwd ~/dev/deck/broker src/main.ts   # foreground; macOS can use ops/install.sh (launchd)
+   bun --cwd ~/dev/deck/broker src/main.ts   # foreground; or your process manager
    bun ~/dev/deck/broker/src/cli.ts login anthropic
-   bun ~/dev/deck/broker/src/cli.ts login openai-codex-device   # optional; any pi-ai OAuth provider
+   bun ~/dev/deck/broker/src/cli.ts login openai-codex-device   # optional
    bun ~/dev/deck/broker/src/cli.ts status
    ```
 
    Credentials land in `~/.deck/broker/store.db` (0600) on this host and stay
-   here. `ops/install.sh` is macOS/launchd; on Linux run the broker under your
-   own process manager (systemd user unit or a shell in tmux — either is fine).
+   here. On Linux run the broker under your own process manager (systemd user
+   unit or a shell in tmux).
 
-6. **Herdr server.** Install the `herdr` binary on deckbox, then:
+5. **Herdr server.** Install the `herdr` binary on the host, then:
 
    ```sh
    herdr server
    ```
 
-   Glass in from a laptop with `herdr --remote deckbox` (or `ssh deckbox`).
+   Glass in from a laptop with `herdr --remote <user>@<host>`.
 
-7. **Verify.**
+6. **Verify.**
 
    ```sh
    deck-v2 home     # prints ~/.deck
@@ -70,10 +69,9 @@ Run everything below **on deckbox**, as your own user.
 
 ## Shipping a personal project (yolo-ship)
 
-Personal projects on deckbox ship through the same PR pipeline as everything
-else; the profile just selects the yolo posture. One-time per project: add a
-profile to `~/.deck/config/projects.json` (the deck seed is the template —
-`pipeline: "yolo-ship", yolo: true, stamp: false`).
+Personal projects ship through the same PR pipeline as everything else; the
+profile just selects the yolo posture. One-time per project: add a profile to
+`~/.deck/config/projects.json` (`pipeline: "yolo-ship", yolo: true, stamp: false`).
 
 Then one command ships an effort:
 
@@ -93,11 +91,11 @@ point — the pipeline is the default, `--no-pipeline` is the escape hatch.
 
 ## How deck code moves between hosts
 
-| Host | Authors deck? | Gets new deck by |
+| Host role | Authors deck? | Gets new deck by |
 |---|---|---|
-| home laptop (`twaldin-home`) | **yes** — sole deck-dev | pushes PRs to `twaldin/deck` |
-| work host (`twaldin-work`) | no | `git -C ~/dev/deck pull` on `v2` + `bash v2/install.sh` |
-| deckbox | optional personal features | same: `git pull` on `v2` + `bash v2/install.sh` |
+| Dev laptop | yes | pushes PRs to the deck remote |
+| Work host | no | `git pull` on `main` + `bash v2/install.sh` |
+| Personal orch host | optional personal features | same: `git pull` on `main` + install |
 
 The pull + install pair is the whole sync path. State never travels; only the
 repo does.
