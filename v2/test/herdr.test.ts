@@ -8,7 +8,14 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { TaskRow } from "../src/fleet";
-import { desiredState, mayClosePane, projectionMessage, shellQuote, smithersSummary } from "../src/herdr";
+import {
+	desiredState,
+	mayClosePane,
+	projectionMessage,
+	shellQuote,
+	shouldReleasePane,
+	smithersSummary,
+} from "../src/herdr";
 
 function task(overrides: Partial<TaskRow> = {}): TaskRow {
 	return {
@@ -46,6 +53,56 @@ describe("desiredState", () => {
 	test("finished or never-started maps to idle", () => {
 		expect(desiredState(task({ runState: "finished", lastVerb: "done" }))).toBe("idle");
 		expect(desiredState(task())).toBe("idle");
+	});
+});
+
+describe("shouldReleasePane", () => {
+	test("terminal verbs release even with the worktree still on disk", () => {
+		expect(
+			shouldReleasePane({ runState: "finished", lastVerb: "done", worktreeExists: true }),
+		).toBe(true);
+		expect(
+			shouldReleasePane({ runState: "none", lastVerb: "failed", worktreeExists: true }),
+		).toBe(true);
+	});
+
+	test("parked (paused/blocked, no live run) releases", () => {
+		expect(
+			shouldReleasePane({ runState: "finished", lastVerb: "paused", worktreeExists: true }),
+		).toBe(true);
+		expect(
+			shouldReleasePane({ runState: "none", lastVerb: "blocked", worktreeExists: true }),
+		).toBe(true);
+	});
+
+	test("running keeps the pane unless the verb is terminal", () => {
+		expect(
+			shouldReleasePane({ runState: "running", lastVerb: "working", worktreeExists: true }),
+		).toBe(false);
+		expect(
+			shouldReleasePane({ runState: "running", lastVerb: "blocked", worktreeExists: true }),
+		).toBe(false);
+		expect(
+			shouldReleasePane({ runState: "running", lastVerb: "done", worktreeExists: true }),
+		).toBe(true);
+	});
+
+	test("gone worktree releases any non-running task", () => {
+		expect(
+			shouldReleasePane({ runState: "finished", lastVerb: "working", worktreeExists: false }),
+		).toBe(true);
+		expect(
+			shouldReleasePane({ runState: "none", lastVerb: null, worktreeExists: false }),
+		).toBe(true);
+	});
+
+	test("between events (not running, non-terminal verb, worktree present) parks idle", () => {
+		expect(
+			shouldReleasePane({ runState: "finished", lastVerb: "working", worktreeExists: true }),
+		).toBe(false);
+		expect(
+			shouldReleasePane({ runState: "none", lastVerb: null, worktreeExists: true }),
+		).toBe(false);
 	});
 });
 
