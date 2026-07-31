@@ -53,6 +53,7 @@ type Handler = (event: any, context: TestContext) => Promise<void> | void;
 class ExtensionHarness implements IdleCompactionExtensionApi {
 	readonly hooks = new Map<string, Handler[]>();
 	readonly appended: Array<{ customType: string; data: unknown }> = [];
+	readonly sentMessages: Array<{ message: unknown; options: unknown }> = [];
 	noIdleCompaction = false;
 
 	on(event: string, handler: Handler): void {
@@ -63,6 +64,10 @@ class ExtensionHarness implements IdleCompactionExtensionApi {
 
 	appendEntry(customType: string, data?: unknown): void {
 		this.appended.push({ customType, data });
+	}
+
+	sendMessage(message: unknown, options: unknown): void {
+		this.sentMessages.push({ message, options });
 	}
 
 	registerFlag(): void {}
@@ -363,6 +368,13 @@ describe("idle compaction policy", () => {
 		});
 	});
 
+	test("enables keep-warm for long cache routes", () => {
+		const parsed = parseIdleCompactionConfig({});
+		expect(selectIdleCompactionConfig(parsed, { provider: "deck", id: "claude-sonnet-4-5" }).keepWarm).toBeTrue();
+		expect(selectIdleCompactionConfig(parsed, { provider: "deck", id: "gpt-5.6-sol" }).keepWarm).toBeTrue();
+		expect(parsed.config.keepWarm).toBeFalse();
+	});
+
 	test("gives deck claude routes the broker's 1h retention and GPT-5.6+ the 30m minimum", () => {
 		const parsed = parseIdleCompactionConfig({});
 		// deck claude-*: the broker's pi-ai layer requests ttl "1h" on oauth.
@@ -475,6 +487,39 @@ describe("idle compaction extension", () => {
 		expect(instructions).toContain("task id");
 		expect(instructions).toContain("run receipts");
 		expect(instructions).toContain("pending decision");
+	});
+
+	test("sends a tiny keep-warm turn for a long route below the compaction threshold", async () => {
+		const { runtime, harness, context } = setup({
+			PI_IDLE_COMPACTION_ANTHROPIC_TTL_MS: "1000",
+			PI_IDLE_COMPACTION_ANTHROPIC_MARGIN_MS: "200",
+		});
+		context.model = { provider: "deck", id: "claude-sonnet-4-5", baseUrl: "http://deck.test/v1" };
+		await harness.emit("session_start", context);
+		await warmAndSettle(harness, context);
+		runtime.advance(800);
+		expect(harness.sentMessages).toHaveLength(1);
+		expect(context.compactCalls).toHaveLength(0);
+		expect(harness.sentMessages[0]?.message).toMatchObject({
+			customType: "deck.idle-keepwarm.v1",
+			content: "Reply with exactly idle. Do not call tools.",
+			display: false,
+		});
+		expect(harness.sentMessages[0]?.options).toEqual({ triggerTurn: true });
+	});
+
+	test("falls back to compaction for a long route with a large context", async () => {
+		const { runtime, harness, context } = setup({
+			PI_IDLE_COMPACTION_ANTHROPIC_TTL_MS: "1000",
+			PI_IDLE_COMPACTION_ANTHROPIC_MARGIN_MS: "200",
+		});
+		context.model = { provider: "deck", id: "claude-sonnet-4-5", baseUrl: "http://deck.test/v1" };
+		context.tokens = 160_000;
+		await harness.emit("session_start", context);
+		await warmAndSettle(harness, context);
+		runtime.advance(800);
+		expect(harness.sentMessages).toHaveLength(0);
+		expect(context.compactCalls).toHaveLength(1);
 	});
 
 	test("uses the OpenAI profile deadline for a deck OpenAI route", async () => {

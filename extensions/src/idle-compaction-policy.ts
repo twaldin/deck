@@ -11,6 +11,10 @@ export interface IdleCompactionConfig {
 	minGrowthTokens: number;
 	minGrowthPercent: number;
 	minimumCompactionIntervalMs: number;
+	/** Send a tiny request instead of compacting at the cache deadline. */
+	keepWarm: boolean;
+	/** Compact rather than keep-warm once context reaches this percentage. */
+	keepWarmContextPercent: number;
 	retryDelayMs: number;
 	maxRetriesPerContext: number;
 	notify: boolean;
@@ -25,6 +29,8 @@ export const DEFAULT_IDLE_COMPACTION_CONFIG: Readonly<IdleCompactionConfig> = {
 	minGrowthTokens: 1_024,
 	minGrowthPercent: 5,
 	minimumCompactionIntervalMs: 4 * 60_000,
+	keepWarm: false,
+	keepWarmContextPercent: 70,
 	retryDelayMs: 60_000,
 	maxRetriesPerContext: 2,
 	notify: true,
@@ -45,6 +51,8 @@ export type IdleCompactionCacheRoute = IdleCompactionProvider | "anthropic-long"
 
 export interface ParsedIdleCompactionConfig {
 	config: IdleCompactionConfig;
+	/** Undefined means the operator did not set the keep-warm override. */
+	keepWarmOverride: boolean | undefined;
 	providerConfigs: Readonly<Partial<Record<IdleCompactionProvider, IdleCompactionConfig>>>;
 	builtinConfigs: Readonly<Partial<Record<IdleCompactionCacheRoute, IdleCompactionConfig>>>;
 	warnings: string[];
@@ -101,9 +109,13 @@ export function selectIdleCompactionConfig(
 ): IdleCompactionConfig {
 	const provider = cacheProviderForModel(model);
 	if (provider === undefined) return parsed.config;
-	const envProfile = parsed.providerConfigs[provider];
-	if (envProfile !== undefined) return envProfile;
 	const route = cacheRouteForModel(model);
+	const envProfile = parsed.providerConfigs[provider];
+	if (envProfile !== undefined) {
+		return route === "anthropic-long" || route === "openai-long"
+			? { ...envProfile, keepWarm: parsed.keepWarmOverride ?? true }
+			: envProfile;
+	}
 	return route === undefined ? parsed.config : (parsed.builtinConfigs[route] ?? parsed.config);
 }
 
@@ -119,6 +131,7 @@ export type IdleCompactionDecision =
 				| "usage-unknown"
 				| "below-context-floor"
 				| "no-context-growth"
+				| "keep-warm"
 				| "cooldown";
 			waitMs?: number;
 	  };
@@ -173,6 +186,13 @@ export function decideIdleCompaction(input: IdleCompactionInput): IdleCompaction
 
 	if (input.contextTokens === null || input.contextWindow <= 0) {
 		return { compact: false, reason: "usage-unknown" };
+	}
+
+	const keepWarmThreshold = Math.ceil(
+		input.contextWindow * (config.keepWarmContextPercent / 100),
+	);
+	if (config.keepWarm && input.contextTokens < keepWarmThreshold) {
+		return { compact: false, reason: "keep-warm" };
 	}
 
 	const floorTokens = Math.ceil(input.contextWindow * (config.contextFloorPercent / 100));
@@ -272,6 +292,14 @@ const CONFIG_VARIABLES: ConfigVariable[] = [
 		minimum: 0,
 		maximum: MAX_TIMER_DELAY_MS,
 	},
+	{ key: "keepWarm", env: "PI_IDLE_COMPACTION_KEEP_WARM", kind: "boolean" },
+	{
+		key: "keepWarmContextPercent",
+		env: "PI_IDLE_COMPACTION_KEEP_WARM_CONTEXT_PERCENT",
+		kind: "number",
+		minimum: 0,
+		maximum: 100,
+	},
 	{
 		key: "retryDelayMs",
 		env: "PI_IDLE_COMPACTION_RETRY_MS",
@@ -360,6 +388,15 @@ export function parseIdleCompactionConfig(
 	const config: IdleCompactionConfig = { ...DEFAULT_IDLE_COMPACTION_CONFIG };
 	const warnings: string[] = [];
 	parseConfigVariables(config, CONFIG_VARIABLES, env, warnings);
+	const rawKeepWarm = env.PI_IDLE_COMPACTION_KEEP_WARM?.trim().toLowerCase();
+	const keepWarmOverride =
+		rawKeepWarm === undefined || rawKeepWarm === ""
+			? undefined
+			: ["1", "true", "yes", "on"].includes(rawKeepWarm)
+				? true
+				: ["0", "false", "no", "off"].includes(rawKeepWarm)
+					? false
+					: undefined;
 	normalizeTiming(
 		config,
 		"PI_IDLE_COMPACTION_TTL_MS",
@@ -421,10 +458,14 @@ export function parseIdleCompactionConfig(
 	for (const [route, timing] of Object.entries(DEFAULT_ROUTE_TIMINGS) as Array<
 		[IdleCompactionCacheRoute, Pick<IdleCompactionConfig, "cacheTtlMs" | "marginMs">]
 	>) {
-		const profile = { ...config, ...timing };
+		const profile = {
+			...config,
+			...timing,
+			keepWarm: keepWarmOverride ?? (route === "anthropic-long" || route === "openai-long"),
+		};
 		normalizeTiming(profile, "builtin ttl", "builtin margin", capCooldown, warnings);
 		builtinConfigs[route] = profile;
 	}
 
-	return { config, providerConfigs, builtinConfigs, warnings };
+	return { config, keepWarmOverride, providerConfigs, builtinConfigs, warnings };
 }
