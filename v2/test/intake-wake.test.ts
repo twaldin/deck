@@ -129,6 +129,26 @@ describe("intake event consumption", () => {
 		expect(third.batched).toHaveLength(1);
 	});
 
+	test("a legitimate RE-occurrence (intervening event) wakes again", async () => {
+		const { wake, home: h } = await mods();
+		const reviewRequest = {
+			kind: "new",
+			signal: true,
+			note: "new PR (review-owed): fix x https://x/1",
+			url: "https://x/1",
+		};
+		appendLines(h.intakeFiles().events, [event(reviewRequest)]);
+		expect(wake.reconcile([]).interrupt).toHaveLength(1);
+		// Review request withdrawn, then re-requested later: same url, same kind,
+		// same note — but a real second ask, separated by the removal event.
+		appendLines(h.intakeFiles().events, [
+			event({ kind: "removed", url: "https://x/1", note: "PR descoped: fix x https://x/1" }),
+		]);
+		wake.reconcile([]);
+		appendLines(h.intakeFiles().events, [event(reviewRequest)]);
+		expect(wake.reconcile([]).interrupt).toHaveLength(1);
+	});
+
 	test("no intake log at all is a clean no-op", async () => {
 		const { wake } = await mods();
 		const result = wake.reconcile([]);

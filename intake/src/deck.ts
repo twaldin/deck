@@ -220,10 +220,30 @@ export function buildIntakeEvents(
 	return events;
 }
 
-/** Append events, one JSON object per line. A torn tail line is skipped on read. */
+/**
+ * Append events, one JSON object per line. A torn tail line (crash mid-append)
+ * is reported and skipped by the consumer — but only if the NEXT append does
+ * not glue onto it, so a file that does not end in a newline gets one first.
+ */
 export function appendIntakeEvents(filePath: string, events: IntakeEvent[]): void {
 	if (events.length === 0) return;
 	fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
+	let prefix = "";
+	try {
+		const stat = fs.statSync(filePath);
+		if (stat.size > 0) {
+			const fd = fs.openSync(filePath, "r");
+			try {
+				const tail = Buffer.alloc(1);
+				fs.readSync(fd, tail, 0, 1, stat.size - 1);
+				if (tail[0] !== 0x0a) prefix = "\n";
+			} finally {
+				fs.closeSync(fd);
+			}
+		}
+	} catch {
+		// No file yet: nothing to repair.
+	}
 	const lines = events.map((event) => JSON.stringify(event)).join("\n");
-	fs.appendFileSync(filePath, `${lines}\n`, { mode: 0o600 });
+	fs.appendFileSync(filePath, `${prefix}${lines}\n`, { mode: 0o600 });
 }

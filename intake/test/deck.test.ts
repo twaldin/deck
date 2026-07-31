@@ -218,4 +218,21 @@ describe("appendIntakeEvents", () => {
 		expect(lines).toHaveLength(2);
 		expect(JSON.parse(lines[0] ?? "")).toMatchObject({ v: 1, kind: "ci", taskId: null });
 	});
+
+	test("a torn tail (crash mid-append) is newline-separated, never glued", () => {
+		const file = intakeEventsFile();
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		fs.writeFileSync(file, '{"v":1,"kind":"ci"');
+		const events = buildIntakeEvents(
+			[{ kind: "ci", url: "https://x/pull/1", from: "passing", to: "failing" }],
+			makeState([makeItem({ url: "https://x/pull/1" })]),
+			EMPTY,
+			[],
+			NOW,
+		);
+		appendIntakeEvents(file, events);
+		const lines = fs.readFileSync(file, "utf8").trim().split("\n");
+		expect(lines).toHaveLength(2);
+		expect(() => JSON.parse(lines[1] ?? "")).not.toThrow();
+	});
 });

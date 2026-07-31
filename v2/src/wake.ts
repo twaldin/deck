@@ -212,13 +212,20 @@ const INTAKE_CURSOR_KEY = ".intake";
  * Everything else — uncorrelated CI churn, new PRs we authored ourselves — is
  * recorded silently and listable via `deck-intake ls`.
  *
- * Edge triggering ALSO applies here, via the durable baseline keyed by
- * url+kind: the poller appends events BEFORE advancing its state file, so a
- * crash in between re-emits the same diff next run (at-least-once), and an
- * identical repeat must not wake twice. The note is deterministic (no
- * timestamp), so identical note = same PR state transition.
+ * Edge triggering ALSO applies here, via the durable baseline keyed per URL:
+ * the poller appends events BEFORE advancing its state file, so a crash in
+ * between re-emits the same diff next run (at-least-once), and an identical
+ * repeat must not wake twice. Only an ADJACENT repeat is a duplicate — the
+ * baseline holds the URL's latest event, so a legitimate re-occurrence later
+ * (new → removed → new again, same title) has an intervening event and wakes.
+ * The note is deterministic (no timestamp): identical kind+note, back to
+ * back, is the crash replay and nothing else.
  */
 function consumeIntake(cursors: CursorStore, baseline: Baseline, result: ReconcileResult): void {
+	// ponytail: readFileSince re-reads and re-hashes the whole log per cycle,
+	// same as .status files. At a few hundred bytes per real PR state change the
+	// log grows a few MB per quarter; if it ever hurts, rotate the log (move it
+	// aside; the identity cursor detects the swap and rescans the fresh file).
 	const read = readFileSince(intakeFiles().events, cursors[INTAKE_CURSOR_KEY] ?? null);
 	if (read.cursor === null) return;
 	cursors[INTAKE_CURSOR_KEY] = read.cursor;
@@ -249,11 +256,16 @@ function consumeIntake(cursors: CursorStore, baseline: Baseline, result: Reconci
 			event: { verb: "intake", key: "default", note, raw: line },
 		};
 
-		const dedupKey = `${INTAKE_CURSOR_KEY}:${event.url ?? "?"}#${event.kind ?? "?"}`;
+		const dedupKey = `${INTAKE_CURSOR_KEY}:${event.url ?? "?"}`;
+		const fingerprint = `${event.kind ?? "?"}|${note}`;
 		const previousEntry = baseline[dedupKey];
 		const duplicate =
-			tier !== "T2" && previousEntry !== undefined && previousEntry.lastRaw === note;
-		baseline[dedupKey] = { lastTier: tier, lastRaw: note, count: (previousEntry?.count ?? 0) + 1 };
+			tier !== "T2" && previousEntry !== undefined && previousEntry.lastRaw === fingerprint;
+		baseline[dedupKey] = {
+			lastTier: tier,
+			lastRaw: fingerprint,
+			count: (previousEntry?.count ?? 0) + 1,
+		};
 
 		if (tier === "T2" || duplicate) result.silent.push(item);
 		else if (tier === "T0") result.interrupt.push(item);
