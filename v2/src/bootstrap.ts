@@ -21,6 +21,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { assertHomeIsNotACheckout, assertHomeIsNotAnotherFleet, deckV2Home } from "./home";
+import { seedProfilesFile } from "./projects";
 
 export type BootstrapResult = {
 	home: string;
@@ -116,6 +117,11 @@ export function bootstrapHome(options: { repoV2Dir: string; home?: string } = { 
 			created.push(file);
 		}
 	}
+
+	// Machine-readable project profiles (config/projects.json), seeded once and
+	// then the captain's to edit. data/projects.md stays the human form.
+	const profilesSeeded = seedProfilesFile(home);
+	if (profilesSeeded !== null) created.push(profilesSeeded);
 
 	return { home, created, linked, notes };
 }

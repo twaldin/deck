@@ -479,6 +479,34 @@ describe("evaluateReadyForStamp", () => {
 			),
 		).toBe("rev");
 	});
+
+	// yolo profile (e.g. deck): green merges without a human approval; a
+	// still-running CI is NOT green enough (yolo fires on green, not on hope).
+	describe("yolo", () => {
+		const yoloOptions = { ...options, yolo: true };
+
+		test("green CI with NO approval is ready", () => {
+			const verdict = evaluateReadyForStamp([], "green", yoloOptions);
+			expect(verdict.ready).toBe(true);
+			expect(verdict.approvedBy).toBeNull();
+		});
+
+		test("no checks configured is ready", () => {
+			expect(evaluateReadyForStamp([], "none", yoloOptions).ready).toBe(true);
+		});
+
+		test("REGRESSION: will-be-green is NOT ready under yolo (stamp ruling does not carry over)", () => {
+			// Under stamp, will-be-green passes (a human decided). Under yolo
+			// nobody decides, so the loop must wait for checks to finish.
+			const verdict = evaluateReadyForStamp([], "will-be-green", yoloOptions);
+			expect(verdict.ready).toBe(false);
+			expect(verdict.reasons[0]).toContain("yolo merge fires on green");
+		});
+
+		test("red is not ready", () => {
+			expect(evaluateReadyForStamp([], "red", yoloOptions).ready).toBe(false);
+		});
+	});
 });
 
 // ---------------------------------------------------------------------------

@@ -14,6 +14,12 @@ export interface ReadyOptions {
 	author: string;
 	/** Logins whose approvals do not count (e.g. "ali" per SOP, bots). */
 	excludedApprovers: string[];
+	/**
+	 * yolo profile (e.g. deck): ready needs CI actually green (or no checks),
+	 * and needs NO human approval. "will-be-green" is NOT ready: yolo merge
+	 * fires on green, so the poll loop waits for checks to finish.
+	 */
+	yolo?: boolean;
 }
 
 /**
@@ -47,6 +53,11 @@ export function evaluateReadyForStamp(
 ): ReadyVerdict {
 	const reasons: string[] = [];
 	const approver = findHumanApproval(approvals, options);
+	if (options.yolo === true) {
+		const ciOk = ci === "green" || ci === "none";
+		if (!ciOk) reasons.push(`yolo merge fires on green; CI is ${ci}.`);
+		return { ready: ciOk, approvedBy: approver, ci, reasons };
+	}
 	if (approver === null) {
 		reasons.push("no real human approval yet (bot/agent reviews and excluded logins never count).");
 	}

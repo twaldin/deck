@@ -8,7 +8,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { readMeta } from "../src/meta";
-import { REPO_ALIASES, resolveRepo, startRun } from "../src/spawn";
+import { profilesFile, seedProfiles } from "../src/projects";
+import { resolveRepo, startRun } from "../src/spawn";
 
 const DECK_BIN = path.resolve(import.meta.dir, "../../cli/bin/deck");
 
@@ -148,10 +149,35 @@ describe("spawn worktree allocation", () => {
 		expect(state.entries[0].state).toBe("free");
 	});
 
-	test("repo aliases resolve and unknown aliases are refused", () => {
-		expect(resolveRepo("lindy")).toBe(REPO_ALIASES.lindy as string);
-		expect(resolveRepo("deck")).toBe(REPO_ALIASES.deck as string);
+	test("repo aliases resolve via project-profile primary paths", () => {
+		// No config file in this test home: the seeds answer.
+		const seeds = seedProfiles();
+		expect(resolveRepo("lindy")).toBe(seeds.find((p) => p.id === "lindy")?.primary as string);
+		expect(resolveRepo("deck")).toBe(seeds.find((p) => p.id === "deck")?.primary as string);
 		expect(resolveRepo("/abs/path")).toBe("/abs/path");
 		expect(() => resolveRepo("nope")).toThrow(/unknown repo alias/);
+	});
+
+	test("a config file overrides the seeded primary for an alias", () => {
+		const home = process.env.DECK_V2_HOME as string;
+		const file = profilesFile(home);
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		fs.writeFileSync(
+			file,
+			JSON.stringify([
+				{
+					id: "deck",
+					repo: "twaldin/deck",
+					primary: "/somewhere/else/deck",
+					pipeline: "yolo-ship",
+					yolo: true,
+					stamp: false,
+					knowledge: [],
+				},
+			]),
+		);
+		expect(resolveRepo("deck")).toBe("/somewhere/else/deck");
+		// Wholesale replacement: an alias absent from the file no longer resolves.
+		expect(() => resolveRepo("lindy")).toThrow(/unknown repo alias/);
 	});
 });

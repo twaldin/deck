@@ -10,12 +10,12 @@
  * The brief is generated here (prompts.ts), not hand-written per task.
  */
 import { spawn as spawnProcess, spawnSync } from "node:child_process";
-import * as os from "node:os";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { appendStatus } from "./events";
 import { ensureTaskDirs, stateFiles, taskFiles } from "./home";
 import { bumpEpoch, readMeta, updateMeta, type TaskKind } from "./meta";
+import { findProfile, loadProfiles } from "./projects";
 import { workerBrief } from "./prompts";
 import { buildHydration } from "./hydrate";
 import { ack as ackMessages } from "./queue";
@@ -84,21 +84,20 @@ export type SpawnResult = {
 	branch?: string;
 };
 
-/** Known repo aliases on this machine. An absolute path always works too. */
-export const REPO_ALIASES: Record<string, string> = {
-	lindy: path.join(os.homedir(), "dev", "fm2", "projects", "lindy"),
-	deck: path.join(os.homedir(), "dev", "deck"),
-};
-
+/**
+ * Resolve a repo alias to its primary checkout via the project profiles
+ * (config/projects.json). An absolute path always works too.
+ */
 export function resolveRepo(repo: string): string {
 	if (path.isAbsolute(repo)) return repo;
-	const aliased = REPO_ALIASES[repo];
-	if (aliased === undefined) {
+	const profile = findProfile(repo);
+	if (profile === null) {
+		const known = loadProfiles().map((p) => p.id);
 		throw new Error(
-			`unknown repo alias "${repo}"; use an absolute path or one of: ${Object.keys(REPO_ALIASES).join(", ")}`,
+			`unknown repo alias "${repo}"; use an absolute path or one of: ${known.join(", ")}`,
 		);
 	}
-	return aliased;
+	return profile.primary;
 }
 
 export type AllocatedWorktree = { wtId: string; worktree: string; branch: string };
