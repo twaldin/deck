@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
-# Pull latest deck v2 + reinstall shims/extension. Safe to re-run.
+# Pull latest deck main + reinstall shims/extension. Safe to re-run.
 # Does NOT overwrite ~/.deck/AGENTS.md, broker store, or state.
 set -euo pipefail
 
 REPO="${DECK_REPO:-$HOME/dev/deck}"
+BRANCH="${DECK_BRANCH:-main}"
 if [ ! -d "$REPO/.git" ]; then
   echo "error: no deck checkout at $REPO (set DECK_REPO=...)" >&2
   exit 1
 fi
 
 cd "$REPO"
-git fetch origin v2
-git checkout v2
-git pull --ff-only origin v2
+git fetch origin "$BRANCH"
+git checkout -B "$BRANCH" "origin/$BRANCH"
+git reset --hard "origin/$BRANCH"
 
 bun install --cwd "$REPO/v2"
 bun install --cwd "$REPO/broker"
