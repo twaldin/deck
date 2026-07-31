@@ -374,6 +374,11 @@ export function attentionRank(task: TaskRow): number {
 	return 6;
 }
 
+/** Terminal workflow: finished one way or another. Unknown/null status stays visible. */
+export function isTerminalWorkflow(wf: WorkflowRow): boolean {
+	return ["completed", "failed", "cancelled", "succeeded"].includes((wf.status ?? "").toLowerCase());
+}
+
 /** Attention-first order; terminal done/failed rows drop unless showAll. */
 export function visibleTasks(tasks: TaskRow[], showAll: boolean): { shown: TaskRow[]; hidden: number } {
 	const sorted = [...tasks].sort((a, b) => attentionRank(a) - attentionRank(b));
@@ -467,9 +472,13 @@ export function buildFleetView(
 	lines.push(header.join(theme.fg("dim", "  ·  ")));
 	lines.push("");
 
-	const { shown, hidden } = visibleTasks(frame.tasks, showAll);
-	if (frame.tasks.length === 0) lines.push(theme.fg("dim", "  (no tasks)"));
-	for (const task of shown) {
+	const sorted = [...frame.tasks].sort((a, b) => attentionRank(a) - attentionRank(b));
+	const activeTasks = sorted.filter((task) => attentionRank(task) < 7);
+	const doneTasks = sorted.filter((task) => attentionRank(task) >= 7);
+	const activeWorkflows = frame.workflows.filter((wf) => !isTerminalWorkflow(wf));
+	const doneWorkflows = frame.workflows.filter(isTerminalWorkflow);
+
+	const renderTask = (task: TaskRow): void => {
 		const chip = chipFor(task);
 		const age = task.statusAgeMs === null ? "" : theme.fg("dim", ` ${humanAge(task.statusAgeMs)}`);
 		// Every dynamic field is clamped: the Text component word-wraps rather
@@ -493,21 +502,33 @@ export function buildFleetView(
 		if (task.queuedMessages > 0) flags.push(`${task.queuedMessages} message(s) queued`);
 		if (task.unresolvedSideEffects > 0) flags.push(`${task.unresolvedSideEffects} UNRESOLVED side effect(s)`);
 		if (flags.length > 0) lines.push(`           ${theme.fg("warning", `! ${flags.join(" · ")}`)}`);
-	}
-	if (hidden > 0) {
-		lines.push(theme.fg("dim", `  ${hidden} done/failed hidden — [a] shows all`));
-	}
+	};
+	const renderWorkflow = (wf: WorkflowRow): void => {
+		const bits = [wf.workflow, wf.status, wf.step === null ? null : `@${wf.step}`, wf.taskId]
+			.filter((bit): bit is string => bit !== null)
+			.join(" · ");
+		lines.push(
+			`  ${theme.fg("accent", `wf:${truncate(wf.runId, 16)}`)}  ${theme.fg("text", truncate(bits, 64))}`,
+		);
+	};
 
-	if (frame.workflows.length > 0) {
+	if (frame.tasks.length === 0) lines.push(theme.fg("dim", "  (no tasks)"));
+	for (const task of activeTasks) renderTask(task);
+	if (activeWorkflows.length > 0) {
 		lines.push("");
 		lines.push(theme.bold(theme.fg("toolTitle", "workflows")));
-		for (const wf of frame.workflows) {
-			const bits = [wf.workflow, wf.status, wf.step === null ? null : `@${wf.step}`, wf.taskId]
-				.filter((bit): bit is string => bit !== null)
-				.join(" · ");
-			lines.push(
-				`  ${theme.fg("accent", `wf:${truncate(wf.runId, 16)}`)}  ${theme.fg("text", truncate(bits, 64))}`,
-			);
+		for (const wf of activeWorkflows) renderWorkflow(wf);
+	}
+
+	const terminal = doneTasks.length + doneWorkflows.length;
+	if (terminal > 0 && !showAll) {
+		lines.push(theme.fg("dim", `  ${terminal} done/failed hidden — [a] shows all`));
+	} else if (terminal > 0) {
+		for (const task of doneTasks) renderTask(task);
+		if (doneWorkflows.length > 0) {
+			lines.push("");
+			lines.push(theme.bold(theme.fg("toolTitle", "finished workflows")));
+			for (const wf of doneWorkflows) renderWorkflow(wf);
 		}
 	}
 

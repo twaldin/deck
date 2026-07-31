@@ -10,6 +10,7 @@ import {
 	buildFleetView,
 	chipFor,
 	framed,
+	isTerminalWorkflow,
 	humanAge,
 	PLAIN_FLEET_THEME,
 	renderStatusline,
@@ -220,6 +221,51 @@ describe("attention-first default view", () => {
 		const t = task({ lastVerb: "failed", openDecisions: 1 });
 		expect(attentionRank(t)).toBe(0);
 		expect(visibleTasks([t], false).shown).toHaveLength(1);
+	});
+
+	test("a running workflow renders with the active tasks, above the collapse line", () => {
+		const out = buildFleetText(
+			frame({
+				tasks: [...doneTasks, ...live],
+				workflows: [{ runId: "r1", workflow: "pr-pipeline", status: "running", step: null, taskId: null }],
+			}),
+		);
+		expect(out.indexOf("wf:r1")).toBeGreaterThan(out.indexOf("live-run"));
+		expect(out.indexOf("wf:r1")).toBeLessThan(out.indexOf("hidden"));
+	});
+
+	test("finished workflows hide by default and count into the collapse line", () => {
+		const out = buildFleetText(
+			frame({
+				tasks: [...doneTasks, ...live],
+				workflows: [{ runId: "r9", workflow: "pr-pipeline", status: "Completed", step: null, taskId: null }],
+			}),
+		);
+		expect(out).not.toContain("wf:r9");
+		expect(out).toContain("16 done/failed hidden");
+	});
+
+	test("show-all puts terminal rows below every active row, finished workflows last", () => {
+		const out = buildFleetText(
+			frame({
+				tasks: [...doneTasks, ...live],
+				workflows: [
+					{ runId: "r1", workflow: "pr-pipeline", status: "running", step: null, taskId: null },
+					{ runId: "r9", workflow: "pr-pipeline", status: "failed", step: null, taskId: null },
+				],
+			}),
+			PLAIN_FLEET_THEME,
+			{ showAll: true },
+		);
+		expect(out.indexOf("wf:r1")).toBeLessThan(out.indexOf("old-0"));
+		expect(out.indexOf("old-14")).toBeLessThan(out.indexOf("wf:r9"));
+		expect(out).toContain("finished workflows");
+	});
+
+	test("isTerminalWorkflow: terminal statuses case-insensitive, unknown/null stay active", () => {
+		const wf = (status: string | null) => ({ runId: "r", workflow: null, status, step: null, taskId: null });
+		for (const s of ["completed", "Failed", "CANCELLED", "succeeded"]) expect(isTerminalWorkflow(wf(s))).toBe(true);
+		for (const s of ["running", "weird", null]) expect(isTerminalWorkflow(wf(s))).toBe(false);
 	});
 
 	test("maxBodyLines clamps the frame height with the border intact", () => {
