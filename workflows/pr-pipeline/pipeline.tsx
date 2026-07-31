@@ -830,6 +830,7 @@ export default smithers((ctx) => {
 												`[escalate] adopted worktree HEAD ${worktreeHead} is not ahead of PR head ${overview.headSha}; refusing to overwrite the PR branch.`,
 											);
 										}
+										}
 										await execOrThrow(
 											bunExec,
 											[

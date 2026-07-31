@@ -95,6 +95,8 @@ export function watchFixPrompt(args: {
 		"never run gt submit / gt create / gh pr create - that creates an accidental child PR.",
 		"Never merge anything. After a rerun or push, return the receipt and exit immediately.",
 		"Never sleep-poll CI or review state. The next persisted Smithers poll owns the wait.",
+
+		"",
 		`Final output: ONLY a JSON object {"round": ${args.round}, "afterPoll": ${args.afterPoll}, "actions": string[], "pushed": boolean, "reRequested": string[], "summary": string}.`,
 		`"round" MUST be exactly ${args.round} and "afterPoll" MUST be exactly ${args.afterPoll}.`,
 	].join("\n");
