@@ -99,6 +99,17 @@ export function wakeFiles() {
 	} as const;
 }
 
+/**
+ * Intake records, written by the deck-intake poller (intake/ in the repo).
+ * `events.jsonl` is append-only; reconcile consumes it with the same
+ * identity-aware cursor discipline as `.status` files.
+ */
+export function intakeFiles() {
+	return {
+		events: path.join(deckV2Home(), "intake", "events.jsonl"),
+	} as const;
+}
+
 /** Task ids are privacy-safe slugs; they become file names. */
 const TASK_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 

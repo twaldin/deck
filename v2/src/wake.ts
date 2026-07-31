@@ -21,15 +21,35 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { type StatusCursor, loadCursors, readStatus, readStatusSince, saveCursors } from "./events";
-import { stateDir, wakeFiles } from "./home";
+import {
+	type CursorStore,
+	type StatusCursor,
+	loadCursors,
+	readFileSince,
+	readStatus,
+	readStatusSince,
+	saveCursors,
+} from "./events";
+import { intakeFiles, stateDir, wakeFiles } from "./home";
 import { readMeta } from "./meta";
 import { type StatusEvent, type WakeTier, tierFor } from "./status";
+
+/**
+ * The shape a wake carries. `.status` lines produce StatusEvents; the intake
+ * event log produces synthetic events with verb "intake". Consumers only read
+ * verb + note for display, so the widening is safe.
+ */
+export type WakeEvent = {
+	verb: string;
+	key: string;
+	note: string;
+	raw: string;
+};
 
 export type WakeItem = {
 	taskId: string;
 	tier: WakeTier;
-	event: StatusEvent;
+	event: WakeEvent;
 };
 
 export type ReconcileResult = {
@@ -151,6 +171,8 @@ export function reconcile(taskIds?: string[]): ReconcileResult {
 		}
 	}
 
+	consumeIntake(cursors, baseline, result);
+
 	saveCursors(cursors);
 	saveBaseline(baseline);
 	// The cursor has now advanced, so these events will never be re-read from the
@@ -160,6 +182,95 @@ export function reconcile(taskIds?: string[]): ReconcileResult {
 	// at-least-once instead of at-most-once.
 	enqueue([...result.interrupt, ...result.batched]);
 	return result;
+}
+
+/**
+ * One line of the intake event log (written by deck-intake; see intake/src/deck.ts).
+ * Only the fields reconcile acts on — unknown fields are ignored, so the two
+ * packages can evolve without lockstep releases.
+ */
+type IntakeEventLine = {
+	ts?: string;
+	kind?: string;
+	url?: string;
+	taskId?: string | null;
+	signal?: boolean;
+	note?: string;
+};
+
+/** Reserved cursor key. A task id can never start with a dot. */
+const INTAKE_CURSOR_KEY = ".intake";
+
+/**
+ * Consume new intake events. The intake poller's diff engine is already
+ * edge-triggered (same PR review state never re-emits) and the durable
+ * cursor never re-reads a consumed line.
+ *
+ * Tiering: a new review request is T0 (the captain owes a review NOW); an
+ * event correlated to a deck task wakes that task as T1, as do removals and
+ * review-decision changes on our own PRs (a human approved/blocked something).
+ * Everything else — uncorrelated CI churn, new PRs we authored ourselves — is
+ * recorded silently and listable via `deck-intake ls`.
+ *
+ * Edge triggering ALSO applies here, via the durable baseline keyed per URL:
+ * the poller appends events BEFORE advancing its state file, so a crash in
+ * between re-emits the same diff next run (at-least-once), and an identical
+ * repeat must not wake twice. Only an ADJACENT repeat is a duplicate — the
+ * baseline holds the URL's latest event, so a legitimate re-occurrence later
+ * (new → removed → new again, same title) has an intervening event and wakes.
+ * The note is deterministic (no timestamp): identical kind+note, back to
+ * back, is the crash replay and nothing else.
+ */
+function consumeIntake(cursors: CursorStore, baseline: Baseline, result: ReconcileResult): void {
+	// ponytail: readFileSince re-reads and re-hashes the whole log per cycle,
+	// same as .status files. At a few hundred bytes per real PR state change the
+	// log grows a few MB per quarter; if it ever hurts, rotate the log (move it
+	// aside; the identity cursor detects the swap and rescans the fresh file).
+	const read = readFileSince(intakeFiles().events, cursors[INTAKE_CURSOR_KEY] ?? null);
+	if (read.cursor === null) return;
+	cursors[INTAKE_CURSOR_KEY] = read.cursor;
+	if (read.rescanned) result.rescanned.push(INTAKE_CURSOR_KEY);
+
+	for (const line of read.text.split("\n")) {
+		if (line.trim().length === 0) continue;
+		let event: IntakeEventLine;
+		try {
+			event = JSON.parse(line) as IntakeEventLine;
+		} catch {
+			result.malformed.push({ taskId: INTAKE_CURSOR_KEY, raw: line, reason: "not valid JSON" });
+			continue;
+		}
+		const note = event.note ?? `${event.kind ?? "?"} ${event.url ?? ""}`.trim();
+		const taskId = typeof event.taskId === "string" ? event.taskId : "intake";
+		const tier: WakeTier =
+			event.signal === true
+				? "T0"
+				: typeof event.taskId === "string" ||
+						event.kind === "removed" ||
+						event.kind === "review-decision"
+					? "T1"
+					: "T2";
+		const item: WakeItem = {
+			taskId,
+			tier,
+			event: { verb: "intake", key: "default", note, raw: line },
+		};
+
+		const dedupKey = `${INTAKE_CURSOR_KEY}:${event.url ?? "?"}`;
+		const fingerprint = `${event.kind ?? "?"}|${note}`;
+		const previousEntry = baseline[dedupKey];
+		const duplicate =
+			tier !== "T2" && previousEntry !== undefined && previousEntry.lastRaw === fingerprint;
+		baseline[dedupKey] = {
+			lastTier: tier,
+			lastRaw: fingerprint,
+			count: (previousEntry?.count ?? 0) + 1,
+		};
+
+		if (tier === "T2" || duplicate) result.silent.push(item);
+		else if (tier === "T0") result.interrupt.push(item);
+		else result.batched.push(item);
+	}
 }
 
 /**
@@ -250,7 +361,7 @@ export function ackWakes(ids: string[]): void {
  */
 export function foldBatched(items: WakeItem[]): string | null {
 	if (items.length === 0) return null;
-	const byTask = new Map<string, StatusEvent[]>();
+	const byTask = new Map<string, WakeEvent[]>();
 	for (const item of items) {
 		const list = byTask.get(item.taskId) ?? [];
 		list.push(item.event);
