@@ -165,6 +165,13 @@ export default function deckV2(pi: any): void {
 			reviewers: Type.Optional(Type.Array(Type.String())),
 			deploy_evidence: Type.Optional(Type.String({ description: "shell command that proves the deploy" })),
 			dry_run: Type.Optional(Type.Boolean({ description: "simulate side effects; default false" })),
+			existing_pr: Type.Optional(
+				Type.Integer({
+					minimum: 1,
+					description:
+						"adopt an already-open PR by number: skip implement + local review, seed from gh, enter the same watch/stamp loop (never opens a second PR)",
+				}),
+			),
 		}),
 		async execute(_id: string, params: Record<string, unknown>) {
 			const result = await startShip({
@@ -184,6 +191,7 @@ export default function deckV2(pi: any): void {
 					? {}
 					: { deployEvidence: params.deploy_evidence as string }),
 				...(params.dry_run === true ? { dryRun: true } : {}),
+				...(params.existing_pr === undefined ? {} : { existingPr: params.existing_pr as number }),
 			});
 			return text(
 				`ship ${result.runId} started (pid ${result.pid}) \u2014 profile ${result.profile} (${result.pipeline})${result.dryRun ? " [DRY RUN]" : ""}\n` +

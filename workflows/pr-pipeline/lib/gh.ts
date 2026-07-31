@@ -4,6 +4,7 @@
  * `gh`/`git` binaries so a crewmate can point this at gh-axi.
  */
 
+import type { PrOverview } from "./adopt.ts";
 import type {
 	CheckRun,
 	CommentActivity,
@@ -371,6 +372,32 @@ export async function fetchRequestedReviewers(ctx: GhContext, prNumber: number):
 		ctx.gh, "api", `repos/${ctx.repo}/pulls/${prNumber}/requested_reviewers`,
 	]);
 	return parseRequestedReviewers(JSON.parse(out));
+}
+
+/** Overview of an existing PR (adopt path: verify + seed, never create). */
+export async function fetchPrOverview(ctx: GhContext, prNumber: number): Promise<PrOverview> {
+	const exec = ctx.exec ?? bunExec;
+	const out = await execOrThrow(exec, [ctx.gh, "api", `repos/${ctx.repo}/pulls/${prNumber}`]);
+	const payload = JSON.parse(out) as {
+		number: number;
+		html_url: string;
+		state: string;
+		draft?: boolean;
+		head: { ref: string; sha: string; repo: { full_name: string } | null };
+		base: { ref: string };
+	};
+	return {
+		number: payload.number,
+		url: payload.html_url,
+		state: payload.state,
+		draft: payload.draft === true,
+		headRefName: payload.head.ref,
+		headSha: payload.head.sha,
+		baseRefName: payload.base.ref,
+		// head.repo is null when the fork was deleted - that PR is not adoptable
+		// either way, so an empty name fails the same-repo check downstream.
+		headRepoFullName: payload.head.repo?.full_name ?? "",
+	};
 }
 
 /** Current head SHA of the PR (stamp-validity check). */

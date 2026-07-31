@@ -9,6 +9,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { validateBrief } from "../../workflows/pr-pipeline/lib/brief";
 import { profilesFile, seedProfiles, type ProjectProfile } from "../src/projects";
+import { existingPrFromFlag } from "../src/cli";
 import { buildPipelineInput, pipelineDir, startShip, type ShipRequest } from "../src/ship";
 import { assertShipGoesThroughPipeline, shipProfileFor } from "../src/spawn";
 
@@ -43,6 +44,16 @@ const request = (overrides: Partial<ShipRequest> = {}): ShipRequest => ({
 	summary: "Does a thing",
 	acceptance: ["it works"],
 	...overrides,
+});
+
+describe("existingPrFromFlag", () => {
+	test("accepts positive integer values and rejects bare, non-positive, and fractional flags", () => {
+		expect(existingPrFromFlag("42")).toBe(42);
+		expect(existingPrFromFlag(undefined)).toBeUndefined();
+		for (const value of [true, "0", "-1", "1.5"]) {
+			expect(() => existingPrFromFlag(value)).toThrow(/positive PR number/);
+		}
+	});
 });
 
 describe("buildPipelineInput", () => {
@@ -90,6 +101,13 @@ describe("buildPipelineInput", () => {
 		expect(dry.dryRun).toBe(true);
 	});
 
+	test("existingPr passes through to the pipeline input (adopt path); omitted stays omitted", () => {
+		const adopt = buildPipelineInput(request({ existingPr: 4242 }), deckProfile());
+		expect(adopt.existingPr).toBe(4242);
+		const fresh = buildPipelineInput(request(), deckProfile());
+		expect(fresh.existingPr).toBeUndefined();
+	});
+
 	test("a stamp profile (lindy) never gets the weak git-log deploy default: preflight must fail closed until explicit evidence exists", () => {
 		const lindy = buildPipelineInput(request({ profile: "lindy" }), lindyProfile());
 		expect(lindy.commands).toBeUndefined();
@@ -106,6 +124,12 @@ describe("startShip", () => {
 		await expect(startShip(request({ profile: "nope" }), home)).rejects.toThrow(
 			/unknown project profile/,
 		);
+	});
+
+	test("a non-positive or fractional existingPr refuses before anything is written", async () => {
+		await expect(startShip(request({ existingPr: 0 }), home)).rejects.toThrow(/existingPr/);
+		await expect(startShip(request({ existingPr: -3 }), home)).rejects.toThrow(/existingPr/);
+		await expect(startShip(request({ existingPr: 1.5 }), home)).rejects.toThrow(/existingPr/);
 	});
 
 	test("empty acceptance refuses (preflight fails closed downstream anyway)", async () => {

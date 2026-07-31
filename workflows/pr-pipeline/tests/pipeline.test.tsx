@@ -169,6 +169,56 @@ describe("project profiles (yolo vs stamp is data, not a fork)", () => {
 	});
 });
 
+describe("adopt existing PR (input.existingPr)", () => {
+	test("implement is stubbed, local review is skipped, prRecord seeded, and the SAME watch loop reaches done", async () => {
+		const { sim, error } = await run({
+			...baseInput,
+			bypassApprovals: true,
+			existingPr: 777,
+			fixtures: { changedFiles: ["src/feature.ts"], watchPollsToExit: 3 },
+		});
+		expect(error).toBeUndefined();
+		expect(sim.status).toBe("finished");
+
+		// Implement ran as a stub, not an agent round:
+		const impl = (sim.outputs.implementation as Array<Record<string, unknown>>)[0];
+		expect(impl.commits).toEqual([]);
+		expect(String(impl.summary)).toContain("adopted existing PR #777");
+
+		// Local adversarial review never rendered (code already on the PR):
+		expect(sim.executed).not.toContain("local-review");
+		expect(sim.executed).not.toContain("local-fix");
+
+		// prRecord seeded from the existing PR, not fixtures.prNumber:
+		const pr = (sim.outputs.prRecord as Array<Record<string, unknown>>)[0];
+		expect(pr.prNumber).toBe(777);
+		expect(String(pr.receipt)).toContain("adopted existing PR #777");
+
+		// The SAME continuous watch loop ran (multiple polls + a fix arm),
+		// then ready/stamp/merge \u2014 not a one-shot check:
+		expect(sim.executed.filter((id) => id === "r0-watch-poll").length).toBe(3);
+		expect(sim.executed).toContain("r0-watch-fix");
+		expect(sim.executed).toContain("r0-ready-poll");
+		expect(sim.executed).toContain("enqueue-merge");
+		expect(sim.executed).toContain("done");
+	});
+
+	test("an adopted run on a stamp profile still parks at the stamp (watch/ready ran; merge never fired)", async () => {
+		const { sim } = await run({
+			...baseInput,
+			existingPr: 777,
+			fixtures: { changedFiles: ["src/feature.ts"] },
+		});
+		expect(sim.status).toBe("waiting-approval");
+		expect(sim.executed).toContain("push-pr");
+		expect(sim.executed).toContain("r0-watch-poll");
+		expect(sim.executed).toContain("r0-ready-poll");
+		expect(sim.executed).not.toContain("local-review");
+		expect(sim.executed).not.toContain("enqueue-merge");
+	});
+
+});
+
 describe("approval parks (no bypass)", () => {
 	test("an unapproved adversarial review parks at review-escalation; push-pr never runs (stamp profile)", async () => {
 		const { sim } = await run({

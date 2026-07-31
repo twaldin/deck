@@ -46,6 +46,13 @@ export type ShipRequest = {
 	runId?: string;
 	/** Simulate side effects. Default FALSE here: ship means ship. */
 	dryRun?: boolean;
+	/**
+	 * Adopt an already-open PR: the pipeline skips greenfield implement +
+	 * local adversarial review, verifies the branch matches the PR head, seeds
+	 * its PR record from gh (never creates a second PR), and enters the same
+	 * continuous watch/ready/stamp loop as a normal ship.
+	 */
+	existingPr?: number;
 };
 
 /**
@@ -90,6 +97,7 @@ export function buildPipelineInput(request: ShipRequest, profile: ProjectProfile
 		},
 	};
 	if (request.baseBranch !== undefined) input.baseBranch = request.baseBranch;
+	if (request.existingPr !== undefined) input.existingPr = request.existingPr;
 	// A yolo profile with no reviewers named would park every run at the
 	// zero-candidates escalation; personal repos have no review bench, so the
 	// skip is recorded explicitly unless reviewers are given.
@@ -136,6 +144,12 @@ export async function startShip(request: ShipRequest, home = deckV2Home()): Prom
 		throw new Error(
 			`unknown project profile "${request.profile}": add it to config/projects.json (deck home) first`,
 		);
+	}
+	if (
+		request.existingPr !== undefined &&
+		(!Number.isInteger(request.existingPr) || request.existingPr <= 0)
+	) {
+		throw new Error(`existingPr must be a positive PR number, got ${request.existingPr}`);
 	}
 	if (request.acceptance.length === 0) {
 		throw new Error("ship needs at least one acceptance criterion (preflight fails closed without them)");
