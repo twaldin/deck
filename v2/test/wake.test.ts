@@ -175,6 +175,20 @@ describe("ownership + staleness", () => {
 		expect(verdicts).toHaveLength(0);
 	});
 
+	test("a malformed run_pid (123abc) is treated as no recorded run", async () => {
+		const { wake, events } = await mods();
+		const { stateFiles } = await import("../src/home");
+		events.appendStatus("t1", "working", "implementing");
+		// parseInt would truncate this to 123 and probe a pid that was never recorded.
+		fs.writeFileSync(stateFiles("t1").meta, "id=t1\nrun_pid=123abc\n");
+		const verdicts = wake.detectStale(["t1"], {
+			runAlive: () => {
+				throw new Error("liveness must not be probed without a real pid");
+			},
+		});
+		expect(verdicts).toHaveLength(0);
+	});
+
 	test("a finished run is not stale", async () => {
 		const { wake, events, meta } = await mods();
 		events.appendStatus("t1", "done", "PR opened");

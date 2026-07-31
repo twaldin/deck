@@ -62,6 +62,15 @@ export type TaskMeta = {
 /** Keys stored as integers. Everything else round-trips as a string. */
 const NUMERIC_KEYS = new Set(["run_epoch", "run_pid", "run_deadline"]);
 
+/**
+ * Strict integer parse. parseInt accepts partial garbage ("123abc" -> 123), and
+ * a malformed pid that parses to a real number gets liveness-probed as if a run
+ * were recorded. Malformed means NaN, which every consumer rejects.
+ */
+function parseIntStrict(value: string): number {
+	return /^-?\d+$/.test(value) ? Number.parseInt(value, 10) : Number.NaN;
+}
+
 export function readMeta(id: string): TaskMeta | null {
 	assertTaskId(id);
 	const file = stateFiles(id).meta;
@@ -80,7 +89,7 @@ export function readMeta(id: string): TaskMeta | null {
 		const key = trimmed.slice(0, eq).trim();
 		const value = trimmed.slice(eq + 1).trim();
 		if (key.length === 0) continue;
-		meta[key] = NUMERIC_KEYS.has(key) ? Number.parseInt(value, 10) : value;
+		meta[key] = NUMERIC_KEYS.has(key) ? parseIntStrict(value) : value;
 	}
 	return meta;
 }
