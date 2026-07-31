@@ -7,11 +7,13 @@ import { describe, expect, test } from "bun:test";
 import {
 	attentionRank,
 	buildFleetText,
+	buildFleetView,
 	chipFor,
 	framed,
 	humanAge,
 	PLAIN_FLEET_THEME,
 	renderStatusline,
+	sliceVisible,
 	textWidth,
 	visibleTasks,
 	type FleetFrame,
@@ -233,6 +235,75 @@ describe("attention-first default view", () => {
 			(line) => line.startsWith("\u256d") || line.startsWith("\u2502") || line.startsWith("\u2570"),
 		);
 		expect(new Set(bordered.map(textWidth)).size).toBe(1);
+	});
+
+	test("truncated view advertises j/k scroll; untruncated view does not", () => {
+		const clamped = buildFleetView(frame({ tasks: [...doneTasks, ...live] }), PLAIN_FLEET_THEME, {
+			showAll: true,
+			maxBodyLines: 10,
+		});
+		expect(clamped.scrollable).toBe(true);
+		expect(clamped.text).toContain("[j/k] scroll");
+		const open = buildFleetView(frame({ tasks: live }), PLAIN_FLEET_THEME, { showAll: true });
+		expect(open.scrollable).toBe(false);
+		expect(open.text).not.toContain("[j/k] scroll");
+	});
+
+	test("scrollOffset moves the window, stays on-budget, and comes back clamped", () => {
+		const opts = { showAll: true, maxBodyLines: 10 };
+		const f = frame({ tasks: [...doneTasks, ...live] });
+		const top = buildFleetView(f, PLAIN_FLEET_THEME, { ...opts, scrollOffset: 0 });
+		const scrolled = buildFleetView(f, PLAIN_FLEET_THEME, { ...opts, scrollOffset: 5 });
+		expect(scrolled.scrollOffset).toBe(5);
+		expect(scrolled.text).toContain("line(s) above");
+		expect(scrolled.text).not.toBe(top.text);
+		// Frame height never grows past the budget while scrolled.
+		expect(scrolled.text.split("\n").length).toBe(14);
+		// Over-scroll clamps to the real end of the body.
+		const bottom = buildFleetView(f, PLAIN_FLEET_THEME, { ...opts, scrollOffset: 9_999 });
+		expect(bottom.scrollOffset).toBeLessThan(9_999);
+		expect(bottom.text).not.toContain("more line(s)");
+		expect(bottom.text.split("\n").length).toBeLessThanOrEqual(14);
+	});
+});
+
+describe("sliceVisible", () => {
+	const lines = Array.from({ length: 20 }, (_, i) => `L${i}`);
+
+	test("fits: everything visible, no markers", () => {
+		expect(sliceVisible(lines, 0, 20)).toEqual({ visible: lines, offset: 0, above: 0, below: 0 });
+		expect(sliceVisible(lines, 7, 25).offset).toBe(0);
+	});
+
+	test("top of a clamped list: below marker only, budget respected", () => {
+		const win = sliceVisible(lines, 0, 10);
+		expect(win).toEqual({ visible: lines.slice(0, 9), offset: 0, above: 0, below: 11 });
+	});
+
+	test("middle: both markers, still on budget", () => {
+		const win = sliceVisible(lines, 5, 10);
+		expect(win.above).toBe(5);
+		expect(win.visible).toEqual(lines.slice(5, 13));
+		expect(win.below).toBe(7);
+		expect(win.visible.length + 2).toBe(10);
+	});
+
+	test("bottom: offset clamps so the last line lands on screen", () => {
+		const win = sliceVisible(lines, 9_999, 10);
+		expect(win.offset).toBe(11);
+		expect(win.below).toBe(0);
+		expect(win.visible[win.visible.length - 1]).toBe("L19");
+		expect(win.visible.length + 1).toBeLessThanOrEqual(10);
+	});
+
+	test("negative offset clamps to 0", () => {
+		expect(sliceVisible(lines, -3, 10).offset).toBe(0);
+	});
+
+	test("max=1 still shows one line", () => {
+		const win = sliceVisible(lines, 0, 1);
+		expect(win.visible).toEqual(["L0"]);
+		expect(win.below).toBe(19);
 	});
 });
 

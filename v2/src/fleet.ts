@@ -402,14 +402,40 @@ export function framed(title: string, body: string, footer: string, theme: Fleet
 }
 
 /**
- * The overlay's whole text: counters header, chip-per-task rows, workflow rows,
- * source health, key footer. Pure, so tests assert on it directly.
+ * Pure scroll window: which slice of `lines` fits in `max` rows at `offset`,
+ * reserving one row per truncation marker (above/below). Returns the clamped
+ * offset so callers can keep their scroll state in bounds.
  */
-export function buildFleetText(
+export function sliceVisible(
+	lines: string[],
+	offset: number,
+	max: number,
+): { visible: string[]; offset: number; above: number; below: number } {
+	if (max >= lines.length) return { visible: lines, offset: 0, above: 0, below: 0 };
+	// Furthest useful offset: the last line sits on the last row, with one
+	// above-marker row reserved.
+	const maxOffset = Math.max(0, lines.length - Math.max(1, max - 1));
+	const off = Math.min(Math.max(0, offset), maxOffset);
+	const aboveRows = off > 0 ? 1 : 0;
+	// Without a below marker the window holds max - aboveRows lines; if the
+	// tail still does not fit, give the below marker its row.
+	let cap = Math.max(1, max - aboveRows);
+	if (off + cap < lines.length) cap = Math.max(1, max - aboveRows - 1);
+	const visible = lines.slice(off, off + cap);
+	return { visible, offset: off, above: off, below: lines.length - off - visible.length };
+}
+
+/**
+ * The overlay's whole text plus scroll state: counters header, chip-per-task
+ * rows, workflow rows, source health, key footer. Pure, so tests assert on it
+ * directly. Returns the clamped scrollOffset so the caller's state cannot
+ * drift past the end of the body.
+ */
+export function buildFleetView(
 	frame: FleetFrame,
 	theme: FleetTheme = PLAIN_FLEET_THEME,
-	options: { showAll?: boolean; maxBodyLines?: number } = {},
-): string {
+	options: { showAll?: boolean; maxBodyLines?: number; scrollOffset?: number } = {},
+): { text: string; scrollOffset: number; scrollable: boolean } {
 	const showAll = options.showAll ?? false;
 	const c = frame.counters;
 	const lines: string[] = [];
@@ -478,15 +504,34 @@ export function buildFleetText(
 	);
 
 	// Clamp the body so the framed panel never draws taller than the viewport:
-	// the border must close on screen, not below it.
+	// the border must close on screen, not below it. sliceVisible windows the
+	// body at scrollOffset and reserves rows for the above/below markers.
 	let body = lines;
+	let scrollOffset = 0;
+	let scrollable = false;
 	if (options.maxBodyLines !== undefined && body.length > options.maxBodyLines) {
-		const kept = Math.max(1, options.maxBodyLines - 1);
-		body = [...body.slice(0, kept), theme.fg("dim", `  … +${lines.length - kept} more line(s)`)];
+		scrollable = true;
+		const win = sliceVisible(lines, options.scrollOffset ?? 0, options.maxBodyLines);
+		scrollOffset = win.offset;
+		body = [
+			...(win.above > 0 ? [theme.fg("dim", `  … +${win.above} line(s) above`)] : []),
+			...win.visible,
+			...(win.below > 0 ? [theme.fg("dim", `  … +${win.below} more line(s)`)] : []),
+		];
 	}
 
-	const footer = `${theme.fg("accent", "[q/Esc]")} ${theme.fg("dim", "close")}   ${theme.fg("accent", "[r]")} ${theme.fg("dim", "refresh")}   ${theme.fg("accent", "[a]")} ${theme.fg("dim", showAll ? "attention only" : "show all")}   ${theme.fg("dim", "live · refreshes every 5s")}`;
-	return framed("deck fleet", body.join("\n"), footer, theme);
+	const scrollHint = scrollable ? `${theme.fg("accent", "[j/k]")} ${theme.fg("dim", "scroll")}   ` : "";
+	const footer = `${theme.fg("accent", "[q/Esc]")} ${theme.fg("dim", "close")}   ${theme.fg("accent", "[r]")} ${theme.fg("dim", "refresh")}   ${theme.fg("accent", "[a]")} ${theme.fg("dim", showAll ? "attention only" : "show all")}   ${scrollHint}${theme.fg("dim", "live · refreshes every 5s")}`;
+	return { text: framed("deck fleet", body.join("\n"), footer, theme), scrollOffset, scrollable };
+}
+
+/** Text-only convenience over buildFleetView. */
+export function buildFleetText(
+	frame: FleetFrame,
+	theme: FleetTheme = PLAIN_FLEET_THEME,
+	options: { showAll?: boolean; maxBodyLines?: number; scrollOffset?: number } = {},
+): string {
+	return buildFleetView(frame, theme, options).text;
 }
 
 /** Compact statusline. Costs no turn; the captain glances instead of being told. */
