@@ -1,9 +1,10 @@
 /**
  * Calm: a presentation-only transcript toggle, ported from fm2.
  *
- * While active it hides collapsed thinking, the shells of pi's seven built-in
- * tools, and deck operational user rows (the `[deck] ` wake/stale injections
- * from extension/index.ts). Pi's `Working...` row stays visible. Nothing here
+ * While active it hides collapsed thinking, every tool row's shell (pi's
+ * built-ins, deck's orchestrator tools, and tools other extensions register,
+ * such as @aliou/pi-processes' process tool), and deck operational user rows
+ * (the `[deck] ` wake/stale injections from extension/index.ts). Pi's `Working...` row stays visible. Nothing here
  * touches delivery, ordering, session storage, or model context: hidden rows
  * remain ordinary messages that the model and /export both still see.
  *
@@ -128,6 +129,7 @@ type AssistantMessagePresentationState = {
 // Introduction-version symbols stay stable so a compatible upgrade cannot
 // double-patch a live process.
 const CALM_ASSISTANT_LAYOUT_PATCH = Symbol.for("deck:calm-assistant-layout:pi-0.82.0");
+const CALM_TOOL_SHELL_LAYOUT_PATCH = Symbol.for("deck:calm-tool-shell-layout:pi-0.82.0");
 const CALM_OPERATIONAL_USER_LAYOUT_PATCH = Symbol.for(
 	"deck:calm-operational-user-layout:pi-0.82.0",
 );
@@ -178,6 +180,44 @@ export function installCalmAssistantLayout(): void {
 	};
 
 	registry[CALM_ASSISTANT_LAYOUT_PATCH] = patch;
+}
+
+type CalmToolShellLayoutPatch = { hidesToolShells: () => boolean };
+
+/**
+ * Tool rows: every tool call in the interactive transcript renders through
+ * ToolExecutionComponent, regardless of which extension registered the tool.
+ * Wrapping registerTool cannot reach tools other extensions register (each
+ * extension gets its own ExtensionAPI object), so this one seam is what makes
+ * Calm cover deck's orchestrator tools, ask_captain, and the process tool.
+ */
+export function installCalmToolShellLayout(): void {
+	const registry = globalThis as typeof globalThis & {
+		[key: symbol]: CalmToolShellLayoutPatch | undefined;
+	};
+	const hidesToolShells = (): boolean => calmPresentationHides();
+	const installed = registry[CALM_TOOL_SHELL_LAYOUT_PATCH];
+	if (installed) {
+		installed.hidesToolShells = hidesToolShells;
+		return;
+	}
+
+	const patch: CalmToolShellLayoutPatch = { hidesToolShells };
+	const ToolExecutionComponent = PiCodingAgent.ToolExecutionComponent;
+	if (typeof ToolExecutionComponent !== "function") {
+		throw new Error("deck calm requires pi ToolExecutionComponent");
+	}
+	const originalRender = ToolExecutionComponent.prototype.render;
+	if (typeof originalRender !== "function") {
+		throw new Error("deck calm requires pi ToolExecutionComponent.render");
+	}
+
+	ToolExecutionComponent.prototype.render = function (width: number): string[] {
+		if (patch.hidesToolShells()) return [];
+		return originalRender.call(this, width);
+	};
+
+	registry[CALM_TOOL_SHELL_LAYOUT_PATCH] = patch;
 }
 
 type UserMessageConstructorArgs = ConstructorParameters<typeof PiUserMessageComponent>;
@@ -332,6 +372,7 @@ type StandardShellState = {
 export function registerCalm(pi: ExtensionAPI): void {
 	installAdapter("collapsed-thinking", installCalmAssistantLayout);
 	installAdapter("operational-user-row", installCalmOperationalUserLayout);
+	installAdapter("tool-shell", installCalmToolShellLayout);
 
 	let exportRendering = false;
 	let removeTerminalInputHandler: (() => void) | undefined;

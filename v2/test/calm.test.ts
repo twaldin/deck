@@ -14,11 +14,14 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
+import * as PiTui from "@earendil-works/pi-tui";
+import deckV2 from "../src/extension/index";
 import {
 	DECK_OPERATIONAL_PREFIX,
 	calmPreferencePath,
 	installCalmAssistantLayout,
 	installCalmOperationalUserLayout,
+	installCalmToolShellLayout,
 	isDeckOperationalText,
 	loadCalmPreference,
 	persistCalmPreference,
@@ -247,6 +250,67 @@ describe("collapsed-thinking adapter", () => {
 		expect(on.join(" ")).not.toContain("secret");
 		// the real message object is never mutated
 		expect(message.content).toHaveLength(2);
+	});
+});
+
+describe("tool-shell adapter", () => {
+	const fakeUi = { requestRender() {} } as any;
+
+	function toolRow(definition: Record<string, any>, args: Record<string, unknown>) {
+		return new PiCodingAgent.ToolExecutionComponent(
+			definition.name,
+			"call-1",
+			args,
+			undefined,
+			definition as any,
+			fakeUi,
+			process.cwd(),
+		);
+	}
+
+	test("a custom tool with its own renderers hides under Calm and shows without", () => {
+		installCalmToolShellLayout();
+		const pi = fakePi();
+		pi.api.registerTool({
+			name: "process",
+			label: "Process",
+			description: "fake external process tool",
+			parameters: {},
+			async execute() {
+				return { content: [], details: {} };
+			},
+			renderCall: () => new PiTui.Text("process: start dev-server", 0, 0),
+			renderResult: () => new PiTui.Text("started pid 123", 0, 0),
+		});
+		const row = toolRow(pi.tools[0]!, { action: "start" });
+		row.updateResult({ content: [{ type: "text", text: "ok" }], isError: false });
+
+		setCalmPresentation(true);
+		expect(row.render(60)).toEqual([]);
+
+		setCalmPresentation(false);
+		const lines = row.render(60);
+		expect(lines.join(" ")).toContain("process: start dev-server");
+		expect(lines.join(" ")).toContain("started pid 123");
+	});
+
+	test("deck orchestrator tool rows hide under Calm and export overrides", () => {
+		installCalmToolShellLayout();
+		const pi = fakePi();
+		deckV2(pi.api);
+		const spawn = pi.tools.find((tool) => tool.name === "spawn")!;
+		expect(spawn).toBeDefined();
+		const row = toolRow(spawn, { task_id: "t1" });
+
+		setCalmPresentation(true);
+		expect(row.render(60)).toEqual([]);
+
+		setCalmStockExportRendering(true);
+		expect(row.render(60).join(" ")).toContain("spawn");
+		setCalmStockExportRendering(false);
+
+		setCalmPresentation(false);
+		expect(row.render(60).join(" ")).toContain("spawn");
 	});
 });
 
