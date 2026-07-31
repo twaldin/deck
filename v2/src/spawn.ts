@@ -148,8 +148,30 @@ export function assertIsolatedWorktree(worktree: string, primaryCheckout: string
 			`refusing to spawn in the primary checkout ${primary}: workers require a disposable worktree`,
 		);
 	}
-	if (!fs.existsSync(path.join(resolved, ".git"))) {
+	const gitMarker = path.join(resolved, ".git");
+	if (!fs.existsSync(gitMarker)) {
 		throw new Error(`${resolved} is not a git worktree (no .git); refusing to spawn`);
+	}
+	// A main checkout has a .git DIRECTORY; a linked (disposable) worktree has a
+	// .git file. Refusing the directory form refuses every repo's primary
+	// checkout, not just the orchestrator home.
+	if (fs.statSync(gitMarker).isDirectory()) {
+		throw new Error(
+			`${resolved} is a repository's primary checkout: workers require a disposable linked worktree`,
+		);
+	}
+}
+
+/** Best-effort release of a just-allocated worktree after a failed launch. */
+function releaseAllocated(wtId: string): void {
+	const bin = process.env.DECK_CLI_BIN ?? "deck";
+	try {
+		spawnSync(bin, ["wt", "release", wtId, "--delete-branch"], {
+			encoding: "utf8",
+			env: { ...process.env },
+		});
+	} catch {
+		// The original failure propagates; the slot stays visible in `deck wt ls`.
 	}
 }
 
@@ -206,6 +228,22 @@ export function startRun(request: SpawnRequest, primaryCheckout: string): SpawnR
 	const allocated = request.worktree === undefined ? allocateWorktree(request) : undefined;
 	const worktree = allocated?.worktree ?? (request.worktree as string);
 	const branch = allocated?.branch ?? request.branch;
+	try {
+		return launchRun(request, worktree, branch, allocated, primaryCheckout);
+	} catch (error) {
+		// A failed launch must not strand a fresh allocation as an active slot.
+		if (allocated !== undefined) releaseAllocated(allocated.wtId);
+		throw error;
+	}
+}
+
+function launchRun(
+	request: SpawnRequest,
+	worktree: string,
+	branch: string | undefined,
+	allocated: AllocatedWorktree | undefined,
+	primaryCheckout: string,
+): SpawnResult {
 	assertIsolatedWorktree(worktree, primaryCheckout);
 	ensureTaskDirs(request.taskId);
 
@@ -243,10 +281,17 @@ export function startRun(request: SpawnRequest, primaryCheckout: string): SpawnR
 		stdio: ["pipe", "ignore", "ignore"],
 		env: { ...process.env, DECK_TASK_ID: request.taskId, DECK_RUN_EPOCH: String(epoch) },
 	});
+	// A spawn failure (e.g. pi not on PATH) is emitted async on this event; with
+	// no listener it crashes the orchestrator process. The pid check below is the
+	// synchronous detection path, so the event itself only needs absorbing.
+	child.on("error", () => {});
 	child.stdin?.end(prompt);
 	child.unref();
 
 	const pid = child.pid ?? -1;
+	if (allocated !== undefined && pid <= 0) {
+		throw new Error("pi did not launch; releasing the allocated worktree");
+	}
 	// Recorded so stale detection can tell "run finished" from "run vanished".
 	// The deadline makes "bounded work" an enforced property rather than an
 	// assumption: a live worker that loops writes no status and never dies, so

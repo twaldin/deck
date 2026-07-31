@@ -118,6 +118,36 @@ describe("spawn worktree allocation", () => {
 		).toThrow(/exactly one/);
 	});
 
+	test("REGRESSION: the escape hatch refuses a repository's primary checkout", () => {
+		// The repo itself, not a linked worktree: .git is a directory here.
+		expect(() =>
+			startRun(
+				{ ...baseRequest(), taskId: "spawn-primary-test", worktree: path.join(root, "repo") },
+				path.join(root, "unrelated"),
+			),
+		).toThrow(/primary checkout/);
+	});
+
+	test("a failed launch releases the fresh allocation instead of stranding it", () => {
+		// Point PATH at an empty dir so `pi` cannot launch. Keep DECK_CLI_BIN
+		// absolute and spawn bun via its absolute path? deck's shebang needs bun on
+		// PATH, so keep bun's dir plus an empty dir with no pi.
+		const bunDir = path.dirname(Bun.which("bun") as string);
+		const gitDir = path.dirname(Bun.which("git") as string);
+		process.env.PATH = `${bunDir}:${gitDir}`;
+		expect(() =>
+			startRun(
+				{ ...baseRequest(), taskId: "spawn-fail-test", repo: path.join(root, "repo"), base: "main" },
+				path.join(root, "repo"),
+			),
+		).toThrow();
+		const state = JSON.parse(
+			fs.readFileSync(path.join(process.env.DECK_HOME as string, "worktrees.json"), "utf8"),
+		);
+		expect(state.entries).toHaveLength(1);
+		expect(state.entries[0].state).toBe("free");
+	});
+
 	test("repo aliases resolve and unknown aliases are refused", () => {
 		expect(resolveRepo("lindy")).toBe(REPO_ALIASES.lindy as string);
 		expect(resolveRepo("deck")).toBe(REPO_ALIASES.deck as string);
