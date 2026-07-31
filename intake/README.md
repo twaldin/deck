@@ -3,40 +3,78 @@
 Makes "nothing untracked can exist" a checked invariant. Polls GitHub for
 (a) open PRs authored by the configured login and (b) open PRs with a review
 requested from that login, keeps a durable JSON snapshot, renders a
-human-readable markdown list, and prints a machine-parseable diff of what
-changed since the previous run. A watcher script wakes a supervisor on any
-diff output; `REVIEW-REQUESTED` lines are the high-signal wake condition.
+human-readable markdown list, prints a machine-parseable diff of what
+changed since the previous run, and appends every non-`untracked` change to a
+durable event log under the deck home that deck-v2's wake reconcile consumes.
+`REVIEW-REQUESTED` lines/events are the high-signal wake condition.
 
-No daemon, no scheduler: the fleet's own watcher owns cadence and invokes
-`--once` on its schedule.
+Cursors are durable: the JSON state file only advances after outputs are
+written, so a restart never re-fires what was already reported, and a crash
+never silently consumes a change (worst case: at-least-once event delivery,
+which the consumer tolerates).
 
 ## Invocation
 
 ```sh
 cd intake && bun install   # once
 
+# single poll (cron / orchestrator timer owns cadence)
 ./bin/deck-intake --once \
 	--org lindy-ai \
 	--include-user-repos \
-	--state ~/.deck/intake/intake-prs.json \
-	--out /path/to/fleet/data/intake-prs.md \
 	--tracked /path/to/fleet/data/tracked-prs.txt
+
+# or long-lived (run it under the process tool / launchd; restart-safe)
+./bin/deck-intake --loop 120 --org lindy-ai --include-user-repos
+
+# list intake records with correlated deck task ids
+./bin/deck-intake ls
 ```
 
 | Flag | Meaning | Default |
 |---|---|---|
-| `--once` | Single poll: fetch, diff, write, print, exit. **Required.** | — |
+| `--once` | Single poll: fetch, diff, write, print, exit. | — |
+| `--loop <seconds>` | Long-lived mode: the same poll on a fixed cadence (>= 10s). Mutually exclusive with `--once`; one of the two is required. | — |
+| `--events <file>` | Durable event log (JSONL, append-only) | `$DECK_V2_HOME/intake/events.jsonl` |
 | `--login <login>` | GitHub login to poll for | `twaldin` |
 | `--org <org>` | Search scope org (repeatable) | `lindy-ai` |
 | `--include-user-repos` | Also scope to `user:<login>` (the login's own repos) | off |
-| `--state <file>` | Durable JSON state file | `~/.deck/intake/intake-prs.json` |
-| `--out <file>` | Rendered markdown path | `~/.deck/intake/intake-prs.md` |
+| `--state <file>` | Durable JSON state file | `$DECK_V2_HOME/intake/intake-prs.json` |
+| `--out <file>` | Rendered markdown path | `$DECK_V2_HOME/intake/intake-prs.md` |
 | `--tracked <file>` | Known/tracked PR URLs, one per line (`#` comments, trailing annotations after whitespace OK). Anything unlisted is flagged `untracked`. | none (section reports "no file supplied") |
 | `--json` | Diff as JSON lines instead of tab-separated | off |
 | `--linear` | Linear section — **stub**, fails loudly (no verified Linear auth path yet; see `src/linear.ts`) | off |
 
-Auth: rides the ambient `gh` login (`gh auth status`). Read-only: only
-GraphQL search/lookup and the commit-search REST endpoint are used.
+`DECK_V2_HOME` defaults to `~/.deck` — the same home deck-v2 uses.
+
+Auth (live mode): rides the ambient `gh` login — verify with `gh auth status`.
+Read-only: only GraphQL search/lookup and the commit-search REST endpoint are
+used. Unit tests never touch the live API; a live smoke run is just
+`./bin/deck-intake --once --org <org>` with a logged-in `gh`.
+
+## Durable events + waking parked efforts
+
+Every change except `untracked` is appended to the event log as one JSON
+object per line (`src/deck.ts`, `IntakeEvent`): `{v, ts, kind, url, taskId,
+signal, note}`. `taskId` is the correlated deck task when the PR's URL or head
+branch matches a task's `.meta` record under `$DECK_V2_HOME/state/`
+(PR-URL match wins; an ambiguous branch match correlates to nothing rather
+than to the wrong task). Uncorrelated PRs remain intake records, listable with
+`deck-intake ls` (tab-separated: `taskId  buckets  ci  review  url  title`).
+
+deck-v2's `reconcile` (v2/src/wake.ts) consumes the log with the same
+identity-aware byte cursor it uses for `.status` files, so a wake fires
+exactly once per event across restarts:
+
+| event | tier | delivery |
+|---|---|---|
+| `signal: true` (new review request for the login) | T0 | interrupt now |
+| correlated to a task, or `removed` / `review-decision` | T1 | folded batch — wakes the parked effort |
+| everything else (uncorrelated CI churn, own new PRs) | T2 | recorded, never delivered |
+
+Idempotence is layered: the diff engine only emits real state changes (same PR
+review state never re-emits), and the consumer's cursor never re-reads a
+consumed line.
 
 Exit codes: `0` ok (empty diff = quiet run), `1` usage error, `2` poll/IO
 failure. The state file is advanced LAST, after the diff has been printed

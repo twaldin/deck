@@ -122,19 +122,19 @@ export type CursorRead = {
 };
 
 /**
- * Read only what is new since `previous`, tolerating file-identity changes.
- *
- * A missed fs.watch event is therefore LATE, never LOST: reconcile reads from
- * the recorded offset forward and catches up.
+ * Read the new tail of any append-only file since `previous`, tolerating
+ * file-identity changes. The shared mechanics under `.status` and the intake
+ * event log: one cursor discipline, not two.
  */
-export function readStatusSince(id: string, previous: StatusCursor | null): CursorRead {
-	assertTaskId(id);
-	const file = stateFiles(id).status;
+export function readFileSince(
+	file: string,
+	previous: StatusCursor | null,
+): { text: string; cursor: StatusCursor | null; rescanned: boolean } {
 	let stat: fs.Stats;
 	try {
 		stat = fs.statSync(file);
 	} catch {
-		return { events: [], malformed: [], cursor: null, rescanned: false };
+		return { text: "", cursor: null, rescanned: false };
 	}
 
 	const full = fs.readFileSync(file, "utf8");
@@ -146,8 +146,7 @@ export function readStatusSince(id: string, previous: StatusCursor | null): Curs
 		previous.offset <= full.length &&
 		hash(full.slice(0, previous.offset)) === previous.tailHash;
 
-	const slice = identityHolds && previous !== null ? full.slice(previous.offset) : full;
-	const parsed = splitLines(slice);
+	const text = identityHolds && previous !== null ? full.slice(previous.offset) : full;
 	const cursor: StatusCursor = {
 		dev: stat.dev,
 		ino: stat.ino,
@@ -155,11 +154,20 @@ export function readStatusSince(id: string, previous: StatusCursor | null): Curs
 		offset: full.length,
 		tailHash: hash(full),
 	};
-	return {
-		...parsed,
-		cursor,
-		rescanned: previous !== null && !identityHolds,
-	};
+	return { text, cursor, rescanned: previous !== null && !identityHolds };
+}
+
+/**
+ * Read only what is new since `previous`, tolerating file-identity changes.
+ *
+ * A missed fs.watch event is therefore LATE, never LOST: reconcile reads from
+ * the recorded offset forward and catches up.
+ */
+export function readStatusSince(id: string, previous: StatusCursor | null): CursorRead {
+	assertTaskId(id);
+	const read = readFileSince(stateFiles(id).status, previous);
+	if (read.cursor === null) return { events: [], malformed: [], cursor: null, rescanned: false };
+	return { ...splitLines(read.text), cursor: read.cursor, rescanned: read.rescanned };
 }
 
 /** Latest event per decision key, for reconciling open decisions. */
