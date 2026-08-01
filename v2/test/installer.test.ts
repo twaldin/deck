@@ -170,6 +170,8 @@ describe("installer layout", () => {
 				INSTALL_TARGET: "",
 				DECK_V2_HOME: "",
 				BIN_TARGET: path.join(target, "bin"),
+				WORKFLOWS_SOURCE: workflowsSource,
+				WORKFLOWS_LINK: path.join(target, "home", "workflows"),
 			},
 			encoding: "utf8",
 			stdio: ["ignore", "pipe", "pipe"],

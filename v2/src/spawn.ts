@@ -17,6 +17,7 @@ import { ensureTaskDirs, stateFiles, taskFiles } from "./home";
 import { bumpEpoch, readMeta, updateMeta, type TaskKind } from "./meta";
 import { findProfile, loadProfiles, type ProjectProfile } from "./projects";
 import { workerBrief } from "./prompts";
+import { assertDeckModel } from "../../workflows/pr-pipeline/lib/models";
 import { buildHydration } from "./hydrate";
 import { ack as ackMessages } from "./queue";
 
@@ -147,6 +148,12 @@ function worktreePrimary(worktree: string): string | null {
  * path matters: without it, `spawn --kind ship --worktree <wt>` on a profiled
  * project would bypass the pipeline the other two paths enforce.
  */
+export function workerModelFor(request: SpawnRequest): string {
+	const model = request.model ?? shipProfileFor(request)?.models?.implementer ?? DEFAULT_WORKER_MODEL;
+	assertDeckModel(model);
+	return model;
+}
+
 export function shipProfileFor(request: SpawnRequest): ProjectProfile | null {
 	if (request.project !== undefined) {
 		const byProject = findProfile(request.project);
@@ -286,7 +293,7 @@ export function writeBrief(
 	return files.brief;
 }
 
-function piArgs(sessionDir: string, model: string, thinking: string | undefined, resume: boolean) {
+export function piArgs(sessionDir: string, model: string, thinking: string | undefined, resume: boolean) {
 	const args = ["-p", "--session-dir", sessionDir, "--model", model];
 	if (resume) args.push("-c");
 	if (thinking !== undefined && thinking.length > 0) args.push("--thinking", thinking);
@@ -330,7 +337,7 @@ function launchRun(
 	assertIsolatedWorktree(worktree, primaryCheckout);
 	ensureTaskDirs(request.taskId);
 
-	const model = request.model ?? DEFAULT_WORKER_MODEL;
+	const model = workerModelFor(request);
 	const sessionDir = stateFiles(request.taskId).sessions;
 	fs.mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
 

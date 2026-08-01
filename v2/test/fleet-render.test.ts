@@ -20,6 +20,7 @@ import {
 	waitingForFor,
 	normalizeStep,
 	collectRuns,
+	buildFrame,
 	PLAIN_FLEET_THEME,
 	renderFooterLines,
 	sliceVisible,
@@ -65,6 +66,9 @@ function frame(overrides: Partial<FleetFrame> = {}): FleetFrame {
 			openQuestions: 0,
 			internalOpen: 0,
 			internalCap: 12,
+			efforts: 0,
+			agents: 0,
+			unhealedFailures: 0,
 		},
 		sources: [
 			{ name: "smithers", state: "skipped", detail: "" },
@@ -73,6 +77,57 @@ function frame(overrides: Partial<FleetFrame> = {}): FleetFrame {
 		...overrides,
 	};
 }
+
+describe("fleet frame state", () => {
+	test("asks once for a parked stamp and keeps resolved questions from reappearing", async () => {
+		const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fleet-frame-"));
+		const queue = path.join(directory, "queue.jsonl");
+		const previous = process.env.DECK_QUESTIONS_FILE;
+		process.env.DECK_QUESTIONS_FILE = queue;
+		const run = {
+			id: "run-stamp",
+			rootDir: directory,
+			prNumber: 42,
+			step: "r0-stamp",
+			status: "waiting-approval",
+			state: "paused",
+			started: "2026-01-01T00:00:00.000Z",
+		};
+		try {
+			const first = await buildFrame({ workflowCwd: directory, psRuns: [run] });
+			expect(first.efforts?.[0]?.waitingFor).toBe("stamp-question");
+			expect(fs.readFileSync(queue, "utf8")).toContain('"questionKind":"stamp"');
+			const second = await buildFrame({ workflowCwd: directory, psRuns: [run] });
+			expect(second.counters.openQuestions).toBe(1);
+			expect(fs.readFileSync(queue, "utf8").trim().split("\\n")).toHaveLength(1);
+			const { answer, readQuestions } = await import("../src/questions-store");
+			answer(queue, readQuestions(queue)[0]!.id, "Do not stamp", "dismissed");
+			const afterAnswer = await buildFrame({ workflowCwd: directory, psRuns: [run] });
+			expect(afterAnswer.counters.openQuestions).toBe(0);
+			expect(fs.readFileSync(queue, "utf8")).toContain('"status":"dismissed"');
+		} finally {
+			if (previous === undefined) delete process.env.DECK_QUESTIONS_FILE;
+			else process.env.DECK_QUESTIONS_FILE = previous;
+			fs.rmSync(directory, { recursive: true, force: true });
+		}
+	});
+
+	test("folds live generations by repo-qualified PR and keeps the newest run", async () => {
+		const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fleet-fold-"));
+		try {
+			const runs = [
+				{ id: "old", rootDir: directory, prNumber: 7, step: "watch-poll", started: "2026-01-01T00:00:00.000Z" },
+				{ id: "new", rootDir: directory, prNumber: 7, step: "watch-poll", started: "2026-01-02T00:00:00.000Z" },
+				{ id: "other-repo", rootDir: `${directory}-other`, prNumber: 7, step: "watch-poll", started: "2026-01-01T00:00:00.000Z" },
+			];
+			const result = await buildFrame({ workflowCwd: directory, psRuns: runs });
+			expect(result.efforts).toHaveLength(2);
+			expect(result.efforts?.map((effort) => effort.runId)).toEqual(expect.arrayContaining(["new", "other-repo"]));
+		} finally {
+			fs.rmSync(directory, { recursive: true, force: true });
+		}
+	});
+});
 
 describe("run collection", () => {
 	test("uses one ps subprocess per tick and deduplicates concurrent collectors", async () => {
@@ -93,6 +148,14 @@ describe("run collection", () => {
 			process.env.PATH = previousPath;
 			fs.rmSync(directory, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("three-surface footer", () => {
+	test("renders only questions, efforts, agents, and failures", () => {
+		const base = frame();
+		const out = renderFooterLines(frame({ counters: { ...base.counters, openQuestions: 2, efforts: 3, agents: 4, unhealedFailures: 1 } }));
+		expect(out[2]).toBe("Nq 2 · 3 efforts · 4 agents · fail 1");
 	});
 });
 
@@ -757,7 +820,7 @@ describe("three-line footer", () => {
 		expect(out[0]).toContain("CH25%");
 		expect(out[1]).toContain("claude");
 		expect(out[1]).toContain("codex");
-		expect(out[2]).toBe("pause 1 · ask 1");
+		expect(out[2]).toContain("Nq 1");
 		for (const line of out) expect(textWidth(line)).toBeLessThanOrEqual(140);
 	});
 });
@@ -819,9 +882,9 @@ describe("footer attention counts", () => {
 	test("asks are plain words and zero-count segments are omitted", () => {
 		const f = frame();
 		f.counters.openQuestions = 2;
-		expect(renderFooterLines(f)[2]).toBe("ask 2");
+		expect(renderFooterLines(f)[2]).toContain("Nq 2");
 		f.counters.openQuestions = 0;
-		expect(renderFooterLines(f)[2]).toBe("");
+		expect(renderFooterLines(f)[2]).toContain("Nq 0");
 	});
 
 	test("active work is play and actionable failures are fail", () => {
@@ -832,7 +895,7 @@ describe("footer attention counts", () => {
 				step: "watch", taskId: null, activity: "failed",
 			}],
 		});
-		expect(renderFooterLines(f)[2]).toBe("play 1 · fail 1");
+		expect(renderFooterLines(f)[2]).toBe("Nq 0 · 0 efforts · 0 agents");
 	});
 
 	test("paused and blocked work is pause, while terminal task events are not counts", () => {
@@ -841,7 +904,7 @@ describe("footer attention counts", () => {
 			task({ taskId: "blocked", runState: "running", lastVerb: "blocked" }),
 			task({ taskId: "done", runState: "finished", lastVerb: "done" }),
 		] });
-		expect(renderFooterLines(f)[2]).toBe("pause 2");
+		expect(renderFooterLines(f)[2]).toBe("Nq 0 · 0 efforts · 0 agents");
 	});
 
 	test("failed poll rows stay failed and terminal stamp rows do not ask", () => {
@@ -855,7 +918,7 @@ describe("footer attention counts", () => {
 		};
 		const out = buildFleetText(frame({ workflows: [failed, cancelledStamp] }));
 		expect(out).toContain("[failed]");
-		expect(renderFooterLines(frame({ workflows: [cancelledStamp] }))[2]).toBe("");
+		expect(renderFooterLines(frame({ workflows: [cancelledStamp] }))[2]).toContain("Nq 0");
 	});
 
 	test("zombies do not increase fail", () => {
@@ -866,13 +929,13 @@ describe("footer attention counts", () => {
 			runId: "successor", workflow: "pr-pipeline", status: "running", state: "running",
 			step: "r0-watch-poll", taskId: null, activity: "working", prNumber: 42, startedAt: "2026-01-02",
 		}] });
-		expect(renderFooterLines(f)[2]).toBe("play 1");
+		expect(renderFooterLines(f)[2]).toBe("Nq 0 · 0 efforts · 0 agents");
 	});
 
 	test("theme colors attention counts", () => {
 		const marked = { fg: (key: string, text: string) => `<${key}>${text}</${key}>`, bold: (text: string) => text };
 		const f = frame({ tasks: [task({ runState: "running", lastVerb: "working" })] });
-		expect(renderFooterLines(f, {}, marked)[2]).toBe("<warning>play 1</warning>");
+		expect(renderFooterLines(f, {}, marked)[2]).toBe("<warning>Nq 0 · 0 efforts · 0 agents</warning>");
 	});
 
 	test("the overlay header names /questions so the captain knows the next move", () => {

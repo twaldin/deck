@@ -92,6 +92,7 @@ export function buildPipelineInput(
 		worktree: request.worktree,
 		branch: request.branch,
 		profile: profile.id,
+		models: profile.models,
 		dryRun: request.dryRun === true,
 		brief: {
 			ticket: request.ticket,

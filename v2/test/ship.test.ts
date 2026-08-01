@@ -11,7 +11,7 @@ import { validateBrief } from "../../workflows/pr-pipeline/lib/brief";
 import { profilesFile, seedProfiles, type ProjectProfile } from "../src/projects";
 import { existingPrFromFlag, runCli } from "../src/cli";
 import { buildPipelineInput, pipelineDir, startShip, type ShipRequest } from "../src/ship";
-import { assertShipGoesThroughPipeline, shipProfileFor } from "../src/spawn";
+import { assertShipGoesThroughPipeline, shipProfileFor, workerModelFor } from "../src/spawn";
 
 let home: string;
 const saved: Record<string, string | undefined> = {};
@@ -72,6 +72,34 @@ describe("ship CLI flags", () => {
 		expect(result.exitCode).toBe(1);
 		expect(result.stderr).not.toContain("unknown flag(s) for ship");
 		expect(result.stderr).toContain("--profile is required");
+	});
+});
+
+describe("worker model wiring", () => {
+	test("uses the profile implementer instead of the default worker model", () => {
+		const profile = { ...deckProfile(), models: { ...deckProfile().models!, implementer: "deck/claude-fable-5" } };
+		const file = profilesFile(home);
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		fs.writeFileSync(file, JSON.stringify([profile]));
+		expect(
+			workerModelFor({
+				taskId: "model-test",
+				task: "test",
+				acceptance: ["works"],
+				kind: "ship",
+				project: profile.id,
+			}),
+		).toBe("deck/claude-fable-5");
+	});
+
+	test("rejects a profile implementer outside the deck catalog", () => {
+		const profile = deckProfile();
+		const file = profilesFile(home);
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		fs.writeFileSync(file, JSON.stringify([{ ...profile, models: { ...profile.models, implementer: "openai/gpt-5" } }]));
+		expect(() => workerModelFor({ taskId: "model-test", task: "test", acceptance: ["works"], kind: "scout", project: profile.id })).toThrow(
+			/must use the deck provider/,
+		);
 	});
 });
 
