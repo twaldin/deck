@@ -53,7 +53,7 @@ if [ -n "$HOME_PROFILE" ] && command -v gh >/dev/null && gh auth status >/dev/nu
     for item in "$TEMP_HOME/repo"/* "$TEMP_HOME/repo"/.[!.]*; do
       [ -e "$item" ] || continue
       name="$(basename "$item")"
-      case "$name" in .git|.pi|.env|AGENTS.md|data|state|wt|logs|run|questions|broker) continue ;; esac
+      case "$name" in .git|.pi|.env|.deck-profile|AGENTS.md|data|state|wt|logs|run|questions|broker) continue ;; esac
       cp -a "$item" "$HOME_REPO/"
     done
   else
