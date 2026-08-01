@@ -55,6 +55,30 @@ describe("fleet workspace safeguards", () => {
 		expect(warnings[0]).not.toContain("lib");
 	});
 
+	test("REGRESSION: identical orphan sets warn once per session", () => {
+		const shadow = path.join(home, "workflows", "pr-pipeline", ".smithers");
+		fs.mkdirSync(path.join(shadow, "executions", "run-123"), { recursive: true });
+		const warnings: string[] = [];
+		const warnedFingerprints = new Set<string>();
+		warnOnShadowWorkspace(home, (message) => warnings.push(message), warnedFingerprints);
+		warnOnShadowWorkspace(home, (message) => warnings.push(message), warnedFingerprints);
+		expect(warnings).toHaveLength(1);
+	});
+
+	test("REGRESSION: extension warning uses the pi UI channel", async () => {
+		const shadow = path.join(home, "workflows", "pr-pipeline", ".smithers");
+		fs.mkdirSync(path.join(shadow, "executions", "run-123"), { recursive: true });
+		const notifications: unknown[][] = [];
+		const pi = fakePi();
+		deckV2(pi.api as never);
+		await pi.emit("session_start", {
+			mode: "tui",
+			ui: { notify: (...args: unknown[]) => notifications.push(args) },
+		});
+		expect(notifications).toHaveLength(1);
+		expect(notifications[0]?.[1]).toBe("warning");
+	});
+
 	test("REGRESSION: an empty shadow workspace does not warn", () => {
 		const shadow = path.join(home, "workflows", "pr-pipeline", ".smithers");
 		fs.mkdirSync(path.join(shadow, "executions"), { recursive: true });
