@@ -21,7 +21,7 @@ export interface ExecResult {
 	stderr: string;
 }
 
-export type ExecFn = (argv: string[], options?: { cwd?: string }) => Promise<ExecResult>;
+export type ExecFn = (argv: string[], options?: { cwd?: string; stdin?: string }) => Promise<ExecResult>;
 
 /** Default exec via Bun.spawn. Injectable for tests. */
 export const bunExec: ExecFn = async (argv, options) => {
@@ -29,7 +29,7 @@ export const bunExec: ExecFn = async (argv, options) => {
 		cwd: options?.cwd,
 		stdout: "pipe",
 		stderr: "pipe",
-		stdin: "ignore",
+		stdin: options?.stdin === undefined ? "ignore" : new Blob([options.stdin]),
 	});
 	const [stdout, stderr, code] = await Promise.all([
 		new Response(proc.stdout).text(),
@@ -61,8 +61,26 @@ export async function postComment(
 		"POST",
 		`repos/${ctx.repo}/issues/${issueNumber}/comments`,
 		"-f",
-		`body=${signedCommentBody(project, body)}`,
-	]);
+		"body=@-",
+	], { stdin: signedCommentBody(project, body) });
+}
+
+/** Post a reply to a pull-request review comment through the same signer. */
+export async function postReviewReply(
+	ctx: { gh: string; repo: string; exec: ExecFn },
+	project: string | undefined,
+	commentId: number,
+	body: string,
+): Promise<void> {
+	await execOrThrow(ctx.exec, [
+		ctx.gh,
+		"api",
+		"-X",
+		"POST",
+		`repos/${ctx.repo}/pulls/comments/${commentId}/replies`,
+		"-f",
+		"body=@-",
+	], { stdin: signedCommentBody(project, body) });
 }
 
 // ---------------------------------------------------------------------------

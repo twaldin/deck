@@ -422,6 +422,17 @@ describe("watch fix worker boundary", () => {
 		expect(prompt).toContain("Never sleep-poll CI or review state");
 		expect(prompt).toContain("persisted Smithers poll owns the wait");
 	});
+
+	test("signature project prompt uses the signing helper for both comment types", () => {
+		const prompt = watchFixPrompt({
+			worktree: "/tmp/wt", branch: "fix/ci", repo: "owner/repo", prNumber: 42,
+			project: "lindy-ai/lindy", gh: "gh", baseBranch: "main", pollJson: "{}", round: 0, afterPoll: 1,
+		});
+		expect(prompt).toContain("post-comment.ts");
+		expect(prompt).toContain("post-review-reply.ts");
+		expect(prompt).toContain("-- tim's agent");
+		expect(prompt).toContain("stdin");
+	});
 });
 
 // ---------------------------------------------------------------------------
