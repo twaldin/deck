@@ -9,6 +9,7 @@ export type UsageRoster = {
 	reports?: Array<{
 		provider?: string;
 		metadata?: { email?: string; accountId?: string; account?: string; cooling?: boolean; blocked?: boolean };
+		blocks?: Array<{ providerKey?: string; blockScope?: string; blockedUntilMs?: number }>;
 		limits?: Array<{
 			id?: string;
 			label?: string;

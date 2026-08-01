@@ -492,10 +492,10 @@ async function collectRunsOnce(
 						ciState = states.length === 0 ? "no checks" : states.every((state) => state === "SUCCESS") ? "passing" : states.some((state) => ["FAILURE", "CANCELLED", "ERROR"].includes(state)) ? "failing" : "pending";
 					} catch { ciState = "unavailable"; }
 					try {
-						const review = await run("gh", ["pr", "view", String(prNumber), "--repo", input.repo, "--json", "reviewDecision,reviews"], { cwd, timeout: 15_000, maxBuffer: 1_000_000 });
+						const review = await run("gh", ["pr", "view", String(prNumber), "--repo", input.repo, "--json", "reviewDecision,reviews,reviewThreads"], { cwd, timeout: 15_000, maxBuffer: 1_000_000 });
 						const value = JSON.parse(review.stdout) as { reviewDecision?: string; reviews?: Array<{ author?: { login?: string }; state?: string; submittedAt?: string }>; reviewThreads?: Array<{ isResolved?: boolean; comments?: Array<{ author?: { login?: string }; body?: string }> }> };
 						const latest = new Map<string, { state?: string }>();
-						for (const item of value.reviews ?? []) {
+						for (const item of [...(value.reviews ?? [])].sort((a, b) => (Date.parse(a.submittedAt ?? "") || 0) - (Date.parse(b.submittedAt ?? "") || 0))) {
 							const login = item.author?.login ?? "unknown";
 							latest.set(login, item);
 						}
@@ -1712,7 +1712,7 @@ export function buildUsageText(roster: import("./usage-roster").UsageRoster | nu
 			const free = limit.amount?.remainingFraction ?? (limit.amount?.usedFraction === undefined ? null : 1 - limit.amount.usedFraction);
 			const value = free === null || !Number.isFinite(free) ? "?" : `${Math.round(Math.max(0, Math.min(1, free)) * 100)}% free`;
 			const tier = typeof limit.scope?.tier === "string" ? ` · tier ${limit.scope.tier}` : "";
-			const blocks = (report as { blocks?: Array<{ blockedUntilMs?: number; providerKey?: string; blockScope?: string }> }).blocks ?? [];
+			const blocks = report.blocks ?? [];
 			const cooling = report.metadata?.cooling === true || report.metadata?.blocked === true || limit.status === "exhausted" || blocks.some((block) => typeof block.blockedUntilMs === "number" && block.blockedUntilMs > Date.now());
 			const temperature = cooling ? " · cooling" : " · warm";
 			lines.push(`  ${limit.window?.id ?? limit.label ?? limit.id ?? "limit"}${tier}: ${value}${temperature}`);
