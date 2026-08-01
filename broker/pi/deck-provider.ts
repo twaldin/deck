@@ -48,7 +48,7 @@ const models: DeckModel[] = [
 	{
 		id: "claude-sonnet-4-5",
 		name: "Claude Sonnet 4.5 (Deck)",
-		api: "anthropic-messages",
+		api: "openai-completions",
 		reasoning: true,
 		thinkingLevelMap: { minimal: "budget:1024", low: "budget:4096", medium: "budget:8192", high: "budget:16384", xhigh: "budget:32768", max: "budget:64000" },
 		input: ["text", "image"],
@@ -59,7 +59,7 @@ const models: DeckModel[] = [
 	{
 		id: "claude-haiku-4-5",
 		name: "Claude Haiku 4.5 (Deck)",
-		api: "anthropic-messages",
+		api: "openai-completions",
 		reasoning: true,
 		thinkingLevelMap: { minimal: "budget:1024", low: "budget:4096", medium: "budget:8192", high: "budget:16384", xhigh: "budget:32768", max: "budget:64000" },
 		input: ["text", "image"],
@@ -70,7 +70,7 @@ const models: DeckModel[] = [
 	{
 		id: "claude-fable-5",
 		name: "Claude Fable 5 (Deck)",
-		api: "anthropic-messages",
+		api: "openai-completions",
 		reasoning: true,
 		thinkingLevelMap: { minimal: "budget:1024", low: "budget:4096", medium: "budget:8192", high: "budget:16384", xhigh: "budget:32768", max: "budget:64000" },
 		input: ["text", "image"],
