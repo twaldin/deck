@@ -70,10 +70,11 @@ export function startValidatedGateway(
 						delete body.reasoning;
 						delete body.reasoning_effort;
 						if ("reasoning_effort" in native) body.reasoning_effort = native.reasoning_effort;
-						else body.thinking = native.thinking;
+						else if ("thinking" in native) body.thinking = native.thinking;
 					}
 					if (body.thinking?.type === "enabled") {
-						body.thinking = nativeReasoning("anthropic", `budget:${body.thinking.budget_tokens ?? ""}`).thinking;
+						const nativeThinking = nativeReasoning("anthropic", `budget:${body.thinking.budget_tokens ?? ""}`);
+						if ("thinking" in nativeThinking) body.thinking = nativeThinking.thinking;
 					}
 				} catch (error) {
 					return Response.json({ error: { type: "invalid_request_error", message: error instanceof Error ? error.message : String(error) } }, { status: 400 });

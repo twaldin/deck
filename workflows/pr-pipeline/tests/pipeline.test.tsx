@@ -22,6 +22,7 @@ import pipeline, { buildModelPolicy, DEFAULT_GITHUB } from "../pipeline.tsx";
 import type { ProjectProfile } from "../lib/profiles.ts";
 import { falloutPrompt, localFixPrompt, localReviewPrompt, reviewersDecisionPrompt } from "../lib/prompts.ts";
 import { resolveAdversary } from "../lib/models.ts";
+import { startValidatedGateway } from "../../../broker/src/validated-gateway.ts";
 
 const validBrief = {
 	ticket: "LIN-123",
@@ -31,6 +32,14 @@ const validBrief = {
 	decisionLedger: [{ question: "Which store?", decision: "redis", open: false }],
 	killSwitch: { kind: "named", name: "RATE_LIMIT_ENABLED flag" },
 	breakSignal: "sentry:lindy-api #on-call-issues",
+};
+
+const seatModels = {
+	implementer: "deck/claude-fable-5",
+	watcher: "deck/gpt-5.6-luna",
+	fallout: "deck/gpt-5.6-sol",
+	familyOpposition: true,
+	oppositionDefaults: { anthropic: "deck/gpt-5.6-luna" },
 };
 
 const baseInput = {
@@ -64,13 +73,7 @@ describe("workflow rendering contracts", () => {
 		knowledge: [],
 		depsWarm: true,
 	};
-	const fullModels = {
-		implementer: "deck/claude-fable-5",
-		watcher: "deck/gpt-5.6-luna",
-		fallout: "deck/gpt-5.6-sol",
-		familyOpposition: true,
-		oppositionDefaults: { anthropic: "deck/gpt-5.6-luna" },
-	};
+	const fullModels = seatModels;
 
 	async function renderWithProfile(
 		profile: Record<string, unknown>,
@@ -174,20 +177,21 @@ describe("fallout prompt rendering contracts", () => {
 		expect(prompt).not.toContain("[object Object]");
 	});
 
-	test("renders the production fallout task with object-valued inputs", async () => {
+	test("renders every configured PiAgent seat with its profile reasoning", async () => {
 		const rendered = await renderWorkflow(pipeline, {
 			input: {
 				...baseInput,
 				dryRun: false,
 				profile: "test",
-				models: { implementer: "deck/claude-fable-5", watcher: "deck/gpt-5.6-luna", fallout: "deck/gpt-5.6-sol", familyOpposition: true, oppositionDefaults: { anthropic: "deck/gpt-5.6-luna" } },
+				models: { implementer: "deck/claude-fable-5", watcher: "deck/gpt-5.6-luna", fallout: "deck/gpt-5.6-sol", familyOpposition: true, oppositionDefaults: { anthropic: "deck/gpt-5.6-luna" }, reasoning: "high", reasoningReviewer: "xhigh", reasoningWatcher: "low", reasoningFallout: "max" },
 			},
 			outputs: {
 				preflight: [{ nodeId: "preflight", ok: true, openQuestions: [], briefDigest: "", resolvedReviewerModel: "deck/claude-fable-5" }],
 				implementation: [{ nodeId: "implement", commits: ["fix"], summary: "fixed", testEvidence: "green" }],
 				localReview: [{ nodeId: "local-review", round: 0, approved: true, blockingFindings: [], nits: [] }],
 				prRecord: [{ nodeId: "push-pr", prNumber: 80, url: "https://github.com/lindy-ai/lindy/pull/80", headSha: "abc123", watchSetRegistered: true, watchSetPath: "", receipt: "", createdAt: "2026-08-01T00:00:00.000Z" }],
-				watchPoll: [{ nodeId: "r0-watch-poll", round: 0, poll: 0, headSha: "abc123", exitOk: true, disposition: "complete", actionable: false, ci: "green", unresolvedThreads: 0, unansweredComments: 0, reviewersToReRequest: [], reasons: [] }],
+				reviewerRequest: [{ nodeId: "request-reviewers", skipped: false, requested: ["reviewer"], verified: ["reviewer"], source: "test", at: "2026-08-01T00:00:00.000Z", reviewerPrompt: "" }],
+				watchPoll: [{ nodeId: "r0-watch-poll", round: 0, poll: 0, headSha: "abc123", exitOk: false, disposition: "fix", actionable: true, ci: "red", unresolvedThreads: 1, unansweredComments: 1, reviewersToReRequest: ["reviewer"], reasons: ["unresolved thread"] }],
 				readyPoll: [{ nodeId: "r0-ready-poll", round: 0, poll: 0, ready: true, regressed: false, approvedBy: "reviewer", ci: "green", headSha: "abc123", reasons: [], migrationDetected: false, migrationFiles: [], at: "2026-08-01T00:00:00.000Z" }],
 				approvals: [{ nodeId: "r0-stamp", approved: true, note: "ok", decidedBy: "test", decidedAt: "2026-08-01T00:00:00.000Z" }],
 				stampValidity: [{ nodeId: "r0-stamp-validity", round: 0, stampedHead: "abc123", currentHead: "abc123", valid: true, checkedAt: "2026-08-01T00:00:00.000Z" }],
@@ -203,10 +207,38 @@ describe("fallout prompt rendering contracts", () => {
 		});
 		const falloutTask = rendered.tasks.find((task) => task.nodeId === "fallout-watch");
 		expect(falloutTask).toBeDefined();
+		const agentsByNode = new Map(
+			rendered.tasks
+				.filter((task) => task.agent !== undefined)
+				.map((task) => [task.nodeId, task.agent as { opts?: { model?: string; thinking?: string } }]),
+		);
+		expect(agentsByNode.get("implement")?.opts).toMatchObject({ model: "claude-fable-5", thinking: "high" });
+		expect(agentsByNode.get("local-review")?.opts).toMatchObject({ model: "claude-fable-5", thinking: "xhigh" });
+		expect(agentsByNode.get("r0-watch-fix")?.opts).toMatchObject({ model: "gpt-5.6-luna", thinking: "low" });
+		expect(agentsByNode.get("fallout-watch")?.opts).toMatchObject({ model: "gpt-5.6-sol", thinking: "max" });
+		expect(agentsByNode.size).toBeGreaterThanOrEqual(4);
+		const forwarded: Array<Record<string, unknown>> = [];
+		const upstreamServer = Bun.serve({ port: 0, fetch: async (request) => { forwarded.push(await request.json() as Record<string, unknown>); return Response.json({ ok: true }); } });
+		const gateway = startValidatedGateway({ bind: "127.0.0.1:0" } as never, (() => ({ url: `http://127.0.0.1:${upstreamServer.port}`, close: async () => upstreamServer.stop() })) as never);
+		try {
+			for (const nodeId of ["implement", "local-review", "r0-watch-fix", "fallout-watch"]) {
+				const agent = agentsByNode.get(nodeId) as { opts: { provider: string; model: string; thinking: string }; buildArgs: (input: { prompt: string; cwd: string; mode: string }) => string[] };
+				const args = agent.buildArgs({ prompt: "broker-seat-probe", cwd: "/tmp/lindy-wt", mode: "text" });
+				expect(agent.opts.provider).toBe("deck");
+				expect(args).toEqual(expect.arrayContaining(["--provider", "deck", "--model", agent.opts.model, "--thinking", agent.opts.thinking]));
+				const response = await fetch(`${gateway.url}/v1/chat/completions`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model: `${agent.opts.provider}/${agent.opts.model}`, reasoning_effort: agent.opts.thinking }) });
+				expect(response.status).toBe(200);
+			}
+		} finally {
+			await gateway.close();
+		}
+		expect(forwarded).toHaveLength(4);
+		expect(forwarded.map((body) => body.reasoning_effort)).toEqual(["high", "xhigh", "low", "max"]);
 		expect(rendered.toXml()).toContain("RATE_LIMIT_ENABLED flag");
 		expect(rendered.toXml()).toContain('{\\"verdict\\":\\"clean|regression\\"');
 		expect(rendered.toXml()).not.toContain("[object Object]");
 	});
+
 });
 
 describe("reviewer selection contracts", () => {
