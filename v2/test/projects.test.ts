@@ -63,6 +63,9 @@ describe("seeds", () => {
 		expect(lindy?.knowledge.some((k) => k.endsWith("lindy-domain.md"))).toBe(true);
 		// The frozen traps ride in the profile, not in a prompts.ts fork.
 		expect(lindy?.doctrine).toContain("state=closed, merged=false");
+		expect(lindy?.models?.implementer).toBe("deck/gpt-5.6-luna");
+		expect(lindy?.models?.reviewer).toBeUndefined();
+		expect(lindy?.models?.oppositionDefaults.openai).toBe("deck/claude-fable-5");
 
 		const deck = findProfile("deck");
 		expect(deck?.pipeline).toBe("yolo-ship");
@@ -90,6 +93,11 @@ describe("config file", () => {
 		// the captain. Refuse the file instead.
 		writeConfig([{ ...deckOverride, stamp: true }]);
 		expect(() => loadProfiles()).toThrow(/implies yolo=true stamp=false/);
+	});
+
+	test("model seat config refuses malformed opposition defaults", () => {
+		writeConfig([{ ...deckOverride, models: { implementer: "deck/gpt-5.6-luna", watcher: "deck/gpt-5.6-luna", fallout: "deck/gpt-5.6-sol", familyOpposition: true, oppositionDefaults: { openai: 42 } } }]);
+		expect(() => loadProfiles()).toThrow(/oppositionDefaults values/);
 	});
 
 	test("malformed entries are refused with the reason", () => {
