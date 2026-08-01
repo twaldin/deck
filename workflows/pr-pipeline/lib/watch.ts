@@ -37,8 +37,8 @@ export function assessCi(checkRuns: CheckRun[]): CiState {
 /**
  * Reviewers whose last activity predates the last push and who are not
  * currently in requested_reviewers: these are the silent no-ops the SOP
- * calls out. Bots and reviewers whose latest state is APPROVED after the
- * push are excluded.
+ * calls out. A current, non-dismissed approval remains valid across pushes;
+ * a dismissal after the push needs a fresh request.
  */
 export function reviewersNeedingReRequest(
 	reviewers: ReviewerActivity[],
@@ -52,8 +52,19 @@ export function reviewersNeedingReRequest(
 	for (const reviewer of reviewers) {
 		const login = reviewer.login.toLowerCase();
 		if (reviewer.isBot || self.has(login) || requested.has(login)) continue;
+		const state = reviewer.lastReviewState?.toUpperCase();
+		// GitHub keeps approvals across pushes unless the approval is dismissed.
+		if (reviewer.hasActiveApproval === true || state === "APPROVED") continue;
+		if (state === "DISMISSED") {
+			// The dismissal itself invalidates the approval and requires a fresh request.
+			out.push(reviewer.login);
+			continue;
+		}
 		// Activity after the last push means they have seen the current head.
-		if (reviewer.lastActivityAt >= lastPushAt) {
+		if (reviewer.lastActivityAt >= lastPushAt) continue;
+		if (reviewer.hadDismissedApproval === true) {
+			// A later pre-push review is still stale and must be requested again.
+			out.push(reviewer.login);
 			continue;
 		}
 		out.push(reviewer.login);
@@ -98,6 +109,8 @@ export interface WatchExitOptions {
 /** The machine-checked exit condition for the watch-ci-review loop. */
 export function evaluateWatchExit(snapshot: WatchSnapshot, options: WatchExitOptions): WatchExitVerdict {
 	const reasons: string[] = [];
+	const needsRebase = snapshot.mergeable === "CONFLICTING" || snapshot.mergeStateStatus.toUpperCase() === "DIRTY";
+	if (needsRebase) reasons.push("PR is not mergeable; needs rebase onto its base branch.");
 	const unresolved = snapshot.threads.filter((thread) => !thread.isResolved).length;
 	if (unresolved > 0) reasons.push(`${unresolved} unresolved review thread(s).`);
 
@@ -121,7 +134,7 @@ export function evaluateWatchExit(snapshot: WatchSnapshot, options: WatchExitOpt
 	if (ci === "will-be-green") reasons.push("CI is still running; Smithers will poll again.");
 	if (ci === "none") reasons.push("CI has not reported checks; Smithers will poll again.");
 
-	const actionable = unresolved > 0 || unanswered > 0 || needReRequest.length > 0 || ci === "red";
+	const actionable = needsRebase || unresolved > 0 || unanswered > 0 || needReRequest.length > 0 || ci === "red";
 	const exitOk = !actionable && ci === "green";
 	const disposition = exitOk ? "complete" : actionable ? "fix" : "wait";
 

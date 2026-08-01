@@ -38,6 +38,7 @@ import {
 } from "smithers-orchestrator";
 import { z } from "zod";
 
+import { assertAdoptable, decideAdoptPush } from "./lib/adopt.ts";
 import { validateBrief } from "./lib/brief.ts";
 import { evaluateDone } from "./lib/done.ts";
 import {
@@ -48,6 +49,7 @@ import {
 	fetchHeadSha,
 	fetchMainCommitSubjects,
 	fetchPrApprovalsAndCi,
+	fetchPrOverview,
 	fetchRecentAuthors,
 	fetchRequestedReviewers,
 	fetchWatchSnapshot,
@@ -140,6 +142,13 @@ const inputSchema = z.object({
 	 * park at the durable <Approval> as always. Omitted = stamp behavior.
 	 */
 	profile: z.string().optional(),
+	/**
+	 * Adopt an already-open PR instead of implementing greenfield: implement is
+	 * stubbed, local adversarial review still runs, push-pr verifies the branch matches the PR head and seeds prRecord
+	 * from gh — it NEVER creates a second PR. Watch/ready/stamp are unchanged:
+	 * the run owns continuous CI/review polling until merge, same as a ship.
+	 */
+	existingPr: z.number().int().positive().optional(),
 	brief: z.unknown().optional(),
 	/** Default TRUE: real GH writes require explicit dryRun:false. */
 	dryRun: z.boolean().optional(),
@@ -397,6 +406,7 @@ export default smithers((ctx) => {
 	const github = { ...DEFAULT_GITHUB, ...(input.github ?? {}) };
 	const commands = { ...DEFAULT_COMMANDS, ...(input.commands ?? {}) };
 	const baseBranch = input.baseBranch ?? "main";
+	const adopt = input.existingPr != null;
 	// Resolved once per render; yolo=false (stamp behavior) when omitted.
 	const profile: ProjectProfile | null =
 		input.profile === undefined ? null : findProfile(input.profile);
@@ -653,7 +663,19 @@ export default smithers((ctx) => {
 				) : null}
 
 				{/* ------------------------------------------------ stage 1: implement */}
-				{preflight?.ok === true && brief !== null ? (
+				{/* Adopt path: the code already lives on the PR. The implement node
+				    still runs (downstream gates key off its row) but as a stub compute
+				    task — no agent, no greenfield work. */}
+				{preflight?.ok === true && brief !== null && adopt ? (
+					<Task id="implement" output={outputs.implementation} retries={0}>
+						{() => ({
+							commits: [],
+							summary: `adopted existing PR #${input.existingPr}: implementation lives on the PR`,
+							testEvidence: `adopted existing PR #${input.existingPr}: CI on the PR is the evidence`,
+						})}
+					</Task>
+				) : null}
+				{preflight?.ok === true && brief !== null && !adopt ? (
 					<Task
 						id="implement"
 						output={outputs.implementation}
@@ -671,6 +693,7 @@ export default smithers((ctx) => {
 				) : null}
 
 				{/* ---------------------------------- stage 2: local adversarial review */}
+				{/* Adopt skips implementation only; local adversarial review remains mandatory. */}
 				{implementation !== undefined && brief !== null ? (
 					<Loop
 						id="local-review-loop"
@@ -740,6 +763,125 @@ export default smithers((ctx) => {
 					<Task id="push-pr" output={outputs.prRecord} retries={1}>
 						{() =>
 							(async () => {
+								if (adopt) {
+									// Adopt: verify and seed the live PR. Never create a second PR.
+									const prNumber = input.existingPr as number;
+									if (dryRun) {
+										return {
+											prNumber,
+											url: `https://github.com/${input.repo}/pull/${prNumber}`,
+											headSha: "dryrun-head-sha",
+											watchSetRegistered: true,
+											watchSetPath: "(dry-run: not written)",
+											receipt: `dry-run: adopted existing PR #${prNumber}`,
+											createdAt: nowIso(),
+										};
+									}
+									let overview = await fetchPrOverview(ghCtx, prNumber);
+									// The local and watch fixers commit/push, and enqueue-merge runs
+									// in THIS worktree. Verify the branch, repository, and clean state;
+									// a clean descendant is allowed when local review fixed the PR.
+									const worktreeBranch = (
+										await execOrThrow(
+											bunExec,
+											[github.git, "rev-parse", "--abbrev-ref", "HEAD"],
+											{ cwd: input.worktree },
+										)
+									).trim();
+									const worktreeHead = (
+										await execOrThrow(bunExec, [github.git, "rev-parse", "HEAD"], {
+											cwd: input.worktree,
+										})
+									).trim();
+									const worktreeStatus = await execOrThrow(
+										bunExec,
+										[github.git, "status", "--porcelain"],
+										{ cwd: input.worktree },
+									);
+									const worktreeOriginUrl = (
+										await execOrThrow(
+											bunExec,
+											[github.git, "remote", "get-url", "origin"],
+											{ cwd: input.worktree },
+										)
+									).trim();
+									let worktreeIsDescendant = true;
+									if (worktreeHead !== overview.headSha) {
+										const ancestor = await bunExec(
+											[github.git, "merge-base", "--is-ancestor", overview.headSha, worktreeHead],
+											{ cwd: input.worktree },
+										);
+										worktreeIsDescendant = ancestor.code === 0;
+									}
+									assertAdoptable(overview, {
+										repo: input.repo,
+										branch: input.branch,
+										baseBranch,
+										worktreeBranch,
+										worktreeHead,
+										worktreeStatus,
+										worktreeOriginUrl,
+										allowWorktreeAhead: true,
+										worktreeIsDescendant,
+									});
+									if (worktreeHead !== overview.headSha) {
+										const decision = decideAdoptPush({
+											worktreeHead,
+											prHead: overview.headSha,
+											isAncestor: worktreeIsDescendant,
+										});
+										if (decision === "escalate") {
+											throw new Error(
+												`[escalate] adopted worktree HEAD ${worktreeHead} is not ahead of PR head ${overview.headSha}; refusing to overwrite the PR branch.`,
+											);
+										}
+										await execOrThrow(
+											bunExec,
+											[
+												github.git,
+												"push",
+												`--force-with-lease=refs/heads/${input.branch}:${overview.headSha}`,
+												"origin",
+												`HEAD:refs/heads/${input.branch}`,
+											],
+											{ cwd: input.worktree },
+										);
+										overview = await fetchPrOverview(ghCtx, prNumber);
+										const pushedHead = (
+											await execOrThrow(bunExec, [github.git, "rev-parse", "HEAD"], {
+												cwd: input.worktree,
+											})
+									).trim();
+										if (pushedHead !== overview.headSha) {
+											throw new Error(
+													`[escalate] existing PR #${prNumber} did not advance to local HEAD ${pushedHead} after the push.`,
+												);
+										}
+									}
+									const fs = await import("node:fs");
+									const path = await import("node:path");
+									fs.mkdirSync(path.dirname(watchSetPath), { recursive: true });
+									fs.appendFileSync(
+										watchSetPath,
+										`${JSON.stringify({
+											ticket: input.ticket,
+											repo: input.repo,
+											pr: prNumber,
+											url: overview.url,
+											registeredAt: nowIso(),
+											runId: ctx.runId,
+										})}\n`,
+									);
+									return {
+										prNumber,
+										url: overview.url,
+										headSha: overview.headSha,
+										watchSetRegistered: true,
+										watchSetPath,
+										receipt: `adopted existing PR #${prNumber} (head ${overview.headSha})`,
+										createdAt: nowIso(),
+									};
+								}
 								if (dryRun) {
 									return {
 										prNumber: fixtures.prNumber,
@@ -1098,6 +1240,7 @@ export default smithers((ctx) => {
 															: watchFixPrompt({
 																	worktree: input.worktree,
 																	branch: input.branch,
+																	baseBranch,
 																	repo: input.repo,
 																	prNumber: pr.prNumber,
 																	gh: github.gh,
@@ -1393,6 +1536,21 @@ export default smithers((ctx) => {
 								if (headNow !== authorizedRound.headSha) {
 									throw new Error(
 										`[escalate] PR head moved to ${headNow} after the stamp (stamped ${authorizedRound.headSha}) - refusing to submit to the merge queue. The next render re-enters watch-ci via the head-check round guard.`,
+									);
+								}
+								// The merge command runs against the worktree's CURRENT
+								// branch (gt merge is unqualified) - refuse if the worktree
+								// drifted off the PR branch, or the wrong PR gets merged.
+								const mergeBranch = (
+									await execOrThrow(
+										bunExec,
+										[github.git, "rev-parse", "--abbrev-ref", "HEAD"],
+										{ cwd: input.worktree },
+									)
+								).trim();
+								if (mergeBranch !== input.branch) {
+									throw new Error(
+										`[escalate] worktree is on branch "${mergeBranch}", not "${input.branch}" - refusing to run the merge command there (it acts on the current branch and would merge the wrong PR).`,
 									);
 								}
 								const out = await runShell(commands.merge, input.worktree);

@@ -73,9 +73,10 @@ Enforcement notes (each maps to a cited incident in the SOP):
   logins). Zero candidates also escalates - the only empty-reviewer path is an
   explicit `github.skipReviewerRequest: true`, recorded as `explicit-skip`.
 - **watch-ci exit is machine-checked** (`lib/watch.ts`): zero unresolved review
-  threads + all actionable comments answered + reviewers re-requested, verified
-  against the `requested_reviewers` API (GH review requests silently no-op) + CI
-  green. Pending or absent CI writes a `disposition: "wait"` poll receipt and
+  threads + all actionable comments answered + only stale human reviewers in
+  `reviewersNeedingReRequest` re-requested, verified against the
+  `requested_reviewers` API (GH review requests silently no-op) + CI green.
+  Approved, non-dismissed reviews are not re-requested. Pending or absent CI writes a `disposition: "wait"` poll receipt and
   stays in the persisted Smithers loop. It does not start an agent. Hard-red CI
   or review work writes `disposition: "fix"` and starts one bounded fix agent.
   Completed poll iterations survive an owner-process restart and resume from
@@ -106,6 +107,7 @@ Enforcement notes (each maps to a cited incident in the SOP):
   enqueued, so the throw is retry-safe).
 - **Ready-poll uses FRESH CI**: the ready verdict is computed from check runs
   fetched in the same poll as the approvals, not the earlier watch snapshot.
+- **GitHub comment attribution**: every pipeline PR comment or review-thread reply ends with `-- tim's agent`; agents never write as Tim, and commits have no agent co-author line.
 - **Bot comments count as actionable** in the watch exit (deliberate: the loop
   owns Claude-bot feedback per SOP stage 4; see `lib/watch.ts`).
 - **Landing = squash commit `(#N)` on main** (`lib/landing.ts`). The merged

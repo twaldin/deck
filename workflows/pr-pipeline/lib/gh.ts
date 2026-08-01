@@ -4,6 +4,7 @@
  * `gh`/`git` binaries so a crewmate can point this at gh-axi.
  */
 
+import type { PrOverview } from "./adopt.ts";
 import type {
 	CheckRun,
 	CommentActivity,
@@ -121,6 +122,8 @@ export function parseActivity(
 ): { comments: CommentActivity[]; reviewers: ReviewerActivity[] } {
 	const comments: CommentActivity[] = [];
 	const latestByReviewer = new Map<string, ReviewerActivity>();
+	const approvalByReviewer = new Map<string, { at: string; approved: boolean }>();
+	const dismissedByReviewer = new Set<string>();
 
 	if (Array.isArray(commentNodes)) {
 		for (const node of commentNodes) {
@@ -142,18 +145,34 @@ export function parseActivity(
 			if (str(node.body) !== "") {
 				comments.push({ author: login, isBot: isBotAuthor(author), createdAt: submittedAt });
 			}
-			const prior = latestByReviewer.get(login.toLowerCase());
+			const key = login.toLowerCase();
+			const state = str(node.state).toUpperCase();
+			if (state === "DISMISSED") dismissedByReviewer.add(key);
+			if (state === "APPROVED" || state === "CHANGES_REQUESTED" || state === "DISMISSED") {
+				const priorApproval = approvalByReviewer.get(key);
+				if (priorApproval === undefined || submittedAt > priorApproval.at) {
+					approvalByReviewer.set(key, { at: submittedAt, approved: state === "APPROVED" });
+				}
+			}
+			const prior = latestByReviewer.get(key);
 			if (prior === undefined || submittedAt > prior.lastActivityAt) {
-				latestByReviewer.set(login.toLowerCase(), {
+				latestByReviewer.set(key, {
 					login,
 					isBot: isBotAuthor(author),
 					lastActivityAt: submittedAt,
-					lastReviewState: str(node.state) !== "" ? str(node.state) : null,
+					lastReviewState: state !== "" ? state : null,
 				});
 			}
 		}
 	}
-	return { comments, reviewers: [...latestByReviewer.values()] };
+	return {
+		comments,
+		reviewers: [...latestByReviewer.entries()].map(([key, reviewer]) => ({
+			...reviewer,
+			hasActiveApproval: approvalByReviewer.get(key)?.approved === true,
+			...(dismissedByReviewer.has(key) ? { hadDismissedApproval: true } : {}),
+		})),
+	};
 }
 
 /** requested_reviewers REST payload -> logins. */
@@ -179,6 +198,8 @@ query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
       headRefOid
+      mergeable
+      mergeStateStatus
       commits(last: 1) { nodes { commit { committedDate } } }
       reviewThreads(first: 100) {
         nodes {
@@ -226,6 +247,8 @@ export async function fetchWatchSnapshot(ctx: GhContext, prNumber: number, selfL
 
 	return {
 		headSha,
+		mergeable: pr.mergeable === "MERGEABLE" || pr.mergeable === "CONFLICTING" ? pr.mergeable : "UNKNOWN",
+		mergeStateStatus: str(pr.mergeStateStatus),
 		lastPushAt,
 		threads: parseReviewThreads(pr?.reviewThreads?.nodes),
 		comments,
@@ -371,6 +394,32 @@ export async function fetchRequestedReviewers(ctx: GhContext, prNumber: number):
 		ctx.gh, "api", `repos/${ctx.repo}/pulls/${prNumber}/requested_reviewers`,
 	]);
 	return parseRequestedReviewers(JSON.parse(out));
+}
+
+/** Overview of an existing PR (adopt path: verify + seed, never create). */
+export async function fetchPrOverview(ctx: GhContext, prNumber: number): Promise<PrOverview> {
+	const exec = ctx.exec ?? bunExec;
+	const out = await execOrThrow(exec, [ctx.gh, "api", `repos/${ctx.repo}/pulls/${prNumber}`]);
+	const payload = JSON.parse(out) as {
+		number: number;
+		html_url: string;
+		state: string;
+		draft?: boolean;
+		head: { ref: string; sha: string; repo: { full_name: string } | null };
+		base: { ref: string };
+	};
+	return {
+		number: payload.number,
+		url: payload.html_url,
+		state: payload.state,
+		draft: payload.draft === true,
+		headRefName: payload.head.ref,
+		headSha: payload.head.sha,
+		baseRefName: payload.base.ref,
+		// head.repo is null when the fork was deleted - that PR is not adoptable
+		// either way, so an empty name fails the same-repo check downstream.
+		headRepoFullName: payload.head.repo?.full_name ?? "",
+	};
 }
 
 /** Current head SHA of the PR (stamp-validity check). */

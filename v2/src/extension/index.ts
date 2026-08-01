@@ -24,7 +24,9 @@ import {
 	type FleetTheme,
 	PLAIN_FLEET_THEME,
 	renderFrame,
+	renderFooterLines,
 	renderStatusline,
+	type FooterSessionBits,
 } from "../fleet";
 import { projectFleet } from "../herdr";
 import { deckV2Home, stateFiles } from "../home";
@@ -84,6 +86,13 @@ export default function deckV2(pi: any): void {
 	// Re-entrancy lock: deliver() fires from the interval AND every fs.watch
 	// nudge; two overlapping async passes would drain the same outbox twice.
 	let delivering = false;
+	let lastFooterFrame = {
+		generatedAt: new Date().toISOString(),
+		tasks: [],
+		workflows: [],
+		counters: { tasks: 0, running: 0, blocked: 0, openDecisions: 0, queuedMessages: 0, openQuestions: 0, internalOpen: 0, internalCap: 0 },
+		sources: [],
+	} as Awaited<ReturnType<typeof buildFrame>>;
 
 	function busy(ctx: any): boolean {
 		return agentBusy || ctx?.isIdle?.() === false || ctx?.hasPendingMessages?.() === true;
@@ -165,6 +174,13 @@ export default function deckV2(pi: any): void {
 			reviewers: Type.Optional(Type.Array(Type.String())),
 			deploy_evidence: Type.Optional(Type.String({ description: "shell command that proves the deploy" })),
 			dry_run: Type.Optional(Type.Boolean({ description: "simulate side effects; default false" })),
+			existing_pr: Type.Optional(
+				Type.Integer({
+					minimum: 1,
+					description:
+						"adopt an already-open PR by number: skip implement + local review, seed from gh, enter the same watch/stamp loop (never opens a second PR)",
+				}),
+			),
 		}),
 		async execute(_id: string, params: Record<string, unknown>) {
 			const result = await startShip({
@@ -184,6 +200,7 @@ export default function deckV2(pi: any): void {
 					? {}
 					: { deployEvidence: params.deploy_evidence as string }),
 				...(params.dry_run === true ? { dryRun: true } : {}),
+				...(params.existing_pr === undefined ? {} : { existingPr: params.existing_pr as number }),
 			});
 			return text(
 				`ship ${result.runId} started (pid ${result.pid}) \u2014 profile ${result.profile} (${result.pipeline})${result.dryRun ? " [DRY RUN]" : ""}\n` +
@@ -598,6 +615,7 @@ export default function deckV2(pi: any): void {
 	async function refreshStatusline(ctx: any): Promise<void> {
 		try {
 			const frame = await buildFrame(workflowCwd === undefined ? {} : { workflowCwd });
+			lastFooterFrame = frame;
 			ctx.ui?.setStatus?.("deck", renderStatusline(frame, asFleetTheme(ctx.ui?.theme)));
 			// Herdr projection rides the same cadence: every reconcile cycle mirrors
 			// worker state into herdr agents (smithers runs are fleet-only). Guarded
@@ -610,6 +628,44 @@ export default function deckV2(pi: any): void {
 
 	pi.on("session_start", async (_event: unknown, ctx: any) => {
 		workflowCwd = `${deckV2Home()}/workflows/.smithers`;
+		ctx.ui?.setFooter?.((tui: any, theme: any, footerData: any) => {
+			const unsub = footerData.onBranchChange(() => tui.requestRender());
+			const usage = (): FooterSessionBits => {
+				let inputTokens = 0;
+				let outputTokens = 0;
+				let cacheReadTokens = 0;
+				let cacheWriteTokens = 0;
+				let cost = 0;
+				for (const entry of ctx.sessionManager?.getEntries?.() ?? []) {
+					const usage = entry.type === "message" ? entry.message?.usage : entry.usage;
+					if (usage === undefined) continue;
+					inputTokens += usage.input;
+					outputTokens += usage.output;
+					cacheReadTokens += usage.cacheRead;
+					cacheWriteTokens += usage.cacheWrite;
+					cost += usage.cost.total;
+				}
+				return {
+					cwd: ctx.sessionManager?.getCwd?.() ?? ctx.cwd,
+					branch: footerData.getGitBranch?.(),
+					model: ctx.model?.id,
+					contextPercent: ctx.getContextUsage?.()?.percent,
+					inputTokens,
+					outputTokens,
+					cacheReadTokens,
+					cacheWriteTokens,
+					cost,
+				};
+			};
+			return {
+				dispose: unsub,
+				invalidate() {},
+				render(width: number): string[] {
+					const frame = lastFooterFrame;
+					return renderFooterLines(frame, usage(), asFleetTheme(theme), width);
+				},
+			};
+		});
 		// The wake loop only runs for an interactive orchestrator.
 		//
 		// Waking means injecting a user message, which needs a live session with a

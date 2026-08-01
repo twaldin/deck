@@ -60,6 +60,10 @@ export interface ReviewerActivity {
 	lastActivityAt: string;
 	/** APPROVED | CHANGES_REQUESTED | COMMENTED | DISMISSED */
 	lastReviewState: string | null;
+	/** Whether the latest non-comment review state is still APPROVED. */
+	hasActiveApproval?: boolean;
+	/** Whether an approval was dismissed, even if a later comment became latest activity. */
+	hadDismissedApproval?: boolean;
 }
 
 export interface CommentActivity {
@@ -69,8 +73,14 @@ export interface CommentActivity {
 }
 
 /** Snapshot of PR feedback state used by the watch-ci-review exit check. */
+export type MergeableState = "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
+
 export interface WatchSnapshot {
 	headSha: string;
+	/** GitHub's mergeability calculation for the current PR head. */
+	mergeable: MergeableState;
+	/** GitHub's merge queue status, including BEHIND and DIRTY rebase signals. */
+	mergeStateStatus: string;
 	/** ISO timestamp of the last push to the PR branch. */
 	lastPushAt: string;
 	threads: ReviewThread[];

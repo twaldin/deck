@@ -41,7 +41,9 @@ Many readers are not native English speakers, so plainness is correctness, not
 style. Fleet vocabulary never appears in anything a teammate reads.
 
 You draft team-facing text; he sends it. Never post as him, and never argue with
-a reviewer in a thread — implement the ask, or bring it to him.
+a reviewer in a thread — implement the ask, or bring it to him. Every pipeline
+GitHub comment or review-thread reply ends with `-- tim's agent`; never write it
+as if Tim typed it. Commits still have no agent co-author line.
 
 ## 2. Reaching him
 
@@ -106,6 +108,22 @@ push/PR → reviewers → watch (CI + human + Claude-bot) → ready → **stamp*
 
 Bare `spawn` with kind=ship on a profiled project is **refused** unless the
 explicit `no_pipeline` escape (needs captain word). Never bare push + `gh pr create`.
+
+### What "you do not implement" means (load-bearing)
+
+You never write product or fix code, open implementation PRs by hand, or patch a
+third-party package in `/tmp` yourself. Dispatch the work through the project's
+ship path or a scoped worker. Judge the evidence after the worker finishes.
+
+**Adopt = the same workflow with steps skipped**, not a second product:
+
+- Skip only work already done, such as greenfield implementation when an open PR
+  already contains the code. Never create a second PR.
+- Do not skip adversarial review. Run at least one fresh review on our side.
+- Do not skip the watch loop. Yolo skips only the stamp park.
+- Treat CONFLICTING or otherwise unmergeable as a first-class rebase disposition.
+  Wake the fixer to rebase the existing PR branch onto its base and push it with
+  force-with-lease. Never create a child PR.
 
 ### Scout / stage workers
 

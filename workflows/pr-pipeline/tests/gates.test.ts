@@ -8,7 +8,7 @@ import { describe, expect, test } from "bun:test";
 
 import { validateBrief } from "../lib/brief.ts";
 import { evaluateDone } from "../lib/done.ts";
-import { parseCheckRuns, parseRequestedReviewers, parseReviews, parseReviewThreads } from "../lib/gh.ts";
+import { parseActivity, parseCheckRuns, parseRequestedReviewers, parseReviews, parseReviewThreads } from "../lib/gh.ts";
 import { findLandingCommit } from "../lib/landing.ts";
 import { detectMigrations, migrationEvidenceComplete, missingMigrationStages } from "../lib/migrations.ts";
 import {
@@ -188,6 +188,8 @@ describe("model policy (deck catalog + family opposition)", () => {
 function snapshot(overrides: Partial<WatchSnapshot> = {}): WatchSnapshot {
 	return {
 		headSha: "abc123",
+		mergeable: "MERGEABLE",
+		mergeStateStatus: "CLEAN",
 		lastPushAt: "2026-07-27T10:00:00Z",
 		threads: [],
 		comments: [],
@@ -203,6 +205,26 @@ describe("evaluateWatchExit", () => {
 		const verdict = evaluateWatchExit(snapshot(), { selfLogins: ["twaldin"] });
 		expect(verdict.exitOk).toBe(true);
 		expect(verdict.actionable).toBe(false);
+	});
+
+	test("CONFLICTING blocks exit and requests a rebase fix", () => {
+		const verdict = evaluateWatchExit(snapshot({ mergeable: "CONFLICTING" }), { selfLogins: ["twaldin"] });
+		expect(verdict.exitOk).toBe(false);
+		expect(verdict.disposition).toBe("fix");
+		expect(verdict.actionable).toBe(true);
+		expect(verdict.reasons.join(" ")).toContain("needs rebase");
+	});
+
+	test("DIRTY blocks exit and requests a rebase fix", () => {
+		const verdict = evaluateWatchExit(snapshot({ mergeStateStatus: "DIRTY" }), { selfLogins: ["twaldin"] });
+		expect(verdict.disposition).toBe("fix");
+		expect(verdict.reasons.join(" ")).toContain("needs rebase");
+	});
+
+	test("BEHIND alone waits for the merge boundary", () => {
+		const verdict = evaluateWatchExit(snapshot({ mergeStateStatus: "BEHIND" }), { selfLogins: ["twaldin"] });
+		expect(verdict.exitOk).toBe(true);
+		expect(verdict.disposition).toBe("complete");
 	});
 
 	test("unresolved thread blocks exit", () => {
@@ -320,6 +342,119 @@ describe("watch helpers", () => {
 		expect(reviewersNeedingReRequest(reviewers, ["requested"], lastPush, ["me"])).toEqual(["stale"]);
 	});
 
+	test("parseActivity preserves an approval across a later push", () => {
+		const { reviewers } = parseActivity(
+			[
+				{
+					author: { login: "approved", __typename: "User" },
+					state: "APPROVED",
+					submittedAt: "2026-07-27T09:00:00Z",
+					body: "",
+				},
+			],
+			[],
+		);
+		expect(reviewers).toEqual([
+			{
+				login: "approved",
+				isBot: false,
+				lastActivityAt: "2026-07-27T09:00:00Z",
+				lastReviewState: "APPROVED",
+				hasActiveApproval: true,
+			},
+		]);
+	});
+
+	test("parseActivity marks the latest approval as inactive after dismissal", () => {
+		const { reviewers } = parseActivity(
+			[
+				{
+					author: { login: "dismissed", __typename: "User" },
+					state: "APPROVED",
+					submittedAt: "2026-07-27T09:00:00Z",
+					body: "",
+				},
+				{
+					author: { login: "dismissed", __typename: "User" },
+					state: "DISMISSED",
+					submittedAt: "2026-07-27T11:00:00Z",
+					body: "",
+				},
+			],
+			[],
+		);
+		expect(reviewers).toEqual([
+			{
+				login: "dismissed",
+				isBot: false,
+				lastActivityAt: "2026-07-27T11:00:00Z",
+				lastReviewState: "DISMISSED",
+				hasActiveApproval: false,
+				hadDismissedApproval: true,
+			},
+		]);
+	});
+
+	test("does not re-request an approval that predates the push", () => {
+		expect(
+			reviewersNeedingReRequest(
+				[{ login: "approved", isBot: false, lastActivityAt: "2026-07-27T09:00:00Z", lastReviewState: "APPROVED" }],
+				[],
+				"2026-07-27T10:00:00Z",
+			),
+		).toEqual([]);
+	});
+
+	test("re-requests changes requested before the push", () => {
+		expect(
+			reviewersNeedingReRequest(
+				[{ login: "changes", isBot: false, lastActivityAt: "2026-07-27T09:00:00Z", lastReviewState: "CHANGES_REQUESTED" }],
+				[],
+				"2026-07-27T10:00:00Z",
+			),
+		).toEqual(["changes"]);
+	});
+
+	test("does not re-request an approval after the push", () => {
+		expect(
+			reviewersNeedingReRequest(
+				[{ login: "approved", isBot: false, lastActivityAt: "2026-07-27T11:00:00Z", lastReviewState: "APPROVED" }],
+				[],
+				"2026-07-27T10:00:00Z",
+			),
+		).toEqual([]);
+	});
+
+	test("re-requests an approval dismissed after the push", () => {
+		expect(
+			reviewersNeedingReRequest(
+				[{ login: "dismissed", isBot: false, lastActivityAt: "2026-07-27T09:00:00Z", lastReviewState: "DISMISSED" }],
+				[],
+				"2026-07-27T10:00:00Z",
+			),
+		).toEqual(["dismissed"]);
+	});
+
+	test("does not re-request a dismissed approval followed by post-push activity", () => {
+		expect(
+			reviewersNeedingReRequest(
+				[{ login: "dismissed", isBot: false, lastActivityAt: "2026-07-27T11:00:00Z", lastReviewState: "COMMENTED", hadDismissedApproval: true }],
+				[],
+				"2026-07-27T10:00:00Z",
+			),
+		).toEqual([]);
+	});
+
+	test("re-requests a dismissed approval followed only by stale activity", () => {
+		expect(
+			reviewersNeedingReRequest(
+				[{ login: "dismissed", isBot: false, lastActivityAt: "2026-07-27T09:00:00Z", lastReviewState: "COMMENTED", hadDismissedApproval: true }],
+				[],
+				"2026-07-27T10:00:00Z",
+			),
+		).toEqual(["dismissed"]);
+	});
+
 	test("unansweredComments counts only others' comments newer than our latest activity", () => {
 		const comments = [
 			{ author: "rev", isBot: false, createdAt: "2026-07-27T11:00:00Z" },
@@ -344,13 +479,20 @@ describe("watch fix worker boundary", () => {
 			repo: "owner/repo",
 			prNumber: 42,
 			gh: "gh",
+			baseBranch: "main",
 			pollJson: "{}",
 			round: 0,
 			afterPoll: 1,
 		});
 		expect(prompt).toContain("return the receipt and exit immediately");
+		expect(prompt).toContain("rebase THIS PR branch");
+		expect(prompt).toContain("fetch origin/main");
+		expect(prompt).toContain("force-with-lease");
 		expect(prompt).toContain("Never sleep-poll CI or review state");
 		expect(prompt).toContain("persisted Smithers poll owns the wait");
+		expect(prompt).toContain("reviewersToReRequest");
+		expect(prompt).toContain("-- tim's agent");
+		expect(prompt).not.toContain("re-request every prior human reviewer");
 	});
 });
 

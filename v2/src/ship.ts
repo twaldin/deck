@@ -20,6 +20,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { deckV2Home, stateDir } from "./home";
+import { readMeta, updateMeta } from "./meta";
 import { findProfile, type ProjectProfile } from "./projects";
 import { SMITHERS_SPEC } from "./smithers";
 
@@ -46,6 +47,13 @@ export type ShipRequest = {
 	runId?: string;
 	/** Simulate side effects. Default FALSE here: ship means ship. */
 	dryRun?: boolean;
+	/**
+	 * Adopt an already-open PR: the pipeline skips greenfield implement only,
+	 * runs local adversarial review, verifies the branch matches the PR head,
+	 * seeds its PR record from gh (never creates a second PR), and enters the same
+	 * continuous watch/ready/stamp loop as a normal ship.
+	 */
+	existingPr?: number;
 };
 
 /**
@@ -57,7 +65,13 @@ export function pipelineDir(): string {
 	const override = process.env.DECK_PIPELINE_DIR;
 	if (override !== undefined) return override;
 	const self = fs.realpathSync(fileURLToPath(import.meta.url));
-	return path.resolve(path.dirname(self), "..", "..", "workflows", "pr-pipeline");
+	return path.resolve(
+		path.dirname(self),
+		"..",
+		"..",
+		"workflows",
+		"pr-pipeline",
+	);
 }
 
 /**
@@ -65,7 +79,10 @@ export function pipelineDir(): string {
  * dryRun defaults FALSE: the pipeline's own default is dry-run (safe for a
  * bare `smithers up`), but `deck-v2 ship` is the ship command.
  */
-export function buildPipelineInput(request: ShipRequest, profile: ProjectProfile): Record<string, unknown> {
+export function buildPipelineInput(
+	request: ShipRequest,
+	profile: ProjectProfile,
+): Record<string, unknown> {
 	const input: Record<string, unknown> = {
 		ticket: request.ticket,
 		repo: profile.repo,
@@ -84,16 +101,25 @@ export function buildPipelineInput(request: ShipRequest, profile: ProjectProfile
 					? { kind: "none" }
 					: { kind: "named", name: request.killSwitch },
 			breakSignal:
-				request.breakSignal ?? "captain report + CI on the base branch after landing",
-			...(request.blastRadius === undefined ? {} : { blastRadius: request.blastRadius }),
-			...(request.reviewers === undefined ? {} : { suggestedReviewers: request.reviewers }),
+				request.breakSignal ??
+				"captain report + CI on the base branch after landing",
+			...(request.blastRadius === undefined
+				? {}
+				: { blastRadius: request.blastRadius }),
+			...(request.reviewers === undefined
+				? {}
+				: { suggestedReviewers: request.reviewers }),
 		},
 	};
 	if (request.baseBranch !== undefined) input.baseBranch = request.baseBranch;
+	if (request.existingPr !== undefined) input.existingPr = request.existingPr;
 	// A yolo profile with no reviewers named would park every run at the
 	// zero-candidates escalation; personal repos have no review bench, so the
 	// skip is recorded explicitly unless reviewers are given.
-	if (profile.yolo && (request.reviewers === undefined || request.reviewers.length === 0)) {
+	if (
+		profile.yolo &&
+		(request.reviewers === undefined || request.reviewers.length === 0)
+	) {
 		input.github = { skipReviewerRequest: true };
 	}
 	// Done is evidence-gated. For a yolo repo with no deploy step, landing on
@@ -130,34 +156,68 @@ export type ShipResult = {
  * Async: child startup errors are emitted asynchronously, so a sync return
  * would report "started" for a process that never launched.
  */
-export async function startShip(request: ShipRequest, home = deckV2Home()): Promise<ShipResult> {
+export async function startShip(
+	request: ShipRequest,
+	home = deckV2Home(),
+): Promise<ShipResult> {
 	const profile = findProfile(request.profile, home);
 	if (profile === null) {
 		throw new Error(
 			`unknown project profile "${request.profile}": add it to config/projects.json (deck home) first`,
 		);
 	}
+	if (
+		request.existingPr !== undefined &&
+		(!Number.isInteger(request.existingPr) || request.existingPr <= 0)
+	) {
+		throw new Error(
+			`existingPr must be a positive PR number, got ${request.existingPr}`,
+		);
+	}
 	if (request.acceptance.length === 0) {
-		throw new Error("ship needs at least one acceptance criterion (preflight fails closed without them)");
+		throw new Error(
+			"ship needs at least one acceptance criterion (preflight fails closed without them)",
+		);
 	}
 	const dir = pipelineDir();
 	if (!fs.existsSync(path.join(dir, "pipeline.tsx"))) {
-		throw new Error(`pr-pipeline not found at ${dir} (set DECK_PIPELINE_DIR if the layout differs)`);
+		throw new Error(
+			`pr-pipeline not found at ${dir} (set DECK_PIPELINE_DIR if the layout differs)`,
+		);
 	}
 	const runId =
-		request.runId ?? `${request.ticket.toLowerCase().replace(/[^a-z0-9-]+/g, "-")}-pipeline`;
+		request.runId ??
+		`${request.ticket.toLowerCase().replace(/[^a-z0-9-]+/g, "-")}-pipeline`;
 	const input = buildPipelineInput(request, profile);
+	// Keep the task-to-workflow join durable when the caller already created a
+	// deck task with the ticket id. Smithers ps does not expose a unique worktree.
+	try {
+		if (readMeta(request.ticket) !== null)
+			updateMeta(request.ticket, { run_id: runId });
+	} catch {
+		// A ticket is not always a deck task id. There is no metadata to join.
+	}
 
 	const shipDir = path.join(stateDir(), "ship");
 	fs.mkdirSync(shipDir, { recursive: true, mode: 0o700 });
 	const inputPath = path.join(shipDir, `${runId}.input.json`);
 	const logPath = path.join(shipDir, `${runId}.log`);
-	fs.writeFileSync(inputPath, `${JSON.stringify(input, null, 2)}\n`, { mode: 0o600 });
+	fs.writeFileSync(inputPath, `${JSON.stringify(input, null, 2)}\n`, {
+		mode: 0o600,
+	});
 
 	const log = fs.openSync(logPath, "a");
 	const child = spawnProcess(
 		"bunx",
-		[SMITHERS_SPEC, "up", "pipeline.tsx", "--input", JSON.stringify(input), "--run-id", runId],
+		[
+			SMITHERS_SPEC,
+			"up",
+			"pipeline.tsx",
+			"--input",
+			JSON.stringify(input),
+			"--run-id",
+			runId,
+		],
 		{
 			cwd: dir,
 			detached: true,
@@ -172,7 +232,11 @@ export async function startShip(request: ShipRequest, home = deckV2Home()): Prom
 		await new Promise<void>((resolve, reject) => {
 			child.once("spawn", () => resolve());
 			child.once("error", (error) =>
-				reject(new Error(`could not start the pipeline run (${error.message}); see ${logPath}`)),
+				reject(
+					new Error(
+						`could not start the pipeline run (${error.message}); see ${logPath}`,
+					),
+				),
 			);
 		});
 	} finally {
