@@ -40,7 +40,7 @@ import { reconcileRecuts } from "../recut";
 import { peekSession, startRun } from "../spawn";
 import { STATUS_VERBS, type StatusVerb } from "../status";
 import { readUsageRoster, usageStatusLine } from "../usage-roster";
-import { smithersWorkspaceRoot, warnOnShadowWorkspace } from "../workspace";
+import { smithersWorkspaceCwd, warnOnShadowWorkspace } from "../workspace";
 import { evaluateTeardown, formatVerdict } from "../teardown";
 import { ackWakes, detectStale, foldBatched, pendingWakes, reconcile } from "../wake";
 import {
@@ -419,8 +419,8 @@ export default function deckV2(pi: any): void {
 			let frame = lastFooterFrame;
 			// ctx.ui.custom is TUI-only; degrade to a printed frame elsewhere.
 			if (ctx.mode !== "tui" || ctx.ui?.custom === undefined) {
-				ctx.ui?.notify?.(renderFrame(frame), "info");
-				void refreshStatusline(ctx);
+				const liveFrame = await refreshStatusline(ctx);
+				ctx.ui?.notify?.(renderFrame(liveFrame), "info");
 				return;
 			}
 			void refreshStatusline(ctx);
@@ -642,20 +642,27 @@ export default function deckV2(pi: any): void {
 		}
 	}
 
-	async function refreshStatusline(ctx: any): Promise<void> {
+	async function getCurrentFrame(): Promise<Awaited<ReturnType<typeof buildFrame>>> {
+		const snapshot = workflowCwd === undefined ? { runs: [] as never[] } : await collectPsSnapshot(workflowCwd);
+		if (workflowCwd !== undefined) void reconcileRecuts(workflowCwd, pipelineDir(), snapshot.runs).catch(() => {});
+		observePsSnapshot(snapshot.runs);
+		const frame = await buildFrame(workflowCwd === undefined ? {} : { workflowCwd, psRuns: snapshot.runs });
+		lastFooterFrame = frame;
+		return frame;
+	}
+
+	async function refreshStatusline(ctx: any): Promise<Awaited<ReturnType<typeof buildFrame>>> {
 		try {
-			const snapshot = workflowCwd === undefined ? { runs: [] as never[] } : await collectPsSnapshot(workflowCwd);
-			if (workflowCwd !== undefined) void reconcileRecuts(workflowCwd, pipelineDir(), snapshot.runs).catch(() => {});
-			observePsSnapshot(snapshot.runs);
-			const frame = await buildFrame(workflowCwd === undefined ? {} : { workflowCwd, psRuns: snapshot.runs });
-			lastFooterFrame = frame;
+			const frame = await getCurrentFrame();
 			ctx.ui?.setStatus?.("deck-usage", undefined);
 			// Herdr projection rides the same cadence: every reconcile cycle mirrors
 			// worker state into herdr agents (smithers runs are fleet-only). Guarded
 			// inside; herdr being down makes this a no-op, never a fault.
 			await projectFleet(frame);
+			return frame;
 		} catch {
 			// A statusline is decoration; never let it break a turn.
+			return lastFooterFrame;
 		}
 	}
 
@@ -664,7 +671,7 @@ export default function deckV2(pi: any): void {
 		injectedCompactions.clear();
 		compactionSequence = 0;
 		await injectStandingRules(ctx, "session_start");
-		workflowCwd = smithersWorkspaceRoot();
+		workflowCwd = smithersWorkspaceCwd();
 		warnOnShadowWorkspace();
 		// The deck footer owns quota presentation. Block the legacy deck-usage
 		// status slot so its timer cannot paint a second chrome strip.

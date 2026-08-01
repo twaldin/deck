@@ -12,6 +12,7 @@ import { profilesFile, seedProfiles, type ProjectProfile } from "../src/projects
 import { existingPrFromFlag, runCli } from "../src/cli";
 import { buildPipelineInput, pipelineDir, startShip, type ShipRequest } from "../src/ship";
 import { assertShipGoesThroughPipeline, shipProfileFor, workerModelFor } from "../src/spawn";
+import { smithersWorkspaceCwd, smithersWorkspaceRoot } from "../src/workspace";
 
 let home: string;
 const saved: Record<string, string | undefined> = {};
@@ -179,6 +180,13 @@ describe("buildPipelineInput", () => {
 			lindyProfile(),
 		);
 		expect((explicit.commands as { deployEvidence: string }).deployEvidence).toBe("check-deploy.sh");
+	});
+});
+
+describe("smithers workspace", () => {
+	test("REGRESSION: ship invokes Smithers from the shared workspace parent", () => {
+		expect(smithersWorkspaceRoot(home)).toBe(path.join(home, "workflows", ".smithers"));
+		expect(smithersWorkspaceCwd(home)).toBe(path.join(home, "workflows"));
 	});
 });
 

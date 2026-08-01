@@ -25,11 +25,11 @@ export function warnOnShadowWorkspace(home = deckV2Home(), log = console.warn): 
 
 function shadowRunIds(workspace: string): string[] {
 	try {
-		const entries = fs.readdirSync(workspace, { withFileTypes: true });
-		return entries
-			.filter((entry) => entry.isDirectory() && entry.name !== "node_modules")
-			.map((entry) => entry.name)
-			.filter((id) => id.length > 0);
+		const executions = path.join(workspace, "executions");
+		return fs
+			.readdirSync(executions, { withFileTypes: true })
+			.filter((entry) => entry.isDirectory() && entry.name.length > 0)
+			.map((entry) => entry.name);
 	} catch {
 		return [];
 	}
