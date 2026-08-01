@@ -15,7 +15,7 @@ import * as path from "node:path";
 import { appendStatus } from "./events";
 import { ensureTaskDirs, stateFiles, taskFiles } from "./home";
 import { bumpEpoch, readMeta, updateMeta, type TaskKind } from "./meta";
-import { findProfile, loadProfiles, type ProjectProfile } from "./projects";
+import { findProfile, loadProfiles, type ModelSeat, type ProjectProfile } from "./projects";
 import { workerBrief } from "./prompts";
 import { assertDeckModel } from "../../workflows/pr-pipeline/lib/models";
 import { buildHydration } from "./hydrate";
@@ -152,10 +152,19 @@ function worktreePrimary(worktree: string): string | null {
  * path matters: without it, `spawn --kind ship --worktree <wt>` on a profiled
  * project would bypass the pipeline the other two paths enforce.
  */
+function seatModel(seat: ModelSeat | undefined): { model: string; reasoning?: string } {
+	if (seat === undefined) return { model: DEFAULT_WORKER_MODEL };
+	return typeof seat === "string" ? { model: seat } : seat;
+}
+
 export function workerModelFor(request: SpawnRequest): string {
-	const model = request.model ?? shipProfileFor(request)?.models?.implementer ?? DEFAULT_WORKER_MODEL;
+	const model = request.model ?? seatModel(shipProfileFor(request)?.models?.implementer).model;
 	assertDeckModel(model);
 	return model;
+}
+
+export function workerReasoningFor(request: SpawnRequest): string | undefined {
+	return request.thinking ?? seatModel(shipProfileFor(request)?.models?.implementer).reasoning;
 }
 
 export function shipProfileFor(request: SpawnRequest): ProjectProfile | null {
@@ -369,7 +378,7 @@ function launchRun(
 		? hydration.text
 		: `${fs.readFileSync(briefPath, "utf8")}\n\n${hydration.text}`;
 
-	const child = spawnProcess("pi", piArgs(sessionDir, model, request.thinking, resume), {
+	const child = spawnProcess("pi", piArgs(sessionDir, model, workerReasoningFor(request), resume), {
 		cwd: worktree,
 		detached: true,
 		stdio: ["pipe", "ignore", "ignore"],

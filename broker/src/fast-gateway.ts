@@ -20,6 +20,10 @@ function isOpenAIModel(model: Model<Api>): boolean {
 
 export interface FastGatewayOptions {
 	bind: string;
+	/** Optional broker quota snapshot and fallback policy. */
+	quotaAccounts?: () => import("./quota").AccountQuota[];
+	quotaPreferences?: () => import("./quota").QuotaModel[];
+	onQuotaEvent?: (event: import("./quota").QuotaEvent) => void;
 	bearerTokens: string[];
 	version: string;
 	resolveModel: ModelResolver;

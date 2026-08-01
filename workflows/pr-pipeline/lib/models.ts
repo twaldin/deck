@@ -15,6 +15,8 @@
 export const DECK_PROVIDER = "deck";
 
 export type ModelFamily = "anthropic" | "openai" | "zai" | "unknown";
+export type ModelSeat = string | { model: string; reasoning?: string };
+function modelRef(seat: ModelSeat): string { return typeof seat === "string" ? seat : seat.model; }
 
 export interface ModelRef {
 	/** pi provider id, e.g. "deck". */
@@ -57,11 +59,11 @@ export const DEFAULT_MODELS = {
 } as const;
 
 export interface ModelPolicy {
-	implementer: string;
+	implementer: ModelSeat;
 	/** Optional: when omitted and familyOpposition is on, derived from opposition. */
-	reviewer?: string;
-	watcher: string;
-	fallout: string;
+	reviewer?: ModelSeat;
+	watcher: ModelSeat;
+	fallout: ModelSeat;
 	/** First-class knob: reviewer/debate nodes must be the opposite family. */
 	familyOpposition: boolean;
 	/** Family -> counter model id (deck catalog). Overridable per run. */
@@ -111,8 +113,8 @@ export function assertDeckModel(ref: string): void {
 	}
 }
 
-export function modelFamily(ref: string): ModelFamily {
-	const { model } = parseModelRef(ref);
+export function modelFamily(ref: ModelSeat): ModelFamily {
+	const { model } = parseModelRef(modelRef(ref));
 	if (model.startsWith("claude-")) return "anthropic";
 	if (model.startsWith("gpt-")) return "openai";
 	if (model.startsWith("glm-")) return "zai";
@@ -125,8 +127,8 @@ export function modelFamily(ref: string): ModelFamily {
  * opposite-family default. Throws when opposition is on and no opposite-family
  * model can be derived.
  */
-export function resolveAdversary(producerRef: string, policy: ModelPolicy): string {
-	if (policy.reviewer !== undefined && policy.reviewer !== "") return policy.reviewer;
+export function resolveAdversary(producerRef: ModelSeat, policy: ModelPolicy): string {
+	if (policy.reviewer !== undefined && modelRef(policy.reviewer) !== "") return modelRef(policy.reviewer);
 	if (!policy.familyOpposition) return DEFAULT_MODELS.reviewer;
 	const family = modelFamily(producerRef);
 	const counter = policy.oppositionDefaults[family];
@@ -147,9 +149,9 @@ export function resolveAdversary(producerRef: string, policy: ModelPolicy): stri
 export function validateModelPolicy(policy: ModelPolicy): string[] {
 	const violations: string[] = [];
 	const refs: Array<[string, string]> = [
-		["implementer", policy.implementer],
-		["watcher", policy.watcher],
-		["fallout", policy.fallout],
+		["implementer", modelRef(policy.implementer)],
+		["watcher", modelRef(policy.watcher)],
+		["fallout", modelRef(policy.fallout)],
 	];
 
 	let reviewer: string | null = null;

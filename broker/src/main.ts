@@ -29,6 +29,7 @@ import {
 } from "./paths";
 import { refreshUsageRoster } from "./usage";
 import { startValidatedGateway } from "./validated-gateway";
+import { normalizeBlockScopes, routingProvider } from "./quota";
 
 
 export const BROKER_VERSION = "deck-broker/0.1.0";
@@ -54,6 +55,21 @@ async function main(): Promise<void> {
 		version: BROKER_VERSION,
 		resolveModel: models.resolve,
 		listModels: models.list,
+		quotaAccounts: () => {
+			const snapshot = storage.exportSnapshot();
+			const now = Date.now();
+			return snapshot.credentials.map(entry => ({
+				credentialId: entry.id,
+				provider: routingProvider(entry.provider),
+				authProvider: entry.provider,
+				blocked: store.listCredentialBlocks([entry.id]).filter(block => block.blockedUntilMs > now).flatMap(block => normalizeBlockScopes(block.blockScope, entry.provider)), 
+			}));
+		},
+		quotaPreferences: () => [...models.list()].map(model => ({
+			id: model.id,
+			provider: routingProvider(model.provider),
+		})),
+		onQuotaEvent: event => console.error(JSON.stringify(event)),
 	});
 
 	const refresher = new AuthBrokerRefresher({ storage });
