@@ -8,14 +8,14 @@ afterEach(async () => {
 	for (const gateway of gateways.splice(0)) await gateway.close();
 });
 
-async function withFakeUpstream(options: Partial<FastGatewayOptions> = {}) {
+async function withFakeUpstream(options: Partial<FastGatewayOptions> = {}, upstreamResponse: Response = Response.json({ ok: true })) {
 	const forwarded: Array<{ path: string; body: Record<string, unknown> }> = [];
 	const upstreamServer = Bun.serve({
 		 hostname: "127.0.0.1",
 		 port: 0,
 		 fetch: async request => {
 			forwarded.push({ path: new URL(request.url).pathname, body: await request.json() as Record<string, unknown> });
-			return Response.json({ ok: true });
+			return upstreamResponse.clone();
 		},
 	});
 	const upstream = {
@@ -66,8 +66,8 @@ describe("validated gateway outbound requests", () => {
 		const pins: unknown[] = [];
 		const { gateway, forwarded } = await withFakeUpstream({
 			quotaAccounts: () => [
-				{ credentialId: 1, provider: "anthropic", authProvider: "anthropic", blocked: ["fable-7d"] },
-				{ credentialId: 2, provider: "anthropic", authProvider: "anthropic", blocked: ["all-model-5h", "all-model-7d"] },
+				{ credentialId: 1, provider: "anthropic", authProvider: "anthropic", blocked: ["all-model-5h", "all-model-7d"] },
+				{ credentialId: 2, provider: "anthropic", authProvider: "anthropic", blocked: ["fable-7d"] },
 				{ credentialId: 3, provider: "anthropic", authProvider: "anthropic", blocked: ["fable-7d"] },
 			],
 			quotaPreferences: () => [{ id: "claude-sonnet-5", provider: "anthropic" }],
@@ -77,8 +77,18 @@ describe("validated gateway outbound requests", () => {
 		const response = await fetch(`${gateway.url}/v1/messages`, { method: "POST", body: JSON.stringify({ model: "anthropic/claude-fable-5", prompt_cache_key: "session-1" }) });
 		expect(response.status).toBe(200);
 		expect(forwarded[0]?.body.model).toBe("anthropic/claude-sonnet-5");
-		expect(pins).toEqual([["anthropic", "session-1", 1]]);
+		expect(pins).toEqual([["anthropic", "session-1", 2]]);
 		expect(events).toHaveLength(1);
+	});
+
+	test("converts an upstream 429 to structured 503 with retry conversion", async () => {
+		const { gateway, forwarded } = await withFakeUpstream({ quotaAccounts: () => [{ credentialId: 1, provider: "anthropic", blocked: [] }], storage: {} as never }, new Response("upstream limited", { status: 429, headers: { "retry-after": "7" } }));
+		const response = await fetch(`${gateway.url}/v1/messages`, { method: "POST", body: JSON.stringify({ model: "anthropic/claude-sonnet-5" }) });
+		const body = await response.json();
+		expect(response.status).toBe(503);
+		expect(response.headers.get("retry-after")).toBeNull();
+		expect(body).toMatchObject({ error: { code: "NO_QUOTA", type: "quota_exhausted", retry_after_ms: 7000 } });
+		expect(forwarded).toHaveLength(1);
 	});
 
 	test("returns structured 503 and does not forward when all accounts cool", async () => {

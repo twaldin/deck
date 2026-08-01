@@ -32,6 +32,15 @@ describe("quota routing self-check", () => {
 		expect(events).toHaveLength(1);
 	});
 
+	test("falls back across OpenAI provider aliases", () => {
+		const result = routeModel(
+			{ id: "gpt-5.6-spark", provider: "openai" },
+			[{ credentialId: 1, provider: "openai-codex", blocked: ["codex-spark"] }],
+			[{ id: "gpt-5.5", provider: "openai-codex" }],
+		);
+		expect(result.model.id).toBe("gpt-5.5");
+	});
+
 	test("returns structured no-quota instead of a retryable 429", () => {
 		try {
 			pickAccount({ id: "claude-sonnet-5", provider: "anthropic" }, [{ credentialId: 1, provider: "anthropic", blocked: ["all-model-5h", "all-model-7d"] }]);

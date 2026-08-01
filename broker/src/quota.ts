@@ -53,7 +53,7 @@ export function routeModel(requested: QuotaModel, accounts: readonly AccountQuot
 	} catch (error) {
 		if (!(error instanceof NoQuotaError)) throw error;
 		for (const candidate of preferences) {
-			if (candidate.provider !== requested.provider) continue;
+			if (routingProvider(candidate.provider) !== routingProvider(requested.provider)) continue;
 			try {
 				const account = pickAccount(candidate, accounts);
 				const fallback: QuotaEvent = { type: "model-fallback", requestedModel: requested.id, selectedModel: candidate.id, provider: requested.provider, reason: "all-accounts-cooling" };

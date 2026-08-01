@@ -43,7 +43,7 @@ export function startValidatedGateway(
 							// Pin the selected account before the upstream parses the request.
 							const sessionId = typeof body.prompt_cache_key === "string" ? body.prompt_cache_key : `deck-route:${routed.model.provider}:${routed.model.id}`;
 							body.prompt_cache_key = sessionId;
-							if (typeof (options.storage as unknown as { pinSessionOAuthAccount?: unknown }).pinSessionOAuthAccount === "function") {
+							if (typeof (options.storage as unknown as { pinSessionOAuthAccount?: unknown })?.pinSessionOAuthAccount === "function") {
 								(options.storage as unknown as { pinSessionOAuthAccount: (provider: string, sessionId: string, credentialId: number) => boolean }).pinSessionOAuthAccount(routed.account.authProvider ?? routed.model.provider, sessionId, routed.account.credentialId);
 							}
 						} catch (error) {
@@ -79,7 +79,7 @@ export function startValidatedGateway(
 				const provider = routingProvider(parts.at(-2) ?? (parts.at(-1)?.startsWith("claude-") ? "anthropic" : parts.at(-1)?.startsWith("grok-") ? "xai" : "openai-codex"));
 				const requested: QuotaModel = { id: parts.at(-1) ?? requestBody.model, provider };
 				const retryAfter = response.headers.get("retry-after");
-				const retryAfterMs = retryAfter !== null && /^\\d+$/.test(retryAfter) ? Number(retryAfter) * 1000 : undefined;
+				const retryAfterMs = retryAfter !== null && /^\d+$/.test(retryAfter) ? Number(retryAfter) * 1000 : undefined;
 				try {
 					routeModel(requested, quotaAccounts(), [], options.onQuotaEvent);
 				} catch (error) {
