@@ -22,13 +22,16 @@ import { Type } from "typebox";
 import { DECK_OPERATIONAL_PREFIX, registerCalm } from "../calm";
 import { appendStatus, readStatus } from "../events";
 import {
-		buildFactoryText,
+	buildFactoryText,
+	buildFactoryView,
 	buildUsageText,
 	buildFrame,
 	collectPsSnapshot,
 	type FleetTheme,
 	PLAIN_FLEET_THEME,
 	renderFrame,
+	renderStatus,
+	renderDeltaStatus,
 	renderFooterLines,
 	type FooterSessionBits,
 	type PsRun,
@@ -122,6 +125,7 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 		sources: [],
 	} as Awaited<ReturnType<typeof buildFrame>>;
 
+	let previousStatusFrame: Awaited<ReturnType<typeof buildFrame>> | null = null;
 	const injectedCompactions = new Set<string>();
 	let injectedSession = false;
 	let compactionSequence = 0;
@@ -446,117 +450,95 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 		},
 	});
 
-	pi.registerCommand("factory", {
-		description:
-			"Factory overlay: attention-first (q/Esc close, r refresh, a show-all, j/k scroll; /fleet all opens expanded)",
-		handler: async (args: string, ctx: any) => {
-			// First paint is cache-only. Smithers ps is a slow shell-out and must
-			// never delay opening the overlay.
-			let frame = lastFooterFrame;
-			// ctx.ui.custom is TUI-only; degrade to a printed frame elsewhere.
-			if (ctx.mode !== "tui" || ctx.ui?.custom === undefined) {
-				const liveFrame = await refreshStatusline(ctx);
-				ctx.ui?.notify?.(buildFactoryText(liveFrame, asFleetTheme(ctx.ui?.theme ?? PLAIN_FLEET_THEME)), "info");
-				return;
-			}
-			void refreshStatusline(ctx);
-			let showAll = args.trim() === "all";
-			await ctx.ui.custom(
-				(tui: any, rawTheme: any, _kb: any, done: any) => {
-					const theme = asFleetTheme(rawTheme);
-					// The Box owns ALL the chrome: background fill + padding. The view
-					// renders bare text; a second unicode frame inside the Box
-					// width-mismatches and garbles the overlay.
-					const box = new Box(2, 1, asBgFn(rawTheme));
-					// Body budget: terminal rows minus overlay margin (2), box padding
-					// (2), title + blank (2), blank + footer (2), so the panel stays on
-					// screen when tasks outnumber rows. No floor above 1: a floor that
-					// exceeds a tiny viewport reintroduces the overflow.
-					const maxBodyLines = (): number =>
-						Math.max(1, (tui.terminal?.rows ?? 40) - 8);
-					// Usable row columns: 90% overlay width minus box padding (2+2).
-					const maxRowWidth = (): number =>
-						Math.floor((tui.terminal?.cols ?? 120) * 0.9) - 4;
-					let scrollOffset = 0;
-					let scrollable = false;
-					const render = (): string => {
-						const view = { text: buildFactoryText(frame, theme), scrollOffset: 0, scrollable: false };
-						// The view clamps the offset; adopt it so k after over-scrolling
-						// moves immediately instead of unwinding phantom distance.
-						scrollOffset = view.scrollOffset;
-						scrollable = view.scrollable;
-						return view.text;
-					};
-					const body = new Text(render(), 0, 0);
-					box.addChild(body);
-
-					// In-flight guard: buildFrame shells out to smithers ps, which can
-					// outlast a tick; overlapping rebuilds would pile up subprocesses.
-					let busy = false;
-					const refresh = async (): Promise<void> => {
-						if (busy) return;
-						busy = true;
-						try {
-							frame = await getCurrentFrame();
+	const factoryCommand = async (_args: string, ctx: any): Promise<void> => {
+		// First paint is cache-only. Smithers ps is a slow shell-out and must
+		// never delay opening the overlay.
+		let frame = lastFooterFrame;
+		// ctx.ui.custom is TUI-only; degrade to a printed frame elsewhere.
+		if (ctx.mode !== "tui" || ctx.ui?.custom === undefined) {
+			const liveFrame = await refreshStatusline(ctx);
+			ctx.ui?.notify?.(buildFactoryText(liveFrame, asFleetTheme(ctx.ui?.theme ?? PLAIN_FLEET_THEME)), "info");
+			return;
+		}
+		void refreshStatusline(ctx);
+		await ctx.ui.custom(
+			(tui: any, rawTheme: any, _kb: any, done: any) => {
+				const theme = asFleetTheme(rawTheme);
+				const box = new Box(2, 1, asBgFn(rawTheme));
+				const maxBodyLines = (): number => Math.max(1, (tui.terminal?.rows ?? 40) - 8);
+				const maxRowWidth = (): number => Math.floor((tui.terminal?.cols ?? 120) * 0.9) - 4;
+				let scrollOffset = 0;
+				let scrollable = false;
+				const render = (): string => {
+					const view = buildFactoryView(frame, theme, {
+						maxBodyLines: maxBodyLines(),
+						scrollOffset,
+						maxRowWidth: maxRowWidth(),
+						chrome: "bare",
+					});
+					scrollOffset = view.scrollOffset;
+					scrollable = view.scrollable;
+					return view.text;
+				};
+				const body = new Text(render(), 0, 0);
+				box.addChild(body);
+				let busy = false;
+				const refresh = async (): Promise<void> => {
+					if (busy) return;
+					busy = true;
+					try {
+						frame = await getCurrentFrame();
+						body.setText(render());
+						tui.requestRender();
+					} catch {
+						// Keep the last good frame on a failed refresh.
+					} finally {
+						busy = false;
+					}
+				};
+				const timer = setInterval(() => void refresh(), 5_000);
+				timer.unref?.();
+				return {
+					render: (width: number) => box.render(width),
+					invalidate: () => box.invalidate(),
+					handleInput: (data: string) => {
+						if (data === "q" || data === "\u001b" || data === "\u0003") {
+							clearInterval(timer);
+							done(undefined);
+							return;
+						}
+						if (data === "j" || data === "\u001b[B") {
+							if (!scrollable) return;
+							scrollOffset += 1;
 							body.setText(render());
 							tui.requestRender();
-						} catch {
-							// keep the last good frame on a failed refresh
-						} finally {
-							busy = false;
+							return;
 						}
-					};
-					const timer = setInterval(() => void refresh(), 5_000);
-					timer.unref?.();
+						if (data === "k" || data === "\u001b[A") {
+							if (scrollOffset === 0) return;
+							scrollOffset -= 1;
+							body.setText(render());
+							tui.requestRender();
+							return;
+						}
+						if (data === "r") void refresh();
+					},
+				};
+			},
+			{ overlay: true, overlayOptions: { anchor: "center", width: "90%", minWidth: 80, margin: 1, maxHeight: "100%" } },
+		);
+	};
 
-					return {
-						render: (width: number) => box.render(width),
-						invalidate: () => box.invalidate(),
-						handleInput: (data: string) => {
-							if (data === "q" || data === "\u001b" || data === "\u0003") {
-								clearInterval(timer);
-								done(undefined);
-								return;
-							}
-							if (data === "a") {
-								showAll = !showAll;
-								scrollOffset = 0;
-								body.setText(render());
-								tui.requestRender();
-								return;
-							}
-							if (data === "j" || data === "\u001b[B") {
-								if (!scrollable) return;
-								scrollOffset += 1;
-								body.setText(render());
-								tui.requestRender();
-								return;
-							}
-							if (data === "k" || data === "\u001b[A") {
-								if (scrollOffset === 0) return;
-								scrollOffset -= 1;
-								body.setText(render());
-								tui.requestRender();
-								return;
-							}
-							if (data === "r") void refresh();
-						},
-					};
-				},
-				// maxHeight is the last-resort clip for terminals too short for even
-				// a one-line body; the body clamp keeps the border intact above that.
-				{ overlay: true, overlayOptions: { anchor: "center", width: "90%", minWidth: 80, margin: 1, maxHeight: "100%" } },
-			);
-		},
+	pi.registerCommand("factory", {
+		description: "Factory overlay: live effort state (q/Esc close, r refresh, j/k scroll)",
+		handler: factoryCommand,
 	});
-
 
 	pi.registerCommand("fleet", {
 		description: "Deprecated alias for /factory",
 		handler: async (args: string, ctx: any) => {
 			ctx.ui?.notify?.("/fleet is now /factory.", "warning");
-			const command = pi.commands?.get?.("factory");
-			if (command?.handler) await command.handler(args, ctx);
+			await factoryCommand(args, ctx);
 		},
 	});
 
@@ -566,8 +548,12 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 	});
 
 	pi.registerCommand("status", {
-		description: "Show the live one-view factory status",
-		handler: async (_args: string, ctx: any) => ctx.ui?.notify?.(renderFrame(await getCurrentFrame()), "info"),
+		description: "Show full diagnostic factory state, including completed and failed work",
+		handler: async (_args: string, ctx: any) => {
+			const current = await getCurrentFrame();
+			ctx.ui?.notify?.(`${renderStatus(current)}\n${renderDeltaStatus(current, previousStatusFrame)}`, "info");
+			previousStatusFrame = current;
+		},
 	});
 
 	pi.registerCommand("wake", {

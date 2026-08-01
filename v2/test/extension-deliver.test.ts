@@ -118,6 +118,28 @@ describe("fleet workspace safeguards", () => {
 		await pending;
 	});
 
+	test("factory, status, and the fleet alias expose their separate views", async () => {
+		fs.mkdirSync(path.join(home, "workflows", ".smithers"), { recursive: true });
+		const pi = fakePi();
+		const notifications: Array<[string, string]> = [];
+		deckV2(pi.api as never, {
+			collectPsSnapshot: async () => ({
+				runs: [{ id: "completed", status: "completed", state: "completed" }, { id: "live", status: "running", state: "running", step: "watch-poll" }],
+				health: { name: "smithers", state: "ok", detail: "2 run(s)" },
+			}),
+		});
+		const printCtx = { mode: "print", ui: { notify: (value: string, level: string) => notifications.push([value, level]), setWorkingVisible: () => {}, setHiddenThinkingLabel: () => {}, setFooter: () => {}, setStatus: () => {} } };
+		await pi.emit("session_start", printCtx);
+		await pi.commands.get("factory")?.("", printCtx);
+		expect(notifications.at(-1)?.[0]).toContain("deck factory");
+		expect(notifications.at(-1)?.[0]).not.toContain("completed");
+		await pi.commands.get("status")?.("", printCtx);
+		expect(notifications.at(-1)?.[0]).toContain("completed");
+		await pi.commands.get("fleet")?.("", printCtx);
+		expect(notifications.at(-2)).toEqual(["/fleet is now /factory.", "warning"]);
+		expect(notifications.at(-1)?.[0]).toContain("deck factory");
+	});
+
 	test("REGRESSION: non-TUI fleet prints a live first frame", async () => {
 		fs.mkdirSync(path.join(home, "workflows", ".smithers"), { recursive: true });
 		const pi = fakePi();

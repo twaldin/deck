@@ -11,6 +11,9 @@ import {
 	activityFor,
 	actionableWorkflowFailures,
 	attentionRank,
+	buildFactoryText,
+	buildFactoryView,
+	buildUsageText,
 	buildFleetText,
 	buildFleetView,
 	chipFor,
@@ -24,6 +27,7 @@ import {
 	liveSpawnCount,
 	PLAIN_FLEET_THEME,
 	renderFooterLines,
+	renderStatus,
 	sliceVisible,
 	textWidth,
 	visibleTasks,
@@ -36,6 +40,7 @@ function task(overrides: Partial<TaskRow> = {}): TaskRow {
 	return {
 		taskId: "t1",
 		kind: "ship",
+		model: null,
 		project: null,
 		runState: "none",
 		lastVerb: null,
@@ -854,6 +859,61 @@ describe("sliceVisible", () => {
 				maxBodyLines + 4,
 			);
 		}
+	});
+});
+
+describe("factory renderer", () => {
+	test("shows live work with resolved model seats and omits completed work", () => {
+		const live = { runId: "live", workflow: "pr-pipeline", status: "running", state: "running", step: "r0-watch-poll", taskId: null, phase: "watch", waitingFor: "ci-poll", activity: "idle", startedAt: new Date(Date.now() - 65_000).toISOString() } satisfies WorkflowRow;
+		const complete = { ...live, runId: "complete", status: "completed", state: "completed", step: "fallout-wait" };
+		const output = buildFactoryText(frame({
+			workflows: [live, complete],
+			efforts: [
+				{ identity: "live", ticket: "D-1", prNumber: 7, prTitle: null, runId: "live", state: "running", waitingFor: "ci-poll", failed: false, step: "r0-watch-poll", runtimeMs: 65_000, ciState: "watching", reviewState: null, model: "implement deck/gpt-5.6-luna · review deck/claude-fable-5", prUrl: "https://github.com/example/repo/pull/7" },
+				{ identity: "complete", ticket: "D-2", prNumber: 8, prTitle: null, runId: "complete", state: "completed", waitingFor: null, failed: false, step: "fallout-wait", runtimeMs: 65_000, ciState: null, reviewState: null, model: "deck/gpt-5.6-sol", prUrl: "https://github.com/example/repo/pull/8" },
+			],
+		}));
+		expect(output).toContain("https://github.com/example/repo/pull/7");
+		expect(output).toContain("implement deck/gpt-5.6-luna");
+		expect(output).not.toContain("pull/8");
+	});
+
+	test("windows factory rows for scrolling and clamps an overscroll", () => {
+		const workflows = Array.from({ length: 5 }, (_, index) => ({ runId: `run-${index}`, workflow: "pr-pipeline", status: "running", state: "running", step: "r0-watch-poll", taskId: null, phase: "watch", waitingFor: "ci-poll", activity: "idle", startedAt: new Date().toISOString() } satisfies WorkflowRow));
+		const efforts = workflows.map((workflow, index) => ({ identity: workflow.runId, ticket: `D-${index}`, prNumber: index, prTitle: null, runId: workflow.runId, state: "running", waitingFor: "ci-poll", failed: false, step: "r0-watch-poll", runtimeMs: 1_000, ciState: "watching", reviewState: null, model: "deck/gpt-5.6-luna", prUrl: null }));
+		const top = buildFactoryView(frame({ workflows, efforts }), PLAIN_FLEET_THEME, { maxBodyLines: 4, chrome: "bare" });
+		const bottom = buildFactoryView(frame({ workflows, efforts }), PLAIN_FLEET_THEME, { maxBodyLines: 4, scrollOffset: 9_999, chrome: "bare" });
+		expect(top.scrollable).toBe(true);
+		expect(top.text).toContain("[j/k] scroll");
+		expect(bottom.scrollOffset).toBeLessThan(9_999);
+		expect(bottom.text).toContain("line(s) above");
+	});
+
+	test("status keeps completed work after factory omits it", () => {
+		const completed = { runId: "complete", workflow: "pr-pipeline", status: "completed", state: "completed", step: "fallout-wait", taskId: null } satisfies WorkflowRow;
+		expect(renderStatus(frame({ workflows: [completed] }))).toContain("completed");
+	});
+
+	test("lists all resolved pipeline seats from its input", async () => {
+		const directory = fs.mkdtempSync(path.join(os.tmpdir(), "factory-seats-"));
+		const previousHome = process.env.DECK_V2_HOME;
+		process.env.DECK_V2_HOME = directory;
+		try {
+			fs.mkdirSync(path.join(directory, "state", "ship"), { recursive: true });
+			fs.writeFileSync(path.join(directory, "state", "ship", "run.input.json"), JSON.stringify({ repo: "acme/widgets", models: { implementer: "deck/gpt-5.6-luna", watcher: "deck/gpt-5.6-sol", fallout: "deck/claude-fable-5" } }));
+			const result = await buildFrame({ workflowCwd: directory, psRuns: [{ id: "run", status: "running", state: "running", step: "watch-poll" }] });
+			expect(result.efforts?.[0]?.model).toBe("implement deck/gpt-5.6-luna · review deck/claude-fable-5 · watch deck/gpt-5.6-sol · fallout deck/claude-fable-5");
+		} finally {
+			if (previousHome === undefined) delete process.env.DECK_V2_HOME; else process.env.DECK_V2_HOME = previousHome;
+			fs.rmSync(directory, { recursive: true, force: true });
+		}
+	});
+
+	test("renders broker usage by account, tier, and temperature", () => {
+		const output = buildUsageText({ reports: [{ provider: "anthropic", metadata: { email: "captain@example.com" }, limits: [{ window: { id: "5h" }, amount: { remainingFraction: 0.75 }, status: "ok" }, { label: "7d", amount: { usedFraction: 0.9 }, status: "warning" }] }] });
+		expect(output).toContain("captain@example.com · anthropic");
+		expect(output).toContain("5h: 75% free · warm");
+		expect(output).toContain("7d: 10% free · warm");
 	});
 });
 
