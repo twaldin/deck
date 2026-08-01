@@ -7,9 +7,9 @@
  * Two hardenings over a naive implementation:
  *
  * 1. Landing is tested by searching main for the squash commit `(#N)`, NEVER by
- *    the GitHub `merged` flag. A Graphite queue-merged PR reads
- *    `state=closed, merged=false` — three confirmed repros (#24043, #25397,
- *    #25810). A naive merged-flag check would discard landed work.
+ *    the GitHub `merged` flag. Do not treat a closed or unmerged PR state as
+ *    proof that the work did not land. A naive merged-flag check can discard
+ *    landed work.
  *
  * 2. Evidence-bearing worktrees are refused in CODE, not in a memory note.
  *    fm2's learnings protect treehouse slots holding frozen pre-force-push

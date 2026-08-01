@@ -114,7 +114,7 @@ describe("worker brief", () => {
 		for (const project of ["lindy", "Lindy"]) {
 			const brief = workerBrief({ ...base, project });
 			// The three load-bearing traps, verbatim.
-			expect(brief).toContain("state=closed, merged=false");
+			expect(brief).toContain("squash commit");
 			expect(brief).toContain("Unapplied migrations block ALL of CI repo-wide");
 			expect(brief).toContain("requested_reviewers API");
 			// The one-liners.

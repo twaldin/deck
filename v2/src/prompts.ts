@@ -247,9 +247,8 @@ If the orchestrator later sends a specific review or CI failure, inspect that
 reported item, make the bounded fix, push, report, and stop.
 Never open a second PR or a stacked child PR for rework on this task.
 
-A PR that landed through a merge queue can read as closed and not merged.
-Landing truth is the squash commit \`(#N)\` on the base branch, never the merged
-flag.
+Do not infer landing from a PR's closed or unmerged state. Landing truth is the
+squash commit \`(#N)\` on the base branch, never the merged flag alone.
 
 In PR threads: agree, or answer with facts. Never argue with a reviewer — if you
 believe a reviewer is wrong, append \`needs-decision:\` and stop. Write comments in

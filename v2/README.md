@@ -104,9 +104,9 @@ rebased out from under a running fleet.
 - `run_epoch` fences local state only. An epoch grants the right to *start*
   something; it cannot un-land a push, so irreversible operations use a claim plus
   a pending receipt instead.
-- A pull request that landed through a merge queue reads as `closed, not merged`.
-  Landing is confirmed by finding the squash commit on the base branch. Trusting
-  the merged flag would discard work that had actually shipped.
+- Do not infer landing from a pull request's closed or unmerged state. Landing
+  is confirmed by finding the squash commit on the base branch. Trusting only
+  the merged flag can discard work that had actually shipped.
 - Statuses are events, not state. `working:` is not progress, silence is not
   failure, and `paused:` means deliberately waiting.
 - Wake delivery is at-least-once through a durable outbox. Reading the status file

@@ -62,7 +62,7 @@ describe("seeds", () => {
 		expect(lindy?.stamp).toBe(true);
 		expect(lindy?.knowledge.some((k) => k.endsWith("lindy-domain.md"))).toBe(true);
 		// The frozen traps ride in the profile, not in a prompts.ts fork.
-		expect(lindy?.doctrine).toContain("state=closed, merged=false");
+		expect(lindy?.doctrine).toContain("squash commit");
 		expect(lindy?.models?.implementer).toBe("deck/gpt-5.6-luna");
 		expect(lindy?.models?.reviewer).toBeUndefined();
 		expect(lindy?.models?.oppositionDefaults?.openai).toBe("deck/claude-fable-5");

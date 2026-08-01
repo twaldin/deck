@@ -1,7 +1,7 @@
 /**
  * Landing verification (SOP stage 8): search main for the squash commit
- * "(#N)" - NEVER the merged flag. Graphite lands-and-closes: queue-merged PRs
- * read state=closed, merged=false (3 confirmed repros).
+ * "(#N)" - NEVER the merged flag. A provider may report a PR as closed and
+ * unmerged before the landing state is clear, so verify the squash commit.
  */
 
 export interface CommitSubject {

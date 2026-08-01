@@ -119,7 +119,7 @@ Removal resolutions:
 | resolution | meaning |
 |---|---|
 | `merged` | GitHub reports merged |
-| `landed-squash` | **Graphite trap resolved**: state=closed, merged=false, but the squash commit `(#N)` exists on the default branch — the work landed |
+| `landed-squash` | **Landing check resolved**: the squash commit `(#N)` exists on the default branch — the work landed |
 | `closed-without-landing` | closed, unmerged, **and** the squash-commit search came back empty — a real alarm |
 | `descoped` | still open, just left the search scope (e.g. review request withdrawn) |
 | `vanished` | could not resolve the PR at all (deleted repo, lost access) |
@@ -127,13 +127,11 @@ Removal resolutions:
 `--json` emits the same changes as JSON objects, one per line, validated by
 `diffChangeSchema` in `src/schema.ts`.
 
-## The Graphite trap (why `landed-squash` exists)
+## The landing check (why `landed-squash` exists)
 
-Graphite squash-lands a stack onto the default branch and closes the PRs
-instead of GitHub-merging them. A naive poller reports these as
-"closed without merging" — three confirmed repros of that misread. This
-poller never reports `closed-without-landing` until a commit-search of the
-repo's default branch for a headline ending in `(#N)` comes back empty
+A closed or unmerged PR state does not by itself prove that the work did not
+land. This poller never reports `closed-without-landing` until a commit-search
+of the repo's default branch for a headline ending in `(#N)` comes back empty
 (GitHub commit search indexes exactly the default branch). Body-only `#N`
 mentions do not count. See `resolveRemoval` in `src/diff.ts` and
 `pickSquashCommit` in `src/github.ts`.
@@ -163,5 +161,5 @@ no Linear auth path is verified on this rig and we do not guess at auth.
 cd intake && bun test && bunx tsc --noEmit
 ```
 
-The diff engine and Graphite resolution are tested against a mocked
+The diff engine and GitHub landing resolution are tested against a mocked
 `GithubClient`; nothing in the test suite touches the live API.

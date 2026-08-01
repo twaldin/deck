@@ -119,7 +119,7 @@ describe("diff engine", () => {
 	});
 });
 
-describe("removal resolution (Graphite trap)", () => {
+describe("removal resolution (GitHub merge queue landing check)", () => {
 	const item = makeItem({ url: "https://github.com/lindy-ai/lindy/pull/900", number: 900 });
 
 	test("merged PR resolves as merged, no squash search needed", async () => {

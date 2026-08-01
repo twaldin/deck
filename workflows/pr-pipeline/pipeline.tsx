@@ -59,7 +59,7 @@ import {
 	resolveReviewerLogin,
 } from "./lib/gh.ts";
 import { findLandingCommit } from "./lib/landing.ts";
-import { runMergeWithFallback } from "./lib/merge.ts";
+import { runMerge } from "./lib/merge.ts";
 import { detectMigrations, MIGRATION_STAGES, migrationEvidenceComplete } from "./lib/migrations.ts";
 import { generatePullRequestDescription } from "./lib/description.ts";
 import {
@@ -125,7 +125,7 @@ export const DEFAULT_GITHUB = {
 };
 
 const DEFAULT_COMMANDS = {
-	merge: "gt merge",
+	merge: "gh pr merge --auto --squash",
 	deployEvidence: undefined as string | undefined,
 	migrationStgRun: undefined as string | undefined,
 	migrationStgVerify: undefined as string | undefined,
@@ -344,7 +344,7 @@ const schemas = {
 		submittedAt: z.string(),
 		receipt: z.string(),
 		alreadyLanded: z.boolean(),
-		mergePath: z.enum(["graphite", "gh-fallback", "dry-run", "already-landed"]),
+		mergePath: z.enum(["github-merge-queue", "dry-run", "already-landed"]),
 	}),
 	queuePoll: z.object({
 		poll: z.number().int(),
@@ -1505,7 +1505,7 @@ prNumber: pr.prNumber,
 													`Migration gate: ${migRequired ? `TRIGGERED (evidence ${migEvidenceOk ? "complete" : "INCOMPLETE"})` : "not triggered"}`,
 													``,
 													`Approving = stamp + the per-PR merge word. The workflow (not an agent)`,
-													`submits to the Graphite merge queue. Head change after this stamp`,
+													`submits to the GitHub merge queue. Head change after this stamp`,
 													`invalidates it and re-enters watch-ci (no silent re-stamp).`,
 												].join("\n")}
 											/>
@@ -1621,7 +1621,7 @@ prNumber: pr.prNumber,
 									);
 								}
 								// The merge command runs against the worktree's CURRENT
-								// branch (gt merge is unqualified) - refuse if the worktree
+								// branch (the merge command is scoped to the PR) - refuse if the worktree
 								// drifted off the PR branch, or the wrong PR gets merged.
 								const mergeBranch = (
 									await execOrThrow(
@@ -1635,15 +1635,13 @@ prNumber: pr.prNumber,
 										`[escalate] worktree is on branch "${mergeBranch}", not "${input.branch}" - refusing to run the merge command there (it acts on the current branch and would merge the wrong PR).`,
 									);
 								}
-								const merge = await runMergeWithFallback({
-									runGraphite: () => bunExec(["bash", "-lc", commands.merge], { cwd: input.worktree }),
+								const merge = await runMerge({
+									args: ["--auto", "--squash"],
 									exec: bunExec,
 									gh: github.gh,
 									prNumber: pr.prNumber,
 									cwd: input.worktree,
-									// Lindy's merge queue uses --auto. Other repos use the
-									// normal squash strategy when Graphite is unavailable.
-									fallbackArgs: profile?.stamp === true || input.repo === "lindy-ai/lindy" ? ["--auto"] : ["--squash"],
+									// GitHub's merge queue is the only landing path.
 								});
 								return {
 									round: authorizedRound.round,
@@ -1677,8 +1675,7 @@ prNumber: pr.prNumber,
 								const ejected = lifecycle.state === "open" && prior?.autoMergeRequest === true && !lifecycle.autoMergeRequest;
 								if (ejected) {
 									// GitHub removes auto-merge when a queued PR is ejected. Re-submit it
-									// with the configured merge mechanism. This can be Graphite's
-									// queue-aware `gt merge`, so do not substitute a GitHub strategy.
+									// through GitHub's native merge queue.
 									if (!dryRun) {
 										const mergeBranch = (
 											await execOrThrow(
@@ -1692,7 +1689,7 @@ prNumber: pr.prNumber,
 													`[escalate] worktree is on branch "${mergeBranch}", not "${input.branch}" - refusing to re-submit the merge command there (it acts on the current branch and would merge the wrong PR).`,
 											);
 										}
-										await runShell(commands.merge, input.worktree);
+										await runMerge({ exec: bunExec, gh: github.gh, prNumber: pr.prNumber, cwd: input.worktree, args: ["--auto", "--squash"] });
 									}
 								}
 								return { poll: pollNo, state: lifecycle.state, autoMergeRequest: ejected ? true : lifecycle.autoMergeRequest, ejected, reason: ejected ? "PR ejected; auto-merge re-submitted" : lifecycle.state === "closed" ? "PR closed; verify squash on base" : "waiting in merge queue" };
@@ -1721,8 +1718,8 @@ prNumber: pr.prNumber,
 										};
 									}
 									if (pollNo > 0) await sleepSeconds(limits.landingPollSeconds);
-									// NEVER the merged flag: Graphite lands-and-closes reads
-									// state=closed, merged=false. Search main for "(#N)".
+									// NEVER rely on the merged flag. Search main for "(#N)" to
+									// confirm the squash landed.
 									const commits = await fetchMainCommitSubjects(github.git, input.worktree);
 									const landed = findLandingCommit(commits, pr.prNumber);
 									return {
@@ -1747,7 +1744,7 @@ prNumber: pr.prNumber,
 					<Task id="landing-exhausted" output={outputs.landingPoll} retries={0}>
 						{() => {
 							throw new Error(
-								`[escalate] merge submitted but squash commit (#${pr?.prNumber}) never appeared on main after ${landingRows.length} polls. Check the Graphite queue; resume when resolved.`,
+								`[escalate] merge submitted but squash commit (#${pr?.prNumber}) never appeared on main after ${landingRows.length} polls. Check the GitHub merge queue; resume when resolved.`,
 							);
 						}}
 					</Task>

@@ -45,7 +45,7 @@
           "severity": "high",
           "file": "SPEC.md",
           "line": 111,
-          "issue": "Tim's merge stamp is a convention rather than an enforced authorization. A `merge_word` card is not bound to repository, PR, head SHA, checks, or workflow version; raw `gh`/Graphite paths remain available; and code can change after approval. An agent can bypass the card or merge a head Tim never approved.",
+          "issue": "Tim's merge stamp is a convention rather than an enforced authorization. A `merge_word` card is not bound to repository, PR, head SHA, checks, or workflow version; raw `gh`/GitHub merge queue paths remain available; and code can change after approval. An agent can bypass the card or merge a head Tim never approved.",
           "suggestion": "Remove merge authority from all agent credentials and expose one merge gateway protected by branch rules. Have Tim mint a single-use authorization bound to repo, PR, immutable head SHA, base, checks, and workflow run; invalidate it on any head change and consume it atomically at merge time."
         },
         {
