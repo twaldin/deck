@@ -134,8 +134,8 @@ export type FleetFrame = {
 	generatedAt: string;
 	tasks: TaskRow[];
 	workflows: WorkflowRow[];
-	efforts: EffortRow[];
-	agents: AgentRow[];
+	efforts?: EffortRow[];
+	agents?: AgentRow[];
 	counters: {
 		tasks: number;
 		running: number;
@@ -1503,9 +1503,9 @@ export function renderFooterLines(
 ): string[] {
 	const attention = [
 		`Nq ${frame.counters.openQuestions}`,
-		`${frame.counters.efforts ?? frame.efforts.length} efforts`,
-		`${frame.counters.agents ?? frame.agents.length} agents`,
-		(frame.counters.unhealedFailures ?? frame.efforts.filter((effort) => effort.failed).length) > 0 ? `fail ${frame.counters.unhealedFailures ?? frame.efforts.filter((effort) => effort.failed).length}` : null,
+		`${frame.counters.efforts ?? (frame.efforts?.length ?? 0)} efforts`,
+		`${frame.counters.agents ?? (frame.agents?.length ?? 0)} agents`,
+		(frame.counters.unhealedFailures ?? (frame.efforts?.filter((effort) => effort.failed).length ?? 0)) > 0 ? `fail ${frame.counters.unhealedFailures ?? (frame.efforts?.filter((effort) => effort.failed).length ?? 0)}` : null,
 	].filter((value): value is string => value !== null);
 	const lines = [
 		footerIdentity(bits),
