@@ -30,9 +30,13 @@ export function startValidatedGateway(
 					const modelParts = body.model?.split("/") ?? [];
 					const modelId = modelParts.at(-1) ?? "";
 					const providerName = modelParts.at(-2);
-					const provider = providerName === "xai" || providerName === "xai-oauth" || modelId.startsWith("grok-") ? "xai" : "openai";
+					const provider = modelId.startsWith("claude-") || providerName === "anthropic" ? "anthropic" : providerName === "xai" || providerName === "xai-oauth" || modelId.startsWith("grok-") ? "xai" : "openai";
 					const effort = body.reasoning_effort ?? body.reasoning?.effort;
-					if (effort !== undefined) nativeReasoning(provider, effort);
+					if (effort !== undefined) {
+						const native = nativeReasoning(provider, effort);
+						if (native.provider === "anthropic" && body.thinking === undefined) body.thinking = native.thinking;
+						if (native.provider === "openai" && body.reasoning === undefined) body.reasoning = { effort: native.reasoning };
+					}
 					if (body.thinking?.type === "enabled") nativeReasoning("anthropic", `budget:${body.thinking.budget_tokens ?? ""}`);
 				} catch (error) {
 					return Response.json({ error: { type: "invalid_request_error", message: error instanceof Error ? error.message : String(error) } }, { status: 400 });

@@ -22,11 +22,13 @@ import * as path from "node:path";
 export const PIPELINES = ["lindy-full", "yolo-ship", "ask-then-yolo"] as const;
 export type PipelineId = (typeof PIPELINES)[number];
 
+export type ModelSeat = string | { model: string; reasoning?: string };
+
 export type ModelSeats = {
-	implementer?: string;
-	reviewer?: string;
-	watcher?: string;
-	fallout?: string;
+	implementer?: ModelSeat;
+	reviewer?: ModelSeat;
+	watcher?: ModelSeat;
+	fallout?: ModelSeat;
 	familyOpposition?: boolean;
 	oppositionDefaults?: Record<string, string>;
 };
@@ -204,8 +206,12 @@ export function validateProfiles(parsed: unknown, source: string): ProjectProfil
 			}
 			const m = p.models as Record<string, unknown>;
 			for (const role of ["implementer", "reviewer", "watcher", "fallout"] as const) {
-				if (m[role] !== undefined && typeof m[role] !== "string") {
-					throw new Error(`${where} (${p.id}): models.${role} must be a string`);
+				const seat = m[role];
+				if (seat !== undefined && typeof seat !== "string" && (seat === null || typeof seat !== "object" || Array.isArray(seat))) throw new Error(`${where} (${p.id}): models.${role} must be a model string or { model, reasoning }`);
+				if (seat !== undefined && typeof seat === "object") {
+					const value = seat as Record<string, unknown>;
+					if (typeof value.model !== "string" || value.model.length === 0) throw new Error(`${where} (${p.id}): models.${role}.model must be a non-empty string`);
+					if (value.reasoning !== undefined && (typeof value.reasoning !== "string" || value.reasoning.length === 0)) throw new Error(`${where} (${p.id}): models.${role}.reasoning must be a non-empty string`);
 				}
 			}
 			if (m.familyOpposition !== undefined && typeof m.familyOpposition !== "boolean") {
@@ -215,10 +221,10 @@ export function validateProfiles(parsed: unknown, source: string): ProjectProfil
 				throw new Error(`${where} (${p.id}): models.oppositionDefaults must be an object`);
 			}
 			models = {
-				...(m.implementer === undefined ? {} : { implementer: m.implementer as string }),
-				...(m.reviewer === undefined ? {} : { reviewer: m.reviewer as string }),
-				...(m.watcher === undefined ? {} : { watcher: m.watcher as string }),
-				...(m.fallout === undefined ? {} : { fallout: m.fallout as string }),
+				...(m.implementer === undefined ? {} : { implementer: m.implementer as ModelSeat }),
+				...(m.reviewer === undefined ? {} : { reviewer: m.reviewer as ModelSeat }),
+				...(m.watcher === undefined ? {} : { watcher: m.watcher as ModelSeat }),
+				...(m.fallout === undefined ? {} : { fallout: m.fallout as ModelSeat }),
 				...(m.familyOpposition === undefined ? {} : { familyOpposition: m.familyOpposition as boolean }),
 				oppositionDefaults: (() => {
 					const entries = Object.entries((m.oppositionDefaults ?? {}) as Record<string, unknown>);
