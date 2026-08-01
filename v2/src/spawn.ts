@@ -75,7 +75,11 @@ export type SpawnRequest = {
 	branch?: string;
 	model?: string;
 	context?: string;
-	/** Reasoning level; per captain doctrine, high for gpt, medium for claude. */
+	/**
+	 * Native reasoning selector passed to Pi. Use a named effort (`minimal`,
+	 * `low`, `medium`, `high`, `xhigh`, or `max`) or an Anthropic budget as
+	 * `budget:<tokens>`; Pi sends the provider-native value without remapping.
+	 */
 	thinking?: string;
 };
 

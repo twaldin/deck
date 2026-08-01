@@ -14,7 +14,6 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import { AuthBrokerRefresher } from "@oh-my-pi/pi-ai/auth-broker";
-import { startFastGateway } from "./fast-gateway";
 import { startControlSocket } from "./control";
 import { buildModelIndex } from "./models";
 import {
@@ -29,6 +28,8 @@ import {
 	writeJsonAtomic,
 } from "./paths";
 import { refreshUsageRoster } from "./usage";
+import { startValidatedGateway } from "./validated-gateway";
+
 
 export const BROKER_VERSION = "deck-broker/0.1.0";
 const CONTROL_TOKEN_FILE = path.join(BROKER_DIR, "control.token");
@@ -46,7 +47,7 @@ async function main(): Promise<void> {
 	const controlCapability = ensureToken(CONTROL_TOKEN_FILE);
 
 	const models = buildModelIndex();
-	const gateway = startFastGateway({
+	const gateway = startValidatedGateway({
 		storage,
 		bind: DEFAULT_GATEWAY_BIND,
 		bearerTokens: [gatewayToken],
