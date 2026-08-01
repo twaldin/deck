@@ -94,6 +94,14 @@ export type AgentRow = {
 };
 
 export type EffortRow = {
+	/** Captain-facing factory metadata. */
+	workflow?: string | null;
+	step?: string | null;
+	runtimeMs?: number | null;
+	ciState?: string | null;
+	reviewState?: string | null;
+	model?: string | null;
+	prUrl?: string | null;
 	identity: string;
 	ticket: string | null;
 	prNumber: number | null;
@@ -588,6 +596,10 @@ function realpath(target: string): string {
 	}
 }
 
+function frameModelForTask(taskId: string, tasks: TaskRow[]): string | null {
+	return tasks.find((task) => task.taskId === taskId)?.kind ?? null;
+}
+
 export async function buildFrame(
 	options: { workflowCwd?: string; psRuns?: PsRun[] } = {},
 ): Promise<FleetFrame> {
@@ -766,7 +778,12 @@ export async function buildFrame(
 		if (prior === undefined || (wf.startedAt ?? "") > (prior.startedAt ?? "")) effortMap.set(key, wf);
 	}
 	const efforts: EffortRow[] = [...effortMap].map(([identity, wf]) => ({
-		identity, ticket: wf.ticket ?? null, prNumber: wf.prNumber ?? null, prTitle: wf.prTitle ?? null,
+		identity, workflow: wf.workflow, step: wf.step, runtimeMs: wf.startedAt ? ageMs(wf.startedAt) : null,
+		ciState: wf.phase === "watch" ? (wf.activity === "failed" ? "failed" : "watching") : null,
+		reviewState: wf.waitingFor?.startsWith("gate:") ? "needs review" : (wf.waitingFor === "stamp" ? "ready" : null),
+		model: wf.taskId ? (frameModelForTask(wf.taskId, tasks) ?? null) : null,
+		prUrl: wf.repo && wf.prNumber ? `https://github.com/${wf.repo}/pull/${wf.prNumber}` : null,
+		ticket: wf.ticket ?? null, prNumber: wf.prNumber ?? null, prTitle: wf.prTitle ?? null,
 		runId: wf.runId, state: wf.state ?? wf.status, waitingFor: wf.waitingFor === "stamp" ? "stamp-question" : (wf.waitingFor ?? null),
 		failed: wf.activity === "failed",
 	}));
@@ -1487,6 +1504,51 @@ export function buildFleetView(
 		scrollOffset,
 		scrollable,
 	};
+}
+
+export type FactoryViewOptions = { maxBodyLines?: number; scrollOffset?: number };
+
+/** Captain's single-pane factory view. It is derived from live workflow rows and
+ * omits terminal work from the default view. */
+export function buildFactoryText(frame: FleetFrame, theme: FleetTheme = PLAIN_FLEET_THEME): string {
+	const rows = (frame.efforts ?? []).filter((effort) => {
+		const wf = frame.workflows.find((candidate) => candidate.runId === effort.runId);
+		return wf !== undefined && !isTerminalWorkflow(wf) && !wf.superseded;
+	});
+	const sections = new Map<string, EffortRow[]>([["STAMPABLE", []], ["WATCHING", []], ["IMPLEMENTING", []]]);
+	for (const row of rows) {
+		const wf = frame.workflows.find((candidate) => candidate.runId === row.runId);
+		const state = wf?.waitingFor === "stamp" ? "STAMPABLE" : wf?.activity === "fixing" ? "IMPLEMENTING" : (wf?.phase === "implement" ? "IMPLEMENTING" : "WATCHING");
+		sections.get(state)!.push(row);
+	}
+	const lines = [`${theme.bold(theme.fg("accent", "deck factory"))}  ${rows.length} live effort(s) · ${frame.counters.openQuestions} question(s)`];
+	for (const [name, entries] of sections) {
+		if (entries.length === 0) continue;
+		lines.push("", theme.bold(theme.fg(name === "STAMPABLE" ? "success" : name === "WATCHING" ? "accent" : "warning", `${name} (${entries.length})`)));
+		for (const row of entries) {
+			const pr = row.prUrl ?? (row.prNumber === null ? "PR ?" : `#${row.prNumber}`);
+			const wait = row.waitingFor ? ` · waiting ${row.waitingFor}` : "";
+			lines.push(`  ${pr} · ${row.step ?? "step ?"} · ${row.runtimeMs === null || row.runtimeMs === undefined ? "runtime ?" : humanAge(row.runtimeMs)}${wait} · CI ${row.ciState ?? "?"} · review ${row.reviewState ?? "?"} · model ${row.model ?? "?"}`);
+		}
+	}
+	if (rows.length === 0) lines.push("", theme.fg("dim", "No live efforts. The factory is quiet."));
+	return lines.join("\n");
+}
+
+export function buildUsageText(roster: import("./usage-roster").UsageRoster | null, theme: FleetTheme = PLAIN_FLEET_THEME): string {
+	if (roster === null) return "deck usage\n\nNo broker roster available.";
+	const lines = [theme.bold(theme.fg("accent", "deck usage"))];
+	for (const report of roster.reports ?? []) {
+		const label = report.metadata?.email ?? "unknown account";
+		lines.push("", `${label} · ${report.provider ?? "?"}`);
+		for (const limit of report.limits ?? []) {
+			const free = limit.amount?.remainingFraction ?? (limit.amount?.usedFraction === undefined ? null : 1 - limit.amount.usedFraction);
+			const value = free === null || !Number.isFinite(free) ? "?" : `${Math.round(Math.max(0, Math.min(1, free)) * 100)}% free`;
+			const cooling = limit.status === "warning" || limit.status === "exhausted" ? " · cooling" : " · warm";
+			lines.push(`  ${limit.window?.id ?? limit.label ?? limit.id ?? "tier ?"}: ${value}${cooling}`);
+		}
+	}
+	return lines.join("\n");
 }
 
 /** Text-only convenience over buildFleetView. */

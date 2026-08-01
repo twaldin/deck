@@ -22,7 +22,8 @@ import { Type } from "typebox";
 import { DECK_OPERATIONAL_PREFIX, registerCalm } from "../calm";
 import { appendStatus, readStatus } from "../events";
 import {
-	buildFleetView,
+		buildFactoryText,
+	buildUsageText,
 	buildFrame,
 	collectPsSnapshot,
 	type FleetTheme,
@@ -315,13 +316,13 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 	});
 
 	pi.registerTool({
-		name: "fleet",
-		label: "Fleet",
-		description: "What every task and workflow is doing right now.",
+		name: "factory",
+		label: "Factory",
+		description: "What every effort and workflow is doing right now.",
 		parameters: Type.Object({}),
 		async execute() {
 			const frame = await getCurrentFrame();
-			return text(renderFrame(frame));
+			return text(buildFactoryText(frame, PLAIN_FLEET_THEME));
 		},
 	});
 
@@ -445,9 +446,9 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 		},
 	});
 
-	pi.registerCommand("fleet", {
+	pi.registerCommand("factory", {
 		description:
-			"Fleet overlay: attention-first (q/Esc close, r refresh, a show-all, j/k scroll; /fleet all opens expanded)",
+			"Factory overlay: attention-first (q/Esc close, r refresh, a show-all, j/k scroll; /fleet all opens expanded)",
 		handler: async (args: string, ctx: any) => {
 			// First paint is cache-only. Smithers ps is a slow shell-out and must
 			// never delay opening the overlay.
@@ -455,7 +456,7 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 			// ctx.ui.custom is TUI-only; degrade to a printed frame elsewhere.
 			if (ctx.mode !== "tui" || ctx.ui?.custom === undefined) {
 				const liveFrame = await refreshStatusline(ctx);
-				ctx.ui?.notify?.(renderFrame(liveFrame), "info");
+				ctx.ui?.notify?.(buildFactoryText(liveFrame, asFleetTheme(ctx.ui?.theme ?? PLAIN_FLEET_THEME)), "info");
 				return;
 			}
 			void refreshStatusline(ctx);
@@ -479,13 +480,7 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 					let scrollOffset = 0;
 					let scrollable = false;
 					const render = (): string => {
-						const view = buildFleetView(frame, theme, {
-							showAll,
-							maxBodyLines: maxBodyLines(),
-							scrollOffset,
-							maxRowWidth: maxRowWidth(),
-							chrome: "bare",
-						});
+						const view = { text: buildFactoryText(frame, theme), scrollOffset: 0, scrollable: false };
 						// The view clamps the offset; adopt it so k after over-scrolling
 						// moves immediately instead of unwinding phantom distance.
 						scrollOffset = view.scrollOffset;
@@ -553,6 +548,26 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 				{ overlay: true, overlayOptions: { anchor: "center", width: "90%", minWidth: 80, margin: 1, maxHeight: "100%" } },
 			);
 		},
+	});
+
+
+	pi.registerCommand("fleet", {
+		description: "Deprecated alias for /factory",
+		handler: async (args: string, ctx: any) => {
+			ctx.ui?.notify?.("/fleet is now /factory.", "warning");
+			const command = pi.commands?.get?.("factory");
+			if (command?.handler) await command.handler(args, ctx);
+		},
+	});
+
+	pi.registerCommand("usage", {
+		description: "Show broker quota by account and tier",
+		handler: async (_args: string, ctx: any) => ctx.ui?.notify?.(buildUsageText(readUsageRoster(), asFleetTheme(ctx.ui?.theme ?? PLAIN_FLEET_THEME)), "info"),
+	});
+
+	pi.registerCommand("status", {
+		description: "Show the live one-view factory status",
+		handler: async (_args: string, ctx: any) => ctx.ui?.notify?.(renderFrame(await getCurrentFrame()), "info"),
 	});
 
 	pi.registerCommand("wake", {
@@ -892,6 +907,7 @@ export const TOOL_NAMES = [
 	"send",
 	"status",
 	"peek",
+	"factory",
 	"fleet",
 	"teardown_check",
 	"note",

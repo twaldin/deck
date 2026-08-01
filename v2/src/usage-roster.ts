@@ -5,14 +5,17 @@ import { join } from "node:path";
 
 export type UsageTheme = { fg: (key: string, text: string) => string; bold: (text: string) => string };
 export type UsageRoster = {
+	generatedAt?: string;
 	reports?: Array<{
 		provider?: string;
+		metadata?: { email?: string };
 		limits?: Array<{
 			id?: string;
 			label?: string;
 			window?: { id?: string };
 			scope?: Record<string, unknown>;
 			amount?: { usedFraction?: number; remainingFraction?: number };
+			status?: "ok" | "warning" | "exhausted" | "unknown";
 		}>;
 	}>;
 };
@@ -26,6 +29,7 @@ type UsageLimit = {
 	window?: { id?: string };
 	scope?: Record<string, unknown>;
 	amount?: { usedFraction?: number; remainingFraction?: number };
+	status?: "ok" | "warning" | "exhausted" | "unknown";
 };
 
 function freeFraction(limit: UsageLimit): number | null {
