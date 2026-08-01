@@ -30,12 +30,13 @@ import {
 	renderFrame,
 	renderFooterLines,
 	type FooterSessionBits,
+	type PsRun,
 } from "../fleet";
 import { projectFleet } from "../herdr";
 import { deckV2Home, stateFiles } from "../home";
 import { standingRulesDigest } from "./standing-rules";
 import { readMeta } from "../meta";
-import { observePsSnapshotWithInspect } from "../observer";
+import { observePsSnapshotWithInspect, type PsSnapshotRow } from "../observer";
 import { registerQuestions } from "../questions";
 import { enqueue, pending } from "../queue";
 import { pipelineDir, startShip } from "../ship";
@@ -43,7 +44,7 @@ import { reconcileRecuts } from "../recut";
 import { peekSession, startRun } from "../spawn";
 import { STATUS_VERBS, type StatusVerb } from "../status";
 import { readUsageRoster, usageStatusLine } from "../usage-roster";
-import { smithersWorkspaceCwd, uiWarn, warnOnShadowWorkspace } from "../workspace";
+import { discoverSmithersWorkspaces, smithersWorkspaceCwd, uiWarn, warnOnShadowWorkspace } from "../workspace";
 import { evaluateTeardown, formatVerdict } from "../teardown";
 import { ackWakes, detectStale, foldBatched, pendingWakes, reconcile } from "../wake";
 import {
@@ -86,6 +87,7 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 	let timer: ReturnType<typeof setInterval> | undefined;
 	let unwatch: (() => void) | undefined;
 	let workflowCwd: string | undefined;
+	let workflowWorkspaces: string[] = [];
 	// Send-failure backoff protects against real queue transport errors. Wakes
 	// remain durable in the outbox while a failed call is retried.
 	let sendFailures = 0;
@@ -318,7 +320,7 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 		description: "What every task and workflow is doing right now.",
 		parameters: Type.Object({}),
 		async execute() {
-			const frame = await buildFrame(workflowCwd === undefined ? {} : { workflowCwd });
+			const frame = await getCurrentFrame();
 			return text(renderFrame(frame));
 		},
 	});
@@ -447,7 +449,6 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 		description:
 			"Fleet overlay: attention-first (q/Esc close, r refresh, a show-all, j/k scroll; /fleet all opens expanded)",
 		handler: async (args: string, ctx: any) => {
-			const frameOptions = workflowCwd === undefined ? {} : { workflowCwd };
 			// First paint is cache-only. Smithers ps is a slow shell-out and must
 			// never delay opening the overlay.
 			let frame = lastFooterFrame;
@@ -501,7 +502,7 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 						if (busy) return;
 						busy = true;
 						try {
-							frame = await buildFrame(frameOptions);
+							frame = await getCurrentFrame();
 							body.setText(render());
 							tui.requestRender();
 						} catch {
@@ -677,11 +678,15 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 	}
 
 	async function getCurrentFrame(): Promise<Awaited<ReturnType<typeof buildFrame>>> {
-		const snapshot = workflowCwd === undefined ? { runs: [] as never[] } : await collectSnapshot(workflowCwd);
-		if (workflowCwd !== undefined) void reconcileRecuts(workflowCwd, pipelineDir(), snapshot.runs).catch(() => {});
+		const snapshots = workflowWorkspaces.length === 0
+			? []
+			: await Promise.all(workflowWorkspaces.map(async (workspace) => ({ workspace, snapshot: await collectSnapshot(workspace) })));
+		const workflowSnapshot = snapshots.find(({ workspace }) => workspace === workflowCwd)?.snapshot;
+		const rows = snapshots.flatMap(({ workspace, snapshot: current }) => current.runs.map((run) => ({ ...run, workspace }))) as PsSnapshotRow[];
+		if (workflowCwd !== undefined) void reconcileRecuts(workflowCwd, pipelineDir(), workflowSnapshot?.runs ?? []).catch(() => {});
 		if (workflowCwd !== undefined) {
 			await observePsSnapshotWithInspect({
-				rows: snapshot.runs,
+				rows,
 				workspace: workflowCwd,
 				run: dependencies.inspectRun ?? (async (command, args, cwd) => {
 					try {
@@ -697,7 +702,7 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 				}),
 			});
 		}
-		const frame = await buildFrame(workflowCwd === undefined ? {} : { workflowCwd, psRuns: snapshot.runs });
+		const frame = await buildFrame(workflowCwd === undefined ? {} : { workflowCwd, psRuns: rows as PsRun[] });
 		lastFooterFrame = frame;
 		return frame;
 	}
@@ -731,6 +736,9 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 		warnedShadowFingerprints.clear();
 		await injectStandingRules(ctx, "session_start");
 		workflowCwd = smithersWorkspaceCwd();
+		workflowWorkspaces = discoverSmithersWorkspaces();
+		// Automatic wake is TUI-only by design. A future deck-notifier projection
+		// can consume this same multi-workspace observation for no-TUI sessions.
 		warnOnShadowWorkspace(
 			undefined,
 			(message) => uiWarn(ctx, message),

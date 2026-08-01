@@ -160,7 +160,7 @@ export type FleetFrame = {
 	sources: SourceHealth[];
 };
 
-type PsRun = {
+export type PsRun = {
 	id: string;
 	ticket?: string;
 	worktree?: string;

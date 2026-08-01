@@ -187,6 +187,15 @@ describe("observer event selection", () => {
 		expect(event?.note).toContain("merge-gate");
 	});
 
+	test("terminal ps outcomes produce wake events", async () => {
+		const { observer, events } = await mods();
+		fs.mkdirSync(path.join(home, "state", "ship"), { recursive: true });
+		fs.writeFileSync(path.join(home, "state", "ship", "run-1.input.json"), JSON.stringify({ ticket: "ticket-1" }));
+		const emitted = observer.observePsSnapshot([{ id: "run-1", status: "finished", state: "succeeded", workflow: "pr-pipeline" }]);
+		expect(emitted[0]?.verb).toBe("done");
+		expect(events.readStatus("ticket-1").events).toHaveLength(1);
+	});
+
 	test("waiting-event includes the blocked node in the wake", async () => {
 		const { observer, events } = await mods();
 		fs.mkdirSync(path.join(home, "state", "ship"), { recursive: true });
@@ -231,6 +240,17 @@ describe("observer event selection", () => {
 		const planned = observer.planEvents("t1", { run: run("succeeded"), nodes: [] }, { emitted: [] });
 		expect(planned).toHaveLength(1);
 		expect(events.readStatus("t1").events).toHaveLength(0);
+	});
+
+	test("two workspaces with the same run id emit independent events", async () => {
+		const { observer, events } = await mods();
+		fs.mkdirSync(path.join(home, "state", "ship"), { recursive: true });
+		fs.writeFileSync(path.join(home, "state", "ship", "run-1.input.json"), JSON.stringify({ ticket: "ticket-1" }));
+		observer.observePsSnapshot([
+			{ id: "run-1", status: "succeeded", state: "succeeded", workflow: "pr-pipeline", workspace: "/tmp/workspace-a" },
+			{ id: "run-1", status: "succeeded", state: "succeeded", workflow: "pr-pipeline", workspace: "/tmp/workspace-b" },
+		]);
+		expect(events.readStatus("ticket-1").events.filter((line) => line.verb === "done")).toHaveLength(2);
 	});
 
 	test("a node-level and run-level transition never collide on one key", async () => {

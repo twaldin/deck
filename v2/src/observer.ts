@@ -41,6 +41,7 @@ export type ObservedRun = {
 	status: string;
 	step: string | null;
 	rootDir: string | null;
+	workspace?: string;
 };
 
 export type ObservedNode = {
@@ -57,13 +58,15 @@ export type Observation = {
 	nodes: ObservedNode[];
 };
 
-type PsSnapshotRow = {
+export type PsSnapshotRow = {
 	id?: unknown;
 	workflow?: unknown;
 	status?: unknown;
 	state?: unknown;
 	step?: unknown;
 	rootDir?: unknown;
+	/** Workspace that produced this row. */
+	workspace?: string;
 	blockedNode?: unknown;
 	runState?: { blocked?: { nodeId?: unknown } };
 	pendingApprovals?: Array<{ nodeId?: unknown; status?: unknown }>;
@@ -198,6 +201,8 @@ export function transitionKey(input: {
 	nodeId: string;
 	transition: string;
 	seq: number;
+	/** Workspace that owns the run. */
+	workspace?: string;
 	/**
 	 * Distinguishes repeats that share every other field.
 	 *
@@ -212,7 +217,8 @@ export function transitionKey(input: {
 	occurrence?: number | string;
 }): string {
 	const occurrence = input.occurrence === undefined ? "" : `:${input.occurrence}`;
-	return `${input.scope}:${input.runId}:${input.nodeId}:${input.transition}:${input.seq}${occurrence}`;
+	const workspace = input.workspace === undefined ? "" : `:${input.workspace}`;
+	return `${input.scope}:${workspace}:${input.runId}:${input.nodeId}:${input.transition}:${input.seq}${occurrence}`;
 }
 
 /**
@@ -255,6 +261,7 @@ export function planEvents(
 			transition,
 			seq: node.attempt ?? 0,
 			occurrence,
+			workspace: run.workspace,
 		});
 		if (seen.has(key)) continue;
 		events.push({
@@ -280,6 +287,7 @@ export function planEvents(
 			transition: run.status,
 			seq: 0,
 			...(TERMINAL.has(run.status) || run.step === null ? {} : { occurrence: run.step }),
+			workspace: run.workspace,
 		});
 		if (!seen.has(key)) {
 			const step = run.step === null ? "" : ` at ${run.step}`;
@@ -364,14 +372,13 @@ function observationFromPsRow(row: PsSnapshotRow): Observation | null {
 	if (taskId === null) return null;
 	const status = typeof row.status === "string" ? row.status : typeof row.state === "string" ? row.state : "";
 	const outcome = typeof row.state === "string" && (TERMINAL.has(row.state) || status === "") ? row.state : status;
-	if (TERMINAL.has(outcome)) return null;
 	const pending = row.pendingApprovals?.find((approval) => approval.status === "requested")?.nodeId
 		?? row.pendingApprovals?.[0]?.nodeId
 		?? row.blockedNode
 		?? row.runState?.blocked?.nodeId;
 	const step = typeof pending === "string" ? pending : typeof row.step === "string" && row.step !== "—" ? row.step : null;
 	return {
-		run: { id: row.id, workflow: typeof row.workflow === "string" ? row.workflow : "", status: outcome, step, rootDir: typeof row.rootDir === "string" ? row.rootDir : null },
+		run: { id: row.id, workflow: typeof row.workflow === "string" ? row.workflow : "", status: outcome, step, rootDir: typeof row.rootDir === "string" ? row.rootDir : null, workspace: row.workspace },
 		nodes: [],
 	};
 }
@@ -397,8 +404,9 @@ export async function observePsSnapshotWithInspect(options: {
 		const base = observationFromPsRow(row);
 		const taskId = taskIdForRow(row);
 		if (base === null || taskId === null || typeof row.id !== "string") continue;
-		const result = await options.run("bunx", [SMITHERS_SPEC, "inspect", row.id, "--format", "json"], options.workspace).catch(() => null);
+		const result = await options.run("bunx", [SMITHERS_SPEC, "inspect", row.id, "--format", "json"], row.workspace ?? options.workspace).catch(() => null);
 		const inspected = result !== null && result.exitCode === 0 ? parseInspect(result.stdout) : null;
+		if (inspected !== null) inspected.run.workspace = base.run.workspace;
 		emitted.push(...observeOnce(taskId, inspected ?? base));
 	}
 	return emitted;
