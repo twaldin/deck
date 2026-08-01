@@ -39,7 +39,7 @@ export function implementPrompt(brief: Brief, worktree: string, branch: string):
 		"- Implement exactly the brief. No scope creep; open questions were resolved before dispatch.",
 		"- Run the relevant tests locally and record what you ran.",
 		"- Commit your work as one or more plain commits on this branch. DO NOT push.",
-		"- Do not create branches, PRs, or use gt/graphite commands.",
+		"- Do not create branches, PRs, or use GitHub merge commands.",
 		"",
 		...resultContract('{"commits":["abc123"],"summary":"Implemented the brief.","testEvidence":"bun test workflows/pr-pipeline/tests/pipeline.test.tsx"}'),
 	].join("\n");
@@ -138,7 +138,7 @@ export function watchFixPrompt(args: {
 		"   (the requested_reviewers API is verified by the next poll - silent no-ops are caught).",
 		"",
 		"HARD RULES: plain commits on the existing PR branch ONLY. Never branch off the PR head,",
-		"never run gt submit / gt create / gh pr create - that creates an accidental child PR.",
+		"never run gh pr create - that creates an accidental child PR.",
 		"Never merge anything. After a rerun or push, return the receipt and exit immediately.",
 		"Never sleep-poll CI or review state. The next persisted Smithers poll owns the wait.",
 		`Result fields: {"round": number, "afterPoll": number, "actions": string[], "pushed": boolean, "reRequested": string[], "summary": string}.`,

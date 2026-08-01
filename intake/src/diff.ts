@@ -3,7 +3,7 @@ import type { DiffChange, IntakeState, PrItem, RemovalResolution } from "./schem
 
 /**
  * Diff two intake snapshots. Pure except for removal resolution, which needs
- * the GithubClient to run the Graphite closed-PR check (SPEC of this tool:
+ * the GithubClient to run the GitHub merge queue closed-PR check (SPEC of this tool:
  * closed+unmerged is NOT closed-without-landing until the squash-commit
  * search on the default branch comes back empty).
  */
@@ -77,7 +77,7 @@ function sameBuckets(a: string[], b: string[]): boolean {
 }
 
 /**
- * GRAPHITE TRAP: a PR that fell out of the open search must be looked up
+ * MERGE QUEUE LANDING CHECK: a PR that fell out of the open search must be looked up
  * point-wise. state=closed, merged=false is resolved by searching the default
  * branch for the squash commit "(#N)"; only an empty search may be reported
  * as closed-without-landing. Three confirmed repros of the misread.

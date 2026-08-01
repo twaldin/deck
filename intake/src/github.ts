@@ -8,7 +8,7 @@ import {
 
 /**
  * Everything the poller needs from GitHub, behind an interface so the diff
- * engine and Graphite-resolution tests run against mocks, never the live API.
+ * engine and GitHub merge queue-resolution tests run against mocks, never the live API.
  */
 export interface GithubClient {
 	/** All open PRs matching one search bucket (already-deduped nodes). */
@@ -17,7 +17,7 @@ export interface GithubClient {
 	lookupPr(repo: string, number: number): Promise<PrLookup | null>;
 	/**
 	 * Search the repository's DEFAULT BRANCH for a squash commit whose headline
-	 * carries the "(#N)" suffix Graphite/GitHub squash-merges append. GitHub
+	 * carries the "(#N)" suffix GitHub merge queue/GitHub squash-merges append. GitHub
 	 * commit search only indexes the default branch, which is exactly the
 	 * landing target we need to check.
 	 *

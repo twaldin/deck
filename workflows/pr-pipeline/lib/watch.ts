@@ -70,11 +70,11 @@ export function isReviewFinding(comment: CommentActivity): boolean {
 	if (!comment.isBot) return true;
 	const author = comment.author.trim().toLowerCase();
 	const body = (comment.body ?? "").trim();
-	if (!/^(?:graphite-app|graphite|linear)\[bot\]$/.test(author)) return true;
+	if (!/^(?:github merge queue-app|github merge queue|linear)\[bot\]$/.test(author)) return true;
 	return !(
-		/^###\s+Graphite Automations\b/i.test(body) ||
+		/^###\s+GitHub merge queue Automations\b/i.test(body) ||
 		/^<!--\s*linear-linkback\s*-->\s*$/i.test(body) ||
-		/^(?:graphite|linear)\s+(?:banner|linkback):\s+generated\s+(?:link|banner)\.?$/i.test(body)
+		/^(?:github merge queue|linear)\s+(?:banner|linkback):\s+generated\s+(?:link|banner)\.?$/i.test(body)
 	);
 }
 

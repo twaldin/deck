@@ -1,6 +1,6 @@
 /**
  * Landing verification (SOP stage 8): search main for the squash commit
- * "(#N)" - NEVER the merged flag. Graphite lands-and-closes: queue-merged PRs
+ * "(#N)" - NEVER the merged flag. GitHub merge queue closes PRs before landing is confirmed: queue-merged PRs
  * read state=closed, merged=false (3 confirmed repros).
  */
 

@@ -52,7 +52,7 @@ bare worker cannot open the PR that skips this graph. Incident: doctrine PR
 | 5 migration gate (conditional) | `migration-check`, `migration-gate` (Approval), `migration-scope`, `migration-{stg,prod}-{run,verify}` | mandatory when diff touches `migrations/` or `packages/database-migrations/` |
 | 6 ready-for-stamp | `r{N}-ready-loop` / `r{N}-ready-poll`, `r{N}-ready-exhausted` | human approval + CI green-or-**will-be**-green |
 | 7 stamp + merge word | `r{N}-stamp` (Approval), `r{N}-stamp-validity` | durable park; head-change invalidates |
-| 8 MQ merge | `r{N}-merge-head-check`, `enqueue-merge` | fresh head re-check at merge time, then compute; Graphite queue; receipted; idempotent |
+| 8 MQ merge | `r{N}-merge-head-check`, `enqueue-merge` | fresh head re-check at merge time, then compute; GitHub merge queue; receipted; idempotent |
 | 8b landing verification | `landing-loop` / `landing-poll`, `landing-exhausted` | squash commit `(#N)` on main — **never** the merged flag |
 | 9 fallout watch | `deploy-evidence`, `fallout-window`, `fallout-wait`, `fallout-watch`, `fallout-escalation` | anchored to deploy; NAMED break-signal |
 | 10 evidence-gated done | `done` | refuses without landing + deploy evidence + fallout verdict (+ migration evidence when triggered) |
@@ -83,7 +83,7 @@ Enforcement notes (each maps to a cited incident in the SOP):
   Completed poll iterations survive an owner-process restart and resume from
   Smithers state.
   The agent works in plain commits on the SAME branch — the prompt hard-forbids
-  `gt submit`/child branches (#24026/#24223/#24227 class).
+  `gh pr create`/child branches (#24026/#24223/#24227 class).
 - **Stamp**: `r{N}-stamp` is a real smithers `<Approval>` — the run parks durably
   (a suspended run is a row, not a process) and resumes on `smithers approve`.
   The card is decision-shaped: original issue → fix → danger/blast radius.
@@ -92,7 +92,7 @@ Enforcement notes (each maps to a cited incident in the SOP):
   `r{N+1}-*` nodes). No silent re-stamp, ever.
 - **No agent holds merge authority**: `enqueue-merge` renders only when a round
   has `stamp.approved && validity.valid && merge-head-check.ok`, and it is a
-  compute node (submits to the Graphite queue, `gh pr merge` is policy-blocked
+  compute node (submits to the GitHub merge queue, `gh pr merge` is policy-blocked
   repo-side anyway). `r{N}-merge-head-check` re-fetches the PR head immediately
   before enqueue: a head that moved between stamp-validity and merge fails the
   check, ends the round, and re-enters watch-ci (closes the stamp-to-merge
@@ -104,14 +104,14 @@ Enforcement notes (each maps to a cited incident in the SOP):
   evidence exists makes the `migration-stale` node throw an escalation instead
   of landing stale-evidence migrations.
 - **Merge submit re-checks the head one last time** inside `enqueue-merge`,
-  immediately before `gt merge` - a moved head refuses to submit (nothing was
+  immediately before `gh pr merge --auto --squash` - a moved head refuses to submit (nothing was
   enqueued, so the throw is retry-safe).
 - **Ready-poll uses FRESH CI**: the ready verdict is computed from check runs
   fetched in the same poll as the approvals, not the earlier watch snapshot.
 - **Bot comments count as actionable** in the watch exit (deliberate: the loop
   owns Claude-bot feedback per SOP stage 4; see `lib/watch.ts`).
 - **Landing = squash commit `(#N)` on main** (`lib/landing.ts`). The merged
-  flag is never consulted (Graphite lands-and-closes: state=closed, merged=false;
+  flag is never consulted (GitHub merge queue closes PRs before landing is confirmed: state=closed, merged=false;
   3 confirmed repros).
 - **Done is evidence-gated** (`lib/done.ts`): merged != done.
 - **Every loop is bounded** with an escalation path: watch → `r{N}-watch-escalation`
@@ -294,6 +294,6 @@ examples/               dry-run input
 - Real-mode GH fetchers page at 100 threads/reviews/comments per poll (enough
   for lindy-sized PRs; revisit if a PR outgrows that).
 - The pre-merge head re-check narrows the stamp-to-merge race to the seconds
-  between check and `gt merge` submission; a truly atomic check would need
-  server-side support Graphite does not expose. The landing verification
+  between check and `gh pr merge --auto --squash` submission; a truly atomic check would need
+  server-side support GitHub merge queue does not expose. The landing verification
   still catches any mismatch after the fact (squash `(#N)` search).

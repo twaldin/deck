@@ -43,7 +43,7 @@ Output contract (stdout, one line per change):
   signal: REVIEW-REQUESTED when the polled login was newly asked for review
   (the high-signal wake condition), else "-".
   removed lines carry a resolution: merged | landed-squash | closed-without-landing | descoped | vanished
-  (landed-squash = Graphite trap resolved: closed+unmerged but the squash
+  (landed-squash = GitHub merge queue landing check resolved: closed+unmerged but the squash
   commit "(#N)" exists on the default branch).
   --json: same changes as JSON objects, one per line (schema: src/schema.ts diffChangeSchema).
 

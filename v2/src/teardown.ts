@@ -7,7 +7,7 @@
  * Two hardenings over a naive implementation:
  *
  * 1. Landing is tested by searching main for the squash commit `(#N)`, NEVER by
- *    the GitHub `merged` flag. A Graphite queue-merged PR reads
+ *    the GitHub `merged` flag. A GitHub merge queue-merged PR reads
  *    `state=closed, merged=false` — three confirmed repros (#24043, #25397,
  *    #25810). A naive merged-flag check would discard landed work.
  *
