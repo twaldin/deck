@@ -431,6 +431,24 @@ export async function fetchPrOverview(ctx: GhContext, prNumber: number): Promise
 }
 
 /** Current head SHA of the PR (stamp-validity check). */
+export interface PrLifecycle {
+	state: "open" | "closed";
+	merged: boolean;
+	autoMergeRequest: boolean;
+}
+
+/** Read queue state. `merged` is intentionally not used to prove landing. */
+export async function fetchPrLifecycle(ctx: GhContext, prNumber: number): Promise<PrLifecycle> {
+	const exec = ctx.exec ?? bunExec;
+	const out = await execOrThrow(exec, [ctx.gh, "api", `repos/${ctx.repo}/pulls/${prNumber}`]);
+	const payload = JSON.parse(out) as { state?: unknown; merged?: unknown; auto_merge?: unknown };
+	return {
+		state: payload.state === "closed" ? "closed" : "open",
+		merged: payload.merged === true,
+		autoMergeRequest: payload.auto_merge !== null && payload.auto_merge !== undefined,
+	};
+}
+
 export async function fetchHeadSha(ctx: GhContext, prNumber: number): Promise<string> {
 	const exec = ctx.exec ?? bunExec;
 	const out = await execOrThrow(exec, [

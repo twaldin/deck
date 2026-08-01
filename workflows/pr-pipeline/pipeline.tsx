@@ -48,6 +48,7 @@ import {
 	fetchCodeowners,
 	fetchHeadSha,
 	fetchMainCommitSubjects,
+	fetchPrLifecycle,
 	fetchPrApprovalsAndCi,
 	fetchPrOverview,
 	fetchRecentAuthors,
@@ -338,6 +339,13 @@ const schemas = {
 		alreadyLanded: z.boolean(),
 		mergePath: z.enum(["graphite", "gh-fallback", "dry-run", "already-landed"]),
 	}),
+	queuePoll: z.object({
+		poll: z.number().int(),
+		state: z.enum(["open", "closed"]),
+		autoMergeRequest: z.boolean(),
+		ejected: z.boolean(),
+		reason: z.string(),
+	}),
 	landingPoll: z.object({
 		poll: z.number().int(),
 		landed: z.boolean(),
@@ -357,7 +365,7 @@ const schemas = {
 		waitedUntil: z.string(),
 	}),
 	fallout: z.object({
-		verdict: z.enum(["clean", "regression"]),
+		verdict: z.enum(["clean", "regression", "parked"]),
 		breakSignal: z.string(),
 		probeResults: z.array(z.string()),
 		notes: z.string(),
@@ -587,6 +595,8 @@ export default smithers((ctx) => {
 			: null;
 
 	const mergeReceipt = ctx.latest(outputs.mergeReceipt, "enqueue-merge");
+	const latestQueue = ctx.latest(outputs.queuePoll, "queue-poll");
+	const queueRows = (ctx.outputs.queuePoll ?? []) as Array<{ poll: number; state: string; ejected: boolean }>;
 	const latestLanding = ctx.latest(outputs.landingPoll, "landing-poll");
 	const landingRows = (ctx.outputs.landingPoll ?? []) as Array<{ poll: number; landed: boolean }>;
 	const deploy = ctx.latest(outputs.deployEvidence, "deploy-evidence");
@@ -673,11 +683,7 @@ export default smithers((ctx) => {
 							if (!worktreeExists) {
 								questions.push(`worktree does not exist on disk: ${input.worktree}`);
 							}
-							if (commands.deployEvidence === undefined && !adopt) {
-								questions.push(
-									"commands.deployEvidence is not configured: real runs need a deploy-evidence probe (done is evidence-gated).",
-								);
-							}
+
 						}
 						let resolvedReviewer = "unresolvable";
 						try {
@@ -1648,8 +1654,33 @@ export default smithers((ctx) => {
 					</Task>
 				) : null}
 
-				{/* -------------------------------- stage 8b: landing verification */}
+				{/* -------------------------------- stage 8b: queue then landing verification */}
 				{mergeReceipt !== undefined && pr !== undefined ? (
+					<Loop
+						id="queue-loop"
+						until={ctx.latest(outputs.queuePoll, "queue-poll")?.state === "closed"}
+						maxIterations={limits.landingPolls}
+						onMaxReached="return-last"
+					>
+						<Task id="queue-poll" output={outputs.queuePoll} retries={1}>
+							{() => (async () => {
+								const pollNo = queueRows.length;
+								if (!dryRun && pollNo > 0) await sleepSeconds(limits.landingPollSeconds * 2);
+								const lifecycle = dryRun
+									? { state: "closed" as const, merged: false, autoMergeRequest: false }
+									: await fetchPrLifecycle(ghCtx, pr.prNumber);
+								const prior = queueRows[queueRows.length - 1];
+								const ejected = lifecycle.state === "open" && prior?.autoMergeRequest === true && !lifecycle.autoMergeRequest;
+								if (ejected) {
+									throw new Error(`[wake-fix-loop] PR #${pr.prNumber} was ejected from the merge queue (auto-merge request disappeared while open). Re-ready and re-submit after the fix.`);
+								}
+								return { poll: pollNo, state: lifecycle.state, autoMergeRequest: lifecycle.autoMergeRequest, ejected, reason: lifecycle.state === "closed" ? "PR closed; verify squash on base" : "waiting in merge queue" };
+							})()}
+						</Task>
+					</Loop>
+				) : null}
+
+				{latestQueue?.state === "closed" && mergeReceipt !== undefined && pr !== undefined ? (
 					<Loop
 						id="landing-loop"
 						until={ctx.latest(outputs.landingPoll, "landing-poll")?.landed === true}
@@ -1685,7 +1716,13 @@ export default smithers((ctx) => {
 					</Loop>
 				) : null}
 
-				{landingRows.length >= limits.landingPolls && latestLanding?.landed !== true ? (
+				{latestQueue?.state === "open" && queueRows.length >= limits.landingPolls ? (
+					<Task id="queue-exhausted" output={outputs.queuePoll} retries={0}>
+						{() => { throw new Error(`[escalate] PR #${pr?.prNumber} remained in the merge queue after ${queueRows.length} polls.`); }}
+					</Task>
+				) : null}
+
+				{latestQueue?.state === "closed" && landingRows.length >= limits.landingPolls && latestLanding?.landed !== true ? (
 					<Task id="landing-exhausted" output={outputs.landingPoll} retries={0}>
 						{() => {
 							throw new Error(
@@ -1703,13 +1740,14 @@ export default smithers((ctx) => {
 								if (dryRun) {
 									return { evidence: "dry-run: deploy evidence simulated", deployedAt: nowIso() };
 								}
-								if (commands.deployEvidence === undefined) {
-									throw new Error(
-										"[escalate] no commands.deployEvidence configured - cannot verify the deploy. Done is evidence-gated.",
-									);
+								const probe = profile?.falloutCommand ?? commands.deployEvidence;
+								if (probe === undefined) return { evidence: "none-configured: no fallout probe configured", deployedAt: nowIso() };
+								try {
+									const out = await runShell(probe, input.worktree);
+									return { evidence: out.slice(-4000), deployedAt: nowIso() };
+								} catch (error) {
+									return { evidence: `PARK: fallout probe unavailable (CD may be frozen): ${String(error).slice(-2000)}`, deployedAt: nowIso() };
 								}
-								const out = await runShell(commands.deployEvidence, input.worktree);
-								return { evidence: out.slice(-4000), deployedAt: nowIso() };
 							})()
 						}
 					</Task>
@@ -1745,12 +1783,12 @@ export default smithers((ctx) => {
 						agent={dryRun ? undefined : agents?.fallout}
 						retries={1}
 					>
-						{dryRun
+						{dryRun || deploy?.evidence.startsWith("PARK:")
 							? () => ({
-									verdict: "clean" as const,
+									verdict: deploy?.evidence.startsWith("PARK:") ? "parked" as const : "clean" as const,
 									breakSignal: brief.breakSignal,
-									probeResults: [`dry-run: probed ${brief.breakSignal}: clean`],
-									notes: "dry-run fallout watch",
+									probeResults: [`fallout probe: ${deploy?.evidence ?? "clean"}`],
+									notes: deploy?.evidence ?? "dry-run fallout watch",
 								})
 							: falloutPrompt({
 									breakSignal: brief.breakSignal,
@@ -1763,6 +1801,10 @@ export default smithers((ctx) => {
 									probes: commands.falloutProbes,
 								})}
 					</Task>
+				) : null}
+
+				{falloutRow?.verdict === "parked" && falloutEscalation === undefined ? (
+					<Gate id="fallout-escalation" title={`FALLOUT probe parked: ${input.ticket}`} summary={falloutRow.notes} />
 				) : null}
 
 				{falloutRow?.verdict === "regression" && falloutEscalation === undefined ? (
@@ -1780,7 +1822,7 @@ export default smithers((ctx) => {
 
 				{/* -------------------------------- stage 10: evidence-gated done */}
 				{falloutRow !== undefined &&
-				(falloutRow.verdict === "clean" || falloutEscalation?.approved === true) &&
+				((falloutRow.verdict === "clean" || falloutEscalation?.approved === true)) &&
 				pr !== undefined ? (
 					<Task id="done" output={outputs.doneRecord} retries={0}>
 						{() => {

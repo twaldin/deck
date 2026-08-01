@@ -130,7 +130,7 @@ export interface MigrationEvidenceEntry {
 export interface DoneEvidence {
 	landedSha: string | null;
 	deployEvidence: string | null;
-	falloutVerdict: "clean" | "regression" | null;
+	falloutVerdict: "clean" | "regression" | "parked" | null;
 	migrationRequired: boolean;
 	migrationEvidence: MigrationEvidenceEntry[];
 }

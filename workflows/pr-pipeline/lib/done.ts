@@ -13,7 +13,7 @@ export function evaluateDone(evidence: DoneEvidence): DoneVerdict {
 		missing.push("landing not verified: no squash commit (#N) found on main.");
 	}
 	if (evidence.deployEvidence === null || evidence.deployEvidence === "") {
-		missing.push("no deploy evidence recorded.");
+		missing.push("no fallout evidence recorded.");
 	}
 	if (evidence.falloutVerdict === null) {
 		missing.push("no fallout verdict recorded (fallout watch must run against the named break-signal).");
