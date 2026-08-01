@@ -292,7 +292,7 @@ describe("executeReviewerRequest", () => {
 	test("filters the configured denylist before collaborator checks", async () => {
 		const requested: string[][] = [];
 		const result = await executeReviewerRequest({ ...config, denylist: ["bgar324"] }, adapters({
-			requestReviewers: async (logins) => requested.push(logins),
+			requestReviewers: async (logins) => { requested.push(logins); },
 		}));
 		expect(requested).toEqual([["Swader"]]);
 		expect(result.skippedNonCollaborators).toEqual([]);
@@ -308,7 +308,7 @@ describe("executeReviewerRequest", () => {
 		const requested: string[][] = [];
 		const result = await executeReviewerRequest(config, adapters({
 			isCollaborator: async (login) => login === "Swader",
-			requestReviewers: async (logins) => requested.push(logins),
+			requestReviewers: async (logins) => { requested.push(logins); },
 		}));
 		expect(requested).toEqual([["Swader"]]);
 		expect(result.skippedNonCollaborators).toEqual(["bgar324"]);

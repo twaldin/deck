@@ -69,7 +69,7 @@ describe("validated gateway outbound requests", () => {
 			body: JSON.stringify({ model: "xai/grok-4.5", reasoning_effort: "medium" }),
 		});
 		expect(response.status).toBe(200);
-		expect(forwarded[0]?.body).toEqual({ model: "xai/grok-4.5", reasoning_effort: "low" });
+		expect(forwarded[0]?.body).toEqual({ model: "xai/grok-4.5", reasoning_effort: "medium" });
 	});
 
 	test("keeps Deck Claude models on OpenAI-compatible routing", async () => {

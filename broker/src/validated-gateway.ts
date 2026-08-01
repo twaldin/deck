@@ -1,5 +1,6 @@
 import { startFastGateway, type FastGatewayOptions } from "./fast-gateway";
 import { DEFAULT_GATEWAY_BIND } from "./paths";
+import { buildModelIndex } from "./models";
 import { clampReasoning, nativeReasoning, supportedReasoning, type ReasoningEffort } from "./reasoning";
 import { routeModel, NoQuotaError, routingProvider, type QuotaModel } from "./quota";
 
@@ -18,6 +19,7 @@ export function startValidatedGateway(
 ) {
 	const upstream = startUpstream({ ...options, bind: "127.0.0.1:0" });
 	const quotaAccounts = options.quotaAccounts;
+	const modelIndex = buildModelIndex();
 	const { hostname, port } = gatewayBind(options.bind ?? DEFAULT_GATEWAY_BIND);
 	const server = Bun.serve({
 		hostname,
@@ -61,7 +63,9 @@ export function startValidatedGateway(
 							: "openai";
 					const effort = body.reasoning_effort ?? body.reasoning?.effort;
 					if (effort !== undefined) {
-						const selector = provider === "anthropic" && effort.startsWith("budget:") ? effort : clampReasoning(effort as ReasoningEffort, supportedReasoning(modelId, provider));
+						const resolved = modelIndex.resolve(body.model ?? modelId) ?? modelIndex.resolve(modelId);
+						const capabilities = resolved?.thinking?.efforts as readonly ReasoningEffort[] | undefined;
+						const selector = provider === "anthropic" && effort.startsWith("budget:") ? effort : clampReasoning(effort, supportedReasoning(modelId, provider, capabilities));
 						const native = nativeReasoning(provider, selector);
 						delete body.reasoning;
 						delete body.reasoning_effort;

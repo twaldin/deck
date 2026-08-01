@@ -12,5 +12,10 @@ Named reasoning is validated at the CLI, selected from the explicit request befo
 ## End-to-end evidence
 `v2/test/spawn-alloc.test.ts:89-106` supplies required `--accept`, proves invalid reasoning reaches the reasoning validator, then launches a fake Pi and captures the explicit `high` argv over a profile `low` default. `workflows/pr-pipeline/tests/pipeline.test.tsx` renders the real pipeline and inspects implementer, reviewer, watcher, and fallout PiAgent seats; it proves profile `max` is preserved for each configured seat. `broker/test/reasoning.test.ts` proves Pi-style downward clamping, including sparse `[low, high]` capabilities; `broker/test/validated-gateway.test.ts` proves OpenAI, xAI, and Anthropic wire shapes and rejects invalid xAI input.
 
+## PR body evidence
+**Verdict:** named reasoning preserves the requested selector from the profile to every Pi seat and then converts at the broker wire boundary.
+
+**Wire/type evidence:** the Pi 0.82.0 type supports `max`; the local Smithers compatibility cast preserves it; broker tests prove provider-native payloads; resolved catalog capability tests prove per-model downward clamping. This exact section is the required PR-body evidence.
+
 ## Delivery
-This report is the evidence text for the PR body. Required PR-body evidence: **Verdict:** named reasoning preserves the requested selector from profile to every Pi seat and then converts at the broker wire boundary. **Wire/type evidence:** the Pi 0.82.0 type supports `max`; the local Smithers compatibility cast preserves it; broker tests prove provider-native payloads; sparse-capability tests prove Pi's downward clamping rule. The current worktree instruction forbids pushing, so no PR is created from this worktree.
+The current worktree instruction forbids pushing. No PR is created from this worktree.

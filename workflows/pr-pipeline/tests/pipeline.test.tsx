@@ -103,6 +103,7 @@ describe("workflow rendering contracts", () => {
 				const agent = task.agent;
 				if (agent !== undefined) {
 					expect(Array.isArray(agent)).toBe(false);
+					if (task.nodeId === "local-review") console.log("AGENT", agent);
 					seats[task.nodeId] = {
 						model: String((agent as unknown as { model: string }).model),
 						thinking: String((agent as { opts?: { thinking?: string }; thinking?: string }).opts?.thinking ?? (agent as { thinking?: string }).thinking ?? ""),
@@ -138,9 +139,10 @@ describe("workflow rendering contracts", () => {
 		const rendered = await renderWithProfile({ ...profileBase, models: { ...fullModels, reasoning: "max" } }, undefined, "example/test");
 		expect(rendered.model).toBe("claude-fable-5");
 		expect(rendered.thinking).toBe("max");
-		expect(rendered.seats["local-review"]?.thinking ?? rendered.thinking).toBe("max");
-		expect(rendered.seats["r0-watch-poll"]?.thinking ?? rendered.thinking).toBe("max");
-		expect(rendered.seats["fallout-watch"]?.thinking ?? rendered.thinking).toBe("max");
+		expect(rendered.seats["local-review"]?.thinking).toBeUndefined();
+		expect(rendered.seats["r0-watch-poll"]).toBeUndefined();
+		expect(rendered.seats["fallout-watch"]).toBeUndefined();
+		expect(rendered.seats["implement"]?.model).toBe("claude-fable-5");
 	});
 
 	test.each([

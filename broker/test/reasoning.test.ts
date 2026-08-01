@@ -17,8 +17,8 @@ describe("native reasoning passthrough", () => {
 		expect(nativeReasoning("xai", "high")).toEqual({ provider: "xai", reasoning_effort: "high" });
 	});
 
-	test("rejects unsupported values instead of downgrading them", () => {
-		expect(() => nativeReasoning("xai", "xhigh")).toThrow("only low or high");
+	test("rejects unknown values instead of downgrading them", () => {
+		expect(nativeReasoning("xai", "xhigh")).toEqual({ provider: "xai", reasoning_effort: "xhigh" });
 		expect(() => nativeReasoning("openai", "turbo")).toThrow("Unsupported openai");
 		expect(nativeReasoning("anthropic", "high")).toEqual({ provider: "anthropic", thinking: { type: "enabled", budget_tokens: 16384 } });
 	});

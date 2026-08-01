@@ -5,7 +5,7 @@ export type ReasoningLevel = Exclude<ReasoningEffort, "minimal">;
 export type NativeReasoning =
 	| { provider: "openai"; reasoning_effort: ReasoningEffort }
 	| { provider: "anthropic"; thinking: { type: "enabled"; budget_tokens: number } }
-	| { provider: "xai"; reasoning_effort: "low" | "high" };
+	| { provider: "xai"; reasoning_effort: ReasoningEffort };
 
 const ORDER: ReasoningEffort[] = ["minimal", "low", "medium", "high", "xhigh", "max"];
 const ANTHROPIC_BUDGETS: Record<ReasoningLevel, number> = {
@@ -34,8 +34,10 @@ export const MODEL_REASONING_LEVELS: Record<string, readonly ReasoningEffort[]> 
 	"gpt-5.6-sol": ["low", "medium", "high", "xhigh"],
 };
 
-export function supportedReasoning(modelId: string, provider: "openai" | "anthropic" | "xai"): readonly ReasoningEffort[] {
-	if (provider === "anthropic") return ["low", "medium", "high", "xhigh", "max"];
+export function supportedReasoning(modelId: string, provider: "openai" | "anthropic" | "xai", capabilities?: readonly ReasoningEffort[]): readonly ReasoningEffort[] {
+	// The resolved catalog is authoritative. The legacy table remains only for
+	// callers that do not have a resolved model (for example unit tests).
+	if (capabilities !== undefined) return capabilities;
 	return MODEL_REASONING_LEVELS[modelId] ?? (provider === "xai" ? ["low", "high"] : ["low", "high"]);
 }
 
@@ -55,12 +57,7 @@ export function nativeReasoning(provider: "openai" | "anthropic" | "xai", select
 	if (!OPENAI_EFFORTS.has(selector as ReasoningEffort)) {
 		throw new Error(`Unsupported ${provider} reasoning effort: ${selector}`);
 	}
-	if (provider === "xai") {
-		if (selector !== "low" && selector !== "high") {
-			throw new Error(`xAI reasoning_effort accepts only low or high; received ${selector}`);
-		}
-		return { provider, reasoning_effort: selector };
-	}
+	if (provider === "xai") return { provider, reasoning_effort: selector as ReasoningEffort };
 	return { provider, reasoning_effort: selector as ReasoningEffort };
 }
 
