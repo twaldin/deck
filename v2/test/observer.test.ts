@@ -114,6 +114,40 @@ describe("observer event selection", () => {
 		expect(emitted.map((event) => event.note)).toEqual(["PR opened (prNumber 42)", "PR landed (sha abc123)"]);
 	});
 
+	test("production ps observation enriches milestones from inspect output", async () => {
+		const { observer, events } = await mods();
+		fs.mkdirSync(path.join(home, "state", "ship"), { recursive: true });
+		fs.writeFileSync(path.join(home, "state", "ship", "run-1.input.json"), JSON.stringify({ ticket: "ticket-1" }));
+		const calls: string[] = [];
+		const emitted = await observer.observePsSnapshotWithInspect({
+			rows: [{ id: "run-1", status: "running", workflow: "pr-pipeline" }],
+			workspace: "/tmp/workspace",
+			run: async (_command, args, cwd) => {
+				calls.push(`${cwd}:${args.join(" ")}`);
+				return { exitCode: 0, stdout: JSON.stringify({
+					run: { id: "run-1", workflow: "pr-pipeline", status: "running" },
+				nodes: [{ nodeId: "push-pr", state: "finished", attempt: 0, output: { prNumber: 42 } }],
+			}) };
+			},
+		});
+		expect(calls).toHaveLength(1);
+		expect(emitted[0]?.note).toBe("PR opened (prNumber 42)");
+		expect(events.readStatus("ticket-1").events).toHaveLength(1);
+	});
+
+	test("production ps observation falls back when inspect fails", async () => {
+		const { observer, events } = await mods();
+		fs.mkdirSync(path.join(home, "state", "ship"), { recursive: true });
+		fs.writeFileSync(path.join(home, "state", "ship", "run-1.input.json"), JSON.stringify({ ticket: "ticket-1" }));
+		const emitted = await observer.observePsSnapshotWithInspect({
+			rows: [{ id: "run-1", status: "waiting-approval", step: "r0-stamp", workflow: "pr-pipeline" }],
+			workspace: "/tmp/workspace",
+			run: async () => ({ exitCode: 1, stdout: "not json" }),
+		});
+		expect(emitted[0]?.verb).toBe("needs-decision");
+		expect(events.readStatus("ticket-1").events).toHaveLength(1);
+	});
+
 	test("a running workflow with healthy nodes says nothing", async () => {
 		const { observer } = await mods();
 		const events = observer.observeOnce("t1", {

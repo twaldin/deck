@@ -344,7 +344,9 @@ export function normalizeStep(step: string | null | undefined): string | null {
 }
 
 /** Public read-only CLI only. Never the private db, never Gateway lifecycle. */
-/** One cheap ps poll for the observer. It must not enrich runs with output calls. */
+/** One cheap ps poll for the observer. Milestone observation enriches each row
+ * with read-only `inspect` calls in observer.ts; this is deliberate because ps
+ * does not expose node output, and the extension deduplicates concurrent polls. */
 function isPsRun(value: unknown): value is PsRun {
 	if (typeof value !== "object" || value === null) return false;
 	const row = value as Record<string, unknown>;

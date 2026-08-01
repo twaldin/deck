@@ -71,6 +71,8 @@ type DeckV2Dependencies = {
 };
 
 const inspectRun = promisify(execFile);
+const INSPECT_TIMEOUT_MS = 15_000;
+const INSPECT_MAX_BUFFER = 4_000_000;
 
 export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): void {
 	const collectSnapshot = dependencies.collectPsSnapshot ?? collectPsSnapshot;
@@ -683,7 +685,11 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 				workspace: workflowCwd,
 				run: dependencies.inspectRun ?? (async (command, args, cwd) => {
 					try {
-						const result = await inspectRun(command, [...args], { cwd });
+						const result = await inspectRun(command, [...args], {
+							cwd,
+							timeout: INSPECT_TIMEOUT_MS,
+							maxBuffer: INSPECT_MAX_BUFFER,
+						});
 						return { stdout: result.stdout, exitCode: 0 };
 					} catch (error: any) {
 						return { stdout: String(error?.stdout ?? ""), exitCode: Number(error?.code ?? 1) };
@@ -696,19 +702,26 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 		return frame;
 	}
 
+	let refreshingStatusline: Promise<Awaited<ReturnType<typeof buildFrame>>> | undefined;
 	async function refreshStatusline(ctx: any): Promise<Awaited<ReturnType<typeof buildFrame>>> {
-		try {
-			const frame = await getCurrentFrame();
-			ctx.ui?.setStatus?.("deck-usage", undefined);
-			// Herdr projection rides the same cadence: every reconcile cycle mirrors
-			// worker state into herdr agents (smithers runs are fleet-only). Guarded
-			// inside; herdr being down makes this a no-op, never a fault.
-			await projectFleet(frame);
-			return frame;
-		} catch {
-			// A statusline is decoration; never let it break a turn.
-			return lastFooterFrame;
-		}
+		if (refreshingStatusline !== undefined) return refreshingStatusline;
+		refreshingStatusline = (async () => {
+			try {
+				const frame = await getCurrentFrame();
+				ctx.ui?.setStatus?.("deck-usage", undefined);
+				// Herdr projection rides the same cadence: every reconcile cycle mirrors
+				// worker state into herdr agents (smithers runs are fleet-only). Guarded
+				// inside; herdr being down makes this a no-op, never a fault.
+				await projectFleet(frame);
+				return frame;
+			} catch {
+				// A statusline is decoration; never let it break a turn.
+				return lastFooterFrame;
+			} finally {
+				refreshingStatusline = undefined;
+			}
+		})();
+		return refreshingStatusline;
 	}
 
 	pi.on("session_start", async (_event: unknown, ctx: any) => {
