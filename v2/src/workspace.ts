@@ -13,6 +13,50 @@ export function smithersWorkspaceCwd(home = deckV2Home()): string {
 }
 
 /**
+ * Find Smithers state directories under the configured roots.
+ *
+ * This remains available to callers that need discovery. Deck-v2's live frame
+ * uses the single shared workspace returned by smithersWorkspaceCwd().
+ */
+let discoveryCache: { key: string; expiresAt: number; workspaces: string[] } | undefined;
+const DISCOVERY_CACHE_MS = 30_000;
+
+export function discoverSmithersWorkspaces(home = deckV2Home()): string[] {
+	const configured = process.env.DECK_SMITHERS_ROOTS?.split(path.delimiter)
+		.map((root) => root.trim())
+		.filter(Boolean);
+	const roots = configured?.length ? configured : [home, process.env.DECK_REPO_ROOT ?? process.cwd()];
+	const key = JSON.stringify([home, ...roots.map((root) => path.resolve(root))]);
+	if (discoveryCache?.key === key && discoveryCache.expiresAt > Date.now()) {
+		return [...discoveryCache.workspaces];
+	}
+	const found = new Set<string>();
+	const visit = (directory: string, depth: number): void => {
+		if (depth > 6) return;
+		let entries: fs.Dirent[];
+		try {
+			entries = fs.readdirSync(directory, { withFileTypes: true });
+		} catch {
+			return;
+		}
+		for (const entry of entries) {
+			if (!entry.isDirectory() || entry.name === "node_modules" || entry.name === ".git") continue;
+			const child = path.join(directory, entry.name);
+			if (entry.name === ".smithers") {
+				found.add(path.dirname(child));
+				continue;
+			}
+			visit(child, depth + 1);
+		}
+	};
+	for (const root of roots) visit(path.resolve(root), 0);
+	found.add(smithersWorkspaceCwd(home));
+	const workspaces = [...found].sort();
+	discoveryCache = { key, expiresAt: Date.now() + DISCOVERY_CACHE_MS, workspaces };
+	return [...workspaces];
+}
+
+/**
  * Send a warning through pi's UI when available. The fallback is stderr for
  * command-line callers. Keep this seam: the TUI revamp will define the
  * permanent notification surface here, so it can restyle one place.
