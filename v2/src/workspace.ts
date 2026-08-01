@@ -50,11 +50,7 @@ export function discoverSmithersWorkspaces(home = deckV2Home()): string[] {
 			if (entry.name === ".smithers") {
 				// Store one physical workspace per state directory. The live
 				// ~/.deck/workflows tree is commonly a symlink to this location.
-				try {
-					found.add(fs.realpathSync(path.dirname(child)));
-				} catch {
-					found.add(path.resolve(path.dirname(child)));
-				}
+				found.add(path.resolve(path.dirname(child)));
 				continue;
 			}
 			visit(child, depth + 1);

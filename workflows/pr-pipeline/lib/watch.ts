@@ -60,9 +60,9 @@ export function reviewersNeedingReRequest(
 		// CHANGES_REQUESTED must enter the response loop immediately; approval
 		// polling here was the cause of PRs being parked while blockers remained.
 		if (reviewer.lastReviewState === "CHANGES_REQUESTED") {
-			// A request that predates the latest push is the completed response
-			// cycle. A review after the push is a new blocker and needs a fix.
-			if (requested.has(login) && reviewer.lastActivityAt < lastPushAt) continue;
+			// A requested reviewer is not proof that this pipeline completed its
+			// response. The fix node records the push and re-request together; until
+			// then every changes request remains actionable.
 			out.push(reviewer.login);
 			continue;
 		}

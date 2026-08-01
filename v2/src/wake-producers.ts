@@ -28,8 +28,11 @@ export function produceWakeConditions(snapshot: ProducerSnapshot): void {
 /** Read observer records and produce all five condition classes after restart. */
 export function reconcileWakeProducers(file: string): void {
 	try {
-		const value = JSON.parse(fs.readFileSync(file, "utf8")) as ProducerSnapshot;
-		if (value && typeof value.taskId === "string") produceWakeConditions(value);
+		const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as ProducerSnapshot | ProducerSnapshot[];
+		const values = Array.isArray(parsed) ? parsed : [parsed];
+		for (const value of values) {
+			if (value && typeof value.taskId === "string") produceWakeConditions(value);
+		}
 	} catch {
 		// A missing or partial observer record is retried by the next reconcile.
 	}

@@ -620,6 +620,7 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 		// cursor advance the acknowledgement: if sendUserMessage was missing or
 		// threw, the event was gone for good, and a lost `blocked:` is the worst
 		// failure this system has.
+		for (const workspace of workflowWorkspaces) reconcileWakeProducers(path.join(workspace, "wake-producers.json"));
 		reconcile();
 		let attempted = 0;
 		let sent = 0;
@@ -818,9 +819,9 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 		// print/RPC sessions must still reconcile and expose owed wakes, otherwise
 		// blocked workflow runs silently stall when no interactive session exists.
 		if (ctx?.mode !== "tui") {
-			// Headless sessions have no durable lifetime. Reconcile once so the
-			// command can expose owed state, but never schedule an unsolicited turn.
-			reconcile();
+			// Headless sessions still use the same durable outbox. Deliver now so a
+			// workflow wake is not trapped behind a missing TUI.
+			void deliver(ctx);
 			return;
 		}
 

@@ -85,6 +85,7 @@ import { executeReviewerRequest } from "./lib/reviewers.ts";
 import { assessCi, evaluateWatchExit } from "./lib/watch.ts";
 import { rebaseAndPush } from "./lib/rebase.ts";
 import type { Brief, MigrationEvidenceEntry } from "./lib/types.ts";
+import { claimMainFailure } from "../../v2/src/wake-producers.ts";
 
 // ---------------------------------------------------------------------------
 // Defaults (normalized in code, not via zod .default(), to keep semantics
@@ -426,8 +427,15 @@ function publishWakeProducer(input: { taskId: string; maxAdversarial?: boolean; 
 	if (input.taskId.length === 0) return;
 	const file = path.join(process.cwd(), "wake-producers.json");
 	fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-	const tmp = `${file}.tmp`;
-	fs.writeFileSync(tmp, `${JSON.stringify(input)}\n`, { mode: 0o600 });
+	let records: Array<typeof input> = [];
+	try {
+		const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as typeof input | Array<typeof input>;
+		records = Array.isArray(parsed) ? parsed : [parsed];
+	} catch { /* create the producer log on first publish */ }
+	records = records.filter((record) => record.taskId !== input.taskId);
+	records.push(input);
+	const tmp = `${file}.${process.pid}.tmp`;
+	fs.writeFileSync(tmp, `${JSON.stringify(records)}\n`, { mode: 0o600 });
 	fs.renameSync(tmp, file);
 }
 
@@ -696,6 +704,16 @@ export default smithers((ctx) => {
 	const reviewExhausted =
 		localReviewRows.length >= limits.localReviewRounds && !reviewApproved;
 	const pushAllowed = reviewApproved || reviewEscalation?.approved === true;
+	const producerWatch = ctx.latest(outputs.watchPoll, `r${currentRound}-watch-poll`);
+	if (producerWatch?.ci === "red") claimMainFailure(path.join(process.cwd(), ".deck-coordination"), `${input.repo}:${producerWatch.headSha}`, input.ticket);
+	publishWakeProducer({
+		taskId: input.ticket,
+		maxAdversarial: reviewExhausted && !pushAllowed,
+		reviewerSilent: producerWatch?.disposition === "wait" && producerWatch?.poll >= 3,
+		mainRed: producerWatch?.ci === "red",
+		migrationBlocked: migRequired && anyWatchSettled && migGate === undefined,
+		brokerNoQuota: process.env.DECK_BROKER_NO_QUOTA === "1",
+	});
 
 	// ===========================================================================
 	// Render
@@ -1358,7 +1376,9 @@ export default smithers((ctx) => {
 															: latestWatch.rebaseRequired
 															? async () => {
 																	const actions = await rebaseAndPush(bunExec, { git: github.git, worktree: input.worktree, branch: input.branch, baseBranch, testCommand: commands.test });
-																	return { round: k, afterPoll: latestWatch.poll, actions, pushed: true, reRequested: [], summary: "Rebased, tested, and pushed the branch." };
+																	const reviewers = latestWatch.reviewersToReRequest;
+																			if (reviewers.length > 0) await requestReviewers(ghCtx, pr.prNumber, reviewers);
+																			return { round: k, afterPoll: latestWatch.poll, actions: [...actions, "answered review feedback", ...reviewers.map((reviewer) => `re-requested ${reviewer}`)], pushed: true, reRequested: reviewers, summary: "Rebased, addressed review feedback, tested, pushed, and re-requested review." };
 																}
 															: watchFixPrompt({
 																	worktree: input.worktree,
