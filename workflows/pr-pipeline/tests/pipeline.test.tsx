@@ -19,7 +19,7 @@ import * as path from "node:path";
 import { renderWorkflow, simulate } from "smithers-orchestrator/testing";
 
 import pipeline, { buildModelPolicy, DEFAULT_GITHUB } from "../pipeline.tsx";
-import { localFixPrompt, localReviewPrompt, reviewersDecisionPrompt } from "../lib/prompts.ts";
+import { falloutPrompt, localFixPrompt, localReviewPrompt, reviewersDecisionPrompt } from "../lib/prompts.ts";
 import { resolveAdversary } from "../lib/models.ts";
 
 const validBrief = {
@@ -122,6 +122,25 @@ describe("workflow rendering contracts", () => {
 		["repo-mismatched profile", { ...profileBase, models: fullModels }, { implementer: "deck/claude-sonnet-5" }, "other/repo", "gpt-5.6-luna"],
 	] as const)("renders with %s", async (_name, profile, inputModels, repo, expectedImplementer) => {
 		expect(await renderWithProfile(profile, inputModels, repo)).toBe(expectedImplementer);
+	});
+});
+
+describe("fallout prompt rendering contracts", () => {
+	test("serializes the result fixture as JSON text", () => {
+		const result = { verdict: "clean", breakSignal: "sentry:lindy-api", probeResults: ["no errors"], notes: "No fallout detected." };
+		const prompt = falloutPrompt({
+			breakSignal: result.breakSignal,
+			killSwitch: JSON.stringify({ kind: "named", name: "FLAG" }),
+			repo: "lindy-ai/lindy",
+			prNumber: 80,
+			landedSha: "abc123",
+			windowStart: "2026-08-01T00:00:00.000Z",
+			windowEnd: "2026-08-01T01:00:00.000Z",
+			probes: [],
+		});
+		expect(prompt).toContain(JSON.stringify({ verdict: "clean|regression", breakSignal: "string", probeResults: ["string"], notes: "string" }));
+		expect(prompt).toContain(JSON.stringify({ verdict: result.verdict, breakSignal: result.breakSignal, probeResults: [], notes: result.notes }));
+		expect(prompt).not.toContain("[object Object]");
 	});
 });
 
