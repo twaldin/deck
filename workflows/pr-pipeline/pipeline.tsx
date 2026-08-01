@@ -58,6 +58,7 @@ import {
 	resolveReviewerLogin,
 } from "./lib/gh.ts";
 import { findLandingCommit } from "./lib/landing.ts";
+import { runMergeWithFallback } from "./lib/merge.ts";
 import { detectMigrations, MIGRATION_STAGES, migrationEvidenceComplete } from "./lib/migrations.ts";
 import { generatePullRequestDescription } from "./lib/description.ts";
 import {
@@ -342,6 +343,7 @@ const schemas = {
 		submittedAt: z.string(),
 		receipt: z.string(),
 		alreadyLanded: z.boolean(),
+		mergePath: z.enum(["graphite", "gh-fallback", "dry-run", "already-landed"]),
 	}),
 	landingPoll: z.object({
 		poll: z.number().int(),
@@ -1547,6 +1549,7 @@ export default smithers((ctx) => {
 										submittedAt: nowIso(),
 										receipt: `dry-run: submitted PR #${pr.prNumber} to merge queue at head ${authorizedRound.headSha}`,
 										alreadyLanded: false,
+										mergePath: "dry-run",
 									};
 								}
 								// Idempotency: if the squash commit is already on main
@@ -1559,6 +1562,7 @@ export default smithers((ctx) => {
 										submittedAt: nowIso(),
 										receipt: `already landed as ${landed.sha} ("${landed.subject}") - no resubmit`,
 										alreadyLanded: true,
+										mergePath: "already-landed",
 									};
 								}
 								// Last-instant head re-check INSIDE the submit node: the
@@ -1587,12 +1591,22 @@ export default smithers((ctx) => {
 										`[escalate] worktree is on branch "${mergeBranch}", not "${input.branch}" - refusing to run the merge command there (it acts on the current branch and would merge the wrong PR).`,
 									);
 								}
-								const out = await runShell(commands.merge, input.worktree);
+								const merge = await runMergeWithFallback({
+									runGraphite: () => bunExec(["bash", "-lc", commands.merge], { cwd: input.worktree }),
+									exec: bunExec,
+									gh: github.gh,
+									prNumber: pr.prNumber,
+									cwd: input.worktree,
+									// Lindy's merge queue uses --auto. Other repos use the
+									// normal squash strategy when Graphite is unavailable.
+									fallbackArgs: profile?.stamp === true ? ["--auto"] : ["--squash"],
+								});
 								return {
 									round: authorizedRound.round,
 									submittedAt: nowIso(),
-									receipt: out.slice(-2000),
+									receipt: merge.output.slice(-2000),
 									alreadyLanded: false,
+									mergePath: merge.path,
 								};
 							})()
 						}
