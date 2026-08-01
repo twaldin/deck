@@ -835,10 +835,10 @@ export async function buildFrame(
 	} catch {
 		// an unreadable queue must not take the fleet view down with it
 	}
-	const liveRuns = [...workflows.filter((wf) => !isTerminalWorkflow(wf) && !wf.superseded)].sort((a, b) => Date.parse(b.startedAt ?? "") - Date.parse(a.startedAt ?? "")).filter((wf, _, all) => {
-		const key = `${wf.repo ?? wf.rootDir ?? "unknown"}:${wf.prNumber ?? "none"}`;
-		return all.findIndex((candidate) => `${candidate.repo ?? candidate.rootDir ?? "unknown"}:${candidate.prNumber ?? "none"}` === key) === all.indexOf(wf);
-	});
+	const liveRuns = [...workflows.filter((wf) =>
+		!wf.superseded &&
+		(!isTerminalWorkflow(wf) || isActionableWorkflowFailure(wf, workflows)),
+	)].sort((a, b) => Date.parse(b.startedAt ?? "") - Date.parse(a.startedAt ?? ""));
 	const workflowIdentity = (wf: WorkflowRow): string =>
 		wf.repo ?? wf.rootDir ?? "unknown-repo";
 	const readOpenQuestions = (): ReturnType<typeof openQuestions> => {
@@ -1624,7 +1624,10 @@ function factoryRows(frame: FleetFrame): Array<{ effort: EffortRow; workflow: Wo
 	const workflows = new Map(frame.workflows.map((workflow) => [workflow.runId, workflow]));
 	const rows = (frame.efforts ?? []).flatMap((effort) => {
 		const workflow = workflows.get(effort.runId);
-		return workflow === undefined || isTerminalWorkflow(workflow) || workflow.superseded ? [] : [{ effort, workflow }];
+		return workflow === undefined || workflow.superseded ||
+			(isTerminalWorkflow(workflow) && !isActionableWorkflowFailure(workflow, frame.workflows))
+			? []
+			: [{ effort, workflow }];
 	});
 	const represented = new Set(rows.map(({ workflow }) => workflow.runId));
 	for (const task of frame.tasks) {
@@ -1646,9 +1649,8 @@ function factoryState(workflow: WorkflowRow): "STAMPABLE" | "IMPLEMENTING" | "WA
 }
 
 /**
- * Captain's one-pane factory view. Completed, cancelled, superseded, and failed
- * workflow rows are omitted: failures remain visible in `/status`, which is the
- * diagnostic surface. This view carries only work that can still move.
+ * Captain's one-pane factory view. Completed, cancelled, and superseded work is
+ * omitted. Failed work stays visible when it still requires recovery.
  */
 export function buildFactoryView(
 	frame: FleetFrame,

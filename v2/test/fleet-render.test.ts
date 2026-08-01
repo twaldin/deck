@@ -166,7 +166,8 @@ describe("fleet frame state", () => {
 				{ id: "a", rootDir: directory, prNumber: 7, step: "watch-poll", started: "2026-01-01" },
 				{ id: "b", rootDir: directory, prNumber: 7, step: "watch-poll", started: "2026-01-02" },
 			] });
-			expect(result.counters.efforts).toBe(1);
+				expect(result.counters.efforts).toBe(2);
+			expect(result.efforts?.map((effort) => effort.runId)).toEqual(expect.arrayContaining(["a", "b"]));
 			expect(result.tasks).toHaveLength(2);
 			expect(result.tasks.map((task) => task.runState)).toEqual(["running", "running"]);
 			expect(result.counters.agents).toBe(2);
@@ -175,7 +176,7 @@ describe("fleet frame state", () => {
 			fs.rmSync(directory, { recursive: true, force: true });
 		}
 	});
-	test("folds live generations by repo-qualified PR and keeps the newest run", async () => {
+	test("keeps every live generation, including same-repo PR recuts", async () => {
 		const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fleet-fold-"));
 		const previousHome = process.env.DECK_V2_HOME;
 		process.env.DECK_V2_HOME = directory;
@@ -190,9 +191,9 @@ describe("fleet frame state", () => {
 				{ id: "other-repo", rootDir: `${directory}-other`, prNumber: 7, step: "watch-poll", started: "2026-01-01T00:00:00.000Z" },
 			];
 			const result = await buildFrame({ workflowCwd: directory, psRuns: runs });
-			expect(result.efforts).toHaveLength(2);
-			expect(result.efforts?.map((effort) => effort.runId)).toEqual(expect.arrayContaining(["new", "other-repo"]));
-			expect(result.counters.efforts).toBe(2);
+			expect(result.efforts).toHaveLength(3);
+			expect(result.efforts?.map((effort) => effort.runId)).toEqual(expect.arrayContaining(["old", "new", "other-repo"]));
+			expect(result.counters.efforts).toBe(3);
 		} finally {
 			if (previousHome === undefined) delete process.env.DECK_V2_HOME; else process.env.DECK_V2_HOME = previousHome;
 			fs.rmSync(directory, { recursive: true, force: true });
@@ -892,6 +893,15 @@ describe("factory renderer", () => {
 	test("status keeps completed work after factory omits it", () => {
 		const completed = { runId: "complete", workflow: "pr-pipeline", status: "completed", state: "completed", step: "fallout-wait", taskId: null } satisfies WorkflowRow;
 		expect(renderStatus(frame({ workflows: [completed] }))).toContain("completed");
+	});
+
+	test("factory keeps failed workflows that still need recovery", () => {
+		const failed = { runId: "failed", workflow: "pr-pipeline", status: "failed", state: "failed", step: "watch-poll", taskId: null, phase: "watch", waitingFor: "ci-poll", activity: "failed", startedAt: new Date().toISOString(), merged: false, landed: false, superseded: false, pushPrNull: false } satisfies WorkflowRow;
+		const output = buildFactoryText(frame({
+			workflows: [failed],
+			efforts: [{ identity: "failed", ticket: null, prNumber: 7, prTitle: null, runId: "failed", state: "failed", waitingFor: "ci-poll", failed: true, step: "watch-poll", runtimeMs: 1_000, ciState: null, reviewState: null, model: null, prUrl: null }],
+		}));
+		expect(output).toContain("PR #7");
 	});
 
 	test("lists all resolved pipeline seats from its input", async () => {
