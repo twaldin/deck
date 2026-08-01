@@ -6,6 +6,16 @@
 
 import type { Brief } from "./types.ts";
 
+const RESULT_OBJECT_RULE =
+	"Return a result object with these keys, NOT the schema. do not include $schema, type, properties, or required.";
+function resultContract(example: string): string[] {
+	return [
+		RESULT_OBJECT_RULE,
+		`Concrete valid result example: ${example}`,
+		"Reply with ONLY the result object.",
+	];
+}
+
 export function reviewersDecisionPrompt(denylist: string[]): string {
 	return [
 		"Choose GitHub reviewer logins for this pull request.",
@@ -30,7 +40,7 @@ export function implementPrompt(brief: Brief, worktree: string, branch: string):
 		"- Commit your work as one or more plain commits on this branch. DO NOT push.",
 		"- Do not create branches, PRs, or use gt/graphite commands.",
 		"",
-		'Final output: ONLY a JSON object {"commits": string[] (shas), "summary": string, "testEvidence": string}.',
+		...resultContract('{"commits":["abc123"],"summary":"Implemented the brief.","testEvidence":"bun test workflows/pr-pipeline/tests/pipeline.test.tsx"}'),
 	].join("\n");
 }
 
@@ -71,8 +81,9 @@ export function localReviewPrompt(
 		"Naming preferences, optional polish, pre-existing style outside the diff, and 'consider later' items are nits, never blockers.",
 		"From review round 4 onward, actively reclassify remaining items. If only nits remain, approve. Do not keep the loop alive on taste.",
 		"",
-		`Final output: ONLY a JSON object {"round": ${round}, "approved": boolean, "blockingFindings": string[], "nits": string[], "summary": string}.`,
-		`"round" MUST be exactly ${round}. Set approved=true IFF "blockingFindings" is empty.`,
+		`Result fields: {"round": number, "approved": boolean, "blockingFindings": string[], "nits": string[], "summary": string}.`,
+		...resultContract(`{"round":${round},"approved":true,"blockingFindings":[],"nits":[],"summary":"No blocking findings."}`),
+		`The result "round" MUST be exactly ${round}. Set approved=true IFF "blockingFindings" is empty.`,
 	].join("\n");
 }
 
@@ -84,8 +95,9 @@ export function localFixPrompt(blockingFindings: string[], worktree: string, aft
 		"Blocking findings to resolve (all of them):",
 		JSON.stringify(blockingFindings, null, 2),
 		"",
-		`Final output: ONLY a JSON object {"afterRound": ${afterRound}, "addressed": string[], "summary": string}.`,
-		`"afterRound" MUST be exactly ${afterRound}.`,
+		`Result fields: {"afterRound": number, "addressed": string[], "summary": string}.`,
+		...resultContract(`{"afterRound":${afterRound},"addressed":[],"summary":"All blocking findings addressed."}`),
+		`The result "afterRound" MUST be exactly ${afterRound}.`,
 	].join("\n");
 }
 
@@ -125,8 +137,9 @@ export function watchFixPrompt(args: {
 		"never run gt submit / gt create / gh pr create - that creates an accidental child PR.",
 		"Never merge anything. After a rerun or push, return the receipt and exit immediately.",
 		"Never sleep-poll CI or review state. The next persisted Smithers poll owns the wait.",
-		`Final output: ONLY a JSON object {"round": ${args.round}, "afterPoll": ${args.afterPoll}, "actions": string[], "pushed": boolean, "reRequested": string[], "summary": string}.`,
-		`"round" MUST be exactly ${args.round} and "afterPoll" MUST be exactly ${args.afterPoll}.`,
+		`Result fields: {"round": number, "afterPoll": number, "actions": string[], "pushed": boolean, "reRequested": string[], "summary": string}.`,
+		...resultContract(`{"round":${args.round},"afterPoll":${args.afterPoll},"actions":[],"pushed":false,"reRequested":[],"summary":"No action required."}`),
+		`The result "round" MUST be exactly ${args.round} and "afterPoll" MUST be exactly ${args.afterPoll}.`,
 	].join("\n");
 }
 
@@ -154,8 +167,9 @@ export function falloutPrompt(args: {
 		"not just error rates: does the feature actually behave for users? [Evidence: #23965",
 		"missed a live 169-user regression by watching error rates only.]",
 		"",
-		`Final output: ONLY a JSON object {"verdict": "clean"|"regression", "breakSignal": ${JSON.stringify(args.breakSignal)}, "probeResults": string[], "notes": string}.`,
-		`"breakSignal" MUST be exactly ${JSON.stringify(args.breakSignal)}.`,
+		`Result fields: {"verdict": "clean"|"regression", "breakSignal": string, "probeResults": string[], "notes": string}.`,
+		...resultContract(`{"verdict":"clean","breakSignal":${JSON.stringify(args.breakSignal)},"probeResults":[],"notes":"No fallout detected."}`),
+		`The result "breakSignal" MUST be exactly ${JSON.stringify(args.breakSignal)}.`,
 		'verdict="regression" whenever you find plausible fallout - escalation is cheap, missed regressions are not.',
 	].join("\n");
 }

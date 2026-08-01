@@ -734,6 +734,7 @@ export default smithers((ctx) => {
 						output={outputs.implementation}
 						agent={dryRun ? undefined : agents?.implementer}
 						retries={1}
+						maxSchemaRetries={1}
 					>
 						{dryRun
 							? () => ({
@@ -760,6 +761,7 @@ export default smithers((ctx) => {
 								output={outputs.localReview}
 								agent={dryRun ? undefined : agents?.reviewer}
 								retries={1}
+								maxSchemaRetries={1}
 							>
 								{dryRun
 									? () => {
@@ -794,6 +796,7 @@ export default smithers((ctx) => {
 									output={outputs.localFix}
 									agent={dryRun ? undefined : agents?.implementer}
 									retries={1}
+									maxSchemaRetries={1}
 								>
 									{dryRun
 										? () => ({
@@ -1294,6 +1297,7 @@ export default smithers((ctx) => {
 														output={outputs.watchFix}
 														agent={dryRun ? undefined : agents?.watcher}
 														retries={1}
+														maxSchemaRetries={1}
 													>
 														{dryRun
 															? () => ({
@@ -1801,6 +1805,7 @@ export default smithers((ctx) => {
 						output={outputs.fallout}
 						agent={dryRun ? undefined : agents?.fallout}
 						retries={1}
+						maxSchemaRetries={1}
 					>
 						{dryRun || deploy?.evidence.startsWith("PARK:")
 							? () => ({

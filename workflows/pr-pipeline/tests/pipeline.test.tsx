@@ -176,6 +176,15 @@ describe("local review contracts", () => {
 		expect(prompt).toContain('"blockingFindings": string[]');
 		expect(prompt).toContain('"nits": string[]');
 		expect(prompt).toContain("Set approved=true IFF");
+		expect(prompt).toContain('Concrete valid result example: {"round":3,"approved":true,"blockingFindings":[],"nits":[],"summary":"No blocking findings."}');
+		expect(prompt).toContain("NOT the schema");
+		expect(prompt).toContain("do not include $schema");
+	});
+
+	test("schema-validated fixer prompts show result objects, not schemas", () => {
+		const prompt = localFixPrompt(["broken behavior"], "/tmp/wt", 2);
+		expect(prompt).toContain('Concrete valid result example: {"afterRound":2,"addressed":[],"summary":"All blocking findings addressed."}');
+		expect(prompt).toContain("Reply with ONLY the result object");
 	});
 });
 
