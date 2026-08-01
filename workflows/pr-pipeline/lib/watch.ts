@@ -59,7 +59,7 @@ export function reviewersNeedingReRequest(
 		// A review decision is authoritative even when it predates the last push.
 		// CHANGES_REQUESTED must enter the response loop immediately; approval
 		// polling here was the cause of PRs being parked while blockers remained.
-		if (reviewer.lastReviewState === "CHANGES_REQUESTED" && !requested.has(login)) {
+		if (reviewer.lastReviewState === "CHANGES_REQUESTED") {
 			// Once the request is visible, the fix worker has completed its one
 			// re-request. Wait for the reviewer instead of starting another fix.
 			out.push(reviewer.login);
@@ -155,5 +155,6 @@ export function evaluateWatchExit(snapshot: WatchSnapshot, options: WatchExitOpt
 		ci,
 		reasons,
 		actionable,
+		rebaseRequired: needsRebaseNow,
 	};
 }

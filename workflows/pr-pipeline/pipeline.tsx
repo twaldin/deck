@@ -295,6 +295,7 @@ const schemas = {
 		unansweredComments: z.number().int(),
 		reviewersToReRequest: z.array(z.string()),
 		reasons: z.array(z.string()),
+		rebaseRequired: z.boolean(),
 	}),
 	watchFix: z.object({
 		round: z.number().int(),
@@ -1310,6 +1311,7 @@ export default smithers((ctx) => {
 																unansweredComments: verdict.unansweredComments,
 																reviewersToReRequest: verdict.reviewersNeedingReRequest,
 																reasons: verdict.reasons,
+																		rebaseRequired: verdict.rebaseRequired,
 															};
 														})()
 													}
@@ -1336,7 +1338,7 @@ export default smithers((ctx) => {
 																	reRequested: ["dry-reviewer"],
 																	summary: "dry-run: feedback addressed",
 																})
-															: latestWatch.reasons.some((reason) => reason.includes("needs rebase"))
+															: latestWatch.rebaseRequired
 															? async () => {
 																	const actions = await rebaseAndPush(bunExec, { git: github.git, worktree: input.worktree, branch: input.branch, baseBranch });
 																	return { round: k, afterPoll: latestWatch.poll, actions, pushed: true, reRequested: [], summary: "Rebased, tested, and pushed the branch." };

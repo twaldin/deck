@@ -67,6 +67,35 @@ export type ReconcileResult = {
 
 type Baseline = Record<string, { lastTier: WakeTier; lastRaw: string; count: number }>;
 
+/** Durable, edge-triggered conditions that do not have a .status producer. */
+export type WakeCondition = {
+	key: "max-adversarial" | "reviewer-silent" | "main-red" | "migration-gate" | "broker-no-quota";
+	taskId: string;
+	note: string;
+	/** T0 is used for failures and gates; reviewer silence is batched. */
+	tier?: WakeTier;
+};
+
+/** Record external workflow conditions in the same durable outbox as status events. */
+export function enqueueWakeConditions(conditions: WakeCondition[]): void {
+	const items: WakeItem[] = conditions.map((condition) => ({
+		taskId: condition.taskId,
+		tier: condition.tier ?? (condition.key === "reviewer-silent" ? "T1" : "T0"),
+		event: { verb: condition.key, key: condition.key, note: condition.note, raw: `${condition.key}:${condition.note}` },
+	}));
+	if (items.length === 0) return;
+	// Conditions use the same baseline, so a persistent gate creates one wake.
+	const baseline = loadBaseline();
+	const fresh = items.filter((item) => {
+		const previous = baseline[`${item.taskId}:${item.event.key}`];
+		if (previous?.lastRaw === item.event.raw) return false;
+		baseline[`${item.taskId}:${item.event.key}`] = { lastTier: item.tier, lastRaw: item.event.raw, count: (previous?.count ?? 0) + 1 };
+		return true;
+	});
+	saveBaseline(baseline);
+	enqueue(fresh);
+}
+
 function loadBaseline(): Baseline {
 	try {
 		const parsed: unknown = JSON.parse(fs.readFileSync(wakeFiles().baseline, "utf8"));

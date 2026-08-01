@@ -816,10 +816,9 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 		// print/RPC sessions must still reconcile and expose owed wakes, otherwise
 		// blocked workflow runs silently stall when no interactive session exists.
 		if (ctx?.mode !== "tui") {
-			// Headless commands can exit, but the durable observer must continue
-			// while Smithers runs. The timer is intentionally independent of UI.
-			void deliver(ctx);
-			timer = setInterval(() => void deliver(ctx), RECONCILE_MS);
+			// Headless sessions have no durable lifetime. Reconcile once so the
+			// command can expose owed state, but never schedule an unsolicited turn.
+			reconcile();
 			return;
 		}
 

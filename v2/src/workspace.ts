@@ -124,9 +124,13 @@ function isTerminalExecution(executions: string, id: string): boolean {
 		const lines = fs.readFileSync(stream, "utf8").split("\n").filter(Boolean);
 		for (const line of lines.reverse()) {
 			const event = JSON.parse(line) as Record<string, unknown>;
-			const text = JSON.stringify(event).toLowerCase();
-			if (/run(?:completed|succeeded|failed|cancelled)|status[^a-z]*(?:completed|succeeded|failed|cancelled)/.test(text)) return true;
-			if (/run(?:started|resumed|paused)/.test(text)) break;
+			// Only the envelope's event name and status are authoritative. Do not
+			// search payload text: a review body can contain "RunFailed".
+			const kind = [event.type, event.event, event.kind, event.name].find((value) => typeof value === "string");
+			const status = event.status;
+			if (typeof status === "string" && /^(completed|succeeded|failed|cancelled|finished)$/i.test(status)) return true;
+			if (typeof kind === "string" && /^(?:run[._-])?(completed|succeeded|failed|cancelled|finished)$/i.test(kind)) return true;
+			if (typeof kind === "string" && /^(?:run[._-])?(started|resumed|paused)$/i.test(kind)) break;
 		}
 	} catch {
 		// Fall through to optional state files.

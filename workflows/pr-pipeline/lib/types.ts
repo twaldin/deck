@@ -104,6 +104,8 @@ export interface WatchExitVerdict {
 	reasons: string[];
 	/** True when there is agent-actionable work (fix CI, answer, re-request). */
 	actionable: boolean;
+	/** Structured mergeability signal for deterministic rebase selection. */
+	rebaseRequired: boolean;
 }
 
 export interface ReviewApproval {
