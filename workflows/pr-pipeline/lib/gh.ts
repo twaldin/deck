@@ -364,7 +364,6 @@ export async function isCollaborator(ctx: GhContext, login: string): Promise<boo
 	if (/\b404\b|not found/i.test(`${result.stderr}\n${result.stdout}`)) return false;
 	throw new Error(`collaborator check failed for ${login}: ${result.stderr || result.stdout || `exit ${result.code}`}`);
 }
-}
 
 /** POST review requests. GH silently drops unknown logins - always verify after. */
 export async function requestReviewers(
