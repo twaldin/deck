@@ -64,6 +64,7 @@ describe("fleet workspace safeguards", () => {
 	});
 
 	test("REGRESSION: TUI fleet opens from the cached frame before Smithers ps returns", async () => {
+		fs.mkdirSync(path.join(home, "workflows", ".smithers"), { recursive: true });
 		const bin = path.join(home, "slow-bin");
 		fs.mkdirSync(bin, { recursive: true });
 		fs.writeFileSync(path.join(bin, "bunx"), "#!/bin/sh\nsleep 1\nprintf '[]'\n");
