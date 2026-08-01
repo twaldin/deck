@@ -9,7 +9,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { readMeta } from "../src/meta";
 import { profilesFile, seedProfiles } from "../src/projects";
-import { resolveRepo, startRun } from "../src/spawn";
+import { DEFAULT_WORKER_MODEL, piArgs, resolveRepo, startRun } from "../src/spawn";
 
 const DECK_BIN = path.resolve(import.meta.dir, "../../cli/bin/deck");
 
@@ -74,6 +74,9 @@ const baseRequest = () => ({
 });
 
 describe("spawn worktree allocation", () => {
+	test("passes the per-seat model string unchanged to pi", () => {
+		expect(piArgs("session", `${DEFAULT_WORKER_MODEL}:fast`, undefined, false)).toContain(`${DEFAULT_WORKER_MODEL}:fast`);
+	});
 	test("repo-only spawn allocates an isolated worktree under DECK_HOME/wt and records it", () => {
 		const result = startRun(
 			{ ...baseRequest(), repo: path.join(root, "repo"), base: "main", desc: "short label" },
