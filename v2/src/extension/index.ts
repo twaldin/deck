@@ -320,7 +320,7 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 		description: "What every task and workflow is doing right now.",
 		parameters: Type.Object({}),
 		async execute() {
-			const frame = await buildFrame(workflowCwd === undefined ? {} : { workflowCwd });
+			const frame = await getCurrentFrame();
 			return text(renderFrame(frame));
 		},
 	});
@@ -449,7 +449,6 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 		description:
 			"Fleet overlay: attention-first (q/Esc close, r refresh, a show-all, j/k scroll; /fleet all opens expanded)",
 		handler: async (args: string, ctx: any) => {
-			const frameOptions = workflowCwd === undefined ? {} : { workflowCwd };
 			// First paint is cache-only. Smithers ps is a slow shell-out and must
 			// never delay opening the overlay.
 			let frame = lastFooterFrame;
@@ -503,7 +502,7 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 						if (busy) return;
 						busy = true;
 						try {
-							frame = await buildFrame(frameOptions);
+							frame = await getCurrentFrame();
 							body.setText(render());
 							tui.requestRender();
 						} catch {
