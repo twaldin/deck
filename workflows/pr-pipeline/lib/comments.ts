@@ -27,12 +27,12 @@ export function signedCommentBody(project: string | undefined, body: string): st
 
 /** Command agents must use for every issue comment. Body is supplied on stdin. */
 export function commentCommand(project: string | undefined, repo: string, issueNumber: number, body: string): string {
-	return `bun workflows/pr-pipeline/lib/post-comment.ts ${shellArg(project ?? "")} ${shellArg(repo)} ${issueNumber} <<'COMMENT'\n${body}\nCOMMENT`;
+	return `bun ${import.meta.dir}/post-comment.ts ${shellArg(project ?? "")} ${shellArg(repo)} ${issueNumber} <<'COMMENT'\n${body}\nCOMMENT`;
 }
 
 /** Command agents must use for every review-thread reply. Body is supplied on stdin. */
 export function reviewReplyCommand(project: string | undefined, repo: string, commentId: number, body: string): string {
-	return `bun workflows/pr-pipeline/lib/post-review-reply.ts ${shellArg(project ?? "")} ${shellArg(repo)} ${commentId} <<'COMMENT'\n${body}\nCOMMENT`;
+	return `bun ${import.meta.dir}/post-review-reply.ts ${shellArg(project ?? "")} ${shellArg(repo)} ${commentId} <<'COMMENT'\n${body}\nCOMMENT`;
 }
 
 function shellArg(value: string): string {

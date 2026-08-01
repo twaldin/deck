@@ -5,6 +5,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { resolve } from "node:path";
 
 import { validateBrief } from "../lib/brief.ts";
 import { evaluateDone } from "../lib/done.ts";
@@ -428,7 +429,7 @@ describe("watch fix worker boundary", () => {
 			worktree: "/tmp/wt", branch: "fix/ci", repo: "owner/repo", prNumber: 42,
 			project: "lindy-ai/lindy", gh: "gh", baseBranch: "main", pollJson: "{}", round: 0, afterPoll: 1,
 		});
-		expect(prompt).toContain("post-comment.ts");
+		expect(prompt).toContain(`bun ${resolve(import.meta.dir, "../lib/post-comment.ts")}`);
 		expect(prompt).toContain("post-review-reply.ts");
 		expect(prompt).toContain("-- tim's agent");
 		expect(prompt).toContain("stdin");
