@@ -176,6 +176,7 @@ const inputSchema = z.object({
 			familyOpposition: z.boolean().optional(),
 			oppositionDefaults: z.record(z.string(), z.string()).optional(),
 		})
+		.nullable()
 		.optional(),
 	limits: z
 		.object({
@@ -434,38 +435,27 @@ export function buildModelPolicy(
 		fallout?: string;
 		familyOpposition?: boolean;
 		oppositionDefaults?: Record<string, string>;
-	} | undefined,
+	} | null | undefined,
 	profileSelected = false,
 ): ModelPolicy {
+	// Profile files are validated before they reach the workflow, but a profile
+	// can still be supplied by a caller or an older loader with null/partial
+	// models. Normalize that boundary here so rendering never dereferences null.
 	const profileModels =
-		profileSelected && inputModels !== undefined
-			? inputModels
-			: profile !== null && !profileRepoMismatch
-				? profile.models
-				: undefined;
+		profile !== null && !profileRepoMismatch && profile.models !== null && typeof profile.models === "object"
+			? profile.models
+			: undefined;
 	const policy: ModelPolicy = {
 		...defaultModelPolicy(),
 		...(profileModels ?? {}),
-		...(profileModels !== undefined
-			? {
-					reviewer: profileModels.reviewer,
-				oppositionDefaults: {
-					...defaultModelPolicy().oppositionDefaults,
-					...profileModels.oppositionDefaults,
-				},
-			}
-			: {}),
-		...(inputModels?.implementer !== undefined ? { implementer: inputModels.implementer } : {}),
-		...(inputModels?.reviewer !== undefined ? { reviewer: inputModels.reviewer } : {}),
-		...(inputModels?.watcher !== undefined ? { watcher: inputModels.watcher } : {}),
-		...(inputModels?.fallout !== undefined ? { fallout: inputModels.fallout } : {}),
-		...(inputModels?.familyOpposition !== undefined
-			? { familyOpposition: inputModels.familyOpposition }
-			: {}),
+		...(profileModels !== undefined ? { reviewer: profileModels.reviewer } : {}),
+		...(inputModels ?? {}),
+		oppositionDefaults: {
+			...defaultModelPolicy().oppositionDefaults,
+			...(profileModels?.oppositionDefaults ?? {}),
+			...(inputModels?.oppositionDefaults ?? {}),
+		},
 	};
-	if (inputModels?.oppositionDefaults !== undefined) {
-		policy.oppositionDefaults = { ...policy.oppositionDefaults, ...inputModels.oppositionDefaults };
-	}
 	return policy;
 }
 
