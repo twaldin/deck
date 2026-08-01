@@ -35,7 +35,8 @@ import { readMeta } from "../meta";
 import { observePsSnapshot } from "../observer";
 import { registerQuestions } from "../questions";
 import { enqueue, pending } from "../queue";
-import { startShip } from "../ship";
+import { pipelineDir, startShip } from "../ship";
+import { reconcileRecuts } from "../recut";
 import { peekSession, startRun } from "../spawn";
 import { STATUS_VERBS, type StatusVerb } from "../status";
 import { readUsageRoster, usageStatusLine } from "../usage-roster";
@@ -639,6 +640,7 @@ export default function deckV2(pi: any): void {
 	async function refreshStatusline(ctx: any): Promise<void> {
 		try {
 			const snapshot = workflowCwd === undefined ? { runs: [] as never[] } : await collectPsSnapshot(workflowCwd);
+			if (workflowCwd !== undefined) void reconcileRecuts(workflowCwd, pipelineDir(), snapshot.runs).catch(() => {});
 			observePsSnapshot(snapshot.runs);
 			const frame = await buildFrame(workflowCwd === undefined ? {} : { workflowCwd, psRuns: snapshot.runs });
 			lastFooterFrame = frame;
