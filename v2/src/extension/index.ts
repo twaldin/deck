@@ -27,6 +27,7 @@ import {
 	buildUsageText,
 	buildFrame,
 	collectPsSnapshot,
+	collectRuns,
 	type FleetTheme,
 	PLAIN_FLEET_THEME,
 	renderFrame,
@@ -71,7 +72,9 @@ const text = (body: string): ToolResult => ({
 const RECONCILE_MS = 30_000;
 
 type DeckV2Dependencies = {
+	/** Test seam for the raw ps command. Production uses the enriched collector below. */
 	collectPsSnapshot?: typeof collectPsSnapshot;
+	collectRuns?: typeof collectRuns;
 	inspectRun?: (command: string, args: readonly string[], cwd: string) => Promise<{ stdout: string; exitCode: number } | null>;
 };
 
@@ -80,7 +83,13 @@ const INSPECT_TIMEOUT_MS = 15_000;
 const INSPECT_MAX_BUFFER = 4_000_000;
 
 export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): void {
-	const collectSnapshot = dependencies.collectPsSnapshot ?? collectPsSnapshot;
+	// Keep the raw snapshot seam for focused extension tests, but never use it in
+	// production. collectRuns performs the GitHub and Smithers enrichment needed
+	// by every extension view and the statusline.
+	const collectSnapshot = dependencies.collectPsSnapshot;
+	const collectEnrichedRuns = dependencies.collectRuns ?? (collectSnapshot === undefined
+		? collectRuns
+		: async (cwd: string) => collectSnapshot(cwd));
 	// Calm is presentation-only (see ../calm.ts); it never touches delivery.
 	registerCalm(pi);
 	// ask_captain + /questions live HERE, not in a globally installed extension:
@@ -685,7 +694,7 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 	async function getCurrentFrame(): Promise<Awaited<ReturnType<typeof buildFrame>>> {
 		const snapshots = workflowWorkspaces.length === 0
 			? []
-			: await Promise.all(workflowWorkspaces.map(async (workspace) => ({ workspace, snapshot: await collectSnapshot(workspace) })));
+			: await Promise.all(workflowWorkspaces.map(async (workspace) => ({ workspace, snapshot: await collectEnrichedRuns(workspace) })));
 		const workflowSnapshot = snapshots.find(({ workspace }) => workspace === workflowCwd)?.snapshot;
 		const allRuns = snapshots.flatMap(({ snapshot: current }) => current.runs);
 		const rows = snapshots.flatMap(({ workspace, snapshot: current }) => current.runs.map((run) => ({ ...run, workspace }))) as PsSnapshotRow[];

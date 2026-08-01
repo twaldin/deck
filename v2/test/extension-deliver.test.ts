@@ -140,6 +140,42 @@ describe("fleet workspace safeguards", () => {
 		expect(notifications.at(-1)?.[0]).toContain("deck factory");
 	});
 
+	test("REGRESSION: extension views use enriched run collection", async () => {
+		fs.mkdirSync(path.join(home, "workflows", ".smithers"), { recursive: true });
+		const pi = fakePi();
+		const notifications: string[] = [];
+		let rawCalled = false;
+		let enrichedCalled = false;
+		deckV2(pi.api as never, {
+			collectPsSnapshot: async () => {
+				rawCalled = true;
+				throw new Error("raw collector must not run");
+			},
+			collectRuns: async () => {
+				enrichedCalled = true;
+				return {
+					runs: [{ id: "enriched-run", status: "running", ciState: "passing", reviewState: "APPROVED" }],
+					health: { name: "smithers", state: "ok", detail: "1 run(s)" },
+				};
+			},
+		});
+		const printCtx = {
+			mode: "print",
+			ui: {
+				notify: (value: string) => notifications.push(value),
+				setWorkingVisible: () => {},
+				setHiddenThinkingLabel: () => {},
+				setFooter: () => {},
+				setStatus: () => {},
+			},
+		};
+		await pi.emit("session_start", printCtx);
+		await pi.commands.get("status")?.("", printCtx);
+		expect(enrichedCalled).toBe(true);
+		expect(rawCalled).toBe(false);
+		expect(notifications.join("\\n")).toContain("enriched-run");
+	});
+
 	test("REGRESSION: non-TUI fleet prints a live first frame", async () => {
 		fs.mkdirSync(path.join(home, "workflows", ".smithers"), { recursive: true });
 		const pi = fakePi();
