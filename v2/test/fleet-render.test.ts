@@ -170,18 +170,26 @@ describe("fleet frame state", () => {
 			fs.rmSync(directory, { recursive: true, force: true });
 		}
 	});
-+	test("folds live generations by repo-qualified PR and keeps the newest run", async () => {
+	test("folds live generations by repo-qualified PR and keeps the newest run", async () => {
 		const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fleet-fold-"));
+		const previousHome = process.env.DECK_V2_HOME;
+		process.env.DECK_V2_HOME = directory;
 		try {
+			fs.mkdirSync(path.join(directory, "state", "ship"), { recursive: true });
+			for (const id of ["old", "new", "other-repo"]) {
+				fs.writeFileSync(path.join(directory, "state", "ship", `${id}.input.json`), JSON.stringify({ repo: id === "other-repo" ? "other/widgets" : "acme/widgets", existingPr: 7 }));
+			}
 			const runs = [
 				{ id: "old", rootDir: directory, prNumber: 7, step: "watch-poll", started: "2026-01-01T00:00:00.000Z" },
-				{ id: "new", rootDir: directory, prNumber: 7, step: "watch-poll", started: "2026-01-02T00:00:00.000Z" },
+				{ id: "new", rootDir: `${directory}-new-worktree`, prNumber: 7, step: "watch-poll", started: "2026-01-02T00:00:00.000Z" },
 				{ id: "other-repo", rootDir: `${directory}-other`, prNumber: 7, step: "watch-poll", started: "2026-01-01T00:00:00.000Z" },
 			];
 			const result = await buildFrame({ workflowCwd: directory, psRuns: runs });
 			expect(result.efforts).toHaveLength(2);
 			expect(result.efforts?.map((effort) => effort.runId)).toEqual(expect.arrayContaining(["new", "other-repo"]));
+			expect(result.counters.efforts).toBe(2);
 		} finally {
+			if (previousHome === undefined) delete process.env.DECK_V2_HOME; else process.env.DECK_V2_HOME = previousHome;
 			fs.rmSync(directory, { recursive: true, force: true });
 		}
 	});
