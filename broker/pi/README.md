@@ -19,6 +19,12 @@ The checked-in extension is `broker/pi/deck-provider.ts`. A new auto-discovered 
 
 The broker's `/v1/models` response uses provider-qualified IDs, while its resolver also accepts these unqualified aliases. Pi needs an explicit declaration only for models selected through the custom provider.
 
+## Native reasoning selectors
+
+Use `--thinking xhigh` (or a model selector suffix such as `deck/gpt-5.6-sol:xhigh`) for OpenAI-compatible Deck models. The broker accepts the complete OpenAI effort vocabulary: `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; unsupported model levels fail instead of being downgraded. Anthropic budget requests use `budget:<tokens>` (for example `--thinking budget:32768`) and preserve the integer in `thinking.budget_tokens`. xAI uses only `low` and `high` and sends `reasoning_effort` with that value.
+
+The catalog metadata in `deck-provider.ts` lists the selectable surface: Claude models expose budget mode, the GPT model exposes OpenAI effort mode, and future Grok entries must expose only xAI's `low`/`high` surface.
+
 The extension stores no token. Its `apiKey` is the command-backed reference `!cat ~/.deck/broker/gateway.token`; Pi resolves `!` commands at request time and `authHeader: true` sends the result as a bearer credential. Installed source for this behavior is in `dist/core/model-registry.js` and `dist/core/resolve-config-value.js` under the global `@mariozechner/pi-coding-agent` package.
 
 Pi also supports `api: "anthropic-messages"` custom models. This wiring deliberately uses OpenAI chat compatibility for every deck model: a live native-Anthropic probe reached the broker but the upstream plan rejected the third-party client shape, while the OpenAI-compatible path completed.

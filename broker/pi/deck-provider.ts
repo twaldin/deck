@@ -1,8 +1,10 @@
 interface DeckModel {
 	id: string;
 	name: string;
-	api?: "openai-completions";
+	api?: "openai-completions" | "anthropic-messages";
 	reasoning: boolean;
+	/** Pi-native level-to-wire mapping. Null means the provider rejects that level. */
+	thinkingLevelMap?: Partial<Record<"off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max", string | null>>;
 	input: ("text" | "image")[];
 	cost: {
 		input: number;
@@ -22,7 +24,7 @@ interface PiExtensionApi {
 			baseUrl: string;
 			apiKey: string;
 			authHeader: boolean;
-			api: "openai-completions";
+			api: "openai-completions" | "anthropic-messages";
 			models: DeckModel[];
 		},
 	): void;
@@ -47,6 +49,7 @@ const models: DeckModel[] = [
 		id: "claude-sonnet-4-5",
 		name: "Claude Sonnet 4.5 (Deck)",
 		reasoning: true,
+		thinkingLevelMap: { minimal: "minimal", low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" },
 		input: ["text", "image"],
 		cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
 		contextWindow: 1_000_000,
@@ -56,6 +59,7 @@ const models: DeckModel[] = [
 		id: "claude-haiku-4-5",
 		name: "Claude Haiku 4.5 (Deck)",
 		reasoning: true,
+		thinkingLevelMap: { minimal: "minimal", low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" },
 		input: ["text", "image"],
 		cost: { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25 },
 		contextWindow: 200_000,
@@ -65,6 +69,7 @@ const models: DeckModel[] = [
 		id: "claude-fable-5",
 		name: "Claude Fable 5 (Deck)",
 		reasoning: true,
+		thinkingLevelMap: { minimal: "minimal", low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" },
 		input: ["text", "image"],
 		cost: { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 },
 		contextWindow: 1_000_000,
@@ -75,6 +80,7 @@ const models: DeckModel[] = [
 		name: "GPT-5.6 Sol (Deck)",
 		api: "openai-completions",
 		reasoning: true,
+		thinkingLevelMap: { minimal: null, low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: null },
 		input: ["text", "image"],
 		cost: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 6.25 },
 		contextWindow: 372_000,
