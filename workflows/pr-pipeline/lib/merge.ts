@@ -7,7 +7,8 @@ export type MergeFailure = Error & { mergeResult?: ExecResult };
 function isGraphiteUnavailable(result: ExecResult): boolean {
 	return (
 		result.code === 127 ||
-		/command not found|\buntracked branch\b/i.test(
+		/command not found/i.test(`${result.stdout}\n${result.stderr}`) ||
+		/\bCannot perform this operation on untracked branch\b/i.test(
 			`${result.stdout}\n${result.stderr}`,
 		)
 	);

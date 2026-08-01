@@ -78,7 +78,8 @@ describe("merge fallback", () => {
 	test("surfaces both errors when fallback fails", async () => {
 		await expect(
 			runMergeWithFallback({
-				runGraphite: async () => result(1, "", "untracked branch"),
+				runGraphite: async () =>
+					result(1, "", "Cannot perform this operation on untracked branch x"),
 				exec: async () => result(1, "", "pull request is not mergeable"),
 			gh: "gh",
 			prNumber: 42,
