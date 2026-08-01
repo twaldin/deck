@@ -6,13 +6,17 @@ import deckV2 from "../src/extension/index";
 import { appendStatus } from "../src/events";
 
 let home: string;
+let savedPath: string | undefined;
 beforeEach(() => {
 	home = fs.mkdtempSync(path.join(os.tmpdir(), "deckv2-deliver-"));
 	process.env.DECK_V2_HOME = home;
+	savedPath = process.env.PATH;
+	process.env.PATH = "/nonexistent";
 });
 afterEach(() => {
 	fs.rmSync(home, { recursive: true, force: true });
 	delete process.env.DECK_V2_HOME;
+	if (savedPath !== undefined) process.env.PATH = savedPath;
 });
 
 type Handler = (event: unknown, ctx: unknown) => unknown;
@@ -29,7 +33,7 @@ function fakePi(sendMessage?: (...args: unknown[]) => unknown) {
 	};
 	return { api, emit, sent };
 }
-const ctx = () => ({ mode: "tui", isIdle: () => false, hasPendingMessages: () => true, ui: undefined });
+const ctx = () => ({ mode: "tui", isIdle: () => true, hasPendingMessages: () => false, ui: undefined });
 const settle = () => new Promise((resolve) => setTimeout(resolve, 25));
 
 describe("wake delivery", () => {
@@ -55,8 +59,8 @@ describe("wake delivery", () => {
 	});
 
 	test("T1 events fold into one queued message", async () => {
-		appendStatus("t1", "started", "one");
-		appendStatus("t1", "started", "two");
+		appendStatus("t1", "done", "one");
+		appendStatus("t1", "resolved", "two");
 		const pi = fakePi();
 		deckV2(pi.api as never);
 		await pi.emit("session_start", ctx());

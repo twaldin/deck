@@ -78,9 +78,22 @@ export default function deckV2(pi: any): void {
 	let sendRetryAt = 0;
 	const SEND_BACKOFF_BASE_MS = 60_000;
 	const SEND_BACKOFF_MAX_MS = 15 * 60_000;
+	// Busy fence prevents each timer/watch cycle from queueing another follow-up
+	// during one turn. Events remain in the durable outbox until the turn settles.
+	let agentBusy = false;
+	let pendingAckIds: string[] = [];
 	// Re-entrancy lock: deliver() fires from the interval AND every fs.watch
 	// nudge; two overlapping async passes would drain the same outbox twice.
 	let delivering = false;
+
+	function busy(ctx: any): boolean {
+		return (
+			agentBusy ||
+			pendingAckIds.length > 0 ||
+			ctx?.isIdle?.() === false ||
+			ctx?.hasPendingMessages?.() === true
+		);
+	}
 	let lastFooterFrame = {
 		generatedAt: new Date().toISOString(),
 		tasks: [],
@@ -523,14 +536,14 @@ export default function deckV2(pi: any): void {
 	 * message, T2 never. The fold is the fix for six queued follow-ups each
 	 * burning a turn after the first drain had already handled them.
 	 *
-	 * Pi owns the in-flight message queue. Sends during a turn use `followUp`, so
-	 * Pi queues them and delivers them after the turn settles. The first idle send
-	 * starts a normal turn; the busy fence makes later sends native follow-ups.
+	 * Injection only happens while pi is IDLE. Injecting mid-turn is rejected
+	 * ("Agent is already processing"), and forcing it through with a steer is
+	 * exactly the interruption class this design removes. A wake deferred by one
+	 * cycle is correct; the events are durable and reconcile is idempotent, so
+	 * nothing is lost by waiting. Only the statusline updates while busy.
 	 */
 	async function deliver(ctx: any): Promise<void> {
-		// Backing off after a failed send is the same shape as busy: return before
-		// reconcile so no cursor moves and nothing is consumed unsent.
-		if (delivering || Date.now() < sendRetryAt) {
+		if (delivering || busy(ctx) || Date.now() < sendRetryAt) {
 			void refreshStatusline(ctx);
 			return;
 		}
@@ -588,7 +601,9 @@ export default function deckV2(pi: any): void {
 				delivered.push(...batched.map((entry) => entry.id));
 			}
 		}
-		ackWakes(delivered);
+		// sendMessage confirms queue acceptance, not turn delivery. Keep these
+		// entries owed until pi reports that the queued follow-up has started.
+		pendingAckIds.push(...delivered);
 		if (sent < attempted) {
 			// A send failed: back off exponentially, capped. Undelivered wakes stay
 			// owed in the outbox and are retried when the window opens.
@@ -706,6 +721,22 @@ export default function deckV2(pi: any): void {
 		void deliver(ctx);
 		timer = setInterval(() => void deliver(ctx), RECONCILE_MS);
 		unwatch = (await import("../wake")).watchStatusDir(() => void deliver(ctx));
+	});
+
+	// A queued follow-up is durable until the next turn starts. This avoids
+	// acknowledging a wake that is still only in pi's in-memory queue.
+	pi.on("before_agent_start", async () => {
+		agentBusy = true;
+	});
+	pi.on("agent_start", async () => {
+		agentBusy = true;
+		if (pendingAckIds.length > 0) {
+			ackWakes(pendingAckIds);
+			pendingAckIds = [];
+		}
+	});
+	pi.on("agent_settled", async () => {
+		agentBusy = false;
 	});
 
 	pi.on("session_compact", async (event: any, ctx: any) => {
