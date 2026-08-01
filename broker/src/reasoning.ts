@@ -19,7 +19,17 @@ const ANTHROPIC_BUDGETS: Record<ReasoningLevel, number> = {
 export function clampReasoning(level: ReasoningEffort, supported: readonly ReasoningEffort[]): ReasoningEffort {
 	if (supported.includes(level)) return level;
 	const requested = ORDER.indexOf(level);
-	return [...supported].sort((a, b) => Math.abs(ORDER.indexOf(b) - requested) - Math.abs(ORDER.indexOf(a) - requested))[0] ?? "minimal";
+	return [...supported].sort((a, b) => Math.abs(ORDER.indexOf(a) - requested) - Math.abs(ORDER.indexOf(b) - requested))[0] ?? "minimal";
+}
+
+export const MODEL_REASONING_LEVELS: Record<string, readonly ReasoningEffort[]> = {
+	"grok-4.5": ["low", "high"],
+	"gpt-5.6-sol": ["low", "medium", "high", "xhigh"],
+};
+
+export function supportedReasoning(modelId: string, provider: "openai" | "anthropic" | "xai"): readonly ReasoningEffort[] {
+	if (provider === "anthropic") return ["low", "medium", "high", "xhigh", "max"];
+	return MODEL_REASONING_LEVELS[modelId] ?? (provider === "xai" ? ["low", "high"] : ORDER);
 }
 
 const OPENAI_EFFORTS = new Set<ReasoningEffort>(["minimal", "low", "medium", "high", "xhigh", "max"]);

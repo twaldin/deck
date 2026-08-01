@@ -59,7 +59,7 @@ import {
 	resolveReviewerLogin,
 } from "./lib/gh.ts";
 import { findLandingCommit } from "./lib/landing.ts";
-import { runMerge } from "./lib/merge.ts";
+import { runMergeWithFallback } from "./lib/merge.ts";
 import { detectMigrations, MIGRATION_STAGES, migrationEvidenceComplete } from "./lib/migrations.ts";
 import { generatePullRequestDescription } from "./lib/description.ts";
 import {
@@ -125,7 +125,7 @@ export const DEFAULT_GITHUB = {
 };
 
 const DEFAULT_COMMANDS = {
-	merge: "gh pr merge --auto --squash",
+	merge: "gt merge",
 	deployEvidence: undefined as string | undefined,
 	migrationStgRun: undefined as string | undefined,
 	migrationStgVerify: undefined as string | undefined,
@@ -175,6 +175,11 @@ const inputSchema = z.object({
 			fallout: z.union([z.string(), z.object({ model: z.string(), reasoning: z.string().min(1).optional() })]).optional(),
 			familyOpposition: z.boolean().optional(),
 			oppositionDefaults: z.record(z.string(), z.string()).optional(),
+			reasoning: z.enum(["low", "medium", "high", "xhigh", "max"]).optional(),
+			reasoningImplementer: z.enum(["low", "medium", "high", "xhigh", "max"]).optional(),
+			reasoningReviewer: z.enum(["low", "medium", "high", "xhigh", "max"]).optional(),
+			reasoningWatcher: z.enum(["low", "medium", "high", "xhigh", "max"]).optional(),
+			reasoningFallout: z.enum(["low", "medium", "high", "xhigh", "max"]).optional(),
 		})
 		.nullable()
 		.optional(),
@@ -344,7 +349,7 @@ const schemas = {
 		submittedAt: z.string(),
 		receipt: z.string(),
 		alreadyLanded: z.boolean(),
-		mergePath: z.enum(["github-merge-queue", "dry-run", "already-landed"]),
+		mergePath: z.enum(["graphite", "gh-fallback", "dry-run", "already-landed"]),
 	}),
 	queuePoll: z.object({
 		poll: z.number().int(),
@@ -413,7 +418,7 @@ function seat(ref: ModelSeat): { ref: string; reasoning?: string } {
 	return typeof ref === "string" ? { ref } : { ref: ref.model, reasoning: ref.reasoning };
 }
 
-function makeAgent(ref: ModelSeat, cwd: string, timeoutMs: number): PiAgent {
+function makeAgent(ref: ModelSeat, cwd: string, timeoutMs: number, reasoning = "medium"): PiAgent {
 	const selected = seat(ref);
 	const { provider, model } = parseModelRef(selected.ref);
 	return new PiAgent({
@@ -421,7 +426,7 @@ function makeAgent(ref: ModelSeat, cwd: string, timeoutMs: number): PiAgent {
 		model,
 		cwd,
 		timeoutMs,
-		thinking: selected.reasoning ?? "medium",
+		thinking: selected.reasoning ?? reasoning,
 		noSession: true,
 	});
 }
@@ -440,6 +445,11 @@ export function buildModelPolicy(
 		fallout?: ModelSeat;
 		familyOpposition?: boolean;
 		oppositionDefaults?: Record<string, string>;
+		reasoning?: "low" | "medium" | "high" | "xhigh" | "max";
+		reasoningImplementer?: "low" | "medium" | "high" | "xhigh" | "max";
+		reasoningReviewer?: "low" | "medium" | "high" | "xhigh" | "max";
+		reasoningWatcher?: "low" | "medium" | "high" | "xhigh" | "max";
+		reasoningFallout?: "low" | "medium" | "high" | "xhigh" | "max";
 	} | null | undefined,
 ): ModelPolicy {
 	// The project-profile loader can preserve a JSON `models: null` value from
@@ -456,6 +466,14 @@ export function buildModelPolicy(
 		...(profileModels ?? {}),
 		...(profileModels !== undefined ? { reviewer: profileModels.reviewer } : {}),
 		...(models ?? {}),
+		...(profileModels?.reasoning !== undefined && profileModels.reasoningImplementer === undefined ? { reasoningImplementer: profileModels.reasoning } : {}),
+		...(profileModels?.reasoning !== undefined && profileModels.reasoningReviewer === undefined ? { reasoningReviewer: profileModels.reasoning } : {}),
+		...(profileModels?.reasoning !== undefined && profileModels.reasoningWatcher === undefined ? { reasoningWatcher: profileModels.reasoning } : {}),
+		...(profileModels?.reasoning !== undefined && profileModels.reasoningFallout === undefined ? { reasoningFallout: profileModels.reasoning } : {}),
+		...(models?.reasoning !== undefined && models.reasoningImplementer === undefined ? { reasoningImplementer: models.reasoning } : {}),
+		...(models?.reasoning !== undefined && models.reasoningReviewer === undefined ? { reasoningReviewer: models.reasoning } : {}),
+		...(models?.reasoning !== undefined && models.reasoningWatcher === undefined ? { reasoningWatcher: models.reasoning } : {}),
+		...(models?.reasoning !== undefined && models.reasoningFallout === undefined ? { reasoningFallout: models.reasoning } : {}),
 		oppositionDefaults: {
 			...defaultModelPolicy().oppositionDefaults,
 			...(profileModels?.oppositionDefaults ?? {}),
@@ -621,10 +639,10 @@ export default smithers((ctx) => {
 	const agents = dryRun
 		? null
 		: {
-				implementer: makeAgent(policy.implementer, input.worktree, 45 * 60_000),
-				reviewer: makeAgent({ model: reviewerModel, reasoning: seat(policy.reviewer ?? reviewerModel).reasoning }, input.worktree, 20 * 60_000),
-				watcher: makeAgent(policy.watcher, input.worktree, 30 * 60_000),
-				fallout: makeAgent(policy.fallout, input.worktree, 15 * 60_000),
+				implementer: makeAgent(policy.implementer, input.worktree, 45 * 60_000, policy.reasoningImplementer),
+				reviewer: makeAgent({ model: reviewerModel, reasoning: seat(policy.reviewer ?? reviewerModel).reasoning }, input.worktree, 20 * 60_000, policy.reasoningReviewer),
+				watcher: makeAgent(policy.watcher, input.worktree, 30 * 60_000, policy.reasoningWatcher),
+				fallout: makeAgent(policy.fallout, input.worktree, 15 * 60_000, policy.reasoningFallout),
 			};
 
 	// -- approval gate helper (bypass only allowed with dryRun; preflight enforces) --

@@ -64,6 +64,11 @@ export interface ModelPolicy {
 	reviewer?: ModelSeat;
 	watcher: ModelSeat;
 	fallout: ModelSeat;
+	reasoning: "low" | "medium" | "high" | "xhigh" | "max";
+	reasoningImplementer: ModelPolicy["reasoning"];
+	reasoningReviewer: ModelPolicy["reasoning"];
+	reasoningWatcher: ModelPolicy["reasoning"];
+	reasoningFallout: ModelPolicy["reasoning"];
 	/** First-class knob: reviewer/debate nodes must be the opposite family. */
 	familyOpposition: boolean;
 	/** Family -> counter model id (deck catalog). Overridable per run. */
@@ -83,6 +88,11 @@ export function defaultModelPolicy(): ModelPolicy {
 		reviewer: DEFAULT_MODELS.reviewer,
 		watcher: DEFAULT_MODELS.watcher,
 		fallout: DEFAULT_MODELS.fallout,
+		reasoning: "medium",
+		reasoningImplementer: "medium",
+		reasoningReviewer: "medium",
+		reasoningWatcher: "medium",
+		reasoningFallout: "medium",
 		familyOpposition: true,
 		oppositionDefaults: { ...DEFAULT_OPPOSITION },
 	};

@@ -30,6 +30,12 @@ import { evaluateTeardown, formatVerdict } from "./teardown";
 import { detectStale, foldBatched, reconcile } from "./wake";
 import { smithersWorkspaceRoot } from "./workspace";
 
+const REASONING_LEVELS = new Set(["low", "medium", "high", "xhigh", "max"]);
+function parseReasoning(value: string): "low" | "medium" | "high" | "xhigh" | "max" {
+	if (!REASONING_LEVELS.has(value)) throw new Error(`reasoning must be low, medium, high, xhigh, or max; received ${value}`);
+	return value as "low" | "medium" | "high" | "xhigh" | "max";
+}
+
 const USAGE = `deck-v2 — fleet primitives
 
   bootstrap                        create the orchestrator home (not a checkout)
@@ -219,6 +225,7 @@ export async function runCli(argv: string[]): Promise<number> {
 						...(str(args.flags, "model") === undefined
 							? {}
 							: { model: need(args.flags, "model") }),
+						...(str(args.flags, "reasoning") === undefined ? {} : { reasoning: parseReasoning(need(args.flags, "reasoning")) }),
 					},
 					deckV2Home(),
 				);

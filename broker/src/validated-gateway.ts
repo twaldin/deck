@@ -1,6 +1,6 @@
 import { startFastGateway, type FastGatewayOptions } from "./fast-gateway";
 import { DEFAULT_GATEWAY_BIND } from "./paths";
-import { nativeReasoning } from "./reasoning";
+import { clampReasoning, nativeReasoning, supportedReasoning, type ReasoningEffort } from "./reasoning";
 import { routeModel, NoQuotaError, routingProvider, type QuotaModel } from "./quota";
 
 type GatewayUpstream = { url: string; close(): Promise<void> };
@@ -51,22 +51,22 @@ export function startValidatedGateway(
 							throw error;
 						}
 					}
-					const modelId = modelParts.at(-1) ?? "";
-					const providerName = modelParts.at(-2);
-					const provider = providerName === "openai-codex" ? "openai" : (providerName ?? (modelId.startsWith("claude-") ? "anthropic" : modelId.startsWith("grok-") ? "xai" : "openai"));
-					let effort = body.reasoning_effort ?? body.reasoning?.effort;
-					if (provider === "anthropic" && effort !== undefined && !effort.startsWith("budget:")) {
-						const budgets: Record<string, number> = { minimal: 1024, low: 4096, medium: 16384, high: 32768, xhigh: 65536, max: 65536 };
-						const budget = budgets[effort];
-						if (budget === undefined) throw new Error(`Unsupported anthropic reasoning effort: ${effort}`);
-						effort = `budget:${budget}`;
-					}
+					const reasoningModelParts = body.model?.split("/") ?? [];
+					const modelId = reasoningModelParts.at(-1) ?? "";
+					const providerName = reasoningModelParts.at(-2);
+					const provider = providerName === "anthropic" || modelId.startsWith("claude-") ? "anthropic" : providerName === "xai" || providerName === "xai-oauth" || modelId.startsWith("grok-") ? "xai" : "openai";
+					const effort = body.reasoning_effort ?? body.reasoning?.effort;
 					if (effort !== undefined) {
-						const native = nativeReasoning(provider as "anthropic" | "openai" | "xai", effort);
-						if (native.provider === "anthropic" && body.thinking === undefined) body.thinking = native.thinking;
-						if (native.provider === "openai" && body.reasoning === undefined) body.reasoning = { effort: native.reasoning };
+						const selector = provider === "anthropic" && effort.startsWith("budget:") ? effort : clampReasoning(effort as ReasoningEffort, supportedReasoning(modelId, provider));
+						const native = nativeReasoning(provider, selector);
+						delete body.reasoning;
+						delete body.reasoning_effort;
+						if ("reasoning_effort" in native) body.reasoning_effort = native.reasoning_effort;
+						else body.thinking = native.thinking;
 					}
-					if (body.thinking?.type === "enabled") nativeReasoning("anthropic", `budget:${body.thinking.budget_tokens ?? ""}`);
+					if (body.thinking?.type === "enabled") {
+						body.thinking = nativeReasoning("anthropic", `budget:${body.thinking.budget_tokens ?? ""}`).thinking;
+					}
 				} catch (error) {
 					return Response.json({ error: { type: "invalid_request_error", message: error instanceof Error ? error.message : String(error) } }, { status: 400 });
 				}
