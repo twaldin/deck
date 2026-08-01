@@ -4,8 +4,7 @@
  * validates the parsed output against the task's Zod schema.
  */
 
-import { AGENT_COMMENT_SIGNATURE } from "./comments.ts";
-import { signatureProjects } from "../../../v2/src/signature.ts";
+import { AGENT_COMMENT_SIGNATURE, commentCommand, isSignatureProject, reviewReplyCommand } from "./comments.ts";
 import type { Brief } from "./types.ts";
 
 export function reviewersDecisionPrompt(denylist: string[]): string {
@@ -109,7 +108,7 @@ export function watchFixPrompt(args: {
 		`Worktree: ${args.worktree} | branch: ${args.branch} | base: ${args.baseBranch} | repo: ${args.repo} | PR #${args.prNumber}.`,
 		`Use the \`${args.gh}\` CLI for every GitHub operation.`,
 		"",
-		"Current machine-checked poll state (behindBy > 0 is always action 1, even when checks are green):",
+		"Current machine-checked poll state:",
 		args.pollJson,
 		"",
 		"Do, in order:",
@@ -117,7 +116,9 @@ export function watchFixPrompt(args: {
 		"   Resolve conflicts, run relevant tests, then force-with-lease push the existing PR branch. Do not merge.",
 		"2. Every unresolved review thread: fix the code if warranted (plain commits on THIS branch),",
 		"   reply in the thread, and resolve it (or reply why not, and resolve after agreement).",
-		`3. Every unanswered actionable comment: answer it via the gh CLI. Name or quote each finding in the response; never post a generic status update while a finding is open. Ignore only exact Linear/Graphite automation banners from their [bot] accounts; treat every human comment and unknown bot comment as actionable.${signatureProjects().has(args.project ?? "") ? ` End every comment or review reply with ${AGENT_COMMENT_SIGNATURE}.` : ""} Do not add it to the PR description.`
+		`3. Every unanswered actionable issue comment: pipe the answer to this signing helper, not a raw gh comment command: ${commentCommand(args.project, args.repo, args.prNumber, "YOUR ANSWER")}. For review-thread replies use: ${reviewReplyCommand(args.project, args.repo, 0, "YOUR ANSWER")}.${isSignatureProject(args.project) ? ` The helper adds ${AGENT_COMMENT_SIGNATURE}.` : ""} Use a heredoc or stdin so shell metacharacters stay literal. Use the helper for every issue comment and review reply. Do not add it to the PR description.`,
+
+
 		"4. Hard-red CI: flake -> rerun; trivial/correctness fix -> commit + push. Product/decision-class",
 		"   failures are NOT yours - describe them in the summary instead of guessing.",
 		"5. If you pushed changes, re-request every prior human reviewer:",
