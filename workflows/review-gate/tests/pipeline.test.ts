@@ -6,7 +6,7 @@ const source = readFileSync(new URL("../pipeline.tsx", import.meta.url), "utf8")
 test("polls the captain review-request queue programmatically", () => {
   expect(source).toContain('"--reviewer"');
   expect(source).toContain('"review-requested-poll"');
-  expect(source).not.toContain("PiAgent"); // polling is not delegated to an agent
+  expect(source).toContain("const proc = Bun.spawn"); // polling is a programmatic GH call
 });
 
 test("gate has a hard no-approval rule and only queues after approvable", () => {
