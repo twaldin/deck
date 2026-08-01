@@ -1599,7 +1599,7 @@ export default smithers((ctx) => {
 									cwd: input.worktree,
 									// Lindy's merge queue uses --auto. Other repos use the
 									// normal squash strategy when Graphite is unavailable.
-									fallbackArgs: profile?.stamp === true ? ["--auto"] : ["--squash"],
+									fallbackArgs: profile?.stamp === true || input.repo === "lindy-ai/lindy" ? ["--auto"] : ["--squash"],
 								});
 								return {
 									round: authorizedRound.round,
