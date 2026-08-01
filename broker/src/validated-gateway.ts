@@ -26,7 +26,7 @@ export function startValidatedGateway(
 		async fetch(request) {
 			const url = new URL(request.url);
 			if (request.method === "POST" && ["/v1/chat/completions", "/v1/messages", "/v1/responses"].includes(url.pathname)) {
-				let body: { model?: string; reasoning_effort?: string; reasoning?: { effort?: string }; thinking?: { type?: string; budget_tokens?: number } };
+				let body: { model?: string; reasoning_effort?: string; reasoning?: { effort?: string }; thinking?: { type?: string; budget_tokens?: number }; prompt_cache_key?: string };
 				try {
 					body = await request.json() as typeof body;
 					const modelParts = body.model?.split("/") ?? [];
@@ -36,6 +36,13 @@ export function startValidatedGateway(
 						try {
 							const routed = routeModel(requested, quotaAccounts(), options.quotaPreferences?.() ?? [], options.onQuotaEvent);
 							if (routed.fallback !== undefined) body.model = body.model.replace(requested.id, routed.model.id);
+							// AuthStorage uses the request session key for sticky OAuth routing.
+							// Pin the selected account before the upstream parses the request.
+							const sessionId = typeof body.prompt_cache_key === "string" ? body.prompt_cache_key : `deck-route:${routed.model.provider}:${routed.model.id}`;
+							body.prompt_cache_key = sessionId;
+							if (typeof (options.storage as unknown as { pinSessionOAuthAccount?: unknown }).pinSessionOAuthAccount === "function") {
+								(options.storage as unknown as { pinSessionOAuthAccount: (provider: string, sessionId: string, credentialId: number) => boolean }).pinSessionOAuthAccount(routed.model.provider, sessionId, routed.account.credentialId);
+							}
 						} catch (error) {
 							if (error instanceof NoQuotaError) return Response.json({ error: { code: error.code, type: "quota_exhausted", message: error.message, provider: error.provider, retry_after_ms: error.retryAfterMs ?? null } }, { status: 503 });
 							throw error;

@@ -35,7 +35,7 @@ describe("validated gateway outbound requests", () => {
 			body: JSON.stringify({ model: "openai/gpt-5.6-sol", reasoning_effort: "xhigh" }),
 		});
 		expect(response.status).toBe(200);
-		expect(forwarded).toEqual([{ path: "/v1/chat/completions", body: { model: "openai/gpt-5.6-sol", reasoning_effort: "xhigh" } }]);
+		expect(forwarded).toEqual([{ path: "/v1/chat/completions", body: { model: "openai/gpt-5.6-sol", reasoning_effort: "xhigh", reasoning: { effort: "xhigh" } } }]);
 	});
 
 	test("forwards xAI effort payloads", async () => {
