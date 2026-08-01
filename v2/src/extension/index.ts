@@ -62,7 +62,12 @@ const text = (body: string): ToolResult => ({
 /** Poll cadence for the reconcile pass. A nudge shortens latency, never truth. */
 const RECONCILE_MS = 30_000;
 
-export default function deckV2(pi: any): void {
+type DeckV2Dependencies = {
+	collectPsSnapshot?: typeof collectPsSnapshot;
+};
+
+export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): void {
+	const collectSnapshot = dependencies.collectPsSnapshot ?? collectPsSnapshot;
 	// Calm is presentation-only (see ../calm.ts); it never touches delivery.
 	registerCalm(pi);
 	// ask_captain + /questions live HERE, not in a globally installed extension:
@@ -643,7 +648,7 @@ export default function deckV2(pi: any): void {
 	}
 
 	async function getCurrentFrame(): Promise<Awaited<ReturnType<typeof buildFrame>>> {
-		const snapshot = workflowCwd === undefined ? { runs: [] as never[] } : await collectPsSnapshot(workflowCwd);
+		const snapshot = workflowCwd === undefined ? { runs: [] as never[] } : await collectSnapshot(workflowCwd);
 		if (workflowCwd !== undefined) void reconcileRecuts(workflowCwd, pipelineDir(), snapshot.runs).catch(() => {});
 		observePsSnapshot(snapshot.runs);
 		const frame = await buildFrame(workflowCwd === undefined ? {} : { workflowCwd, psRuns: snapshot.runs });

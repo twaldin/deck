@@ -65,67 +65,58 @@ describe("fleet workspace safeguards", () => {
 
 	test("REGRESSION: TUI fleet opens from the cached frame before Smithers ps returns", async () => {
 		fs.mkdirSync(path.join(home, "workflows", ".smithers"), { recursive: true });
-		const bin = path.join(home, "slow-bin");
-		fs.mkdirSync(bin, { recursive: true });
-		fs.writeFileSync(path.join(bin, "bunx"), "#!/bin/sh\nsleep 1\nprintf '[]'\n");
-		fs.chmodSync(path.join(bin, "bunx"), 0o755);
-		const previousPath = process.env.PATH;
-		process.env.PATH = bin;
-		try {
-			const pi = fakePi();
-			let customOpened = false;
-			deckV2(pi.api as never);
-			const ctx = {
-				mode: "tui",
-				ui: {
-					custom: async () => {
-						customOpened = true;
-					},
-					setStatus: () => {},
-					setWorkingVisible: () => {},
-					setHiddenThinkingLabel: () => {},
-					setFooter: () => {},
+		let releaseSnapshot = () => {};
+		const delayedSnapshot = new Promise<{ runs: []; health: { name: string; state: "ok"; detail: string } }>((resolve) => {
+			releaseSnapshot = () => resolve({ runs: [], health: { name: "smithers", state: "ok", detail: "0 run(s)" } });
+		});
+		const pi = fakePi();
+		let customOpened = false;
+		deckV2(pi.api as never, { collectPsSnapshot: () => delayedSnapshot });
+		const tuiContext = {
+			mode: "tui",
+			ui: {
+				custom: async () => {
+					customOpened = true;
 				},
-			};
-			await pi.emit("session_start", ctx);
-			const fleet = pi.commands.get("fleet");
-			const pending = fleet?.("", ctx);
-			await new Promise((resolve) => setTimeout(resolve, 100));
-			expect(customOpened).toBe(true);
-			await pending;
-		} finally {
-			process.env.PATH = previousPath;
-		}
+				setStatus: () => {},
+				setWorkingVisible: () => {},
+				setHiddenThinkingLabel: () => {},
+				setFooter: () => {},
+			},
+		};
+		await pi.emit("session_start", tuiContext);
+		const fleet = pi.commands.get("fleet");
+		const pending = fleet?.("", tuiContext);
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		expect(customOpened).toBe(true);
+		releaseSnapshot();
+		await delayedSnapshot;
+		await pending;
 	});
 
 	test("REGRESSION: non-TUI fleet prints a live first frame", async () => {
-		const bin = path.join(home, "bin");
-		fs.mkdirSync(bin, { recursive: true });
-		fs.writeFileSync(path.join(bin, "bunx"), "#!/bin/sh\nprintf '[{\\\"id\\\":\\\"live-run\\\",\\\"status\\\":\\\"running\\\"}]'\n");
-		fs.chmodSync(path.join(bin, "bunx"), 0o755);
-		const previousPath = process.env.PATH;
-		process.env.PATH = `${bin}:${previousPath ?? ""}`;
-		try {
-			fs.mkdirSync(path.join(home, "workflows", ".smithers"), { recursive: true });
-			const pi = fakePi();
-			const notifications: string[] = [];
-			deckV2(pi.api as never);
-			const printCtx = {
-				mode: "print",
-				ui: {
-					notify: (value: string) => notifications.push(value),
-					setWorkingVisible: () => {},
-					setHiddenThinkingLabel: () => {},
-					setFooter: () => {},
-					setStatus: () => {},
-				},
-			};
-			await pi.emit("session_start", printCtx);
-			await pi.commands.get("fleet")?.("", printCtx);
-			expect(notifications.join("\n")).toContain("live-run");
-		} finally {
-			process.env.PATH = previousPath;
-		}
+		fs.mkdirSync(path.join(home, "workflows", ".smithers"), { recursive: true });
+		const pi = fakePi();
+		const notifications: string[] = [];
+		deckV2(pi.api as never, {
+			collectPsSnapshot: async () => ({
+				runs: [{ id: "live-run", status: "running" }],
+				health: { name: "smithers", state: "ok", detail: "1 run(s)" },
+			}),
+		});
+		const printCtx = {
+			mode: "print",
+			ui: {
+				notify: (value: string) => notifications.push(value),
+				setWorkingVisible: () => {},
+				setHiddenThinkingLabel: () => {},
+				setFooter: () => {},
+				setStatus: () => {},
+			},
+		};
+		await pi.emit("session_start", printCtx);
+		await pi.commands.get("fleet")?.("", printCtx);
+		expect(notifications.join("\n")).toContain("live-run");
 	});
 });
 
