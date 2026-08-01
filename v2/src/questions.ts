@@ -267,10 +267,13 @@ export function registerQuestions(
 				if (resolve(ctx, entry, text, "answered")) {
 					answered += 1;
 					if (entry.questionKind === "stamp" && text === "Stamp") {
-						const runId = entry.id.startsWith("stamp:") ? entry.id.slice(entry.id.lastIndexOf(":") + 1) : undefined;
+						const rawId = entry.id.startsWith("deck-fleet:") ? entry.id.slice("deck-fleet:".length) : entry.id;
+						const parts = rawId.split(":");
+						const runId = rawId.startsWith("stamp:") ? parts[1] : undefined;
+						const node = rawId.startsWith("stamp:") ? parts.slice(2).join(":") || "r0-stamp" : "r0-stamp";
 						if (runId !== undefined) {
 							try {
-								await exec("smithers", ["approve", runId, "--node", "r0-stamp", "--by", "captain"], { cwd: entry.cwd, timeout: 15_000 });
+								await exec("smithers", ["approve", runId, "--node", node, "--by", "captain"], { cwd: entry.cwd, timeout: 15_000 });
 								await exec("smithers", ["up", "pipeline.tsx", "--run-id", runId, "--resume", "true"], { cwd: entry.cwd, timeout: 15_000 });
 								ctx.ui.notify(`Stamped ${runId} and resumed the pipeline.`, "info");
 							} catch (error) {

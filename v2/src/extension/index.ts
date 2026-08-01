@@ -703,7 +703,9 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 				}),
 			});
 		}
-		const frame = await buildFrame(workflowCwd === undefined ? {} : { workflowCwd, psRuns: rows as PsRun[] });
+		const frame = workflowCwd === undefined
+			? await buildFrame({})
+			: await buildFrame({ workflowCwd });
 		lastFooterFrame = frame;
 		return frame;
 	}

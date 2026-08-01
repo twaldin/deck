@@ -559,6 +559,8 @@ async function collectRunsOnce(
 						prNumber,
 						landed,
 						pushPrNull,
+						ciState,
+						reviewState,
 					};
 				} catch {
 					return { ...psRun, prNumber, landed, pushPrNull, ciState, reviewState };
@@ -863,7 +865,7 @@ export async function buildFrame(
 	for (const wf of liveRuns.filter((row) => row.waitingFor === "stamp")) {
 		// Include the run so a later generation of the same PR gets a fresh
 		// decision, while every render of this parked run uses one stable id.
-		const id = `stamp:${wf.runId}`;
+		const id = `stamp:${wf.runId}:${wf.step ?? "r0-stamp"}`;
 		try {
 			const existing = readQuestionsForStamp(queueFile(), id);
 			if (!existing) {
