@@ -256,8 +256,10 @@ async function pass(frame: FleetFrame): Promise<SourceHealth> {
 		const meta = readMeta(task.taskId);
 		const recordedPane = typeof meta?.herdr_pane === "string" ? meta.herdr_pane : undefined;
 		const recordedTab = typeof meta?.herdr_tab === "string" ? meta.herdr_tab : undefined;
-		const active = task.runState === "running";
 		const worktreeExists = task.worktree !== null && fs.existsSync(task.worktree);
+		// Spawned tasks open a pane immediately. Terminal status always wins over
+		// process liveness, so a late status event cannot leave a ghost pane.
+		const active = task.runState === "running" && !shouldReleasePane({ runState: task.runState, lastVerb: task.lastVerb, worktreeExists });
 
 		// Terminal or parked: close the pane (identity-exact) instead of leaving
 		// an idle ghost. A worktree still on disk is not a reason to keep one.

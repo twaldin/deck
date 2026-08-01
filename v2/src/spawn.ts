@@ -293,7 +293,7 @@ export function writeBrief(
 	return files.brief;
 }
 
-function piArgs(sessionDir: string, model: string, thinking: string | undefined, resume: boolean) {
+export function piArgs(sessionDir: string, model: string, thinking: string | undefined, resume: boolean) {
 	const args = ["-p", "--session-dir", sessionDir, "--model", model];
 	if (resume) args.push("-c");
 	if (thinking !== undefined && thinking.length > 0) args.push("--thinking", thinking);

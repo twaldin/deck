@@ -1445,6 +1445,14 @@ export default smithers((ctx) => {
 										) : null}
 
 										{readyExhausted ? (
+											<Gate
+												id={`r${k}-ready-exhaustion-decision`}
+												title={`ready-for-stamp loop exhausted: ${input.ticket} round ${k}`}
+												summary={`${readyRows.length} polls without human approval.\nApprove to start a fresh watch round; deny to stop and investigate the approval blocker.`}
+											/>
+										) : null}
+
+										{readyExhausted && ctx.latest(outputs.approvals, `r${k}-ready-exhaustion-decision`)?.approved === true ? (
 											<Task id={`r${k}-ready-exhausted`} output={outputs.readyPoll} retries={0}>
 												{() => ({
 													round: k,

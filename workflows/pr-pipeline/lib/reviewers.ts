@@ -210,15 +210,19 @@ export async function executeReviewerRequest(
 		max: Number.MAX_SAFE_INTEGER,
 	});
 	const collaborators: string[] = [];
+	const skippedNonCollaborators: string[] = [];
 	for (const login of selection.reviewers) {
 		if (collaborators.length >= config.max) break;
 		if (await adapters.isCollaborator(login)) collaborators.push(login);
-		else adapters.logSkip?.(login, "not a repository collaborator");
+		else {
+			skippedNonCollaborators.push(login);
+			adapters.logSkip?.(login, "not a repository collaborator");
+		}
 	}
 	if (collaborators.length === 0) {
 		throw new Error(
-			`[escalate] no reviewer candidates (CODEOWNERS empty for touched paths, no eligible ` +
-				`recent authors). A PR never proceeds unreviewed: set github.reviewers, or set ` +
+			`[escalate] no reviewer candidates; no collaborator reviewer candidates: ${skippedNonCollaborators.join(", ")}. ` +
+				`A PR never proceeds unreviewed: set github.reviewers, or set ` +
 				`github.skipReviewerRequest=true on a new run to skip explicitly.`,
 		);
 	}
@@ -235,6 +239,7 @@ export async function executeReviewerRequest(
 		skipped: false,
 		requested: collaborators,
 		verified: collaborators,
+		skippedNonCollaborators,
 		source: selection.source,
 		at: new Date().toISOString(),
 	};
