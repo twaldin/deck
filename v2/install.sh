@@ -122,11 +122,13 @@ WORKSPACE_PACK="$WORKSPACE_ROOT/.smithers"
 mkdir -p "$WORKSPACE_ROOT"
 if [ -d "$WORKFLOWS_SOURCE/.smithers" ]; then
   mkdir -p "$WORKSPACE_PACK"
-  for item in package.json bun.lock agents.ts agents ui; do
-    [ -e "$WORKFLOWS_SOURCE/.smithers/$item" ] || continue
-    rm -rf "$WORKSPACE_PACK/$item"
-    cp -a "$WORKFLOWS_SOURCE/.smithers/$item" "$WORKSPACE_PACK/$item"
-  done
+  # Copy the complete static pack. The config, preload, toon, workflows and
+  # type assets are runtime inputs too; copying a hand-picked subset starts
+  # successfully but fails when Smithers loads a less common workflow.
+  cp -a "$WORKFLOWS_SOURCE/.smithers/." "$WORKSPACE_PACK/"
+  rm -rf "$WORKSPACE_PACK/node_modules" "$WORKSPACE_PACK/executions" "$WORKSPACE_PACK/runs" \
+    "$WORKSPACE_PACK/reports" "$WORKSPACE_PACK/sandboxes" "$WORKSPACE_PACK/logs" "$WORKSPACE_PACK/state" \
+    "$WORKSPACE_PACK/tmp" "$WORKSPACE_PACK/pg"
   # agents.ts is part of the pack but its model catalog is owned by the pipeline.
   # Keep that relative import valid in the isolated runtime workspace.
   mkdir -p "$WORKSPACE_ROOT/pr-pipeline/lib"

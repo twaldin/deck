@@ -1,33 +1,70 @@
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { deckV2Home } from "./home";
 
 export type HomeSyncProfile = "full" | "personal";
 
-function runGit(home: string, args: string[], check = true): string {
-	return execFileSync("git", ["-C", home, ...args], { encoding: "utf8", stdio: check ? ["ignore", "pipe", "pipe"] : ["ignore", "pipe", "pipe"] }).trim();
+function runGit(cwd: string, args: string[]): string {
+	return execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 }
 
-/** The home repository is identity only. Runtime state and secrets stay local. */
+function remote(): string {
+	return process.env.DECK_HOME_GIT_REMOTE ?? process.env.DECK_HOME_REPO ?? "twaldin/deck-home";
+}
+
+function profile(): string {
+	return process.env.DECK_HOME_PROFILE ?? "personal";
+}
+
+function cloneHome(): { root: string; repo: string } {
+	const root = mkdtempSync(path.join(tmpdir(), "deck-home-sync-"));
+	const repo = path.join(root, "repo");
+	const branch = `profile/${profile()}`;
+	try {
+		execFileSync("gh", ["repo", "clone", remote(), repo, "--", "--branch", branch], { stdio: "ignore" });
+	} catch {
+		execFileSync("git", ["clone", "--branch", branch, remote(), repo], { stdio: "ignore" });
+	}
+	return { root, repo };
+}
+
+function identityEntries(home: string): string[] {
+	return fs.readdirSync(home).filter((name) => ![".git", ".env", "data", "state", "wt", "logs", "run", "questions", "broker"].includes(name));
+}
+
+function copyIdentity(from: string, to: string): void {
+	for (const name of identityEntries(from)) fs.cpSync(path.join(from, name), path.join(to, name), { recursive: true, force: true });
+}
+
+/** Home sync uses a temporary clone. The operator home never becomes a checkout. */
 export function homeSyncStatus(home = deckV2Home()): string {
-	if (!fs.existsSync(path.join(home, ".git"))) return "home repository: not configured";
-	return runGit(home, ["status", "--short"]);
+	let clone: { root: string; repo: string } | undefined;
+	try {
+		clone = cloneHome();
+		copyIdentity(home, clone.repo);
+		const result = runGit(clone.repo, ["status", "--short"]);
+		return result || "home repository: clean";
+	} finally { if (clone) rmSync(clone.root, { recursive: true, force: true }); }
 }
 
 export function homeSyncPull(home = deckV2Home()): string {
-	return runGit(home, ["pull", "--ff-only"]);
+	const clone = cloneHome();
+	try { fs.mkdirSync(home, { recursive: true }); copyIdentity(clone.repo, home); return "home repository: pulled"; }
+	finally { rmSync(clone.root, { recursive: true, force: true }); }
 }
 
 export function homeSyncPush(home = deckV2Home()): string {
-	if (!fs.existsSync(path.join(home, ".git"))) throw new Error(`home repository is not configured at ${home}`);
-	// The home repo must contain identity only. Runtime and secrets are excluded
-	// structurally by its .gitignore and again here as a defense in depth.
-	runGit(home, ["add", "-A"]);
-	runGit(home, ["reset", "--", "state", "wt", "logs", "run", "questions", "broker", ".env"], false);
-	const staged = runGit(home, ["diff", "--cached", "--name-only"]);
-	if (staged.length > 0) runGit(home, ["commit", "-m", "sync home"]);
-	return runGit(home, ["push"]);
+	const clone = cloneHome();
+	try {
+		copyIdentity(home, clone.repo);
+		runGit(clone.repo, ["add", "-A"]);
+		const staged = runGit(clone.repo, ["diff", "--cached", "--name-only"]);
+		if (staged.length > 0) { runGit(clone.repo, ["commit", "-m", "sync home"]); return runGit(clone.repo, ["push"]); }
+		return "home repository: clean";
+	} finally { rmSync(clone.root, { recursive: true, force: true }); }
 }
 
 /**
