@@ -25,6 +25,26 @@ afterEach(() => {
 	fs.rmSync(sandbox, { recursive: true, force: true });
 	delete process.env.DECK_V2_HOME;
 	delete process.env.DECK_V2_ALLOW_REPO_HOME;
+	delete process.env.DECK_HOME_PROFILE;
+});
+
+describe("home sync profile resolution", () => {
+	test("refuses when neither env nor marker resolves a profile", async () => {
+		delete process.env.DECK_HOME_PROFILE;
+		const { resolveHomeSyncProfile } = await import("../src/home-sync");
+		expect(() => resolveHomeSyncProfile(path.join(sandbox, "home"))).toThrow(/refused/);
+	});
+
+	test("uses the marker and lets the environment override it", async () => {
+		const home = path.join(sandbox, "home");
+		fs.mkdirSync(home, { recursive: true });
+		fs.writeFileSync(path.join(home, ".deck-profile"), "full\n");
+		const { resolveHomeSyncProfile } = await import("../src/home-sync");
+		delete process.env.DECK_HOME_PROFILE;
+		expect(resolveHomeSyncProfile(home)).toBe("full");
+		process.env.DECK_HOME_PROFILE = "personal";
+		expect(resolveHomeSyncProfile(home)).toBe("personal");
+	});
 });
 
 describe("home is not a checkout", () => {

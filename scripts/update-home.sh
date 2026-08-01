@@ -24,8 +24,22 @@ bash "$REPO/v2/install.sh"
 # Sync the machine's filtered home profile into the plain operator directory.
 # Clone to a temporary directory. Never turn ~/.deck into a git checkout.
 HOME_REPO="${DECK_HOME_REPO:-$HOME/.deck}"
-HOME_PROFILE="${DECK_HOME_PROFILE:-personal}"
-if command -v gh >/dev/null && gh auth status >/dev/null 2>&1; then
+PROFILE_MARKER="$HOME_REPO/.deck-profile"
+if [ -n "${DECK_HOME_PROFILE:-}" ]; then
+  HOME_PROFILE="$DECK_HOME_PROFILE"
+  case "$HOME_PROFILE" in full|personal) ;; *) echo "home sync skipped: invalid DECK_HOME_PROFILE=$HOME_PROFILE" >&2; HOME_PROFILE="" ;; esac
+elif [ -f "$PROFILE_MARKER" ]; then
+  HOME_PROFILE="$(tr -d '[:space:]' < "$PROFILE_MARKER")"
+  case "$HOME_PROFILE" in full|personal) ;; *) echo "home sync skipped: invalid $PROFILE_MARKER" >&2; HOME_PROFILE="" ;; esac
+else
+  echo "home sync skipped: no DECK_HOME_PROFILE and no $PROFILE_MARKER; refusing to guess" >&2
+  HOME_PROFILE=""
+fi
+if [ -n "$HOME_PROFILE" ] && [ -n "${DECK_HOME_PROFILE:-}" ] && [ ! -e "$PROFILE_MARKER" ]; then
+  printf '%s\n' "$HOME_PROFILE" > "$PROFILE_MARKER"
+  chmod 600 "$PROFILE_MARKER"
+fi
+if [ -n "$HOME_PROFILE" ] && command -v gh >/dev/null && gh auth status >/dev/null 2>&1; then
   TEMP_HOME="$(mktemp -d)"
   trap 'rm -rf "$TEMP_HOME"' EXIT
   HOME_REMOTE="${DECK_HOME_GIT_REMOTE:-twaldin/deck-home}"
@@ -39,7 +53,7 @@ if command -v gh >/dev/null && gh auth status >/dev/null 2>&1; then
     for item in "$TEMP_HOME/repo"/* "$TEMP_HOME/repo"/.[!.]*; do
       [ -e "$item" ] || continue
       name="$(basename "$item")"
-      case "$name" in .git|.pi|.env|AGENTS.md|data|state|wt|logs|run|questions|broker) continue ;; esac
+      case "$name" in .git|.pi|.env|.deck-profile|AGENTS.md|data|state|wt|logs|run|questions|broker) continue ;; esac
       cp -a "$item" "$HOME_REPO/"
     done
   else

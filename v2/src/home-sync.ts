@@ -15,8 +15,16 @@ function remote(): string {
 	return process.env.DECK_HOME_GIT_REMOTE ?? "twaldin/deck-home";
 }
 
-function profile(): string {
-	return process.env.DECK_HOME_PROFILE ?? "personal";
+export function profileMarkerPath(home = deckV2Home()): string {
+	return path.join(home, ".deck-profile");
+}
+
+export function resolveHomeSyncProfile(home = deckV2Home()): HomeSyncProfile {
+	const value = process.env.DECK_HOME_PROFILE?.trim() || (fs.existsSync(profileMarkerPath(home))
+		? fs.readFileSync(profileMarkerPath(home), "utf8").trim()
+		: "");
+	if (value === "full" || value === "personal") return value;
+	throw new Error(`home sync refused: DECK_HOME_PROFILE is unset and ${profileMarkerPath(home)} does not identify a profile`);
 }
 
 function gitRemote(value: string): string {
@@ -24,17 +32,17 @@ function gitRemote(value: string): string {
 	return `https://github.com/${value}.git`;
 }
 
-function assertPersonalProfile(home: string): void {
-	if (profile() !== "personal") return;
+function assertPersonalProfile(home: string, selectedProfile: HomeSyncProfile): void {
+	if (selectedProfile !== "personal") return;
 	const found = execFileSync("find", [home, "-type", "f", "(", "-name", "lindy-*", "-o", "-path", "*/secrets-map.md", ")", "-print", "-quit"], { encoding: "utf8" }).trim();
 	const projects = path.join(home, "config", "projects.json");
 	if (found || (fs.existsSync(projects) && /lindy/i.test(fs.readFileSync(projects, "utf8")))) throw new Error("Lindy material in personal home");
 } 
 
-function cloneHome(): { root: string; repo: string } {
+function cloneHome(selectedProfile: HomeSyncProfile): { root: string; repo: string } {
 	const root = mkdtempSync(path.join(tmpdir(), "deck-home-sync-"));
 	const repo = path.join(root, "repo");
-	const branch = `profile/${profile()}`;
+	const branch = `profile/${selectedProfile}`;
 	try {
 		execFileSync("gh", ["repo", "clone", remote(), repo, "--", "--branch", branch], { stdio: "ignore" });
 	} catch {
@@ -44,7 +52,7 @@ function cloneHome(): { root: string; repo: string } {
 }
 
 function identityEntries(home: string): string[] {
-	return fs.readdirSync(home).filter((name) => ![".git", ".pi", ".env", "AGENTS.md", "data", "state", "wt", "logs", "run", "questions", "broker"].includes(name));
+	return fs.readdirSync(home).filter((name) => ![".git", ".pi", ".env", ".deck-profile", "AGENTS.md", "data", "state", "wt", "logs", "run", "questions", "broker"].includes(name));
 }
 
 function copyIdentity(from: string, to: string): void {
@@ -55,8 +63,9 @@ function copyIdentity(from: string, to: string): void {
 export function homeSyncStatus(home = deckV2Home()): string {
 	let clone: { root: string; repo: string } | undefined;
 	try {
-		clone = cloneHome();
-		assertPersonalProfile(home);
+		const selectedProfile = resolveHomeSyncProfile(home);
+		clone = cloneHome(selectedProfile);
+		assertPersonalProfile(home, selectedProfile);
 		copyIdentity(home, clone.repo);
 		const result = runGit(clone.repo, ["status", "--short"]);
 		return result || "home repository: clean";
@@ -64,12 +73,13 @@ export function homeSyncStatus(home = deckV2Home()): string {
 }
 
 export function homeSyncPull(home = deckV2Home()): string {
-	const clone = cloneHome();
+	const selectedProfile = resolveHomeSyncProfile(home);
+	const clone = cloneHome(selectedProfile);
 	try {
 		fs.mkdirSync(home, { recursive: true });
 		// Pull is additive. A profile branch may be incomplete, and deleting local
 		// entries would turn a sync into silent data loss.
-		assertPersonalProfile(clone.repo);
+		assertPersonalProfile(clone.repo, selectedProfile);
 		copyIdentity(clone.repo, home);
 		return "home repository: pulled";
 	}
@@ -77,9 +87,10 @@ export function homeSyncPull(home = deckV2Home()): string {
 }
 
 export function homeSyncPush(home = deckV2Home()): string {
-	const clone = cloneHome();
+	const selectedProfile = resolveHomeSyncProfile(home);
+	const clone = cloneHome(selectedProfile);
 	try {
-		assertPersonalProfile(home);
+		assertPersonalProfile(home, selectedProfile);
 		copyIdentity(home, clone.repo);
 		runGit(clone.repo, ["add", "-A"]);
 		const staged = runGit(clone.repo, ["diff", "--cached", "--name-only"]);
