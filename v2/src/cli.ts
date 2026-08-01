@@ -16,6 +16,7 @@ import {
 	sweepExpired,
 } from "./backlog";
 import { bootstrapHome, formatBootstrap } from "./bootstrap";
+import { homeSyncPull, homeSyncPush, homeSyncStatus } from "./home-sync";
 import { appendStatus, readStatus } from "./events";
 import { buildFrame, renderFrame } from "./fleet";
 import { projectFleet } from "./herdr";
@@ -59,6 +60,7 @@ const USAGE = `deck-v2 — fleet primitives
   note <id> <verb> <text> [--epoch N]          append a status event as the orchestrator
   backlog ls|add|close|externalize|sweep|check
   home                             print the resolved home
+  home sync [status|pull|push]      sync the private home repository (plain git)
 
 Every command reads and writes the same records the pi extension does.`;
 
@@ -129,9 +131,18 @@ export async function runCli(argv: string[]): Promise<number> {
 			if (unknown.length > 0) throw new Error(`unknown flag(s) for ship: ${unknown.map((flag) => `--${flag}`).join(", ")}`);
 		}
 		switch (command) {
-			case "home":
-				process.stdout.write(`${deckV2Home()}\n`);
+			case "home": {
+				const sub = args._[1];
+				if (sub === undefined) {
+					process.stdout.write(`${deckV2Home()}\n`);
+					return 0;
+				}
+				if (sub === "status") process.stdout.write(`${homeSyncStatus()}\n`);
+				else if (sub === "pull") process.stdout.write(`${homeSyncPull()}\n`);
+				else if (sub === "push") process.stdout.write(`${homeSyncPush()}\n`);
+				else throw new Error(`unknown home subcommand ${sub}`);
 				return 0;
+			}
 
 			case "bootstrap": {
 				// import.meta.dir is v2/src, so the package root is one level up.

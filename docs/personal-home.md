@@ -35,7 +35,26 @@ Run everything below **on the personal host**, as your own user.
    ./install-personal.sh
    ```
 
-   Keep updated later: `~/dev/deck/scripts/update-home.sh`
+   Keep updated later (works on an already-installed host): `~/dev/deck/scripts/update-home.sh`.
+
+The private home repository is synced with plain git:
+
+```sh
+deck-v2 home status
+deck-v2 home pull
+deck-v2 home push
+```
+
+The laptop uses the `profile/full` tree. Deckbox uses `profile/personal`. The
+personal profile is built without Lindy files or the Lindy project entry. Never
+copy the full profile to deckbox. Runtime state, Smithers runs, questions,
+credentials, and `.env` are machine-local and are never synced.
+
+For a remote deckbox session, run `~/dev/deck/scripts/update-home.sh`, then
+restart the session with `/reload` if the running pi does not reload the
+extension automatically. The updater is safe to run repeatedly and is the
+primary path for an existing installation. Private repo access requires an
+active `gh auth login` before the home repo clone or pull.
 
    Laptop agents: `docs/LAPTOP-AGENTS.md` (inbox + project register).
 

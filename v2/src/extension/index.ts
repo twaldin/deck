@@ -14,6 +14,8 @@
  * orchestrator's own process, so there is no second thing that can die silently
  * while the orchestrator keeps running. fm2 lost a watcher for 23.8h that way.
  */
+import { spawn as spawnProcess } from "node:child_process";
+import * as path from "node:path";
 import { Box, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { DECK_OPERATIONAL_PREFIX, registerCalm } from "../calm";
@@ -416,6 +418,24 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 	});
 
 	// ---- commands -----------------------------------------------------------
+
+	pi.registerCommand("self-update", {
+		description: "Pull deck and home updates, then reload the pi session atomically",
+		handler: async (_args: string, ctx: any) => {
+			const update = path.join(path.dirname(pipelineDir()), "..", "scripts", "update-home.sh");
+			try {
+				await new Promise<void>((resolve, reject) => {
+					const child = spawnProcess("bash", [update], { stdio: "inherit" });
+					child.once("error", reject);
+					child.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`update exited ${code}`)));
+				});
+				if (typeof ctx.reload === "function") await ctx.reload();
+				else ctx.ui?.notify?.("Updated. Run /reload to activate the new extension.", "warning");
+			} catch (error) {
+				ctx.ui?.notify?.(`self-update failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+			}
+		},
+	});
 
 	pi.registerCommand("fleet", {
 		description:

@@ -7,6 +7,7 @@
  * subprocess hop in the orchestrator's hot path and no duplicated logic.
  */
 export * from "./home";
+export * from "./home-sync";
 export * from "./projects";
 export * from "./status";
 export * from "./meta";

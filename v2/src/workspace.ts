@@ -4,12 +4,17 @@ import { deckV2Home } from "./home";
 
 /** The single Smithers workspace used by every deck-v2 reader and spawner. */
 export function smithersWorkspaceRoot(home = deckV2Home()): string {
-	return path.resolve(home, "workflows", ".smithers");
+	return path.resolve(smithersStateDirFor(home));
+}
+
+/** Resolve the durable, machine-local Smithers workspace. */
+export function smithersStateDirFor(home = deckV2Home()): string {
+	return path.join(home, "state", "smithers");
 }
 
 /** Parent directory from which Smithers must be invoked to use this workspace. */
 export function smithersWorkspaceCwd(home = deckV2Home()): string {
-	return path.dirname(smithersWorkspaceRoot(home));
+	return smithersStateDirFor(home);
 }
 
 /**

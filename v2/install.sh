@@ -114,23 +114,24 @@ EOF
 chmod +x "$SMITHERS_SHIM"
 printf 'installed smithers shim (%s) at %s\n' "$SMITHERS_VERSION" "$SMITHERS_SHIM"
 
-# Workflows: the fleet reads smithers runs from <home>/workflows/.smithers.
-# The home is a plain directory, so the workspace arrives by symlink into the
-# repo checkout (state stays gitignored there; the home itself gains no .git).
-WORKFLOWS_LINK="${WORKFLOWS_LINK:-$DECK_V2_HOME_DIR/workflows}"
-# Overridable so tests link a fixture instead of the real workspace (and never
-# trigger the bun install below against the checkout).
+# Smithers runtime must be outside the development checkout. Copy only the
+# workspace's static pack files; db, executions and logs are created here.
 WORKFLOWS_SOURCE="${WORKFLOWS_SOURCE:-$(cd "$REPO_V2/../workflows" && pwd)}"
+WORKSPACE_ROOT="$DECK_V2_HOME_DIR/state/smithers"
+mkdir -p "$WORKSPACE_ROOT"
+if [ -d "$WORKFLOWS_SOURCE/.smithers" ]; then
+  for item in package.json bun.lock agents.ts agents ui; do
+    [ -e "$WORKFLOWS_SOURCE/.smithers/$item" ] || continue
+    [ -e "$WORKSPACE_ROOT/$item" ] || cp -a "$WORKFLOWS_SOURCE/.smithers/$item" "$WORKSPACE_ROOT/$item"
+  done
+fi
+# Keep the old link name only for static compatibility. It is never the runtime
+# workspace and no state is written through it.
+WORKFLOWS_LINK="${WORKFLOWS_LINK:-$DECK_V2_HOME_DIR/workflows}"
 if [ -L "$WORKFLOWS_LINK" ] || [ ! -e "$WORKFLOWS_LINK" ]; then
   mkdir -p "$(dirname "$WORKFLOWS_LINK")"
   ln -sfn "$WORKFLOWS_SOURCE" "$WORKFLOWS_LINK"
-  printf 'linked %s -> %s\n' "$WORKFLOWS_LINK" "$WORKFLOWS_SOURCE"
-else
-  printf 'note: %s exists and is not a symlink; left alone.\n' "$WORKFLOWS_LINK"
 fi
-
-# `smithers ps` resolves through the workspace's own node_modules, so a fresh
-# checkout needs one install before the fleet chip can read runs.
-if [ -d "$WORKFLOWS_SOURCE/.smithers" ] && [ ! -d "$WORKFLOWS_SOURCE/.smithers/node_modules" ]; then
-  bun install --cwd "$WORKFLOWS_SOURCE/.smithers"
+if [ -f "$WORKSPACE_ROOT/package.json" ] && [ ! -d "$WORKSPACE_ROOT/node_modules" ]; then
+  bun install --cwd "$WORKSPACE_ROOT"
 fi

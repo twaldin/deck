@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Pull latest deck main + reinstall shims/extension. Safe to re-run.
+# Existing installs are the primary case. Private home sync needs `gh auth login`.
 # Does NOT overwrite ~/.deck/AGENTS.md, broker store, or state.
 set -euo pipefail
 
@@ -11,6 +12,8 @@ if [ ! -d "$REPO/.git" ]; then
 fi
 
 cd "$REPO"
+command -v gh >/dev/null || { echo "error: gh is required for private home sync; run gh auth login" >&2; exit 1; }
+gh auth status >/dev/null 2>&1 || { echo "error: run gh auth login before updating" >&2; exit 1; }
 git fetch origin "$BRANCH"
 git checkout -B "$BRANCH" "origin/$BRANCH"
 git reset --hard "origin/$BRANCH"
@@ -19,6 +22,17 @@ bun install --cwd "$REPO/v2"
 bun install --cwd "$REPO/broker"
 bun install --cwd "$REPO/cli"
 bash "$REPO/v2/install.sh"
+
+# Sync the machine's filtered home profile. The home repo itself must expose
+# profile/full or profile/personal; no full tree is copied to a personal host.
+HOME_REPO="${DECK_HOME_REPO:-$HOME/.deck}"
+HOME_PROFILE="${DECK_HOME_PROFILE:-personal}"
+if [ ! -d "$HOME_REPO/.git" ]; then
+  gh repo clone twaldin/deck-home "$HOME_REPO" -- --branch "profile/$HOME_PROFILE"
+else
+  git -C "$HOME_REPO" pull --ff-only
+fi
+find "$HOME_REPO" -type f -name 'lindy-*' -o -path '*/secrets-map.md' | grep -q . && { echo "error: Lindy material in personal home" >&2; exit 1; } || true
 
 # Seed the operator contract on first update. Never overwrite captain edits.
 # Use the repository shim directly because ~/.local/bin may not be on PATH yet.
