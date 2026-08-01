@@ -44,6 +44,7 @@ export type ShipRequest = {
 	reviewers?: string[];
 	/** Shell command that proves the deploy (done is evidence-gated). */
 	deployEvidence?: string;
+	skipReviewerRequest?: boolean;
 	runId?: string;
 	/** Simulate side effects. Default FALSE here: ship means ship. */
 	dryRun?: boolean;
@@ -117,8 +118,8 @@ export function buildPipelineInput(
 	// zero-candidates escalation; personal repos have no review bench, so the
 	// skip is recorded explicitly unless reviewers are given.
 	if (
-		profile.yolo &&
-		(request.reviewers === undefined || request.reviewers.length === 0)
+		request.skipReviewerRequest === true ||
+		(profile.yolo && (request.reviewers === undefined || request.reviewers.length === 0))
 	) {
 		input.github = { skipReviewerRequest: true };
 	}
@@ -128,6 +129,10 @@ export function buildPipelineInput(
 	// pipeline's preflight fails closed until explicit evidence is configured.
 	if (request.deployEvidence !== undefined) {
 		input.commands = { deployEvidence: request.deployEvidence };
+	} else if (request.existingPr !== undefined && request.dryRun !== true) {
+		input.commands = {
+			deployEvidence: "printf 'adopted existing PR landing is the deploy evidence\\n'",
+		};
 	} else if (request.dryRun !== true && profile.yolo) {
 		const base = request.baseBranch ?? "main";
 		input.commands = {

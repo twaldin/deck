@@ -35,7 +35,7 @@ const USAGE = `deck-v2 — fleet primitives
              --title <text> --summary <text> --accept <a;b;c>
              [--base <branch>] [--break-signal <text>] [--kill-switch <name>]
              [--blast-radius <text>] [--reviewers <a,b>] [--deploy-evidence <cmd>]
-             [--run-id <id>] [--dry-run] [--existing-pr <number>]
+             [--run-id <id>] [--dry-run] [--skip-reviewer-request] [--existing-pr <number>]
                                    DEFAULT ship path: start the project's PR
                                    pipeline (adversarial review gates the PR open;
                                    yolo profiles merge on green, stamp profiles
@@ -122,6 +122,11 @@ export async function runCli(argv: string[]): Promise<number> {
 	}
 
 	try {
+		if (command === "ship") {
+			const known = ["profile", "worktree", "branch", "title", "summary", "accept", "base", "break-signal", "kill-switch", "blast-radius", "reviewers", "deploy-evidence", "run-id", "dry-run", "skip-reviewer-request", "existing-pr"];
+			const unknown = Object.keys(args.flags).filter((flag) => !known.includes(flag) && flag !== "help");
+			if (unknown.length > 0) throw new Error(`unknown flag(s) for ship: ${unknown.map((flag) => `--${flag}`).join(", ")}`);
+		}
 		switch (command) {
 			case "home":
 				process.stdout.write(`${deckV2Home()}\n`);
@@ -165,6 +170,7 @@ export async function runCli(argv: string[]): Promise<number> {
 						: { deployEvidence: need(args.flags, "deploy-evidence") }),
 					...(str(args.flags, "run-id") === undefined ? {} : { runId: need(args.flags, "run-id") }),
 					...(args.flags["dry-run"] === true ? { dryRun: true } : {}),
+					...(args.flags["skip-reviewer-request"] === true ? { skipReviewerRequest: true } : {}),
 					...(existingPr === undefined ? {} : { existingPr }),
 				});
 				process.stdout.write(

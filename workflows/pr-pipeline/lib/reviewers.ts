@@ -85,7 +85,7 @@ export interface ReviewerSelectionInput {
 	codeowners: string[];
 	/** One login per recent commit on the touched files; repeats carry frequency. */
 	recentAuthors: string[];
-	/** Never requested: selfLogins + excludedApprovers (ali), case-insensitive. */
+	/** Never requested: selfLogins, excludedApprovers, and the configured denylist. */
 	exclude: string[];
 	/** Auto-derived reviewer target (explicit entries can exceed it). */
 	max?: number;
@@ -149,6 +149,10 @@ export interface ReviewerRequestAdapters {
 	fetchCodeowners: () => Promise<string | null>;
 	fetchRecentAuthors: (files: string[]) => Promise<string[]>;
 	resolveLogin: (nameOrLogin: string) => Promise<string | null>;
+	/** Return true only when the login is a collaborator who can be requested. */
+	isCollaborator: (login: string) => Promise<boolean>;
+	/** Record a non-fatal reviewer skip for operators. */
+	logSkip?: (login: string, reason: string) => void;
 	requestReviewers: (logins: string[]) => Promise<void>;
 	fetchRequestedReviewers: () => Promise<string[]>;
 }
@@ -164,6 +168,7 @@ export interface ReviewerRequestResult {
 	skipped: boolean;
 	requested: string[];
 	verified: string[];
+	skippedNonCollaborators?: string[];
 	source: string;
 	at: string;
 }
@@ -201,18 +206,29 @@ export async function executeReviewerRequest(
 		codeowners: owners,
 		recentAuthors,
 		exclude: config.exclude,
-		max: config.max,
+		// Validate every eligible candidate, then stop after max collaborators.
+		max: Number.MAX_SAFE_INTEGER,
 	});
-	if (selection.reviewers.length === 0) {
+	const collaborators: string[] = [];
+	const skippedNonCollaborators: string[] = [];
+	for (const login of selection.reviewers) {
+		if (collaborators.length >= config.max) break;
+		if (await adapters.isCollaborator(login)) collaborators.push(login);
+		else {
+			skippedNonCollaborators.push(login);
+			adapters.logSkip?.(login, "not a repository collaborator");
+		}
+	}
+	if (collaborators.length === 0) {
 		throw new Error(
-			`[escalate] no reviewer candidates (CODEOWNERS empty for touched paths, no eligible ` +
-				`recent authors). A PR never proceeds unreviewed: set github.reviewers, or set ` +
+			`[escalate] no reviewer candidates; no collaborator reviewer candidates: ${skippedNonCollaborators.join(", ")}. ` +
+				`A PR never proceeds unreviewed: set github.reviewers, or set ` +
 				`github.skipReviewerRequest=true on a new run to skip explicitly.`,
 		);
 	}
-	await adapters.requestReviewers(selection.reviewers);
+	await adapters.requestReviewers(collaborators);
 	const live = new Set((await adapters.fetchRequestedReviewers()).map((login) => login.toLowerCase()));
-	const missing = selection.reviewers.filter((login) => !live.has(login.toLowerCase()));
+	const missing = collaborators.filter((login) => !live.has(login.toLowerCase()));
 	if (missing.length > 0) {
 		throw new Error(
 			`[escalate] review request silently no-op'd for: ${missing.join(", ")} ` +
@@ -221,8 +237,9 @@ export async function executeReviewerRequest(
 	}
 	return {
 		skipped: false,
-		requested: selection.reviewers,
-		verified: selection.reviewers,
+		requested: collaborators,
+		verified: collaborators,
+		skippedNonCollaborators,
 		source: selection.source,
 		at: new Date().toISOString(),
 	};

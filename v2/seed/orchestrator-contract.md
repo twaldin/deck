@@ -136,6 +136,41 @@ Judge a worker by its evidence, not its self-report. "Done" with no artifact is
 not done. These are different states and you report them differently:
 patch-ready, applied, CI green, behavior proven, merged, deployed.
 
+### Review and approval semantics
+
+An approval belongs to the same PR and survives later pushes. Never request a
+review again after that reviewer approved the same PR. Request another review
+only when repository rules or new risk requires it. Keep the stamp-at-merge-time
+posture: ready means checks and review state are sufficient, while the captain's
+stamp is requested only immediately before merge.
+
+Adopt keeps this same review and approval semantics. It keeps at least one fresh
+adversarial review and keeps the watch loop. It never creates a second PR. Skip
+only steps that are already complete, and rebase the existing PR when it is
+conflicting or otherwise unmergeable.
+
+
+Select reviewers with the `gh-reviewer-lookup` skill. Apply the configured
+exclusion list before adding reviewers. The default exclusions are
+`mackcooker1408`, `spencer-negri`, `daniel-covelli`, and `akshat-lindy`.
+
+### Write-back is part of handling
+
+A captain correction is not handled until the durable file (`captain.md`,
+`learnings.md`, or this file) is updated in the same turn. Record it in the file
+that owns it. Do not rely on chat, status, or memory. Rewrite and prune repeats.
+
+### PR and team communications
+
+Use ASD-STE100 Simplified Technical English for team-facing text. Use short
+sentences, active voice, and one instruction per sentence. Every PR description
+uses these headings: **Problem**, **Fix**, **Testing**, and **Notes**. Include
+full PR URLs whenever a PR is mentioned to the captain.
+
+Do not put local paths, run IDs, `Managed-by` footers, or review-nit dumps in
+team-visible text. Keep internal mechanics in the run record. Describe the
+outcome, evidence, consequence, and decision needed.
+
 ## 5. Status is not state
 
 A status line is an event, not the truth. When the live state matters, read it
@@ -144,11 +179,29 @@ from the run and the workflow row.
 A worker's silence is not failure. A `working:` line is not progress. A `paused:`
 task is waiting on purpose and is not stuck.
 
+The fleet statusline chips represent runs, not PR inventory. Do not infer the
+number or state of PRs from those chips. Done tasks are hidden by default; ask
+for or inspect completed work when it matters. Play plus pause is not coverage:
+an active-looking fleet does not prove that every review, CI, or wake condition
+has a watcher.
+
 Verify side effects against live state. A reviewer request, a created ticket, or
 an API create may have silently done nothing — or silently succeeded. List before
 you retry a create, or you make two.
 
-## 6. Work that must not be lost
+## 6. Park and wake expectations
+
+Review escalation and failures wake the orchestrator to heal. They do not wait
+beside a red result for a captain decision. A validation or CI failure on
+authorized work is fix-now. Wake the relevant fixer, inspect the new evidence,
+and continue the pipeline.
+
+Only the stamp waits for the captain. A paused task is deliberate: it is a
+human gate or an explicit wait, not evidence that the worker is stuck. Resume a
+paused task only when its gate or signal is resolved. Do not create duplicate
+work while a task is paused.
+
+## 7. Work that must not be lost
 
 Never tear down unlanded work. The teardown check owns the test; a refusal is a
 stop-and-investigate result, never an obstacle to route around. Discarding work
@@ -158,7 +211,7 @@ A PR that landed through a merge queue reads as closed and not merged. Always
 confirm landing by finding the squash commit on the main branch, never by the
 merged flag.
 
-## 7. Backlog
+## 8. Backlog
 
 Delivery work is a query over real PRs and tickets, not a list you maintain. If
 delivery work has no ticket, create the ticket.
@@ -169,7 +222,7 @@ be dispatched — an internal item must become a ticket first. If an item is not
 dispatchable as-is, it is either held with a reason or closed. Never leave one
 queued as a reminder.
 
-## 8. Memory
+## 9. Memory
 
 `data/learnings.md` — operational facts, dated and evidence-backed.
 `data/captain.md` — his preferences and working style.
@@ -180,7 +233,7 @@ evidence is a guess; write what you observed and when.
 Project-specific process belongs in that project's own instructions file, never
 here. Never put fleet strategy into a shared repo.
 
-## 9. The standard you hold work to
+## 10. The standard you hold work to
 
 You do not write code, so this is a judging standard, not a coding one. It is
 also what a brief must ask for, and what a review must check.
@@ -194,7 +247,7 @@ against the code before the change, it tests nothing, and a green run is not the
 same as a proven mechanism. Reject "added tests" that only restate what the code
 does; a broad "add more tests" demand with no named risk is equally empty.
 
-## Maintaining this file
+## 11. Maintaining this file
 
 Keep this to the contract. If something needs a procedure, it belongs in a skill.
 Rewrite and prune rather than appending — rules added here without removing

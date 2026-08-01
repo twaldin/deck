@@ -9,7 +9,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { validateBrief } from "../../workflows/pr-pipeline/lib/brief";
 import { profilesFile, seedProfiles, type ProjectProfile } from "../src/projects";
-import { existingPrFromFlag } from "../src/cli";
+import { existingPrFromFlag, runCli } from "../src/cli";
 import { buildPipelineInput, pipelineDir, startShip, type ShipRequest } from "../src/ship";
 import { assertShipGoesThroughPipeline, shipProfileFor } from "../src/spawn";
 
@@ -44,6 +44,35 @@ const request = (overrides: Partial<ShipRequest> = {}): ShipRequest => ({
 	summary: "Does a thing",
 	acceptance: ["it works"],
 	...overrides,
+});
+
+describe("ship CLI flags", () => {
+	async function runWithCapturedStderr(argv: string[]): Promise<{ exitCode: number; stderr: string }> {
+		let stderr = "";
+		const originalWrite = process.stderr.write;
+		process.stderr.write = ((chunk: string | Uint8Array) => {
+			stderr += typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
+			return true;
+		}) as typeof process.stderr.write;
+		try {
+			return { exitCode: await runCli(argv), stderr };
+		} finally {
+			process.stderr.write = originalWrite;
+		}
+	}
+
+	test("rejects unknown flags", async () => {
+		const result = await runWithCapturedStderr(["ship", "deck-42", "--typo"]);
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toContain("unknown flag(s) for ship: --typo");
+	});
+
+	test("keeps existing-pr in the ship allowlist", async () => {
+		const result = await runWithCapturedStderr(["ship", "deck-42", "--existing-pr", "4242"]);
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).not.toContain("unknown flag(s) for ship");
+		expect(result.stderr).toContain("--profile is required");
+	});
 });
 
 describe("existingPrFromFlag", () => {
@@ -104,8 +133,14 @@ describe("buildPipelineInput", () => {
 	test("existingPr passes through to the pipeline input (adopt path); omitted stays omitted", () => {
 		const adopt = buildPipelineInput(request({ existingPr: 4242 }), deckProfile());
 		expect(adopt.existingPr).toBe(4242);
+		expect((adopt.commands as { deployEvidence: string }).deployEvidence).toContain("adopted existing PR");
 		const fresh = buildPipelineInput(request(), deckProfile());
 		expect(fresh.existingPr).toBeUndefined();
+	});
+
+	test("explicit reviewer skip is passed through even for a stamp profile", () => {
+		const input = buildPipelineInput(request({ profile: "lindy", skipReviewerRequest: true }), lindyProfile());
+		expect(input.github).toEqual({ skipReviewerRequest: true });
 	});
 
 	test("a stamp profile (lindy) never gets the weak git-log deploy default: preflight must fail closed until explicit evidence exists", () => {
