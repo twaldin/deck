@@ -38,7 +38,7 @@ export function startValidatedGateway(
 						const requested: QuotaModel = { id: modelParts.at(-1) ?? body.model, provider };
 						try {
 							const routed = routeModel(requested, quotaAccounts(), options.quotaPreferences?.() ?? [], options.onQuotaEvent);
-							if (routed.fallback !== undefined) body.model = body.model.replace(requested.id, routed.model.id);
+							if (routed.fallback !== undefined) body.model = `${routed.model.provider}/${routed.model.id}`;
 							// AuthStorage uses the request session key for sticky OAuth routing.
 							// Pin the selected account before the upstream parses the request.
 							const sessionId = typeof body.prompt_cache_key === "string" ? body.prompt_cache_key : `deck-route:${routed.model.provider}:${routed.model.id}`;
