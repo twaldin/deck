@@ -415,6 +415,37 @@ function makeAgent(ref: string, cwd: string, timeoutMs: number): PiAgent {
 // Workflow
 // ---------------------------------------------------------------------------
 
+export function buildModelPolicy(
+	profile: ProjectProfile | null,
+	profileRepoMismatch: boolean,
+	inputModels: {
+		implementer?: string;
+		reviewer?: string;
+		watcher?: string;
+		fallout?: string;
+		familyOpposition?: boolean;
+		oppositionDefaults?: Record<string, string>;
+	} | undefined,
+): ModelPolicy {
+	const profileModels = profile !== null && !profileRepoMismatch ? profile.models : undefined;
+	const policy: ModelPolicy = {
+		...defaultModelPolicy(),
+		...(profileModels ?? {}),
+		...(profileModels !== undefined ? { reviewer: profileModels.reviewer } : {}),
+		...(inputModels?.implementer !== undefined ? { implementer: inputModels.implementer } : {}),
+		...(inputModels?.reviewer !== undefined ? { reviewer: inputModels.reviewer } : {}),
+		...(inputModels?.watcher !== undefined ? { watcher: inputModels.watcher } : {}),
+		...(inputModels?.fallout !== undefined ? { fallout: inputModels.fallout } : {}),
+		...(inputModels?.familyOpposition !== undefined
+			? { familyOpposition: inputModels.familyOpposition }
+			: {}),
+	};
+	if (inputModels?.oppositionDefaults !== undefined) {
+		policy.oppositionDefaults = { ...policy.oppositionDefaults, ...inputModels.oppositionDefaults };
+	}
+	return policy;
+}
+
 export default smithers((ctx) => {
 	const input = ctx.input;
 	const dryRun = input.dryRun !== false;
@@ -437,20 +468,7 @@ export default smithers((ctx) => {
 	const watchSetPath =
 		input.watchSetPath ?? `${process.env.HOME ?? "~"}/dev/fm2/data/watch-set.jsonl`;
 
-	const policy: ModelPolicy = {
-		...defaultModelPolicy(),
-		...(profile !== null && !profileRepoMismatch ? (profile.models ?? {}) : {}),
-		...(input.models?.implementer !== undefined ? { implementer: input.models.implementer } : {}),
-		...(input.models?.reviewer !== undefined ? { reviewer: input.models.reviewer } : {}),
-		...(input.models?.watcher !== undefined ? { watcher: input.models.watcher } : {}),
-		...(input.models?.fallout !== undefined ? { fallout: input.models.fallout } : {}),
-		...(input.models?.familyOpposition !== undefined
-			? { familyOpposition: input.models.familyOpposition }
-			: {}),
-	};
-	if (input.models?.oppositionDefaults !== undefined) {
-		policy.oppositionDefaults = { ...policy.oppositionDefaults, ...input.models.oppositionDefaults };
-	}
+	const policy = buildModelPolicy(profile, profileRepoMismatch, input.models);
 
 	const ghCtx = { gh: github.gh, repo: input.repo };
 

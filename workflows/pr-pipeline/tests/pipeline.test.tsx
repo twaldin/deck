@@ -18,9 +18,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { simulate } from "smithers-orchestrator/testing";
 
-import pipeline from "../pipeline.tsx";
+import pipeline, { buildModelPolicy } from "../pipeline.tsx";
 import { localFixPrompt, localReviewPrompt, reviewersDecisionPrompt } from "../lib/prompts.ts";
 import { DEFAULT_GITHUB, reviewerExcludeList } from "../pipeline.tsx";
+import { resolveAdversary } from "../lib/models.ts";
 
 const validBrief = {
 	ticket: "LIN-123",
@@ -72,6 +73,26 @@ describe("reviewer selection contracts", () => {
 			...DEFAULT_GITHUB.excludedApprovers,
 			...DEFAULT_GITHUB.reviewerDenylist,
 		]);
+	});
+});
+
+describe("model policy wiring", () => {
+	test("profile opposition mapping resolves the reviewer when reviewer is absent", () => {
+		const policy = buildModelPolicy(
+			{
+				models: {
+					implementer: "deck/claude-sonnet-5",
+					watcher: "deck/gpt-5.6-luna",
+					fallout: "deck/gpt-5.6-sol",
+					familyOpposition: true,
+					oppositionDefaults: { anthropic: "deck/gpt-5.6-luna", openai: "deck/claude-fable-5" },
+				},
+			} as never,
+			false,
+			undefined,
+		);
+		expect(policy.reviewer).toBeUndefined();
+		expect(resolveAdversary(policy.implementer, policy)).toBe("deck/gpt-5.6-luna");
 	});
 });
 

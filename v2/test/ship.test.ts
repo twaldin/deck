@@ -11,7 +11,7 @@ import { validateBrief } from "../../workflows/pr-pipeline/lib/brief";
 import { profilesFile, seedProfiles, type ProjectProfile } from "../src/projects";
 import { existingPrFromFlag, runCli } from "../src/cli";
 import { buildPipelineInput, pipelineDir, startShip, type ShipRequest } from "../src/ship";
-import { assertShipGoesThroughPipeline, shipProfileFor } from "../src/spawn";
+import { assertShipGoesThroughPipeline, shipProfileFor, workerModelFor } from "../src/spawn";
 
 let home: string;
 const saved: Record<string, string | undefined> = {};
@@ -72,6 +72,21 @@ describe("ship CLI flags", () => {
 		expect(result.exitCode).toBe(1);
 		expect(result.stderr).not.toContain("unknown flag(s) for ship");
 		expect(result.stderr).toContain("--profile is required");
+	});
+});
+
+describe("worker model wiring", () => {
+	test("uses the profile implementer instead of the default worker model", () => {
+		const profile = deckProfile();
+		expect(
+			workerModelFor({
+				taskId: "model-test",
+				task: "test",
+				acceptance: ["works"],
+				kind: "ship",
+				project: profile.id,
+			}),
+		).toBe(profile.models?.implementer);
 	});
 });
 

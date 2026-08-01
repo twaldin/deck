@@ -147,6 +147,10 @@ function worktreePrimary(worktree: string): string | null {
  * path matters: without it, `spawn --kind ship --worktree <wt>` on a profiled
  * project would bypass the pipeline the other two paths enforce.
  */
+export function workerModelFor(request: SpawnRequest): string {
+	return request.model ?? shipProfileFor(request)?.models?.implementer ?? DEFAULT_WORKER_MODEL;
+}
+
 export function shipProfileFor(request: SpawnRequest): ProjectProfile | null {
 	if (request.project !== undefined) {
 		const byProject = findProfile(request.project);
@@ -330,8 +334,7 @@ function launchRun(
 	assertIsolatedWorktree(worktree, primaryCheckout);
 	ensureTaskDirs(request.taskId);
 
-	const configuredModel = shipProfileFor(request)?.models?.implementer;
-	const model = request.model ?? configuredModel ?? DEFAULT_WORKER_MODEL;
+	const model = workerModelFor(request);
 	const sessionDir = stateFiles(request.taskId).sessions;
 	fs.mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
 
