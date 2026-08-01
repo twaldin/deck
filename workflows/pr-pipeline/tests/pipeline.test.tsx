@@ -53,24 +53,68 @@ async function run(input: Record<string, unknown>) {
 }
 
 describe("workflow rendering contracts", () => {
-	test("renders and starts nodes when the profile loader supplies models: null", async () => {
-		const rendered = await renderWorkflow(pipeline, {
-			input: { ...baseInput, models: null },
-			outputs: {
-				preflight: [
-					{
-						nodeId: "preflight",
-						ok: true,
-						openQuestions: [],
-						briefDigest: "",
-						resolvedReviewerModel: "deck/claude-fable-5",
-					},
-				],
-			},
-			workflowPath: "pipeline.tsx",
-		});
+	const profileBase = {
+		id: "test",
+		repo: "example/test",
+		primary: "/tmp/test",
+		pipeline: "lindy-full",
+		yolo: false,
+		stamp: true,
+		knowledge: [],
+		depsWarm: true,
+	};
+	const fullModels = {
+		implementer: "deck/claude-fable-5",
+		watcher: "deck/gpt-5.6-luna",
+		fallout: "deck/gpt-5.6-sol",
+		familyOpposition: true,
+		oppositionDefaults: { anthropic: "deck/gpt-5.6-luna" },
+	};
 
-		expect(rendered.tasks.map((task) => task.nodeId)).toEqual(["preflight", "implement"]);
+	async function renderWithProfile(
+		profile: Record<string, unknown>,
+		inputModels: Record<string, unknown> | null | undefined,
+		repo: string,
+	): Promise<string> {
+		const savedHome = process.env.DECK_V2_HOME;
+		const home = fs.mkdtempSync(path.join(os.tmpdir(), "deck-pipeline-models-"));
+		try {
+			process.env.DECK_V2_HOME = home;
+			fs.mkdirSync(path.join(home, "config"), { recursive: true });
+			fs.writeFileSync(path.join(home, "config", "projects.json"), JSON.stringify([profile]));
+			const rendered = await renderWorkflow(pipeline, {
+				input: { ...baseInput, repo, profile: "test", models: inputModels, dryRun: false },
+				outputs: {
+					preflight: [
+						{
+							nodeId: "preflight",
+							ok: true,
+							openQuestions: [],
+							briefDigest: "",
+							resolvedReviewerModel: "deck/claude-fable-5",
+						},
+					],
+				},
+				workflowPath: path.join(import.meta.dir, "..", "pipeline.tsx"),
+			});
+			const implementer = rendered.tasks.find((task) => task.nodeId === "implement");
+			expect(implementer).toBeDefined();
+			return String(implementer?.agent?.model);
+		} finally {
+			if (savedHome === undefined) delete process.env.DECK_V2_HOME;
+			else process.env.DECK_V2_HOME = savedHome;
+			fs.rmSync(home, { recursive: true, force: true });
+		}
+	}
+
+	test.each([
+		["full profile models", { ...profileBase, models: fullModels }, undefined, "example/test", "claude-fable-5"],
+		["missing profile models", profileBase, undefined, "example/test", "gpt-5.6-luna"],
+		["null profile models", { ...profileBase, models: null }, null, "example/test", "gpt-5.6-luna"],
+		["partial profile models with input models", { ...profileBase, models: { implementer: "deck/claude-fable-5" } }, { watcher: "deck/gpt-5.6-sol" }, "example/test", "claude-fable-5"],
+		["repo-mismatched profile", { ...profileBase, models: fullModels }, { implementer: "deck/claude-sonnet-5" }, "other/repo", "gpt-5.6-luna"],
+	] as const)("renders with %s", async (_name, profile, inputModels, repo, expectedImplementer) => {
+		expect(await renderWithProfile(profile, inputModels, repo)).toBe(expectedImplementer);
 	});
 });
 
@@ -93,16 +137,6 @@ describe("reviewer selection contracts", () => {
 });
 
 describe("model policy wiring", () => {
-	test.each([
-		["full profile models", { models: { implementer: "deck/gpt-5.6-luna", watcher: "deck/gpt-5.6-luna", fallout: "deck/gpt-5.6-sol", familyOpposition: true, oppositionDefaults: {} } }, false, undefined],
-		["missing profile models", {}, false, undefined],
-		["null profile models", { models: null }, false, undefined],
-		["input implementer override", { models: { implementer: "deck/gpt-5.6-luna", watcher: "deck/gpt-5.6-luna", fallout: "deck/gpt-5.6-sol", familyOpposition: true, oppositionDefaults: {} } }, false, { implementer: "deck/claude-sonnet-5" }],
-		["repo-mismatched profile", { models: { implementer: "deck/claude-sonnet-5" } }, true, undefined],
-	] as const)("renders with %s", (_name, profile, mismatch, inputModels) => {
-		expect(() => buildModelPolicy(profile as never, mismatch, inputModels)).not.toThrow();
-	});
-
 	test("profile opposition mapping resolves the reviewer when reviewer is absent", () => {
 		const policy = buildModelPolicy(
 			{
