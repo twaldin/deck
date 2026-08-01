@@ -23,7 +23,7 @@ The broker's `/v1/models` response uses provider-qualified IDs, while its resolv
 
 Use `--thinking xhigh` (or a model selector suffix such as `deck/gpt-5.6-sol:xhigh`) for OpenAI-compatible Deck models. The broker accepts the fixed pi effort vocabulary: `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. Model metadata marks unsupported levels so pi does not send invalid provider values. Claude models use the OpenAI-compatible ingress. The registered Grok model maps pi levels to xAI's `reasoning_effort` values (`low` or `high`). Explicit numeric Anthropic `budget:<tokens>` selectors are supported by the broker helper, but are not part of pi's `--thinking` vocabulary.
 
-The catalog metadata in `deck-provider.ts` lists the selectable surface: Claude models expose budget mode, the GPT model exposes OpenAI effort mode, and future Grok entries must expose only xAI's `low`/`high` surface.
+The catalog metadata in `deck-provider.ts` lists the selectable surface: Claude models do not advertise unsupported thinking levels on the OpenAI-compatible ingress, the GPT model exposes OpenAI effort mode, and future Grok entries must expose only xAI's `low`/`high` surface.
 
 The extension stores no token. Its `apiKey` is the command-backed reference `!cat ~/.deck/broker/gateway.token`; Pi resolves `!` commands at request time and `authHeader: true` sends the result as a bearer credential. Installed source for this behavior is in `dist/core/model-registry.js` and `dist/core/resolve-config-value.js` under the global `@mariozechner/pi-coding-agent` package.
 
