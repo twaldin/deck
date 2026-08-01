@@ -63,6 +63,40 @@ describe("fleet workspace safeguards", () => {
 		expect(warnings).toEqual([]);
 	});
 
+	test("REGRESSION: TUI fleet opens from the cached frame before Smithers ps returns", async () => {
+		const bin = path.join(home, "slow-bin");
+		fs.mkdirSync(bin, { recursive: true });
+		fs.writeFileSync(path.join(bin, "bunx"), "#!/bin/sh\nsleep 1\nprintf '[]'\n");
+		fs.chmodSync(path.join(bin, "bunx"), 0o755);
+		const previousPath = process.env.PATH;
+		process.env.PATH = bin;
+		try {
+			const pi = fakePi();
+			let customOpened = false;
+			deckV2(pi.api as never);
+			const ctx = {
+				mode: "tui",
+				ui: {
+					custom: async () => {
+						customOpened = true;
+					},
+					setStatus: () => {},
+					setWorkingVisible: () => {},
+					setHiddenThinkingLabel: () => {},
+					setFooter: () => {},
+				},
+			};
+			await pi.emit("session_start", ctx);
+			const fleet = pi.commands.get("fleet");
+			const pending = fleet?.("", ctx);
+			await new Promise((resolve) => setTimeout(resolve, 100));
+			expect(customOpened).toBe(true);
+			await pending;
+		} finally {
+			process.env.PATH = previousPath;
+		}
+	});
+
 	test("REGRESSION: non-TUI fleet prints a live first frame", async () => {
 		const bin = path.join(home, "bin");
 		fs.mkdirSync(bin, { recursive: true });

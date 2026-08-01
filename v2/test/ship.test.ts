@@ -216,6 +216,34 @@ describe("startShip", () => {
 		expect(fs.existsSync(path.join(pipelineDir(), "pipeline.tsx"))).toBe(true);
 	});
 
+	test("REGRESSION: spawn uses the shared workspace cwd and an absolute pipeline path", async () => {
+		const fakeDir = path.join(home, "fake-pipeline");
+		const bin = path.join(home, "bin");
+		const cwdFile = path.join(home, "spawn-cwd");
+		const pipelineFile = path.join(home, "spawn-pipeline");
+		fs.mkdirSync(fakeDir, { recursive: true });
+		fs.mkdirSync(path.join(home, "workflows"), { recursive: true });
+		fs.mkdirSync(bin, { recursive: true });
+		fs.writeFileSync(path.join(fakeDir, "pipeline.tsx"), "// fake\\n");
+		fs.writeFileSync(path.join(bin, "bunx"), `#!/bin/sh
+printf '%s' "$PWD" > ${JSON.stringify(cwdFile)}
+printf '%s' "$3" > ${JSON.stringify(pipelineFile)}
+`);
+		fs.chmodSync(path.join(bin, "bunx"), 0o755);
+		process.env.DECK_PIPELINE_DIR = fakeDir;
+		const savedPath = process.env.PATH;
+		process.env.PATH = bin;
+		try {
+			await startShip(request({ runId: "cwd-test" }), home);
+			for (let attempt = 0; attempt < 20 && !fs.existsSync(cwdFile); attempt++)
+				await new Promise((resolve) => setTimeout(resolve, 10));
+			expect(fs.realpathSync(fs.readFileSync(cwdFile, "utf8"))).toBe(fs.realpathSync(path.join(home, "workflows")));
+			expect(fs.readFileSync(pipelineFile, "utf8")).toBe(path.join(fakeDir, "pipeline.tsx"));
+		} finally {
+			process.env.PATH = savedPath;
+		}
+	});
+
 	test("REGRESSION: a launch that never starts REJECTS instead of reporting started", async () => {
 		// A fake pipeline dir satisfies the existence check; an empty PATH makes
 		// bunx unspawnable, so the child emits error instead of spawn.
