@@ -27,7 +27,8 @@ function gitRemote(value: string): string {
 function assertPersonalProfile(home: string): void {
 	if (profile() !== "personal") return;
 	const found = execFileSync("find", [home, "-type", "f", "(", "-name", "lindy-*", "-o", "-path", "*/secrets-map.md", ")", "-print", "-quit"], { encoding: "utf8" }).trim();
-	if (found) throw new Error("Lindy material in personal home");
+	const projects = path.join(home, "config", "projects.json");
+	if (found || (fs.existsSync(projects) && /lindy/i.test(fs.readFileSync(projects, "utf8")))) throw new Error("Lindy material in personal home");
 } 
 
 function cloneHome(): { root: string; repo: string } {

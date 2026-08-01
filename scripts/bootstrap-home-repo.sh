@@ -8,7 +8,7 @@ PERSONAL_SOURCE="${2:?usage: bootstrap-home-repo.sh FULL_SOURCE PERSONAL_SOURCE}
 for source in "$FULL_SOURCE" "$PERSONAL_SOURCE"; do
   [ -d "$source" ] || { echo "error: missing profile source: $source" >&2; exit 1; }
 done
-if find "$PERSONAL_SOURCE" -type f \( -name 'lindy-*' -o -path '*/secrets-map.md' \) -print -quit | grep -q .; then
+if find "$PERSONAL_SOURCE" -type f \( -name 'lindy-*' -o -path '*/secrets-map.md' \) -print -quit | grep -q . || grep -qi 'lindy' "$PERSONAL_SOURCE/config/projects.json" 2>/dev/null; then
   echo "error: personal source contains Lindy material" >&2
   exit 1
 fi
