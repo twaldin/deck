@@ -79,7 +79,13 @@ export function warmDependencies(worktree: string, repo: string): void {
 	for (const marker of [DEPS_READY, DEPS_FAILED]) {
 		try { fs.rmSync(path.join(worktree, marker)); } catch { /* absent */ }
 	}
-	const child = Bun.spawn(["sh", "-lc", install.command], { cwd: worktree, stdout: "pipe", stderr: "pipe" });
+	let child: Bun.Subprocess;
+	try {
+		child = Bun.spawn(["sh", "-lc", install.command], { cwd: worktree, stdout: "pipe", stderr: "pipe" });
+	} catch (error) {
+		fs.writeFileSync(path.join(worktree, DEPS_FAILED), `${errorMessage(error)}\n`);
+		return;
+	}
 	void (async () => {
 		const [stdout, stderr, code] = await Promise.all([
 			new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited,
