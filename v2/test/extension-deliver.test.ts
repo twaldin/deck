@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import deckV2 from "../src/extension/index";
 import { appendStatus } from "../src/events";
+import { pendingWakes } from "../src/wake";
 
 let home: string;
 let savedPath: string | undefined;
@@ -33,19 +34,50 @@ function fakePi(sendMessage?: (...args: unknown[]) => unknown) {
 	};
 	return { api, emit, sent };
 }
-const ctx = () => ({ mode: "tui", isIdle: () => true, hasPendingMessages: () => false, ui: undefined });
+const ctx = (busy = false) => ({ mode: "tui", isIdle: () => !busy, hasPendingMessages: () => busy, ui: undefined });
 const settle = () => new Promise((resolve) => setTimeout(resolve, 25));
 
 describe("wake delivery", () => {
-	test("queues a wake while busy through followUp", async () => {
+	test("queues a wake after a busy cycle through followUp", async () => {
+		appendStatus("t1", "blocked", "main is red");
+		const pi = fakePi();
+		deckV2(pi.api as never);
+		const busyCtx = ctx(true);
+		await pi.emit("session_start", busyCtx);
+		await settle();
+		expect(pi.sent).toHaveLength(0);
+		// A status watcher retries the durable outbox after the turn becomes idle.
+		const idleCtx = ctx();
+		await pi.emit("agent_settled", idleCtx);
+		await pi.emit("session_start", idleCtx);
+		await settle();
+		expect(pi.sent).toHaveLength(1);
+		expect(pi.sent[0]?.[0]).toMatchObject({ customType: "deck.wake", display: true });
+		expect(pi.sent[0]?.[1]).toEqual({ deliverAs: "followUp", triggerTurn: true });
+	});
+
+	test("acks a queued wake only when agent_start fires", async () => {
 		appendStatus("t1", "blocked", "main is red");
 		const pi = fakePi();
 		deckV2(pi.api as never);
 		await pi.emit("session_start", ctx());
 		await settle();
-		expect(pi.sent).toHaveLength(1);
-		expect(pi.sent[0]?.[0]).toMatchObject({ customType: "deck.wake", display: true });
-		expect(pi.sent[0]?.[1]).toEqual({ deliverAs: "followUp", triggerTurn: true });
+		expect(pendingWakes()).toHaveLength(1);
+		await pi.emit("agent_start", ctx());
+		expect(pendingWakes()).toHaveLength(0);
+		await pi.emit("agent_start", ctx());
+		expect(pendingWakes()).toHaveLength(0);
+	});
+
+	test("keeps a queued wake owed when shutdown happens before agent_start", async () => {
+		appendStatus("t1", "blocked", "main is red");
+		const pi = fakePi();
+		deckV2(pi.api as never);
+		await pi.emit("session_start", ctx());
+		await settle();
+		expect(pendingWakes()).toHaveLength(1);
+		await pi.emit("session_shutdown", ctx());
+		expect(pendingWakes()).toHaveLength(1);
 	});
 
 	test("acks only after a successful queue call", async () => {

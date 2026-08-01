@@ -80,6 +80,8 @@ export default function deckV2(pi: any): void {
 	const SEND_BACKOFF_MAX_MS = 15 * 60_000;
 	// Busy fence prevents each timer/watch cycle from queueing another follow-up
 	// during one turn. Events remain in the durable outbox until the turn settles.
+	// This is intentional: follow-ups are queued only when pi is idle, then
+	// acknowledged when the queued turn actually starts.
 	let agentBusy = false;
 	let pendingAckIds: string[] = [];
 	// Re-entrancy lock: deliver() fires from the interval AND every fs.watch
@@ -749,6 +751,11 @@ export default function deckV2(pi: any): void {
 		unwatch?.();
 		timer = undefined;
 		unwatch = undefined;
+		// Queue acceptance is not delivery. If shutdown happens before the
+		// queued turn starts, leave the outbox entries owed and drop only the
+		// in-memory fence so a later session can retry them.
+		pendingAckIds = [];
+		agentBusy = false;
 	});
 }
 
