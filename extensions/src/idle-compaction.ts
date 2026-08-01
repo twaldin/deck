@@ -4,6 +4,7 @@ import {
 	MAX_TIMER_DELAY_MS,
 	parseIdleCompactionConfig,
 	selectIdleCompactionConfig,
+	hasProviderNativeCompaction,
 	type IdleCompactionConfig,
 } from "./idle-compaction-policy";
 
@@ -82,7 +83,7 @@ export interface IdleCompactionExtensionApi {
 	appendEntry(customType: string, data?: unknown): void;
 	sendMessage(
 		message: { customType: string; content: string; display: boolean },
-		options: { triggerTurn: boolean },
+		options: { triggerTurn: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
 	): void;
 	registerFlag?(
 		name: string,
@@ -249,6 +250,7 @@ export function registerIdleCompaction(
 				lastCompactedContextMarker,
 				lastCompactedTokens,
 				lastCompactedAtMs,
+				providerNativeCompactionAvailable: hasProviderNativeCompaction(ctx.model),
 			});
 
 			if (!decision.compact) {
@@ -269,7 +271,7 @@ export function registerIdleCompaction(
 									content: KEEP_WARM_PROMPT,
 									display: false,
 								},
-								{ triggerTurn: true },
+								{ triggerTurn: true, deliverAs: "followUp" },
 							);
 						} catch (error) {
 							keepWarmRequested = false;

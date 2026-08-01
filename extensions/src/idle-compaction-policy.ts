@@ -13,7 +13,7 @@ export interface IdleCompactionConfig {
 	minimumCompactionIntervalMs: number;
 	/** Send a tiny request instead of compacting at the cache deadline. */
 	keepWarm: boolean;
-	/** Compact rather than keep-warm once context reaches this percentage. */
+	/** Context percentage at which pre-miss compaction may run. */
 	keepWarmContextPercent: number;
 	retryDelayMs: number;
 	maxRetriesPerContext: number;
@@ -30,7 +30,7 @@ export const DEFAULT_IDLE_COMPACTION_CONFIG: Readonly<IdleCompactionConfig> = {
 	minGrowthPercent: 5,
 	minimumCompactionIntervalMs: 4 * 60_000,
 	keepWarm: false,
-	keepWarmContextPercent: 70,
+	keepWarmContextPercent: 50,
 	retryDelayMs: 60_000,
 	maxRetriesPerContext: 2,
 	notify: true,
@@ -39,6 +39,20 @@ export const DEFAULT_IDLE_COMPACTION_CONFIG: Readonly<IdleCompactionConfig> = {
 export interface IdleCompactionModel {
 	provider: string;
 	id: string;
+}
+
+/** Native compaction is available only on direct provider routes today. */
+export function hasProviderNativeCompaction(model: IdleCompactionModel | undefined): boolean {
+	if (model === undefined) return false;
+	if (model.provider === "xai" || model.provider === "xai-oauth") return false;
+	if (model.provider === "anthropic" || model.provider === "openai" || model.provider === "openai-codex") return true;
+	// Deck resolves to provider-native Anthropic/OpenAI routes by model family.
+	// Keep unknown broker models on the legacy path until capability is advertised.
+	if (model.provider === "deck") {
+		const id = model.id.slice(model.id.lastIndexOf("/") + 1);
+		return id.startsWith("claude-") || id.startsWith("gpt-") || id.startsWith("glm-");
+	}
+	return true;
 }
 
 /**
@@ -132,7 +146,8 @@ export type IdleCompactionDecision =
 				| "below-context-floor"
 				| "no-context-growth"
 				| "keep-warm"
-				| "cooldown";
+				| "cooldown"
+				| "provider-native-unavailable";
 			waitMs?: number;
 	  };
 
@@ -149,6 +164,8 @@ export interface IdleCompactionInput {
 	lastCompactedContextMarker: string | null;
 	lastCompactedTokens: number | null;
 	lastCompactedAtMs: number | null;
+	/** True only when the resolved provider route exposes native compaction. */
+	providerNativeCompactionAvailable?: boolean;
 }
 
 export function idleThresholdMs(config: IdleCompactionConfig): number {
@@ -191,7 +208,11 @@ export function decideIdleCompaction(input: IdleCompactionInput): IdleCompaction
 	const keepWarmThreshold = Math.ceil(
 		input.contextWindow * (config.keepWarmContextPercent / 100),
 	);
-	if (config.keepWarm && input.contextTokens < keepWarmThreshold) {
+	const nativeAvailable = input.providerNativeCompactionAvailable ?? true;
+	// The pre-miss policy never compacts a context below 50%, regardless of
+	// legacy keep-warm configuration. A provider without native support always
+	// takes the keep-warm path at every context size.
+	if (input.contextTokens < keepWarmThreshold || !nativeAvailable) {
 		return { compact: false, reason: "keep-warm" };
 	}
 
