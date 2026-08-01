@@ -222,9 +222,6 @@ export function validateProfiles(parsed: unknown, source: string): ProjectProfil
 			for (const seat of ["reasoning", "reasoningImplementer", "reasoningReviewer", "reasoningWatcher", "reasoningFallout"]) {
 				if (m[seat] !== undefined && !["low", "medium", "high", "xhigh", "max"].includes(m[seat] as string)) throw new Error(`${where} (${p.id}): models.${seat} must be low, medium, high, xhigh, or max`);
 			}
-			for (const seat of ["reasoning", "reasoningImplementer", "reasoningReviewer", "reasoningWatcher", "reasoningFallout"]) {
-				if (m[seat] !== undefined && !["low", "medium", "high", "xhigh", "max"].includes(m[seat] as string)) throw new Error(`${where} (${p.id}): models.${seat} must be low, medium, high, xhigh, or max`);
-			}
 			if (m.familyOpposition !== undefined && typeof m.familyOpposition !== "boolean") {
 				throw new Error(`${where} (${p.id}): models.familyOpposition must be a boolean`);
 			}

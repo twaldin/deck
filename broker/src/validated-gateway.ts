@@ -69,8 +69,10 @@ export function startValidatedGateway(
 						const native = nativeReasoning(provider, selector);
 						delete body.reasoning;
 						delete body.reasoning_effort;
-						if ("reasoning_effort" in native) body.reasoning_effort = native.reasoning_effort;
-						else if ("thinking" in native) body.thinking = native.thinking;
+						if ("reasoning_effort" in native) {
+							body.reasoning_effort = native.reasoning_effort;
+							if (provider === "openai" && providerName !== "deck") body.reasoning = { effort: native.reasoning_effort };
+						} else if ("thinking" in native) body.thinking = native.thinking;
 					}
 					if (body.thinking?.type === "enabled") {
 						const nativeThinking = nativeReasoning("anthropic", `budget:${body.thinking.budget_tokens ?? ""}`);
