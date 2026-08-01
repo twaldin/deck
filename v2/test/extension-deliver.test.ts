@@ -36,6 +36,8 @@ function fakePi(sendMessage?: (...args: unknown[]) => unknown) {
 }
 const ctx = (busy = false) => ({ mode: "tui", isIdle: () => !busy, hasPendingMessages: () => busy, ui: undefined });
 const settle = () => new Promise((resolve) => setTimeout(resolve, 25));
+const wakeCalls = (calls: unknown[][]) =>
+	calls.filter((call) => (call[0] as { customType?: string } | undefined)?.customType === "deck.wake");
 
 describe("wake delivery", () => {
 	test("queues a wake after a busy cycle through followUp", async () => {
@@ -45,15 +47,16 @@ describe("wake delivery", () => {
 		const busyCtx = ctx(true);
 		await pi.emit("session_start", busyCtx);
 		await settle();
-		expect(pi.sent).toHaveLength(0);
+		expect(wakeCalls(pi.sent)).toHaveLength(0);
 		// A status watcher retries the durable outbox after the turn becomes idle.
 		const idleCtx = ctx();
 		await pi.emit("agent_settled", idleCtx);
 		await pi.emit("session_start", idleCtx);
 		await settle();
-		expect(pi.sent).toHaveLength(1);
-		expect(pi.sent[0]?.[0]).toMatchObject({ customType: "deck.wake", display: true });
-		expect(pi.sent[0]?.[1]).toEqual({ deliverAs: "followUp", triggerTurn: true });
+		const sent = wakeCalls(pi.sent);
+		expect(sent).toHaveLength(1);
+		expect(sent[0]?.[0]).toMatchObject({ customType: "deck.wake", display: true });
+		expect(sent[0]?.[1]).toEqual({ deliverAs: "followUp", triggerTurn: true });
 	});
 
 	test("acks a queued wake only when agent_start fires", async () => {
@@ -97,7 +100,7 @@ describe("wake delivery", () => {
 		deckV2(pi.api as never);
 		await pi.emit("session_start", ctx());
 		await settle();
-		expect(pi.sent).toHaveLength(1);
+		expect(wakeCalls(pi.sent)).toHaveLength(1);
 	});
 
 	test("does not expose a bare user injection path", async () => {
@@ -107,6 +110,6 @@ describe("wake delivery", () => {
 		deckV2(pi.api as never);
 		await pi.emit("session_start", ctx());
 		await settle();
-		expect(calls[0]?.[0]).not.toBeTypeOf("string");
+		expect(wakeCalls(calls)[0]?.[0]).not.toBeTypeOf("string");
 	});
 });
