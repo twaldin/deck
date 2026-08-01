@@ -54,6 +54,16 @@ async function main(): Promise<void> {
 		version: BROKER_VERSION,
 		resolveModel: models.resolve,
 		listModels: models.list,
+		quotaAccounts: () => {
+			const snapshot = storage.exportSnapshot();
+			const now = Date.now();
+			return snapshot.credentials.map(entry => ({
+				credentialId: entry.id,
+				provider: entry.provider.includes("anthropic") ? "anthropic" : entry.provider.includes("xai") ? "xai" : "openai",
+				blocked: store.listCredentialBlocks([entry.id]).filter(block => block.blockedUntilMs > now).map(block => block.blockScope).filter((scope): scope is import("./quota").QuotaTier => ["all-model-5h", "all-model-7d", "fable-7d"].includes(scope)),
+			}));
+		},
+		onQuotaEvent: event => console.error(JSON.stringify(event)),
 	});
 
 	const refresher = new AuthBrokerRefresher({ storage });

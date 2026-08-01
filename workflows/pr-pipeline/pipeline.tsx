@@ -69,7 +69,7 @@ import {
 	validateModelPolicy,
 	type ModelPolicy,
 } from "./lib/models.ts";
-import { findProfile, type ProjectProfile } from "./lib/profiles.ts";
+import { findProfile, type ModelSeat, type ProjectProfile } from "./lib/profiles.ts";
 import {
 	falloutPrompt,
 	implementPrompt,
@@ -169,10 +169,10 @@ const inputSchema = z.object({
 	bypassApprovals: z.boolean().optional(),
 	models: z
 		.object({
-			implementer: z.string().optional(),
-			reviewer: z.string().optional(),
-			watcher: z.string().optional(),
-			fallout: z.string().optional(),
+			implementer: z.union([z.string(), z.object({ model: z.string(), reasoning: z.string().min(1).optional() })]).optional(),
+			reviewer: z.union([z.string(), z.object({ model: z.string(), reasoning: z.string().min(1).optional() })]).optional(),
+			watcher: z.union([z.string(), z.object({ model: z.string(), reasoning: z.string().min(1).optional() })]).optional(),
+			fallout: z.union([z.string(), z.object({ model: z.string(), reasoning: z.string().min(1).optional() })]).optional(),
 			familyOpposition: z.boolean().optional(),
 			oppositionDefaults: z.record(z.string(), z.string()).optional(),
 		})
@@ -409,14 +409,19 @@ function nowIso(): string {
 	return new Date().toISOString();
 }
 
-function makeAgent(ref: string, cwd: string, timeoutMs: number): PiAgent {
-	const { provider, model } = parseModelRef(ref);
+function seat(ref: ModelSeat): { ref: string; reasoning?: string } {
+	return typeof ref === "string" ? { ref } : { ref: ref.model, reasoning: ref.reasoning };
+}
+
+function makeAgent(ref: ModelSeat, cwd: string, timeoutMs: number): PiAgent {
+	const selected = seat(ref);
+	const { provider, model } = parseModelRef(selected.ref);
 	return new PiAgent({
 		provider,
 		model,
 		cwd,
 		timeoutMs,
-		thinking: "medium",
+		thinking: selected.reasoning ?? "medium",
 		noSession: true,
 	});
 }
@@ -429,10 +434,10 @@ export function buildModelPolicy(
 	profile: ProjectProfile | null,
 	profileRepoMismatch: boolean,
 	inputModels: {
-		implementer?: string;
-		reviewer?: string;
-		watcher?: string;
-		fallout?: string;
+		implementer?: ModelSeat;
+		reviewer?: ModelSeat;
+		watcher?: ModelSeat;
+		fallout?: ModelSeat;
 		familyOpposition?: boolean;
 		oppositionDefaults?: Record<string, string>;
 	} | null | undefined,
@@ -617,7 +622,7 @@ export default smithers((ctx) => {
 		? null
 		: {
 				implementer: makeAgent(policy.implementer, input.worktree, 45 * 60_000),
-				reviewer: makeAgent(reviewerModel, input.worktree, 20 * 60_000),
+				reviewer: makeAgent({ model: reviewerModel, reasoning: seat(policy.reviewer ?? reviewerModel).reasoning }, input.worktree, 20 * 60_000),
 				watcher: makeAgent(policy.watcher, input.worktree, 30 * 60_000),
 				fallout: makeAgent(policy.fallout, input.worktree, 15 * 60_000),
 			};

@@ -1,6 +1,7 @@
 import { startFastGateway, type FastGatewayOptions } from "./fast-gateway";
 import { DEFAULT_GATEWAY_BIND } from "./paths";
 import { nativeReasoning } from "./reasoning";
+import { routeModel, NoQuotaError, type QuotaModel } from "./quota";
 
 type GatewayUpstream = { url: string; close(): Promise<void> };
 type StartUpstream = (options: FastGatewayOptions) => GatewayUpstream;
@@ -16,6 +17,7 @@ export function startValidatedGateway(
 	startUpstream: StartUpstream = startFastGateway,
 ) {
 	const upstream = startUpstream({ ...options, bind: "127.0.0.1:0" });
+	const quotaAccounts = options.quotaAccounts;
 	const { hostname, port } = gatewayBind(options.bind ?? DEFAULT_GATEWAY_BIND);
 	const server = Bun.serve({
 		hostname,
@@ -28,6 +30,17 @@ export function startValidatedGateway(
 				try {
 					body = await request.json() as typeof body;
 					const modelParts = body.model?.split("/") ?? [];
+					if (body.model !== undefined && quotaAccounts !== undefined) {
+						const provider = modelParts.at(-2) === "anthropic" || modelParts.at(-1)?.startsWith("claude-") ? "anthropic" : modelParts.at(-2) === "xai" ? "xai" : "openai";
+						const requested: QuotaModel = { id: modelParts.at(-1) ?? body.model, provider };
+						try {
+							const routed = routeModel(requested, quotaAccounts(), options.quotaPreferences?.() ?? [], options.onQuotaEvent);
+							if (routed.fallback !== undefined) body.model = body.model.replace(requested.id, routed.model.id);
+						} catch (error) {
+							if (error instanceof NoQuotaError) return Response.json({ error: { code: error.code, type: "quota_exhausted", message: error.message, provider: error.provider, retry_after_ms: error.retryAfterMs ?? null } }, { status: 503 });
+							throw error;
+						}
+					}
 					const modelId = modelParts.at(-1) ?? "";
 					const providerName = modelParts.at(-2);
 					const provider = modelId.startsWith("claude-") || providerName === "anthropic" ? "anthropic" : providerName === "xai" || providerName === "xai-oauth" || modelId.startsWith("grok-") ? "xai" : "openai";

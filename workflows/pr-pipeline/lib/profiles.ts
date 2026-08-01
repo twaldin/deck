@@ -16,4 +16,5 @@ export {
 	validateProfiles,
 	type PipelineId,
 	type ProjectProfile,
+	type ModelSeat,
 } from "../../../v2/src/projects.ts";
