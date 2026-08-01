@@ -1617,7 +1617,7 @@ function factoryRows(frame: FleetFrame): Array<{ effort: EffortRow; workflow: Wo
 	});
 	const represented = new Set(rows.map(({ workflow }) => workflow.runId));
 	for (const task of frame.tasks) {
-		if (task.runState === "finished" || (task.runId !== null && represented.has(task.runId))) continue;
+		if (["done", "failed", "cancelled"].includes(task.lastVerb ?? "") || (task.runId !== null && represented.has(task.runId))) continue;
 		const runId = task.runId ?? `task:${task.taskId}`;
 		const wakeReason = task.waitingFor ?? task.lastNote ?? task.lastVerb;
 		const workflow: WorkflowRow = { runId, workflow: null, status: task.lastVerb, state: task.runState, step: task.stage, taskId: task.taskId, ticket: task.ticket, prNumber: task.prNumber, prTitle: task.prTitle, phase: task.phase, waitingFor: wakeReason as WaitingFor, activity: task.activity, startedAt: null };
