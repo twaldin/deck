@@ -39,11 +39,11 @@ describe("merge fallback", () => {
 		expect(ghCalled).toBe(false);
 	});
 
-	test("fails other Graphite errors without fallback", async () => {
+	test("does not fall back for unrelated not-found Graphite errors", async () => {
 		let ghCalled = false;
 		await expect(
 			runMergeWithFallback({
-				runGraphite: async () => result(2, "", "authentication failed"),
+				runGraphite: async () => result(1, "", "no pull request found for branch x"),
 				exec: async () => {
 					ghCalled = true;
 					return result(0);
@@ -53,6 +53,24 @@ describe("merge fallback", () => {
 				cwd: "/tmp/wt",
 				fallbackArgs: ["--squash"],
 			}),
+		).rejects.toThrow("no pull request found for branch x");
+		expect(ghCalled).toBe(false);
+	});
+
+	test("fails other Graphite errors without fallback", async () => {
+		let ghCalled = false;
+		await expect(
+			runMergeWithFallback({
+				runGraphite: async () => result(2, "", "authentication failed"),
+			exec: async () => {
+				ghCalled = true;
+				return result(0);
+			},
+			gh: "gh",
+			prNumber: 42,
+			cwd: "/tmp/wt",
+			fallbackArgs: ["--squash"],
+		}),
 		).rejects.toThrow("authentication failed");
 		expect(ghCalled).toBe(false);
 	});
@@ -62,11 +80,11 @@ describe("merge fallback", () => {
 			runMergeWithFallback({
 				runGraphite: async () => result(1, "", "untracked branch"),
 				exec: async () => result(1, "", "pull request is not mergeable"),
-				gh: "gh",
-				prNumber: 42,
-				cwd: "/tmp/wt",
-				fallbackArgs: ["--squash"],
-			}),
+			gh: "gh",
+			prNumber: 42,
+			cwd: "/tmp/wt",
+			fallbackArgs: ["--squash"],
+		}),
 		).rejects.toThrow(/untracked branch[\s\S]*not mergeable/);
 	});
 });
