@@ -176,6 +176,7 @@ const inputSchema = z.object({
 			familyOpposition: z.boolean().optional(),
 			oppositionDefaults: z.record(z.string(), z.string()).optional(),
 		})
+		.nullable()
 		.optional(),
 	limits: z
 		.object({
@@ -434,39 +435,28 @@ export function buildModelPolicy(
 		fallout?: string;
 		familyOpposition?: boolean;
 		oppositionDefaults?: Record<string, string>;
-	} | undefined,
-	profileSelected = false,
+	} | null | undefined,
 ): ModelPolicy {
+	// The project-profile loader can preserve a JSON `models: null` value from
+	// config/projects.json. Normalize it before reading `profileModels.reviewer`
+	// or `profileModels.oppositionDefaults`; mismatched profiles provide neither
+	// their loaded policy nor their input snapshot.
 	const profileModels =
-		profileSelected && inputModels !== undefined
-			? inputModels
-			: profile !== null && !profileRepoMismatch
-				? profile.models
-				: undefined;
-	const policy: ModelPolicy = {
+		profile !== null && !profileRepoMismatch && profile.models !== null && typeof profile.models === "object"
+			? profile.models
+			: undefined;
+	const models = profileRepoMismatch ? undefined : inputModels ?? undefined;
+	return {
 		...defaultModelPolicy(),
 		...(profileModels ?? {}),
-		...(profileModels !== undefined
-			? {
-					reviewer: profileModels.reviewer,
-				oppositionDefaults: {
-					...defaultModelPolicy().oppositionDefaults,
-					...profileModels.oppositionDefaults,
-				},
-			}
-			: {}),
-		...(inputModels?.implementer !== undefined ? { implementer: inputModels.implementer } : {}),
-		...(inputModels?.reviewer !== undefined ? { reviewer: inputModels.reviewer } : {}),
-		...(inputModels?.watcher !== undefined ? { watcher: inputModels.watcher } : {}),
-		...(inputModels?.fallout !== undefined ? { fallout: inputModels.fallout } : {}),
-		...(inputModels?.familyOpposition !== undefined
-			? { familyOpposition: inputModels.familyOpposition }
-			: {}),
+		...(profileModels !== undefined ? { reviewer: profileModels.reviewer } : {}),
+		...(models ?? {}),
+		oppositionDefaults: {
+			...defaultModelPolicy().oppositionDefaults,
+			...(profileModels?.oppositionDefaults ?? {}),
+			...(models?.oppositionDefaults ?? {}),
+		},
 	};
-	if (inputModels?.oppositionDefaults !== undefined) {
-		policy.oppositionDefaults = { ...policy.oppositionDefaults, ...inputModels.oppositionDefaults };
-	}
-	return policy;
 }
 
 export default smithers((ctx) => {
@@ -491,7 +481,7 @@ export default smithers((ctx) => {
 	const watchSetPath =
 		input.watchSetPath ?? `${process.env.HOME ?? "~"}/dev/fm2/data/watch-set.jsonl`;
 
-	const policy = buildModelPolicy(profile, profileRepoMismatch, input.models, input.profile !== undefined);
+	const policy = buildModelPolicy(profile, profileRepoMismatch, input.models);
 
 	const ghCtx = { gh: github.gh, repo: input.repo };
 

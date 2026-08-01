@@ -65,7 +65,7 @@ describe("seeds", () => {
 		expect(lindy?.doctrine).toContain("state=closed, merged=false");
 		expect(lindy?.models?.implementer).toBe("deck/gpt-5.6-luna");
 		expect(lindy?.models?.reviewer).toBeUndefined();
-		expect(lindy?.models?.oppositionDefaults.openai).toBe("deck/claude-fable-5");
+		expect(lindy?.models?.oppositionDefaults?.openai).toBe("deck/claude-fable-5");
 
 		const deck = findProfile("deck");
 		expect(deck?.pipeline).toBe("yolo-ship");
@@ -98,6 +98,16 @@ describe("config file", () => {
 	test("model seat config refuses malformed opposition defaults", () => {
 		writeConfig([{ ...deckOverride, models: { implementer: "deck/gpt-5.6-luna", watcher: "deck/gpt-5.6-luna", fallout: "deck/gpt-5.6-sol", familyOpposition: true, oppositionDefaults: { openai: 42 } } }]);
 		expect(() => loadProfiles()).toThrow(/oppositionDefaults values/);
+	});
+
+	test.each([
+		["missing", undefined],
+		["null", null],
+		["partial", { implementer: "deck/claude-fable-5" }],
+	] as const)("normalizes %s model config to a defaultable policy", (_name, models) => {
+		writeConfig([{ ...deckOverride, models }]);
+		const profile = loadProfiles()[0];
+		expect(profile?.models?.implementer).toBe(models && "implementer" in models ? "deck/claude-fable-5" : undefined);
 	});
 
 	test("malformed entries are refused with the reason", () => {

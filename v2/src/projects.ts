@@ -23,12 +23,12 @@ export const PIPELINES = ["lindy-full", "yolo-ship", "ask-then-yolo"] as const;
 export type PipelineId = (typeof PIPELINES)[number];
 
 export type ModelSeats = {
-	implementer: string;
+	implementer?: string;
 	reviewer?: string;
-	watcher: string;
-	fallout: string;
-	familyOpposition: boolean;
-	oppositionDefaults: Record<string, string>;
+	watcher?: string;
+	fallout?: string;
+	familyOpposition?: boolean;
+	oppositionDefaults?: Record<string, string>;
 };
 
 export type ProjectProfile = {
@@ -198,28 +198,30 @@ export function validateProfiles(parsed: unknown, source: string): ProjectProfil
 			throw new Error(`${where} (${p.id}): doctrine must be a string`);
 		}
 		let models: ModelSeats | undefined;
-		if (p.models !== undefined) {
-			if (p.models === null || typeof p.models !== "object" || Array.isArray(p.models)) {
+		if (p.models !== undefined && p.models !== null) {
+			if (typeof p.models !== "object" || Array.isArray(p.models)) {
 				throw new Error(`${where} (${p.id}): models must be an object`);
 			}
 			const m = p.models as Record<string, unknown>;
-			if (typeof m.implementer !== "string" || typeof m.watcher !== "string" || typeof m.fallout !== "string") {
-				throw new Error(`${where} (${p.id}): models implementer, watcher, and fallout must be strings`);
+			for (const role of ["implementer", "reviewer", "watcher", "fallout"] as const) {
+				if (m[role] !== undefined && typeof m[role] !== "string") {
+					throw new Error(`${where} (${p.id}): models.${role} must be a string`);
+				}
 			}
-			if (m.reviewer !== undefined && typeof m.reviewer !== "string") {
-				throw new Error(`${where} (${p.id}): models reviewer must be a string`);
+			if (m.familyOpposition !== undefined && typeof m.familyOpposition !== "boolean") {
+				throw new Error(`${where} (${p.id}): models.familyOpposition must be a boolean`);
 			}
-			if (typeof m.familyOpposition !== "boolean" || m.oppositionDefaults === null || typeof m.oppositionDefaults !== "object" || Array.isArray(m.oppositionDefaults)) {
-				throw new Error(`${where} (${p.id}): models familyOpposition and oppositionDefaults are required`);
+			if (m.oppositionDefaults !== undefined && (m.oppositionDefaults === null || typeof m.oppositionDefaults !== "object" || Array.isArray(m.oppositionDefaults))) {
+				throw new Error(`${where} (${p.id}): models.oppositionDefaults must be an object`);
 			}
 			models = {
-				implementer: m.implementer,
-				...(m.reviewer === undefined ? {} : { reviewer: m.reviewer }),
-				watcher: m.watcher,
-				fallout: m.fallout,
-				familyOpposition: m.familyOpposition,
+				...(m.implementer === undefined ? {} : { implementer: m.implementer as string }),
+				...(m.reviewer === undefined ? {} : { reviewer: m.reviewer as string }),
+				...(m.watcher === undefined ? {} : { watcher: m.watcher as string }),
+				...(m.fallout === undefined ? {} : { fallout: m.fallout as string }),
+				...(m.familyOpposition === undefined ? {} : { familyOpposition: m.familyOpposition as boolean }),
 				oppositionDefaults: (() => {
-					const entries = Object.entries(m.oppositionDefaults);
+					const entries = Object.entries((m.oppositionDefaults ?? {}) as Record<string, unknown>);
 					if (entries.some(([, value]) => typeof value !== "string" || value.length === 0)) {
 						throw new Error(`${where} (${p.id}): models.oppositionDefaults values must be non-empty strings`);
 					}

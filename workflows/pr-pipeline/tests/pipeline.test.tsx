@@ -16,7 +16,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { simulate } from "smithers-orchestrator/testing";
+import { renderWorkflow, simulate } from "smithers-orchestrator/testing";
 
 import pipeline, { buildModelPolicy, DEFAULT_GITHUB } from "../pipeline.tsx";
 import { localFixPrompt, localReviewPrompt, reviewersDecisionPrompt } from "../lib/prompts.ts";
@@ -51,6 +51,79 @@ async function run(input: Record<string, unknown>) {
 	}
 	return { sim, error };
 }
+
+describe("workflow rendering contracts", () => {
+	const profileBase = {
+		id: "test",
+		repo: "example/test",
+		primary: "/tmp/test",
+		pipeline: "lindy-full",
+		yolo: false,
+		stamp: true,
+		knowledge: [],
+		depsWarm: true,
+	};
+	const fullModels = {
+		implementer: "deck/claude-fable-5",
+		watcher: "deck/gpt-5.6-luna",
+		fallout: "deck/gpt-5.6-sol",
+		familyOpposition: true,
+		oppositionDefaults: { anthropic: "deck/gpt-5.6-luna" },
+	};
+
+	async function renderWithProfile(
+		profile: Record<string, unknown>,
+		inputModels: Record<string, unknown> | null | undefined,
+		repo: string,
+	): Promise<string> {
+		const savedHome = process.env.DECK_V2_HOME;
+		const home = fs.mkdtempSync(path.join(os.tmpdir(), "deck-pipeline-models-"));
+		try {
+			process.env.DECK_V2_HOME = home;
+			fs.mkdirSync(path.join(home, "config"), { recursive: true });
+			fs.writeFileSync(path.join(home, "config", "projects.json"), JSON.stringify([profile]));
+			const rendered = await renderWorkflow(pipeline, {
+				input: { ...baseInput, repo, profile: "test", models: inputModels, dryRun: false },
+				outputs: {
+					preflight: [
+						{
+							nodeId: "preflight",
+							ok: true,
+							openQuestions: [],
+							briefDigest: "",
+							resolvedReviewerModel: "deck/claude-fable-5",
+						},
+					],
+				},
+				workflowPath: path.join(import.meta.dir, "..", "pipeline.tsx"),
+			});
+			const implementer = rendered.tasks.find((task) => task.nodeId === "implement");
+			expect(implementer).toBeDefined();
+			const agent = implementer?.agent;
+			expect(agent).toBeDefined();
+			expect(Array.isArray(agent)).toBe(false);
+			return String((agent as { model: string }).model);
+		} finally {
+			if (savedHome === undefined) delete process.env.DECK_V2_HOME;
+			else process.env.DECK_V2_HOME = savedHome;
+			fs.rmSync(home, { recursive: true, force: true });
+		}
+	}
+
+	test("input schema accepts null models", () => {
+		expect(pipeline.inputSchema.safeParse({ ...baseInput, models: null }).success).toBe(true);
+	});
+
+	test.each([
+		["full profile models", { ...profileBase, models: fullModels }, undefined, "example/test", "claude-fable-5"],
+		["missing profile models", profileBase, undefined, "example/test", "gpt-5.6-luna"],
+		["null profile models", { ...profileBase, models: null }, null, "example/test", "gpt-5.6-luna"],
+		["partial profile models with input models", { ...profileBase, models: { implementer: "deck/claude-fable-5" } }, { watcher: "deck/gpt-5.6-sol" }, "example/test", "claude-fable-5"],
+		["repo-mismatched profile", { ...profileBase, models: fullModels }, { implementer: "deck/claude-sonnet-5" }, "other/repo", "gpt-5.6-luna"],
+	] as const)("renders with %s", async (_name, profile, inputModels, repo, expectedImplementer) => {
+		expect(await renderWithProfile(profile, inputModels, repo)).toBe(expectedImplementer);
+	});
+});
 
 describe("reviewer selection contracts", () => {
 	test("reviewer prompt uses the lookup skill and real line breaks", () => {
