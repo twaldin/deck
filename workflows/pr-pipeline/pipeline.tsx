@@ -106,6 +106,9 @@ const DEFAULT_FIXTURES = {
 	watchPollsToExit: 2,
 	watchWaitPolls: 0,
 	prNumber: 4242,
+	queueLifecycle: [] as Array<{ state: "open" | "closed"; autoMergeRequest: boolean }>,
+	landingPollLanded: true,
+	noFalloutProbe: false,
 	headChangeRounds: [] as number[],
 };
 
@@ -219,6 +222,9 @@ const inputSchema = z.object({
 			watchPollsToExit: z.number().int().positive().optional(),
 			watchWaitPolls: z.number().int().nonnegative().optional(),
 			prNumber: z.number().int().positive().optional(),
+			queueLifecycle: z.array(z.object({ state: z.enum(["open", "closed"]), autoMergeRequest: z.boolean() })).optional(),
+			landingPollLanded: z.boolean().optional(),
+			noFalloutProbe: z.boolean().optional(),
 			headChangeRounds: z.array(z.number().int().nonnegative()).optional(),
 		})
 		.optional(),
@@ -596,7 +602,12 @@ export default smithers((ctx) => {
 
 	const mergeReceipt = ctx.latest(outputs.mergeReceipt, "enqueue-merge");
 	const latestQueue = ctx.latest(outputs.queuePoll, "queue-poll");
-	const queueRows = (ctx.outputs.queuePoll ?? []) as Array<{ poll: number; state: string; ejected: boolean }>;
+	const queueRows = (ctx.outputs.queuePoll ?? []) as Array<{
+		poll: number;
+		state: string;
+		autoMergeRequest: boolean;
+		ejected: boolean;
+	}>;
 	const latestLanding = ctx.latest(outputs.landingPoll, "landing-poll");
 	const landingRows = (ctx.outputs.landingPoll ?? []) as Array<{ poll: number; landed: boolean }>;
 	const deploy = ctx.latest(outputs.deployEvidence, "deploy-evidence");
@@ -1666,15 +1677,21 @@ export default smithers((ctx) => {
 							{() => (async () => {
 								const pollNo = queueRows.length;
 								if (!dryRun && pollNo > 0) await sleepSeconds(limits.landingPollSeconds * 2);
+								const fixtureLifecycle = fixtures.queueLifecycle[pollNo];
 								const lifecycle = dryRun
-									? { state: "closed" as const, merged: false, autoMergeRequest: false }
+									? { state: fixtureLifecycle?.state ?? "closed" as const, merged: false, autoMergeRequest: fixtureLifecycle?.autoMergeRequest ?? false }
 									: await fetchPrLifecycle(ghCtx, pr.prNumber);
 								const prior = queueRows[queueRows.length - 1];
 								const ejected = lifecycle.state === "open" && prior?.autoMergeRequest === true && !lifecycle.autoMergeRequest;
 								if (ejected) {
-									throw new Error(`[wake-fix-loop] PR #${pr.prNumber} was ejected from the merge queue (auto-merge request disappeared while open). Re-ready and re-submit after the fix.`);
+									// GitHub removes auto-merge when a queued PR is ejected. Re-enable it
+									// before returning the poll row so the next queue loop iteration can
+									// observe a fresh queue request instead of dying on a retry.
+									if (!dryRun) {
+										await execOrThrow(bunExec, [ghCtx.gh, "pr", "merge", String(pr.prNumber), "--auto", "--merge"], { cwd: input.worktree });
+									}
 								}
-								return { poll: pollNo, state: lifecycle.state, autoMergeRequest: lifecycle.autoMergeRequest, ejected, reason: lifecycle.state === "closed" ? "PR closed; verify squash on base" : "waiting in merge queue" };
+								return { poll: pollNo, state: lifecycle.state, autoMergeRequest: ejected ? true : lifecycle.autoMergeRequest, ejected, reason: ejected ? "PR ejected; auto-merge re-submitted" : lifecycle.state === "closed" ? "PR closed; verify squash on base" : "waiting in merge queue" };
 							})()}
 						</Task>
 					</Loop>
@@ -1694,8 +1711,8 @@ export default smithers((ctx) => {
 									if (dryRun) {
 										return {
 											poll: pollNo,
-											landed: true,
-											sha: "dryrun-squash-sha",
+											landed: fixtures.landingPollLanded,
+											sha: fixtures.landingPollLanded ? "dryrun-squash-sha" : null,
 											subject: `${input.ticket}: dry-run change (#${pr.prNumber})`,
 										};
 									}
@@ -1738,10 +1755,10 @@ export default smithers((ctx) => {
 						{() =>
 							(async () => {
 								if (dryRun) {
-									return { evidence: "dry-run: deploy evidence simulated", deployedAt: nowIso() };
+									return { evidence: fixtures.noFalloutProbe ? "PARK: no fallout probe configured" : "dry-run: deploy evidence simulated", deployedAt: nowIso() };
 								}
 								const probe = profile?.falloutCommand ?? commands.deployEvidence;
-								if (probe === undefined) return { evidence: "none-configured: no fallout probe configured", deployedAt: nowIso() };
+								if (probe === undefined) return { evidence: "PARK: no fallout probe configured", deployedAt: nowIso() };
 								try {
 									const out = await runShell(probe, input.worktree);
 									return { evidence: out.slice(-4000), deployedAt: nowIso() };
