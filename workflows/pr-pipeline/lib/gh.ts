@@ -39,7 +39,7 @@ export const bunExec: ExecFn = async (argv, options) => {
 	return { code, stdout, stderr };
 };
 
-export async function execOrThrow(exec: ExecFn, argv: string[], options?: { cwd?: string }): Promise<string> {
+export async function execOrThrow(exec: ExecFn, argv: string[], options?: { cwd?: string; stdin?: string }): Promise<string> {
 	const result = await exec(argv, options);
 	if (result.code !== 0) {
 		throw new Error(`command failed (${result.code}): ${argv.join(" ")}\n${result.stderr.slice(0, 2000)}`);
@@ -60,7 +60,7 @@ export async function postComment(
 		"-X",
 		"POST",
 		`repos/${ctx.repo}/issues/${issueNumber}/comments`,
-		"-f",
+		"-F",
 		"body=@-",
 	], { stdin: signedCommentBody(project, body) });
 }
@@ -78,7 +78,7 @@ export async function postReviewReply(
 		"-X",
 		"POST",
 		`repos/${ctx.repo}/pulls/comments/${commentId}/replies`,
-		"-f",
+		"-F",
 		"body=@-",
 	], { stdin: signedCommentBody(project, body) });
 }

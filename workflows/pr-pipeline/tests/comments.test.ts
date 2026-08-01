@@ -24,6 +24,7 @@ describe("agent comment signatures", () => {
 			return { code: 0, stdout: "", stderr: "" };
 		};
 		await postComment({ gh: "gh", repo: "lindy-ai/lindy", exec }, "lindy", 42, "A reply");
+		expect(calls[0].argv).toContain("-F");
 		expect(calls[0].argv).toContain("body=@-");
 		expect(calls[0].stdin).toBe(`A reply\n\n${AGENT_COMMENT_SIGNATURE}`);
 	});
@@ -36,6 +37,7 @@ describe("agent comment signatures", () => {
 		};
 		await postReviewReply({ gh: "gh", repo: "lindy-ai/lindy", exec }, "lindy", 7, "A reply");
 		expect(received?.argv).toContain("repos/lindy-ai/lindy/pulls/comments/7/replies");
+		expect(received?.argv).toContain("-F");
 		expect(received?.stdin).toContain(AGENT_COMMENT_SIGNATURE);
 	});
 
