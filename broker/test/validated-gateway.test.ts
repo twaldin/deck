@@ -21,7 +21,7 @@ async function withFakeUpstream() {
 		url: `http://127.0.0.1:${upstreamServer.port}`,
 		close: async () => upstreamServer.stop(),
 	};
-	const gateway = startValidatedGateway({ bind: "127.0.0.1:0" }, (() => upstream) as never);
+	const gateway = startValidatedGateway({ bind: "127.0.0.1:0" } as Parameters<typeof startValidatedGateway>[0], (() => upstream) as never);
 	gateways.push(gateway);
 	return { gateway, forwarded };
 }
