@@ -114,6 +114,17 @@ describe("workflow rendering contracts", () => {
 		expect(pipeline.inputSchema.safeParse({ ...baseInput, models: null }).success).toBe(true);
 	});
 
+	test("profile reasoning flows to each seat, with explicit seat overrides", () => {
+		const policy = buildModelPolicy({
+			...profileBase,
+			models: { reasoning: "high", reasoningReviewer: "xhigh" },
+		}, false, undefined);
+		expect(policy.reasoningImplementer).toBe("high");
+		expect(policy.reasoningReviewer).toBe("xhigh");
+		expect(policy.reasoningWatcher).toBe("high");
+		expect(policy.reasoningFallout).toBe("high");
+	});
+
 	test.each([
 		["full profile models", { ...profileBase, models: fullModels }, undefined, "example/test", "claude-fable-5"],
 		["missing profile models", profileBase, undefined, "example/test", "gpt-5.6-luna"],

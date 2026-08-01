@@ -31,7 +31,6 @@ export function startValidatedGateway(
 				try {
 					body = await request.json() as typeof body;
 					requestBody = body;
-					const modelParts = body.model?.split("/") ?? [];
 					if (body.model !== undefined && quotaAccounts !== undefined) {
 						const providerName = modelParts.at(-2);
 						const provider = providerName ?? (modelParts.at(-1)?.startsWith("claude-") ? "anthropic" : modelParts.at(-1)?.startsWith("grok-") ? "xai" : "openai-codex");
@@ -51,10 +50,10 @@ export function startValidatedGateway(
 							throw error;
 						}
 					}
-					const reasoningModelParts = body.model?.split("/") ?? [];
-					const modelId = reasoningModelParts.at(-1) ?? "";
-					const providerName = reasoningModelParts.at(-2);
-					const provider = providerName === "anthropic" || modelId.startsWith("claude-") ? "anthropic" : providerName === "xai" || providerName === "xai-oauth" || modelId.startsWith("grok-") ? "xai" : "openai";
+					const reasoningParts = body.model?.split("/") ?? [];
+					const modelId = reasoningParts.at(-1) ?? "";
+					const providerName = reasoningParts.at(-2);
+					const provider = providerName === "anthropic" || (providerName !== "deck" && modelId.startsWith("claude-")) ? "anthropic" : providerName === "xai" || providerName === "xai-oauth" || modelId.startsWith("grok-") ? "xai" : "openai";
 					const effort = body.reasoning_effort ?? body.reasoning?.effort;
 					if (effort !== undefined) {
 						const selector = provider === "anthropic" && effort.startsWith("budget:") ? effort : clampReasoning(effort as ReasoningEffort, supportedReasoning(modelId, provider));

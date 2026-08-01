@@ -16,20 +16,24 @@ const ANTHROPIC_BUDGETS: Record<ReasoningLevel, number> = {
 	max: 65536,
 };
 
-export function clampReasoning(level: ReasoningEffort, supported: readonly ReasoningEffort[]): ReasoningEffort {
-	if (supported.includes(level)) return level;
-	const requested = ORDER.indexOf(level);
+export function clampReasoning(level: string, supported: readonly ReasoningEffort[]): ReasoningEffort {
+	if (!ORDER.includes(level as ReasoningEffort)) throw new Error(`Unsupported reasoning effort: ${level}`);
+	if (supported.includes(level as ReasoningEffort)) return level as ReasoningEffort;
+	const requested = ORDER.indexOf(level as ReasoningEffort);
 	return [...supported].sort((a, b) => Math.abs(ORDER.indexOf(a) - requested) - Math.abs(ORDER.indexOf(b) - requested))[0] ?? "minimal";
 }
 
 export const MODEL_REASONING_LEVELS: Record<string, readonly ReasoningEffort[]> = {
+	"claude-sonnet-4-5": ["low", "medium", "high", "xhigh", "max"],
+	"claude-haiku-4-5": ["low", "medium", "high", "xhigh", "max"],
+	"claude-fable-5": ["low", "medium", "high", "xhigh", "max"],
 	"grok-4.5": ["low", "high"],
 	"gpt-5.6-sol": ["low", "medium", "high", "xhigh"],
 };
 
 export function supportedReasoning(modelId: string, provider: "openai" | "anthropic" | "xai"): readonly ReasoningEffort[] {
 	if (provider === "anthropic") return ["low", "medium", "high", "xhigh", "max"];
-	return MODEL_REASONING_LEVELS[modelId] ?? (provider === "xai" ? ["low", "high"] : ORDER);
+	return MODEL_REASONING_LEVELS[modelId] ?? (provider === "xai" ? ["low", "high"] : ["low", "high"]);
 }
 
 const OPENAI_EFFORTS = new Set<ReasoningEffort>(["minimal", "low", "medium", "high", "xhigh", "max"]);

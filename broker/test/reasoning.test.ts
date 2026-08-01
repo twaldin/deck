@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { nativeReasoning, NATIVE_REASONING_LEVELS } from "../src/reasoning";
+import { clampReasoning, nativeReasoning, NATIVE_REASONING_LEVELS, supportedReasoning } from "../src/reasoning";
 
 describe("native reasoning passthrough", () => {
 	test("keeps OpenAI xhigh in the outgoing native field", () => {
@@ -21,6 +21,12 @@ describe("native reasoning passthrough", () => {
 		expect(() => nativeReasoning("xai", "xhigh")).toThrow("only low or high");
 		expect(() => nativeReasoning("openai", "turbo")).toThrow("Unsupported openai");
 		expect(nativeReasoning("anthropic", "high")).toEqual({ provider: "anthropic", thinking: { type: "enabled", budget_tokens: 16384 } });
+	});
+
+	test("clamps unsupported named levels to the nearest model-supported level", () => {
+		expect(clampReasoning("medium", supportedReasoning("grok-4.5", "xai"))).toBe("low");
+		expect(clampReasoning("max", supportedReasoning("gpt-5.6-sol", "openai"))).toBe("xhigh");
+		expect(() => clampReasoning("turbo", supportedReasoning("gpt-5.6-sol", "openai"))).toThrow("Unsupported reasoning effort");
 	});
 
 	test("publishes the provider catalog surface", () => {

@@ -74,8 +74,14 @@ const baseRequest = () => ({
 });
 
 describe("spawn worktree allocation", () => {
-	test("passes the per-seat model string unchanged to pi", () => {
-		expect(piArgs("session", `${DEFAULT_WORKER_MODEL}:fast`, undefined, false)).toContain(`${DEFAULT_WORKER_MODEL}:fast`);
+	test("passes the requested reasoning level to Pi as --thinking", () => {
+		expect(piArgs("session", `${DEFAULT_WORKER_MODEL}:fast`, "high", false)).toEqual([
+			"-p", "--session-dir", "session", "--model", `${DEFAULT_WORKER_MODEL}:fast`, "--thinking", "high", "--exclude-tools", "ask_captain,web_search",
+		]);
+	});
+
+	test("legacy thinking remains the fallback when reasoning is absent", () => {
+		expect(piArgs("session", `${DEFAULT_WORKER_MODEL}:fast`, "legacy", false)).toContain("legacy");
 	});
 	test("repo-only spawn allocates an isolated worktree under DECK_HOME/wt and records it", () => {
 		const result = startRun(
