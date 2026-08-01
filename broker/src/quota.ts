@@ -1,6 +1,6 @@
 /** Pure quota-aware account selection. The gateway can use this without touching auth tokens. */
 export type QuotaTier = "all-model-5h" | "all-model-7d" | "fable-7d";
-export type AccountQuota = { credentialId: number; provider: string; /** AuthStorage provider id, when it differs from the routing family. */ authProvider?: string; blocked: readonly QuotaTier[]; lastUsedAt?: number };
+export type AccountQuota = { credentialId: number; /** Exact pi-ai provider id, except explicit aliases such as xai-oauth. */ provider: string; /** AuthStorage provider id, when it differs from the routing identity. */ authProvider?: string; blocked: readonly QuotaTier[]; lastUsedAt?: number };
 export type QuotaModel = { id: string; provider: string };
 export type QuotaEvent = { type: "model-fallback"; requestedModel: string; selectedModel: string; provider: string; reason: "all-accounts-cooling" };
 
@@ -17,6 +17,11 @@ export class NoQuotaError extends Error {
 }
 
 /** A fable consumes all three Anthropic windows; other Anthropic models use two. */
+/** Provider aliases are explicit. Do not collapse unrelated catalog providers. */
+export function routingProvider(provider: string): string {
+	return provider === "xai-oauth" ? "xai" : provider;
+}
+
 export function tiersForModel(model: QuotaModel): readonly QuotaTier[] {
 	if (model.provider !== "anthropic") return [];
 	return model.id.startsWith("claude-fable-") ? ["all-model-5h", "all-model-7d", "fable-7d"] : ["all-model-5h", "all-model-7d"];
@@ -28,7 +33,8 @@ function usable(account: AccountQuota, needed: readonly QuotaTier[]): boolean {
 
 /** Pick the least recently used warm account, which spreads load without herding. */
 export function pickAccount(model: QuotaModel, accounts: readonly AccountQuota[]): AccountQuota {
-	const candidates = accounts.filter(account => account.provider === model.provider && usable(account, tiersForModel(model)));
+	const provider = routingProvider(model.provider);
+	const candidates = accounts.filter(account => routingProvider(account.provider) === provider && usable(account, tiersForModel(model)));
 	if (candidates.length === 0) throw new NoQuotaError(model.provider);
 	return [...candidates].sort((a, b) => (a.lastUsedAt ?? 0) - (b.lastUsedAt ?? 0))[0]!;
 }

@@ -29,7 +29,7 @@ import {
 } from "./paths";
 import { refreshUsageRoster } from "./usage";
 import { startValidatedGateway } from "./validated-gateway";
-import { normalizeBlockScopes } from "./quota";
+import { normalizeBlockScopes, routingProvider } from "./quota";
 
 
 export const BROKER_VERSION = "deck-broker/0.1.0";
@@ -60,14 +60,14 @@ async function main(): Promise<void> {
 			const now = Date.now();
 			return snapshot.credentials.map(entry => ({
 				credentialId: entry.id,
-				provider: entry.provider.includes("anthropic") ? "anthropic" : entry.provider.includes("xai") ? "xai" : "openai",
+				provider: routingProvider(entry.provider),
 				authProvider: entry.provider,
 				blocked: store.listCredentialBlocks([entry.id]).filter(block => block.blockedUntilMs > now).flatMap(block => normalizeBlockScopes(block.blockScope)), 
 			}));
 		},
 		quotaPreferences: () => [...models.list()].map(model => ({
 			id: model.id,
-			provider: model.provider === "anthropic" ? "anthropic" : model.provider === "xai" ? "xai" : "openai",
+			provider: routingProvider(model.provider),
 		})),
 		onQuotaEvent: event => console.error(JSON.stringify(event)),
 	});

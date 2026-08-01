@@ -3,8 +3,8 @@ interface DeckModel {
 	name: string;
 	api?: "openai-completions" | "anthropic-messages";
 	reasoning: boolean;
-	/** Pi-native level-to-wire mapping. Null means the provider rejects that level. */
-	thinkingLevelMap?: Partial<Record<"off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max", string | null>>;
+	/** Pi-native reasoning selector. The gateway converts Claude effort to a token budget. */
+	thinking?: { mode: "effort"; efforts: readonly string[]; defaultLevel?: string };
 	input: ("text" | "image")[];
 	cost: {
 		input: number;
@@ -50,7 +50,7 @@ const models: DeckModel[] = [
 		name: "Claude Sonnet 4.5 (Deck)",
 		api: "openai-completions",
 		reasoning: true,
-		thinkingLevelMap: { minimal: null, low: null, medium: null, high: null, xhigh: null, max: null },
+		thinking: { mode: "effort", efforts: ["minimal", "low", "medium", "high", "xhigh", "max"], defaultLevel: "medium" },
 		input: ["text", "image"],
 		cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
 		contextWindow: 1_000_000,
@@ -61,7 +61,7 @@ const models: DeckModel[] = [
 		name: "Claude Haiku 4.5 (Deck)",
 		api: "openai-completions",
 		reasoning: true,
-		thinkingLevelMap: { minimal: null, low: null, medium: null, high: null, xhigh: null, max: null },
+		thinking: { mode: "effort", efforts: ["minimal", "low", "medium", "high", "xhigh", "max"], defaultLevel: "medium" },
 		input: ["text", "image"],
 		cost: { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25 },
 		contextWindow: 200_000,
@@ -72,7 +72,7 @@ const models: DeckModel[] = [
 		name: "Claude Fable 5 (Deck)",
 		api: "openai-completions",
 		reasoning: true,
-		thinkingLevelMap: { minimal: null, low: null, medium: null, high: null, xhigh: null, max: null },
+		thinking: { mode: "effort", efforts: ["minimal", "low", "medium", "high", "xhigh", "max"], defaultLevel: "medium" },
 		input: ["text", "image"],
 		cost: { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 },
 		contextWindow: 1_000_000,
@@ -83,7 +83,7 @@ const models: DeckModel[] = [
 		name: "Grok 4.5 (Deck)",
 		api: "openai-completions",
 		reasoning: true,
-		thinkingLevelMap: { minimal: null, low: "low", medium: null, high: "high", xhigh: null, max: null },
+		thinking: { mode: "effort", efforts: ["low", "high"], defaultLevel: "high" },
 		input: ["text", "image"],
 		cost: { input: 3, output: 15, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: 256_000,
@@ -94,7 +94,7 @@ const models: DeckModel[] = [
 		name: "GPT-5.6 Sol (Deck)",
 		api: "openai-completions",
 		reasoning: true,
-		thinkingLevelMap: { minimal: null, low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: null },
+		thinking: { mode: "effort", efforts: ["low", "medium", "high", "xhigh"], defaultLevel: "high" },
 		input: ["text", "image"],
 		cost: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 6.25 },
 		contextWindow: 372_000,
