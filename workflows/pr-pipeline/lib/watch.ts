@@ -62,7 +62,7 @@ export function reviewersNeedingReRequest(
 }
 
 /**
- * Return false only for known automation banners. Human comments and unknown
+ * Return false only for verified automation banners. Human comments and unknown
  * bot comments remain actionable, even when their wording contains banner
  * keywords.
  */
@@ -70,12 +70,8 @@ export function isReviewFinding(comment: CommentActivity): boolean {
 	if (!comment.isBot) return true;
 	const author = comment.author.trim().toLowerCase();
 	const body = (comment.body ?? "").trim();
-	if (!/^(?:github merge queue-app|github merge queue|linear)\[bot\]$/.test(author)) return true;
-	return !(
-		/^###\s+GitHub merge queue Automations\b/i.test(body) ||
-		/^<!--\s*linear-linkback\s*-->\s*$/i.test(body) ||
-		/^(?:github merge queue|linear)\s+(?:banner|linkback):\s+generated\s+(?:link|banner)\.?$/i.test(body)
-	);
+	if (author !== "linear[bot]") return true;
+	return !/^<!--\s*linear-linkback\s*-->\s*$/i.test(body);
 }
 
 export function unansweredComments(

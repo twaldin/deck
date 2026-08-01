@@ -11,6 +11,19 @@ Runs on **plain smithers 0.30.0** — no deck router/manifest/TUI dependency.
 Model access goes through pi's `deck/` provider (the deck broker on
 `127.0.0.1:8377`).
 
+### Reproducible test setup
+
+Run the full suite from this directory. The committed lockfile pins the
+workflow dependencies and the frozen install prevents drift:
+
+```sh
+cd workflows/pr-pipeline
+bun install --frozen-lockfile
+bun test tests/
+```
+
+The expected result is 187 passing tests and 0 failures.
+
 ## This is the DEFAULT ship path
 
 Every profiled project ships through this workflow — the profile

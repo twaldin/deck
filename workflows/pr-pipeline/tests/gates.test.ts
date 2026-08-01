@@ -243,9 +243,9 @@ describe("evaluateWatchExit", () => {
 		expect(verdict.unresolvedThreads).toBe(1);
 	});
 
-	test("known automation banners do not create watch work", () => {
+	test("verified Linear linkbacks do not create watch work", () => {
 		const verdict = evaluateWatchExit(snapshot({
-			comments: [{ author: "github merge queue[bot]", isBot: true, createdAt: "2026-07-27T11:00:00Z", body: "GitHub merge queue banner: generated link" }],
+			comments: [{ author: "linear[bot]", isBot: true, createdAt: "2026-07-27T11:00:00Z", body: "<!-- linear-linkback -->" }],
 		}), { selfLogins: ["twaldin"] });
 		expect(verdict.exitOk).toBe(true);
 		expect(verdict.unansweredComments).toBe(0);
@@ -257,10 +257,9 @@ describe("evaluateWatchExit", () => {
 	});
 
 	test("known bot banner requires both author and exact banner shape", () => {
-		expect(isReviewFinding({ author: "github merge queue-app[bot]", isBot: true, createdAt: "", body: "### GitHub merge queue Automations\nGenerated link" })).toBe(false);
 		expect(isReviewFinding({ author: "linear[bot]", isBot: true, createdAt: "", body: "<!-- linear-linkback -->" })).toBe(false);
-		expect(isReviewFinding({ author: "github merge queue[bot]", isBot: true, createdAt: "", body: "the linear scan here breaks the link handling" })).toBe(true);
-		expect(isReviewFinding({ author: "github merge queue", isBot: true, createdAt: "", body: "GitHub merge queue banner: generated link" })).toBe(true);
+		expect(isReviewFinding({ author: "linear[bot]", isBot: true, createdAt: "", body: "the linear scan here breaks the link handling" })).toBe(true);
+		expect(isReviewFinding({ author: "unknown[bot]", isBot: true, createdAt: "", body: "automation banner" })).toBe(true);
 	});
 
 	test("behind count wins over green checks and is the first reaction", () => {
