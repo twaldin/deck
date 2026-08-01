@@ -48,6 +48,8 @@ export type ObservedNode = {
 	status: string;
 	/** Attempt counter when the CLI reports one; a retry bumps it. */
 	attempt?: number;
+	/** Validated task output, when inspect exposes it. Used only for milestone context. */
+	output?: unknown;
 };
 
 export type Observation = {
@@ -107,6 +109,53 @@ const RUN_TRANSITIONS: Record<string, { verb: StatusVerb; note: string } | undef
 
 /** Terminal states: after one of these the run emits nothing further. */
 const TERMINAL = new Set(["succeeded", "failed", "cancelled"]);
+
+/**
+ * Pipeline milestones are intentionally allow-listed. A healthy node finishing
+ * is not, by itself, a wake: only these transitions can change what the
+ * orchestrator must do next.
+ */
+export const PIPELINE_MILESTONES: Record<string, {
+	transition: string;
+	entering?: boolean;
+	note: (node: ObservedNode) => string;
+}> = {
+	"push-pr": {
+		transition: "pr-opened",
+		note: (node) => `PR opened${formatMilestoneValue(node.output, ["prNumber", "pr", "number"])}`,
+	},
+	"enqueue-merge": {
+		transition: "queued",
+		note: () => "PR submitted to the merge queue",
+	},
+	"landing-poll": {
+		transition: "landed",
+		note: (node) => `PR landed${formatMilestoneValue(node.output, ["sha", "landedSha"])}`,
+	},
+
+	"fallout-wait": {
+		transition: "fallout-wait",
+		entering: true,
+		note: () => "entered fallout wait",
+	},
+	"fallout-watch": {
+		transition: "fallout-complete",
+		note: () => "fallout checks complete",
+	},
+};
+
+function formatMilestoneValue(output: unknown, fields: string[]): string {
+	if (typeof output !== "object" || output === null) return "";
+	for (const field of fields) {
+		const value = (output as Record<string, unknown>)[field];
+		if (typeof value === "string" || typeof value === "number") return ` (${field} ${value})`;
+	}
+	return "";
+}
+
+function milestoneFinished(status: string): boolean {
+	return status === "finished" || status === "completed" || status === "succeeded";
+}
 
 export type ObserverLedger = {
 	/** Emitted transition keys, so a poll never appends the same event twice. */
@@ -189,23 +238,32 @@ export function planEvents(
 	const seenNode = new Map<string, number>();
 	for (const node of nodes) {
 		// Real step states seen live: finished, waiting-approval, failed.
-		if (node.status !== "failed") continue;
-		const dedupeKey = `${node.nodeId}:${node.attempt ?? 0}`;
+		const milestone = run.workflow === "pr-pipeline" ? PIPELINE_MILESTONES[node.nodeId] : undefined;
+		const landingConfirmed = node.nodeId !== "landing-poll" ||
+			(typeof node.output === "object" && node.output !== null && (node.output as Record<string, unknown>).landed === true);
+		const isMilestone = milestone !== undefined && landingConfirmed &&
+			(milestone.entering ? node.status === "running" : milestoneFinished(node.status));
+		if (node.status !== "failed" && !isMilestone) continue;
+		const transition = node.status === "failed" ? "failed" : milestone!.transition;
+		const dedupeKey = `${node.nodeId}:${node.attempt ?? 0}:${transition}`;
 		const occurrence = seenNode.get(dedupeKey) ?? 0;
 		seenNode.set(dedupeKey, occurrence + 1);
 		const key = transitionKey({
 			scope: "node",
 			runId: run.id,
 			nodeId: node.nodeId,
-			transition: "failed",
+			transition,
 			seq: node.attempt ?? 0,
 			occurrence,
 		});
 		if (seen.has(key)) continue;
 		events.push({
 			taskId,
-			verb: "working",
-			note: `step ${node.nodeId} failed and is being retried`,
+			// Milestones are T1 fold events. Failed nodes remain T0 via `failed`.
+			verb: node.status === "failed" ? "failed" : "resolved",
+			note: node.status === "failed"
+				? `step ${node.nodeId} failed and is being retried`
+				: milestone!.note(node),
 			key,
 		});
 	}
@@ -396,8 +454,9 @@ export function parseInspect(stdout: string): Observation | null {
 	const nodes: ObservedNode[] = rawNodes
 		.map((node) => ({
 			nodeId: typeof node?.nodeId === "string" ? node.nodeId : String(node?.id ?? ""),
-			status: String(node?.state ?? node?.status ?? ""),
+				status: String(node?.state ?? node?.status ?? ""),
 			...(typeof node?.attempt === "number" ? { attempt: node.attempt } : {}),
+			...(node?.output !== undefined ? { output: node.output } : {}),
 		}))
 		.filter((node) => node.nodeId.length > 0);
 
