@@ -79,12 +79,20 @@ describe("claim exclusivity", () => {
 			const barrier = ${JSON.stringify(path.join(home, "barrier"))};
 			fs.appendFileSync(barrier, "x");
 			while (fs.readFileSync(barrier, "utf8").length < ${contenders}) {}
-			try {
-				acquireClaim("t1", "push", 1, { target: "origin/main" });
-				console.log("WON");
-			} catch {
-				console.log("REFUSED");
-			}
+			let won = false;
+		try {
+			acquireClaim("t1", "push", 1, { target: "origin/main" });
+			won = true;
+			console.log("WON");
+		} catch {
+			console.log("REFUSED");
+		}
+		// Keep the winner alive until every contender has attempted the claim.
+		// A process that exits immediately is a dead holder by design, so a later
+		// contender may legitimately reclaim it before the race has finished.
+		fs.appendFileSync(barrier, "x");
+		while (fs.readFileSync(barrier, "utf8").length < ${contenders * 2}) {}
+		void won;
 		`;
 		const file = path.join(home, "race.mjs");
 		fs.writeFileSync(file, script);
