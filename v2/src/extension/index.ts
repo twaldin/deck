@@ -72,18 +72,12 @@ export default function deckV2(pi: any): void {
 	let timer: ReturnType<typeof setInterval> | undefined;
 	let unwatch: (() => void) | undefined;
 	let workflowCwd: string | undefined;
-	// Send-failure backoff. deliver() fires on the 30s timer AND on every fs.watch
-	// nudge, so a failing sendUserMessage with no backoff is a tight retry loop:
-	// every status append re-triggers the same failing send. Events are durable
-	// (outbox + status files), so deferring costs nothing.
+	// Send-failure backoff protects against real queue transport errors. Wakes
+	// remain durable in the outbox while a failed call is retried.
 	let sendFailures = 0;
 	let sendRetryAt = 0;
 	const SEND_BACKOFF_BASE_MS = 60_000;
 	const SEND_BACKOFF_MAX_MS = 15 * 60_000;
-	// Tracks the startup and active-turn window. Pi only accepts `followUp` while
-	// streaming, so the first idle send starts normally and later sends use the
-	// native queue rather than racing a second prompt into startup.
-	let agentBusy = false;
 	// Re-entrancy lock: deliver() fires from the interval AND every fs.watch
 	// nudge; two overlapping async passes would drain the same outbox twice.
 	let delivering = false;
@@ -609,17 +603,16 @@ export default function deckV2(pi: any): void {
 	}
 
 	/**
-	 * Send one message, reporting whether it was accepted by Pi's native queue.
-	 * A false return leaves the wake owed, so the next cycle retries it. The
-	 * follow-up delivery mode queues during a running turn and preserves FIFO
-	 * order without surfacing the active-prompt error. A rejection is a failed
-	 * send, never a rethrow.
+	 * Send one message through pi's queue. Pi queues follow-ups while busy and
+	 * starts a turn when idle. A false return leaves the wake owed.
 	 */
-	async function send(ctx: any, text: string): Promise<boolean> {
+	async function send(_ctx: any, text: string): Promise<boolean> {
 		try {
-			if (typeof pi.sendUserMessage !== "function") return false;
-			agentBusy = true;
-			const out = pi.sendUserMessage(text, { deliverAs: "followUp" }) as unknown;
+			if (typeof pi.sendMessage !== "function") return false;
+			const out = pi.sendMessage(
+				{ customType: "deck.wake", content: text, display: true },
+				{ deliverAs: "followUp", triggerTurn: true },
+			) as unknown;
 			if (out instanceof Promise) await out;
 			return true;
 		} catch {
@@ -700,9 +693,9 @@ export default function deckV2(pi: any): void {
 		});
 		// The wake loop only runs for an interactive orchestrator.
 		//
-		// Waking means injecting a user message, which needs a live session with a
-		// captain reading it. In print mode there is no live captain to wake. RPC
-		// has a caller driving the conversation, so unsolicited turns are the
+		// Waking needs a live session with a captain reading it. In print mode there
+		// is a single prompt and no one to wake, so automatic waking is gated.
+		// RPC has a caller driving the conversation, so unsolicited turns are the
 		// caller's business, not ours.
 		//
 		// The tools still work in every mode; only the automatic waking is gated.
@@ -713,16 +706,6 @@ export default function deckV2(pi: any): void {
 		void deliver(ctx);
 		timer = setInterval(() => void deliver(ctx), RECONCILE_MS);
 		unwatch = (await import("../wake")).watchStatusDir(() => void deliver(ctx));
-	});
-
-	pi.on("before_agent_start", async () => {
-		agentBusy = true;
-	});
-	pi.on("agent_start", async () => {
-		agentBusy = true;
-	});
-	pi.on("agent_settled", async () => {
-		agentBusy = false;
 	});
 
 	pi.on("session_compact", async (event: any, ctx: any) => {

@@ -295,9 +295,9 @@ describe("wake loop mode gating", () => {
 			},
 			// Real pi throws this once a run is under way. Print mode is always under
 			// way by the time a wake fires.
-			sendUserMessage: () => {
+			sendMessage: () => {
 				sends++;
-				throw new Error("Agent is already processing");
+				throw new Error("queue unavailable");
 			},
 		};
 		const { default: register } = await import("../src/extension/index");
@@ -348,7 +348,7 @@ describe("send-failure backoff", () => {
 				if (event === "session_start") handlers.push(handler);
 				if (event === "session_shutdown") shutdowns.push(handler);
 			},
-			sendUserMessage: () => {
+			sendMessage: () => {
 				sends++;
 				throw new Error("send is down");
 			},
