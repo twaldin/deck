@@ -484,6 +484,7 @@ export default smithers((ctx) => {
 	const policy = buildModelPolicy(profile, profileRepoMismatch, input.models);
 
 	const ghCtx = { gh: github.gh, repo: input.repo };
+	const project = input.profile ?? input.repo.split("/").at(-1);
 
 	// -- persisted state reads ------------------------------------------------
 	const preflight = ctx.latest(outputs.preflight, "preflight");
@@ -1312,7 +1313,8 @@ export default smithers((ctx) => {
 																	branch: input.branch,
 																	baseBranch,
 																	repo: input.repo,
-																	prNumber: pr.prNumber,
+																	project,
+prNumber: pr.prNumber,
 																	gh: github.gh,
 																	pollJson: JSON.stringify(latestWatch, null, 2),
 																	round: k,
