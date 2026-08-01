@@ -124,7 +124,7 @@ export function watchFixPrompt(args: {
 		args.pollJson,
 		"",
 		"Do, in order:",
-		`1. If mergeability is CONFLICTING, or mergeStateStatus is DIRTY or BEHIND, fetch origin/${args.baseBranch}, then rebase THIS PR branch onto origin/${args.baseBranch}.`,
+		`1. If mergeability is CONFLICTING, or mergeStateStatus is DIRTY or BEHIND, run the deterministic rebase helper: fetch origin/${args.baseBranch}, rebase THIS PR branch onto origin/${args.baseBranch}, run relevant tests, then force-with-lease push. If the helper is unavailable, run exactly those git commands yourself.`,
 		"   Resolve conflicts, run relevant tests, then force-with-lease push the existing PR branch. Do not merge.",
 		"2. Every unresolved review thread: fix the code if warranted (plain commits on THIS branch),",
 		"   reply in the thread, and resolve it (or reply why not, and resolve after agreement).",

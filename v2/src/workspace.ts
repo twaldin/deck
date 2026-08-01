@@ -115,18 +115,17 @@ export function warnOnShadowWorkspace(
 }
 
 function isTerminalExecution(executions: string, id: string): boolean {
-	// Smithers execution logs contain terminal lifecycle records. Keep this
-	// reader tolerant of format changes and only suppress a run when a clear
-	// terminal marker exists.
-	try {
-		const files = fs.readdirSync(path.join(executions, id), { withFileTypes: true });
-		for (const file of files) {
-			if (!file.isFile()) continue;
-			const text = fs.readFileSync(path.join(executions, id, file.name), "utf8");
-			if (/(?:RunFinished|RunFailed|RunCancelled|\"status\"\s*:\s*\"(?:completed|failed|cancelled|succeeded|finished)\"|\"state\"\s*:\s*\"(?:completed|failed|cancelled|succeeded|finished)\")/i.test(text)) return true;
+	// Read only canonical run state records. Attempt payloads and historical
+	// events can contain words such as RunFailed while their run is active.
+	const runDir = path.join(executions, id);
+	for (const name of ["run.json", "state.json", "status.json"]) {
+		try {
+			const value: unknown = JSON.parse(fs.readFileSync(path.join(runDir, name), "utf8"));
+			const status = value && typeof value === "object" ? (value as { status?: unknown; state?: unknown }).status ?? (value as { state?: unknown }).state : undefined;
+			if (typeof status === "string" && /^(completed|failed|cancelled|succeeded|finished)$/i.test(status)) return true;
+		} catch {
+			// Missing or malformed canonical state means the run is still worth warning about.
 		}
-	} catch {
-		return false;
 	}
 	return false;
 }

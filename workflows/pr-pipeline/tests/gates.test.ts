@@ -317,6 +317,24 @@ describe("evaluateWatchExit", () => {
 		expect(verdict.reviewersNeedingReRequest).toEqual(["rev"]);
 	});
 
+	test("current-head CHANGES_REQUESTED blocks even when a request is present", () => {
+		const verdict = evaluateWatchExit(snapshot({
+			reviewers: [{ login: "rev", isBot: false, lastActivityAt: "2026-07-27T11:00:00Z", lastReviewState: "CHANGES_REQUESTED" }],
+			requestedReviewers: ["rev"],
+		}), { selfLogins: ["twaldin"] });
+		expect(verdict.reviewersNeedingReRequest).toEqual(["rev"]);
+		expect(verdict.exitOk).toBe(false);
+	});
+
+	test("old CHANGES_REQUESTED with a current request still needs proof of new review", () => {
+		const verdict = evaluateWatchExit(snapshot({
+			reviewers: [{ login: "rev", isBot: false, lastActivityAt: "2026-07-27T09:00:00Z", lastReviewState: "CHANGES_REQUESTED" }],
+			requestedReviewers: ["rev"],
+		}), { selfLogins: ["twaldin"] });
+		expect(verdict.reviewersNeedingReRequest).toEqual(["rev"]);
+		expect(verdict.exitOk).toBe(false);
+	});
+
 	test("re-requested reviewer (verified via requested_reviewers) passes", () => {
 		const verdict = evaluateWatchExit(
 			snapshot({

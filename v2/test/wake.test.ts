@@ -325,7 +325,8 @@ describe("wake loop mode gating", () => {
 			globalThis.setInterval = realSetInterval;
 		}
 
-		// In print mode nothing should have been scheduled and nothing sent.
+		// Non-TUI sessions reconcile once for durable state, but do not schedule
+		// unsolicited turns or send through the live TUI transport.
 		expect(timers).toHaveLength(0);
 		expect(sends).toBe(0);
 	});

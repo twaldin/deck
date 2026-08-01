@@ -56,10 +56,13 @@ export function reviewersNeedingReRequest(
 		// CHANGES_REQUESTED must enter the response loop immediately; approval
 		// polling here was the cause of PRs being parked while blockers remained.
 		if (reviewer.lastReviewState === "CHANGES_REQUESTED") {
-			// A request made after our fix means the reviewer is waiting for the
-			// new head. A decision on the current head is a blocker, even if GH
-			// still lists the reviewer as requested.
-			if (!(requested.has(login) && reviewer.lastActivityAt < lastPushAt)) out.push(reviewer.login);
+			// CHANGES_REQUESTED is a blocker until a later review proves that this
+			// reviewer accepted the pushed head. A requested reviewer is not proof:
+			// GitHub can retain the request after an old decision, and the request
+			// can also be present while the current-head decision is unresolved.
+			// Keep the distinction explicit so callers do not mistake a stale request
+			// for a successful re-request.
+			out.push(reviewer.login);
 			continue;
 		}
 		if (requested.has(login)) continue;
