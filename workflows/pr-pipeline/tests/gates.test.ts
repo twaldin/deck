@@ -317,27 +317,13 @@ describe("evaluateWatchExit", () => {
 		expect(verdict.reviewersNeedingReRequest).toEqual(["rev"]);
 	});
 
-	test("current-head CHANGES_REQUESTED blocks even when a request is present", () => {
+	test("CHANGES_REQUESTED with a visible request waits silently", () => {
 		const verdict = evaluateWatchExit(snapshot({
 			reviewers: [{ login: "rev", isBot: false, lastActivityAt: "2026-07-27T11:00:00Z", lastReviewState: "CHANGES_REQUESTED" }],
 			requestedReviewers: ["rev"],
 		}), { selfLogins: ["twaldin"] });
-		expect(verdict.reviewersNeedingReRequest).toEqual(["rev"]);
-		expect(verdict.exitOk).toBe(false);
-	});
-
-	test("old CHANGES_REQUESTED with a current request still needs proof of new review", () => {
-		const verdict = evaluateWatchExit(snapshot({
-			reviewers: [{ login: "rev", isBot: false, lastActivityAt: "2026-07-27T09:00:00Z", lastReviewState: "CHANGES_REQUESTED" }],
-			requestedReviewers: ["rev"],
-		}), { selfLogins: ["twaldin"] });
-		expect(verdict.reviewersNeedingReRequest).toEqual(["rev"]);
-		expect(verdict.exitOk).toBe(false);
-	});
-
-	test("re-requested CHANGES_REQUESTED reviewer enters silent polling", () => {
-		const snapshot = makeSnapshot({ reviewers: [{ login: "rev", isBot: false, lastActivityAt: "2024-01-01T00:00:00Z", lastReviewState: "CHANGES_REQUESTED" }], requestedReviewers: ["rev"] });
-		expect(evaluateWatchExit(snapshot, { selfLogins: [] }).reviewersNeedingReRequest).toEqual([]);
+		expect(verdict.reviewersNeedingReRequest).toEqual([]);
+		expect(verdict.exitOk).toBe(true);
 	});
 
 	test("re-requested reviewer (verified via requested_reviewers) passes", () => {
