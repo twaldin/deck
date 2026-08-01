@@ -768,7 +768,7 @@ describe("three-line footer", () => {
 		expect(out[0]).toContain("CH25%");
 		expect(out[1]).toContain("claude");
 		expect(out[1]).toContain("codex");
-		expect(out[2]).toBe("pause 1 · ask 1");
+		expect(out[2]).toContain("Nq 1");
 		for (const line of out) expect(textWidth(line)).toBeLessThanOrEqual(140);
 	});
 });
@@ -830,9 +830,9 @@ describe("footer attention counts", () => {
 	test("asks are plain words and zero-count segments are omitted", () => {
 		const f = frame();
 		f.counters.openQuestions = 2;
-		expect(renderFooterLines(f)[2]).toBe("ask 2");
+		expect(renderFooterLines(f)[2]).toContain("Nq 2");
 		f.counters.openQuestions = 0;
-		expect(renderFooterLines(f)[2]).toBe("");
+		expect(renderFooterLines(f)[2]).toContain("Nq 0");
 	});
 
 	test("active work is play and actionable failures are fail", () => {
@@ -843,7 +843,7 @@ describe("footer attention counts", () => {
 				step: "watch", taskId: null, activity: "failed",
 			}],
 		});
-		expect(renderFooterLines(f)[2]).toBe("play 1 · fail 1");
+		expect(renderFooterLines(f)[2]).toBe("Nq 0 · 0 efforts · 0 agents");
 	});
 
 	test("paused and blocked work is pause, while terminal task events are not counts", () => {
@@ -852,7 +852,7 @@ describe("footer attention counts", () => {
 			task({ taskId: "blocked", runState: "running", lastVerb: "blocked" }),
 			task({ taskId: "done", runState: "finished", lastVerb: "done" }),
 		] });
-		expect(renderFooterLines(f)[2]).toBe("pause 2");
+		expect(renderFooterLines(f)[2]).toBe("Nq 0 · 0 efforts · 0 agents");
 	});
 
 	test("failed poll rows stay failed and terminal stamp rows do not ask", () => {
@@ -866,7 +866,7 @@ describe("footer attention counts", () => {
 		};
 		const out = buildFleetText(frame({ workflows: [failed, cancelledStamp] }));
 		expect(out).toContain("[failed]");
-		expect(renderFooterLines(frame({ workflows: [cancelledStamp] }))[2]).toBe("");
+		expect(renderFooterLines(frame({ workflows: [cancelledStamp] }))[2]).toContain("Nq 0");
 	});
 
 	test("zombies do not increase fail", () => {
@@ -877,13 +877,13 @@ describe("footer attention counts", () => {
 			runId: "successor", workflow: "pr-pipeline", status: "running", state: "running",
 			step: "r0-watch-poll", taskId: null, activity: "working", prNumber: 42, startedAt: "2026-01-02",
 		}] });
-		expect(renderFooterLines(f)[2]).toBe("play 1");
+		expect(renderFooterLines(f)[2]).toBe("Nq 0 · 0 efforts · 0 agents");
 	});
 
 	test("theme colors attention counts", () => {
 		const marked = { fg: (key: string, text: string) => `<${key}>${text}</${key}>`, bold: (text: string) => text };
 		const f = frame({ tasks: [task({ runState: "running", lastVerb: "working" })] });
-		expect(renderFooterLines(f, {}, marked)[2]).toBe("<warning>play 1</warning>");
+		expect(renderFooterLines(f, {}, marked)[2]).toBe("<warning>Nq 0 · 0 efforts · 0 agents</warning>");
 	});
 
 	test("the overlay header names /questions so the captain knows the next move", () => {

@@ -20,7 +20,7 @@ import { lastEvent, openDecisions } from "./events";
 import { internalSummary } from "./backlog";
 import { stateDir, stateFiles } from "./home";
 import { readMeta } from "./meta";
-import { openQuestions, queueFile } from "./questions-store";
+import { ask, openQuestions, queueFile } from "./questions-store";
 import { pending } from "./queue";
 import { unresolvedReceipts } from "./side-effects";
 import { SMITHERS_SPEC } from "./smithers";
@@ -173,6 +173,7 @@ type PsRun = {
 	step?: string;
 	rootDir?: string;
 	blockedNode?: string;
+	waitingFor?: WaitingFor;
 };
 type ShipInput = {
 	existingPr?: unknown;
@@ -724,17 +725,26 @@ export async function buildFrame(
 		// an unreadable queue must not take the fleet view down with it
 	}
 	const liveRuns = workflows.filter((wf) => !isTerminalWorkflow(wf) && !wf.superseded);
-		const effortMap = new Map<string, WorkflowRow>();
-		for (const wf of liveRuns) {
-			const key = wf.prNumber !== null && wf.prNumber !== undefined ? `pr:${wf.prNumber}` : `ticket:${wf.ticket ?? wf.runId}`;
-			const prior = effortMap.get(key);
-			if (prior === undefined || (wf.startedAt ?? "") > (prior.startedAt ?? "")) effortMap.set(key, wf);
+	const effortMap = new Map<string, WorkflowRow>();
+	for (const wf of liveRuns) {
+		const repo = wf.rootDir ?? "unknown-repo";
+		const key = wf.prNumber !== null && wf.prNumber !== undefined
+			? `pr:${repo}:${wf.prNumber}`
+			: `ticket:${repo}:${wf.ticket ?? wf.runId}`;
+		const prior = effortMap.get(key);
+		if (prior === undefined || (wf.startedAt ?? "") > (prior.startedAt ?? "")) effortMap.set(key, wf);
+	}
+	const efforts: EffortRow[] = [...effortMap].map(([identity, wf]) => ({
+		identity, ticket: wf.ticket ?? null, prNumber: wf.prNumber ?? null, prTitle: wf.prTitle ?? null,
+		runId: wf.runId, state: wf.state ?? wf.status, waitingFor: wf.waitingFor === "stamp" ? "stamp-question" : (wf.waitingFor ?? null),
+		failed: wf.activity === "failed",
+	}));
+	for (const wf of liveRuns.filter((row) => row.waitingFor === "stamp")) {
+		const id = `stamp:${wf.rootDir ?? "unknown-repo"}:${wf.prNumber ?? wf.runId}`;
+		if (!openQuestions(queueFile()).some((question) => question.id.endsWith(`:${id}`) && question.status === "open")) {
+			ask(queueFile(), { id, questionKind: "stamp", question: `Stamp PR #${wf.prNumber ?? "unknown"}?`, context: wf.rootDir ?? undefined, options: ["Stamp", "Do not stamp"], recommendation: "Do not stamp until reviewed.", urgency: "high", sessionId: "deck-fleet", cwd: wf.rootDir ?? process.cwd() });
 		}
-		const efforts: EffortRow[] = [...effortMap].map(([identity, wf]) => ({
-			identity, ticket: wf.ticket ?? null, prNumber: wf.prNumber ?? null, prTitle: wf.prTitle ?? null,
-			runId: wf.runId, state: wf.state ?? wf.status, waitingFor: wf.waitingFor === "stamp" ? "stamp-question" : wf.waitingFor,
-			failed: wf.activity === "failed",
-		}));
+	}
 		const agents: AgentRow[] = tasks.filter((task) => task.runState === "running").map((task) => ({
 			id: task.taskId, model: task.kind, status: `${task.lastVerb ?? "working"}: ${task.lastNote ?? ""}`.trim(), ageMs: task.statusAgeMs,
 		}));
@@ -1170,8 +1180,9 @@ export function buildFleetView(
 	const activeTasks = sorted.filter((task) => attentionRank(task) < 7);
 	const doneTasks = sorted.filter((task) => attentionRank(task) >= 7);
 	const activeWorkflows = frame.workflows
-		.filter((wf) => !isTerminalWorkflow(wf))
+		.filter((wf) => !isTerminalWorkflow(wf) && !wf.superseded)
 		.sort((a, b) => workflowAttentionRank(a) - workflowAttentionRank(b));
+	const effortRows = frame.efforts ?? [];
 	const failedWorkflows = actionableWorkflowFailures(frame);
 	const doneWorkflows = frame.workflows.filter(
 		(wf) =>
@@ -1312,6 +1323,15 @@ export function buildFleetView(
 
 	if (frame.tasks.length === 0) lines.push(theme.fg("dim", "  (no tasks)"));
 	for (const task of activeTasks) renderTask(task);
+	if (effortRows.length > 0) {
+		lines.push("");
+		lines.push(theme.bold(theme.fg("toolTitle", "efforts")));
+		for (const effort of effortRows) {
+			const label = effort.prNumber === null ? effort.ticket ?? effort.identity : `PR #${effort.prNumber}`;
+			const blocker = effort.waitingFor === null ? "" : ` waitingFor=${effort.waitingFor}`;
+			lines.push(`  ${theme.fg(effort.failed ? "warning" : "accent", `[${effort.failed ? "failed" : "active"}]`)} ${theme.fg("text", truncate(`${label}${blocker}`, Math.max(1, noteMax)))}`);
+		}
+	}
 	if (
 		activeWorkflows.length > 0 ||
 		(!showAll && failedWorkflows.length > 0)

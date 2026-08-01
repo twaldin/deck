@@ -184,6 +184,7 @@ export function ask(
 	file: string,
 	input: {
 		id?: string;
+		questionKind?: QuestionKind;
 		question: string;
 		context?: string;
 		options?: string[];
@@ -209,6 +210,7 @@ export function ask(
 			supplied === undefined || supplied === ""
 				? `q-${randomSuffix()}`
 				: `${input.sessionId}:${supplied}`,
+		...(input.questionKind === undefined ? {} : { questionKind: input.questionKind }),
 		question,
 		...(input.context === undefined ? {} : { context: input.context }),
 		...(input.options === undefined || input.options.length === 0
