@@ -20,7 +20,7 @@ import { lastEvent, openDecisions } from "./events";
 import { internalSummary } from "./backlog";
 import { stateDir, stateFiles } from "./home";
 import { readMeta } from "./meta";
-import { openQuestions, queueFile } from "./questions-store";
+import { ask, openQuestions, queueFile, type Question } from "./questions-store";
 import { pending } from "./queue";
 import { unresolvedReceipts } from "./side-effects";
 import { SMITHERS_SPEC } from "./smithers";
@@ -82,6 +82,24 @@ export type TaskRow = {
 	statusAgeMs: number | null;
 };
 
+export type AgentRow = {
+	id: string;
+	model: string | null;
+	status: string;
+	ageMs: number | null;
+};
+
+export type EffortRow = {
+	identity: string;
+	ticket: string | null;
+	prNumber: number | null;
+	prTitle: string | null;
+	runId: string;
+	state: string | null;
+	waitingFor: string | null;
+	failed: boolean;
+};
+
 export type WorkflowRow = {
 	runId: string;
 	workflow: string | null;
@@ -116,6 +134,8 @@ export type FleetFrame = {
 	generatedAt: string;
 	tasks: TaskRow[];
 	workflows: WorkflowRow[];
+	efforts: EffortRow[];
+	agents: AgentRow[];
 	counters: {
 		tasks: number;
 		running: number;
@@ -127,6 +147,9 @@ export type FleetFrame = {
 		openQuestions: number;
 		internalOpen: number;
 		internalCap: number;
+		efforts: number;
+		agents: number;
+		unhealedFailures: number;
 	};
 	sources: SourceHealth[];
 };
@@ -700,10 +723,28 @@ export async function buildFrame(
 	} catch {
 		// an unreadable queue must not take the fleet view down with it
 	}
+	const liveRuns = workflows.filter((wf) => !isTerminalWorkflow(wf) && !wf.superseded);
+		const effortMap = new Map<string, WorkflowRow>();
+		for (const wf of liveRuns) {
+			const key = wf.prNumber !== null && wf.prNumber !== undefined ? `pr:${wf.prNumber}` : `ticket:${wf.ticket ?? wf.runId}`;
+			const prior = effortMap.get(key);
+			if (prior === undefined || (wf.startedAt ?? "") > (prior.startedAt ?? "")) effortMap.set(key, wf);
+		}
+		const efforts: EffortRow[] = [...effortMap].map(([identity, wf]) => ({
+			identity, ticket: wf.ticket ?? null, prNumber: wf.prNumber ?? null, prTitle: wf.prTitle ?? null,
+			runId: wf.runId, state: wf.state ?? wf.status, waitingFor: wf.waitingFor === "stamp" ? "stamp-question" : wf.waitingFor,
+			failed: wf.activity === "failed",
+		}));
+		const agents: AgentRow[] = tasks.filter((task) => task.runState === "running").map((task) => ({
+			id: task.taskId, model: task.kind, status: `${task.lastVerb ?? "working"}: ${task.lastNote ?? ""}`.trim(), ageMs: task.statusAgeMs,
+		}));
+	const unhealedFailures = efforts.filter((effort) => effort.failed).length;
 	return {
 		generatedAt: new Date().toISOString(),
 		tasks,
 		workflows,
+		efforts,
+		agents,
 		counters: {
 			tasks: tasks.length,
 			running: tasks.filter((task) => task.runState === "running").length,
@@ -719,6 +760,9 @@ export async function buildFrame(
 			openQuestions: questionsOpen,
 			internalOpen: internal.open,
 			internalCap: internal.cap,
+			efforts: efforts.length,
+			agents: agents.length,
+			unhealedFailures,
 		},
 		sources: [
 			runHealth,
@@ -1457,13 +1501,11 @@ export function renderFooterLines(
 	theme: FleetTheme = PLAIN_FLEET_THEME,
 	width = 120,
 ): string[] {
-	const failures = frame.tasks.filter((task) => task.lastVerb === "failed").length + actionableWorkflowFailures(frame).length;
-	const counts = workflowCounts(frame);
 	const attention = [
-		counts.active > 0 ? `play ${counts.active}` : null,
-		counts.waiting > 0 ? `pause ${counts.waiting}` : null,
-		failures > 0 ? `fail ${failures}` : null,
-		frame.counters.openQuestions > 0 ? `ask ${frame.counters.openQuestions}` : null,
+		`Nq ${frame.counters.openQuestions}`,
+		`${frame.counters.efforts} efforts`,
+		`${frame.counters.agents} agents`,
+		frame.counters.unhealedFailures > 0 ? `fail ${frame.counters.unhealedFailures}` : null,
 	].filter((value): value is string => value !== null);
 	const lines = [
 		footerIdentity(bits),

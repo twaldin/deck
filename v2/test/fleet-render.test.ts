@@ -65,6 +65,9 @@ function frame(overrides: Partial<FleetFrame> = {}): FleetFrame {
 			openQuestions: 0,
 			internalOpen: 0,
 			internalCap: 12,
+			efforts: 0,
+			agents: 0,
+			unhealedFailures: 0,
 		},
 		sources: [
 			{ name: "smithers", state: "skipped", detail: "" },
@@ -93,6 +96,14 @@ describe("run collection", () => {
 			process.env.PATH = previousPath;
 			fs.rmSync(directory, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("three-surface footer", () => {
+	test("renders only questions, efforts, agents, and failures", () => {
+		const base = frame();
+		const out = renderFooterLines(frame({ counters: { ...base.counters, openQuestions: 2, efforts: 3, agents: 4, unhealedFailures: 1 } }));
+		expect(out[2]).toBe("Nq 2 · 3 efforts · 4 agents · fail 1");
 	});
 });
 
