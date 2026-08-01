@@ -77,7 +77,10 @@ describe("ship CLI flags", () => {
 
 describe("worker model wiring", () => {
 	test("uses the profile implementer instead of the default worker model", () => {
-		const profile = deckProfile();
+		const profile = { ...deckProfile(), models: { ...deckProfile().models!, implementer: "deck/claude-fable-5" } };
+		const file = profilesFile(home);
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		fs.writeFileSync(file, JSON.stringify([profile]));
 		expect(
 			workerModelFor({
 				taskId: "model-test",
@@ -86,7 +89,17 @@ describe("worker model wiring", () => {
 				kind: "ship",
 				project: profile.id,
 			}),
-		).toBe(profile.models?.implementer);
+		).toBe("deck/claude-fable-5");
+	});
+
+	test("rejects a profile implementer outside the deck catalog", () => {
+		const profile = deckProfile();
+		const file = profilesFile(home);
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		fs.writeFileSync(file, JSON.stringify([{ ...profile, models: { ...profile.models, implementer: "openai/gpt-5" } }]));
+		expect(() => workerModelFor({ taskId: "model-test", task: "test", acceptance: ["works"], kind: "scout", project: profile.id })).toThrow(
+			/must use the deck provider/,
+		);
 	});
 });
 

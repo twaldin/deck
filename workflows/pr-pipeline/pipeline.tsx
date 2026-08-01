@@ -431,7 +431,15 @@ export function buildModelPolicy(
 	const policy: ModelPolicy = {
 		...defaultModelPolicy(),
 		...(profileModels ?? {}),
-		...(profileModels !== undefined ? { reviewer: profileModels.reviewer } : {}),
+		...(profileModels !== undefined
+			? {
+					reviewer: profileModels.reviewer,
+				oppositionDefaults: {
+					...defaultModelPolicy().oppositionDefaults,
+					...profileModels.oppositionDefaults,
+				},
+			}
+			: {}),
 		...(inputModels?.implementer !== undefined ? { implementer: inputModels.implementer } : {}),
 		...(inputModels?.reviewer !== undefined ? { reviewer: inputModels.reviewer } : {}),
 		...(inputModels?.watcher !== undefined ? { watcher: inputModels.watcher } : {}),
