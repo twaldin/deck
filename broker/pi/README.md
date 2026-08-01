@@ -21,7 +21,7 @@ The broker's `/v1/models` response uses provider-qualified IDs, while its resolv
 
 ## Native reasoning selectors
 
-Use `--thinking xhigh` (or a model selector suffix such as `deck/gpt-5.6-sol:xhigh`) for OpenAI-compatible Deck models. The broker accepts the complete OpenAI effort vocabulary: `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; unsupported model levels fail instead of being downgraded. Anthropic budget requests use `budget:<tokens>` (for example `--thinking budget:32768`) and preserve the integer in `thinking.budget_tokens`. xAI uses only `low` and `high` and sends `reasoning_effort` with that value.
+Use `--thinking xhigh` (or a model selector suffix such as `deck/gpt-5.6-sol:xhigh`) for OpenAI-compatible Deck models. The broker accepts the fixed pi effort vocabulary: `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. Model metadata marks unsupported levels so pi does not send invalid provider values. Claude models use the native Anthropic messages API and preserve the selected thinking level in the gateway's Anthropic request options. The registered Grok model maps pi levels to xAI's `reasoning_effort` values (`low` or `high`). Explicit numeric Anthropic `budget:<tokens>` selectors are supported by the broker helper, but are not part of pi's `--thinking` vocabulary.
 
 The catalog metadata in `deck-provider.ts` lists the selectable surface: Claude models expose budget mode, the GPT model exposes OpenAI effort mode, and future Grok entries must expose only xAI's `low`/`high` surface.
 

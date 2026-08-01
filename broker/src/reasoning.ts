@@ -16,7 +16,7 @@ export function nativeReasoning(provider: "openai" | "anthropic" | "xai", select
 		}
 		return { provider, thinking: { type: "enabled", budget_tokens: Number(match[1]) } };
 	}
-	if (!OPENAI_EFFORTS.has(selector as Effort)) {
+	if (!OPENAI_EFFORTS.has(selector as ReasoningEffort)) {
 		throw new Error(`Unsupported ${provider} reasoning effort: ${selector}`);
 	}
 	if (provider === "xai") {
