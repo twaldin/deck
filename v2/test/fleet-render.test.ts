@@ -21,6 +21,7 @@ import {
 	normalizeStep,
 	collectRuns,
 	buildFrame,
+	liveSpawnCount,
 	PLAIN_FLEET_THEME,
 	renderFooterLines,
 	sliceVisible,
@@ -79,6 +80,9 @@ function frame(overrides: Partial<FleetFrame> = {}): FleetFrame {
 }
 
 describe("fleet frame state", () => {
+	test("counts unique live spawns", () => {
+		expect(liveSpawnCount([{ taskId: "a", runState: "running" }, { taskId: "a", runState: "running" }, { taskId: "b", runState: "finished" }])).toBe(1);
+	});
 	test("asks once for a parked stamp and keeps resolved questions from reappearing", async () => {
 		const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fleet-frame-"));
 		const queue = path.join(directory, "queue.jsonl");
@@ -112,18 +116,80 @@ describe("fleet frame state", () => {
 		}
 	});
 
+	test("stamp question includes durable context and counts historical generations", async () => {
+		const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fleet-stamp-"));
+		const previousHome = process.env.DECK_V2_HOME;
+		const previousQueue = process.env.DECK_QUESTIONS_FILE;
+		process.env.DECK_V2_HOME = directory;
+		process.env.DECK_QUESTIONS_FILE = path.join(directory, "questions.jsonl");
+		try {
+			fs.mkdirSync(path.join(directory, "state", "ship"), { recursive: true });
+			fs.writeFileSync(path.join(directory, "state", "ship", "old.input.json"), JSON.stringify({ repo: "acme/widgets", existingPr: 42 }));
+			fs.writeFileSync(path.join(directory, "state", "ship", "stamp.input.json"), JSON.stringify({
+				repo: "acme/widgets", existingPr: 42,
+				brief: { title: "Fix widget", summary: "Restore widget startup" },
+			}));
+			const result = await buildFrame({ workflowCwd: directory, psRuns: [
+				{ id: "old", rootDir: directory, prNumber: 42, status: "finished", state: "succeeded" },
+				{ id: "stamp", rootDir: directory, prNumber: 42, step: "r0-stamp", status: "waiting-approval", state: "paused" },
+			] });
+			const question = JSON.parse(fs.readFileSync(process.env.DECK_QUESTIONS_FILE, "utf8"));
+			expect(question.id).toContain("acme/widgets:42:stamp");
+			expect(question.question).toContain("https://github.com/acme/widgets/pull/42");
+			expect(question.question).toContain("Fix widget");
+			expect(question.question).toContain("Restore widget startup");
+			expect(question.question).toContain("1 prior pipeline generation");
+			expect(result.counters.efforts).toBe(1);
+		} finally {
+			if (previousHome === undefined) delete process.env.DECK_V2_HOME; else process.env.DECK_V2_HOME = previousHome;
+			if (previousQueue === undefined) delete process.env.DECK_QUESTIONS_FILE; else process.env.DECK_QUESTIONS_FILE = previousQueue;
+			fs.rmSync(directory, { recursive: true, force: true });
+		}
+	});
+
+	test("counts distinct live efforts and live spawned agents", async () => {
+		const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fleet-counts-"));
+		const previousHome = process.env.DECK_V2_HOME;
+		process.env.DECK_V2_HOME = directory;
+		try {
+			fs.mkdirSync(path.join(directory, "state"), { recursive: true });
+			for (const id of ["agent-a", "agent-b"]) {
+				fs.writeFileSync(path.join(directory, "state", `${id}.status`), "working: live\n");
+				fs.writeFileSync(path.join(directory, "state", `${id}.meta`), `id=${id}\nrun_pid=${process.pid}\nkind=ship\nowner_system=deck\n`);
+			}
+			const result = await buildFrame({ workflowCwd: directory, psRuns: [
+				{ id: "a", rootDir: directory, prNumber: 7, step: "watch-poll", started: "2026-01-01" },
+				{ id: "b", rootDir: directory, prNumber: 7, step: "watch-poll", started: "2026-01-02" },
+			] });
+			expect(result.counters.efforts).toBe(1);
+			expect(result.tasks).toHaveLength(2);
+			expect(result.tasks.map((task) => task.runState)).toEqual(["running", "running"]);
+			expect(result.counters.agents).toBe(2);
+		} finally {
+			if (previousHome === undefined) delete process.env.DECK_V2_HOME; else process.env.DECK_V2_HOME = previousHome;
+			fs.rmSync(directory, { recursive: true, force: true });
+		}
+	});
 	test("folds live generations by repo-qualified PR and keeps the newest run", async () => {
 		const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fleet-fold-"));
+		const previousHome = process.env.DECK_V2_HOME;
+		process.env.DECK_V2_HOME = directory;
 		try {
+			fs.mkdirSync(path.join(directory, "state", "ship"), { recursive: true });
+			for (const id of ["old", "new", "other-repo"]) {
+				fs.writeFileSync(path.join(directory, "state", "ship", `${id}.input.json`), JSON.stringify({ repo: id === "other-repo" ? "other/widgets" : "acme/widgets", existingPr: 7 }));
+			}
 			const runs = [
 				{ id: "old", rootDir: directory, prNumber: 7, step: "watch-poll", started: "2026-01-01T00:00:00.000Z" },
-				{ id: "new", rootDir: directory, prNumber: 7, step: "watch-poll", started: "2026-01-02T00:00:00.000Z" },
+				{ id: "new", rootDir: `${directory}-new-worktree`, prNumber: 7, step: "watch-poll", started: "2026-01-02T00:00:00.000Z" },
 				{ id: "other-repo", rootDir: `${directory}-other`, prNumber: 7, step: "watch-poll", started: "2026-01-01T00:00:00.000Z" },
 			];
 			const result = await buildFrame({ workflowCwd: directory, psRuns: runs });
 			expect(result.efforts).toHaveLength(2);
 			expect(result.efforts?.map((effort) => effort.runId)).toEqual(expect.arrayContaining(["new", "other-repo"]));
+			expect(result.counters.efforts).toBe(2);
 		} finally {
+			if (previousHome === undefined) delete process.env.DECK_V2_HOME; else process.env.DECK_V2_HOME = previousHome;
 			fs.rmSync(directory, { recursive: true, force: true });
 		}
 	});
