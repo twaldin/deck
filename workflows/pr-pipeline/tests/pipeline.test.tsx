@@ -142,6 +142,40 @@ describe("fallout prompt rendering contracts", () => {
 		expect(prompt).toContain(JSON.stringify({ verdict: result.verdict, breakSignal: result.breakSignal, probeResults: [], notes: result.notes }));
 		expect(prompt).not.toContain("[object Object]");
 	});
+
+	test("renders the production fallout task with object-valued inputs", async () => {
+		const rendered = await renderWorkflow(pipeline, {
+			input: {
+				...baseInput,
+				dryRun: false,
+				profile: "test",
+				models: { implementer: "deck/claude-fable-5", watcher: "deck/gpt-5.6-luna", fallout: "deck/gpt-5.6-sol", familyOpposition: true, oppositionDefaults: { anthropic: "deck/gpt-5.6-luna" } },
+			},
+			outputs: {
+				preflight: [{ nodeId: "preflight", ok: true, openQuestions: [], briefDigest: "", resolvedReviewerModel: "deck/claude-fable-5" }],
+				implementation: [{ nodeId: "implement", commits: ["fix"], summary: "fixed", testEvidence: "green" }],
+				localReview: [{ nodeId: "local-review", round: 0, approved: true, blockingFindings: [], nits: [] }],
+				prRecord: [{ nodeId: "push-pr", prNumber: 80, url: "https://github.com/lindy-ai/lindy/pull/80", headSha: "abc123", watchSetRegistered: true, watchSetPath: "", receipt: "", createdAt: "2026-08-01T00:00:00.000Z" }],
+				watchPoll: [{ nodeId: "r0-watch-poll", round: 0, poll: 0, headSha: "abc123", exitOk: true, disposition: "complete", actionable: false, ci: "green", unresolvedThreads: 0, unansweredComments: 0, reviewersToReRequest: [], reasons: [] }],
+				readyPoll: [{ nodeId: "r0-ready-poll", round: 0, poll: 0, ready: true, regressed: false, approvedBy: "reviewer", ci: "green", headSha: "abc123", reasons: [], migrationDetected: false, migrationFiles: [], at: "2026-08-01T00:00:00.000Z" }],
+				approvals: [{ nodeId: "r0-stamp", approved: true, note: "ok", decidedBy: "test", decidedAt: "2026-08-01T00:00:00.000Z" }],
+				stampValidity: [{ nodeId: "r0-stamp-validity", round: 0, stampedHead: "abc123", currentHead: "abc123", valid: true, checkedAt: "2026-08-01T00:00:00.000Z" }],
+				mergeHeadCheck: [{ nodeId: "r0-merge-head-check", round: 0, expectedHead: "abc123", currentHead: "abc123", ok: true, checkedAt: "2026-08-01T00:00:00.000Z" }],
+				mergeReceipt: [{ nodeId: "enqueue-merge", round: 0, submittedAt: "2026-08-01T00:00:00.000Z", receipt: "queued", alreadyLanded: false, mergePath: "dry-run" }],
+				queuePoll: [{ nodeId: "queue-poll", poll: 0, state: "closed", autoMergeRequest: true, ejected: false, reason: "landed" }],
+				landingPoll: [{ nodeId: "landing-poll", poll: 0, landed: true, sha: "squash-sha", subject: "landed" }],
+				deployEvidence: [{ nodeId: "deploy-evidence", evidence: "deployed", deployedAt: "2026-08-01T00:00:00.000Z" }],
+				falloutWindow: [{ nodeId: "fallout-window", windowStart: "2026-08-01T00:00:00.000Z", windowEnd: "2026-08-01T01:00:00.000Z" }],
+				falloutWait: [{ nodeId: "fallout-wait", complete: true, waitedUntil: "2026-08-01T01:00:00.000Z" }],
+			},
+			workflowPath: path.join(import.meta.dir, "..", "pipeline.tsx"),
+		});
+		const falloutTask = rendered.tasks.find((task) => task.nodeId === "fallout-watch");
+		expect(falloutTask).toBeDefined();
+		expect(rendered.toXml()).toContain("RATE_LIMIT_ENABLED flag");
+		expect(rendered.toXml()).toContain('{\\"verdict\\":\\"clean|regression\\"');
+		expect(rendered.toXml()).not.toContain("[object Object]");
+	});
 });
 
 describe("reviewer selection contracts", () => {
