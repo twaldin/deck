@@ -11,6 +11,7 @@ import {
 	idleThresholdMs,
 	parseIdleCompactionConfig,
 	selectIdleCompactionConfig,
+	hasProviderNativeCompaction,
 } from "../src/idle-compaction-policy";
 
 class FakeRuntime implements IdleCompactionRuntime {
@@ -198,8 +199,34 @@ describe("idle compaction policy", () => {
 		});
 		expect(decideIdleCompaction({ ...base, contextTokens: 59_999 })).toEqual({
 			compact: false,
-			reason: "keep-warm",
+			reason: "below-context-floor",
 		});
+		expect(decideIdleCompaction({ ...base, providerNativeCompactionAvailable: false })).toEqual({
+			compact: false,
+			reason: "provider-native-unavailable",
+		});
+	});
+
+	test("uses keep-warm only when configured and identifies native routes", () => {
+		const base = {
+			config: { ...DEFAULT_IDLE_COMPACTION_CONFIG, keepWarm: true },
+			nowMs: 240_000,
+			lastCacheTouchMs: 0,
+			isIdle: true,
+			hasPendingMessages: false,
+			inFlightToolCalls: 0,
+			contextTokens: 120_000,
+			contextWindow: 200_000,
+			currentContextMarker: "message-2",
+			lastCompactedContextMarker: "message-1",
+			lastCompactedTokens: 20_000,
+			lastCompactedAtMs: null,
+			providerNativeCompactionAvailable: false,
+		};
+		expect(decideIdleCompaction(base)).toEqual({ compact: false, reason: "keep-warm" });
+		expect(hasProviderNativeCompaction({ provider: "xai", id: "grok-4" })).toBeFalse();
+		expect(hasProviderNativeCompaction({ provider: "deck", id: "grok-4" })).toBeFalse();
+		expect(hasProviderNativeCompaction({ provider: "deck", id: "claude-sonnet-4-5" })).toBeTrue();
 	});
 
 	test("enforces cooldown and window-relative growth before re-compacting", () => {
@@ -221,7 +248,7 @@ describe("idle compaction policy", () => {
 		expect(decideIdleCompaction(base)).toMatchObject({ compact: false, reason: "cooldown" });
 		expect(
 			decideIdleCompaction({ ...base, lastCompactedAtMs: 0 }),
-		).toEqual({ compact: false, reason: "keep-warm" });
+		).toEqual({ compact: false, reason: "below-context-floor" });
 		expect(
 			decideIdleCompaction({
 				...base,
@@ -644,6 +671,18 @@ describe("idle compaction extension", () => {
 		await harness.emit("model_select", context);
 		runtime.advance(10_000);
 		expect(context.compactCalls).toHaveLength(0);
+	});
+
+	test("re-arms the idle timer when a long tool ends after the deadline", async () => {
+		const { runtime, harness, context } = setup();
+		await harness.emit("session_start", context);
+		await warmAndSettle(harness, context);
+		runtime.advance(700);
+		await harness.emit("tool_execution_start", context);
+		runtime.advance(500);
+		await harness.emit("tool_execution_end", context);
+		runtime.advance(0);
+		expect(context.compactCalls).toHaveLength(1);
 	});
 
 	test("never compacts during streaming, pending messages, or in-flight tools", async () => {
