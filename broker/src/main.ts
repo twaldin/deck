@@ -14,8 +14,6 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import { AuthBrokerRefresher } from "@oh-my-pi/pi-ai/auth-broker";
-import { startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
-import { startFastGateway } from "./fast-gateway";
 import { startControlSocket } from "./control";
 import { buildModelIndex } from "./models";
 import {
@@ -30,47 +28,8 @@ import {
 	writeJsonAtomic,
 } from "./paths";
 import { refreshUsageRoster } from "./usage";
-import { nativeReasoning } from "./reasoning";
+import { startValidatedGateway } from "./validated-gateway";
 
-function gatewayBind(bind: string): { hostname: string; port: number } {
-	const separator = bind.lastIndexOf(":");
-	if (separator < 1) throw new Error(`Invalid broker bind address: ${bind}`);
-	return { hostname: bind.slice(0, separator), port: Number(bind.slice(separator + 1)) };
-}
-
-/** Add the broker's provider-specific reasoning checks to the live gateway path. */
-function startValidatedGateway(options: Parameters<typeof startAuthGateway>[0]) {
-	const upstream = startAuthGateway({ ...options, bind: "127.0.0.1:0" });
-	const { hostname, port } = gatewayBind(DEFAULT_GATEWAY_BIND);
-	const server = Bun.serve({
-		hostname,
-		port,
-		idleTimeout: 255,
-		async fetch(request) {
-			const url = new URL(request.url);
-			if (request.method === "POST" && ["/v1/chat/completions", "/v1/messages", "/v1/responses"].includes(url.pathname)) {
-				let body: { model?: string; reasoning_effort?: string; thinking?: { type?: string; budget_tokens?: number } };
-				try {
-					body = await request.json() as typeof body;
-					if (body.reasoning_effort !== undefined) {
-						const modelId = body.model?.split("/").pop() ?? "";
-						const provider = modelId.startsWith("grok-") ? "xai" : "openai";
-						nativeReasoning(provider, body.reasoning_effort);
-					}
-					if (body.thinking?.type === "enabled") {
-						nativeReasoning("anthropic", `budget:${body.thinking.budget_tokens ?? ""}`);
-					}
-				} catch (error) {
-					return Response.json({ error: { type: "invalid_request_error", message: error instanceof Error ? error.message : String(error) } }, { status: 400 });
-				}
-				request = new Request(request, { body: JSON.stringify(body) });
-			}
-			const target = new URL(url.pathname + url.search, upstream.url);
-			return fetch(target, new Request(request, { headers: request.headers }));
-		},
-	});
-	return { url: `http://${hostname}:${server.port}`, close: async () => { server.stop(); await upstream.close(); }, port: server.port, hostname };
-}
 
 export const BROKER_VERSION = "deck-broker/0.1.0";
 const CONTROL_TOKEN_FILE = path.join(BROKER_DIR, "control.token");
