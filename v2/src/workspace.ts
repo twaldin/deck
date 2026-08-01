@@ -74,15 +74,34 @@ export function uiWarn(ctx: { ui?: { notify?: (message: string, type?: "warning"
 	process.stderr.write(`${message}\n`);
 }
 
-/** Report the old per-workflow workspace without deleting operator-owned runs. */
+/**
+ * Report old per-workflow state without warning for the canonical workspace.
+ * Smithers may expose the same directory through ~/.deck/workflows symlinks.
+ */
 export function warnOnShadowWorkspace(
 	home = deckV2Home(),
 	log: (message: string) => void = (message) => uiWarn(undefined, message),
 	warnedFingerprints = new Set<string>(),
 ): string[] {
-	const shadow = path.join(home, "workflows", "pr-pipeline", ".smithers");
-	const legacy = path.join(home, "workflows", ".smithers");
-	const workspaces = [shadow, legacy].filter((workspace) => fs.existsSync(workspace));
+	const canonical = (() => {
+		try {
+			return fs.realpathSync(smithersWorkspaceRoot(home));
+		} catch {
+			return path.resolve(smithersWorkspaceRoot(home));
+		}
+	})();
+	const candidates = [
+		path.join(home, "workflows", "pr-pipeline", ".smithers"),
+		path.join(home, "workflows", ".smithers"),
+	];
+	const workspaces = candidates.filter((workspace) => {
+		if (!fs.existsSync(workspace)) return false;
+		try {
+			return fs.realpathSync(workspace) !== canonical;
+		} catch {
+			return false;
+		}
+	});
 	if (workspaces.length === 0) return [];
 	const ids = workspaces.flatMap(shadowRunIds);
 	if (ids.length > 0) {
@@ -95,12 +114,29 @@ export function warnOnShadowWorkspace(
 	return ids;
 }
 
+function isTerminalExecution(executions: string, id: string): boolean {
+	// Smithers execution logs contain terminal lifecycle records. Keep this
+	// reader tolerant of format changes and only suppress a run when a clear
+	// terminal marker exists.
+	try {
+		const files = fs.readdirSync(path.join(executions, id), { withFileTypes: true });
+		for (const file of files) {
+			if (!file.isFile()) continue;
+			const text = fs.readFileSync(path.join(executions, id, file.name), "utf8");
+			if (/(?:RunFinished|RunFailed|RunCancelled|\"status\"\s*:\s*\"(?:completed|failed|cancelled|succeeded|finished)\"|\"state\"\s*:\s*\"(?:completed|failed|cancelled|succeeded|finished)\")/i.test(text)) return true;
+		}
+	} catch {
+		return false;
+	}
+	return false;
+}
+
 function shadowRunIds(workspace: string): string[] {
 	try {
 		const executions = path.join(workspace, "executions");
 		return fs
 			.readdirSync(executions, { withFileTypes: true })
-			.filter((entry) => entry.isDirectory() && entry.name.length > 0)
+			.filter((entry) => entry.isDirectory() && entry.name.length > 0 && !isTerminalExecution(executions, entry.name))
 			.map((entry) => entry.name)
 			.sort();
 	} catch {

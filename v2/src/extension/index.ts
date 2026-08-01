@@ -812,15 +812,13 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 				},
 			};
 		});
-		// The wake loop only runs for an interactive orchestrator.
-		//
-		// Waking needs a live session with a captain reading it. In print mode there
-		// is a single prompt and no one to wake, so automatic waking is gated.
-		// RPC has a caller driving the conversation, so unsolicited turns are the
-		// caller's business, not ours.
-		//
-		// The tools still work in every mode; only the automatic waking is gated.
-		if (ctx?.mode !== "tui") return;
+		// The durable outbox is the delivery contract. A TUI is only one consumer;
+		// print/RPC sessions must still reconcile and expose owed wakes, otherwise
+		// blocked workflow runs silently stall when no interactive session exists.
+		if (ctx?.mode !== "tui") {
+			reconcile();
+			return;
+		}
 
 		// Reconcile at start: the durable baseline means this reports only what is
 		// genuinely new, so a restart is quiet rather than a flood.

@@ -51,11 +51,20 @@ export function reviewersNeedingReRequest(
 	const out: string[] = [];
 	for (const reviewer of reviewers) {
 		const login = reviewer.login.toLowerCase();
-		if (reviewer.isBot || self.has(login) || requested.has(login)) continue;
-		// Activity after the last push means they have seen the current head.
-		if (reviewer.lastActivityAt >= lastPushAt) {
+		if (reviewer.isBot || self.has(login)) continue;
+		// A review decision is authoritative even when it predates the last push.
+		// CHANGES_REQUESTED must enter the response loop immediately; approval
+		// polling here was the cause of PRs being parked while blockers remained.
+		if (reviewer.lastReviewState === "CHANGES_REQUESTED") {
+			// A request made after our fix means the reviewer is waiting for the
+			// new head. A decision on the current head is a blocker, even if GH
+			// still lists the reviewer as requested.
+			if (!(requested.has(login) && reviewer.lastActivityAt < lastPushAt)) out.push(reviewer.login);
 			continue;
 		}
+		if (requested.has(login)) continue;
+		// Activity after the last push means they have seen the current head.
+		if (reviewer.lastActivityAt >= lastPushAt) continue;
 		out.push(reviewer.login);
 	}
 	return out;
