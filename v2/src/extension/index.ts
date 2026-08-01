@@ -40,7 +40,7 @@ import { reconcileRecuts } from "../recut";
 import { peekSession, startRun } from "../spawn";
 import { STATUS_VERBS, type StatusVerb } from "../status";
 import { readUsageRoster, usageStatusLine } from "../usage-roster";
-import { smithersWorkspaceCwd, warnOnShadowWorkspace } from "../workspace";
+import { discoverSmithersWorkspaces, smithersWorkspaceCwd, warnOnShadowWorkspace } from "../workspace";
 import { evaluateTeardown, formatVerdict } from "../teardown";
 import { ackWakes, detectStale, foldBatched, pendingWakes, reconcile } from "../wake";
 import {
@@ -648,10 +648,13 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 	}
 
 	async function getCurrentFrame(): Promise<Awaited<ReturnType<typeof buildFrame>>> {
-		const snapshot = workflowCwd === undefined ? { runs: [] as never[] } : await collectSnapshot(workflowCwd);
-		if (workflowCwd !== undefined) void reconcileRecuts(workflowCwd, pipelineDir(), snapshot.runs).catch(() => {});
-		observePsSnapshot(snapshot.runs);
-		const frame = await buildFrame(workflowCwd === undefined ? {} : { workflowCwd, psRuns: snapshot.runs });
+		const workspaces = discoverSmithersWorkspaces();
+		const snapshots = await Promise.all(workspaces.map(async (cwd) => ({ cwd, snapshot: await collectSnapshot(cwd) })));
+		const runs = [...new Map(snapshots.flatMap(({ snapshot }) => snapshot.runs).map((run) => [run.id, run])).values()];
+		const primary = snapshots.find(({ cwd }) => cwd === workflowCwd) ?? snapshots[0];
+		if (primary !== undefined) void reconcileRecuts(primary.cwd, pipelineDir(), primary.snapshot.runs).catch(() => {});
+		observePsSnapshot(runs);
+		const frame = await buildFrame(primary === undefined ? {} : { workflowCwd: primary.cwd, psRuns: runs });
 		lastFooterFrame = frame;
 		return frame;
 	}

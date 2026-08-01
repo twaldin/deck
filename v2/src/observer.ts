@@ -99,6 +99,7 @@ const RUN_TRANSITIONS: Record<string, { verb: StatusVerb; note: string } | undef
 	failed: { verb: "failed", note: "workflow failed" },
 	cancelled: { verb: "failed", note: "workflow cancelled" },
 	"waiting-human": { verb: "needs-decision", note: "workflow is waiting for an answer" },
+	"waiting-event": { verb: "blocked", note: "workflow is waiting for an event" },
 	// Paused is deliberate waiting, not a fault, and is never treated as stale.
 	paused: { verb: "paused", note: "workflow paused" },
 };
