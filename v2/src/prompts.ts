@@ -138,7 +138,7 @@ ${acceptance.map((item) => `- ${item}`).join("\n")}`);
 	// checkout corrupts the captain's own working copy.
 	sections.push(`## Dependencies
 
-Dependency warming starts in the background when this worktree is allocated. Before running tests, check \`${worktree}/.deck-deps-ready\`. If it is absent, wait for the install to finish. If \`${worktree}/.deck-deps-failed\` exists, read its error tail and continue when possible; dependency warming is best effort and never blocks this task.
+Dependency warming may start in the background when this worktree is allocated. Before running tests, check \`${worktree}/.deck-deps-ready\`. If it is absent, check \`${worktree}/.deck-deps-failed\`; read its error tail and continue when possible. Wait briefly and recheck while the background install can still be starting. If neither marker appears after that bounded wait, proceed with the install yourself or continue and report the missing marker. Dependency warming is best effort and never blocks this task.
 
 ## Isolation
 

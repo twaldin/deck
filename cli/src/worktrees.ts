@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { spawn } from "node:child_process";
 import { EFFORT_FILES, effortDir, loadConfig, manifestSchema, ulid } from "@deck/core";
 import { DeckError } from "@deck/core";
 import { z } from "zod";
@@ -79,23 +80,24 @@ export function warmDependencies(worktree: string, repo: string): void {
 	for (const marker of [DEPS_READY, DEPS_FAILED]) {
 		try { fs.rmSync(path.join(worktree, marker)); } catch { /* absent */ }
 	}
-	let child: Bun.Subprocess;
+	const ready = path.join(worktree, DEPS_READY);
+	const failed = path.join(worktree, DEPS_FAILED);
+	const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
+	const command = `{ if sh -lc ${shellQuote(install.command)} >${shellQuote(`${failed}.log`)} 2>&1; then printf 'ready\\n' >${shellQuote(ready)}; else tail -c 4000 ${shellQuote(`${failed}.log`)} >${shellQuote(failed)}; fi; rm -f ${shellQuote(`${failed}.log`)}; }`;
 	try {
-		child = Bun.spawn(["sh", "-lc", install.command], { cwd: worktree, stdout: "pipe", stderr: "pipe" });
+		const child = spawn("sh", ["-lc", command], {
+			cwd: worktree,
+			detached: true,
+			stdio: "ignore",
+			env: process.env,
+		});
+		child.on("error", (error) => {
+			try { fs.writeFileSync(failed, `${errorMessage(error)}\n`); } catch { /* best effort marker */ }
+		});
+		child.unref();
 	} catch (error) {
-		fs.writeFileSync(path.join(worktree, DEPS_FAILED), `${errorMessage(error)}\n`);
-		return;
+		fs.writeFileSync(failed, `${errorMessage(error)}\n`);
 	}
-	void (async () => {
-		const [stdout, stderr, code] = await Promise.all([
-			new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited,
-		]);
-		if (code === 0) fs.writeFileSync(path.join(worktree, DEPS_READY), "ready\n");
-		else {
-			const output = `${stdout}\n${stderr}`.trim().slice(-4000);
-			fs.writeFileSync(path.join(worktree, DEPS_FAILED), `${output}\n`);
-		}
-	})();
 }
 
 function errorMessage(error: unknown): string {

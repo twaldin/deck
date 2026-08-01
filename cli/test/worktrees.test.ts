@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { manifestSchema } from "@deck/core";
 import { type WorktreeEntry, worktreesStateSchema } from "../src/schema";
+import { warmDependencies } from "../src/worktrees";
 
 interface ProcessResult {
 	exitCode: number;
@@ -110,6 +111,47 @@ afterEach(() => {
 	for (const root of roots.splice(0)) {
 		fs.rmSync(root, { recursive: true, force: true });
 	}
+});
+
+describe("dependency warming", () => {
+	test("runs the configured install and writes a ready marker after it exits", async () => {
+		const fixture = await createFixture();
+		const worktree = path.join(fixture.root, "warm");
+		fs.mkdirSync(worktree);
+		fs.mkdirSync(path.join(fixture.home, "config"), { recursive: true });
+		fs.writeFileSync(path.join(fixture.home, "config", "projects.json"), JSON.stringify([{
+			primary: fs.realpathSync(fixture.repo), depsWarm: true, installCommand: "printf warmed > installed.txt",
+		}]));
+		const previousHome = process.env.DECK_V2_HOME;
+		process.env.DECK_V2_HOME = fixture.home;
+		warmDependencies(worktree, fs.realpathSync(fixture.repo));
+		if (previousHome === undefined) delete process.env.DECK_V2_HOME; else process.env.DECK_V2_HOME = previousHome;
+		for (let attempt = 0; attempt < 40 && !fs.existsSync(path.join(worktree, ".deck-deps-ready")); attempt++) {
+			await Bun.sleep(25);
+		}
+		expect(fs.readFileSync(path.join(worktree, "installed.txt"), "utf8")).toBe("warmed");
+		expect(fs.readFileSync(path.join(worktree, ".deck-deps-ready"), "utf8")).toBe("ready\n");
+		expect(fs.existsSync(path.join(worktree, ".deck-deps-failed"))).toBe(false);
+	});
+
+	test("writes a failed marker with the install error", async () => {
+		const fixture = await createFixture();
+		const worktree = path.join(fixture.root, "warm");
+		fs.mkdirSync(worktree);
+		fs.mkdirSync(path.join(fixture.home, "config"), { recursive: true });
+		fs.writeFileSync(path.join(fixture.home, "config", "projects.json"), JSON.stringify([{
+			primary: fs.realpathSync(fixture.repo), depsWarm: true, installCommand: "printf broken >&2; exit 7",
+		}]));
+		const previousHome = process.env.DECK_V2_HOME;
+		process.env.DECK_V2_HOME = fixture.home;
+		warmDependencies(worktree, fs.realpathSync(fixture.repo));
+		if (previousHome === undefined) delete process.env.DECK_V2_HOME; else process.env.DECK_V2_HOME = previousHome;
+		for (let attempt = 0; attempt < 40 && !fs.existsSync(path.join(worktree, ".deck-deps-failed")); attempt++) {
+			await Bun.sleep(25);
+		}
+		expect(fs.readFileSync(path.join(worktree, ".deck-deps-failed"), "utf8")).toContain("broken");
+		expect(fs.existsSync(path.join(worktree, ".deck-deps-ready"))).toBe(false);
+	});
 });
 
 describe("deck wt", () => {
