@@ -618,11 +618,8 @@ export default function deckV2(pi: any): void {
 	async function send(ctx: any, text: string): Promise<boolean> {
 		try {
 			if (typeof pi.sendUserMessage !== "function") return false;
-			const options = agentBusy || ctx?.isIdle?.() === false || ctx?.hasPendingMessages?.() === true
-				? { deliverAs: "followUp" }
-				: undefined;
 			agentBusy = true;
-			const out = pi.sendUserMessage(text, options) as unknown;
+			const out = pi.sendUserMessage(text, { deliverAs: "followUp" }) as unknown;
 			if (out instanceof Promise) await out;
 			return true;
 		} catch {
