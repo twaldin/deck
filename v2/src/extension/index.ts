@@ -14,8 +14,9 @@
  * orchestrator's own process, so there is no second thing that can die silently
  * while the orchestrator keeps running. fm2 lost a watcher for 23.8h that way.
  */
-import { spawn as spawnProcess } from "node:child_process";
+import { execFile, spawn as spawnProcess } from "node:child_process";
 import * as path from "node:path";
+import { promisify } from "node:util";
 import { Box, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { DECK_OPERATIONAL_PREFIX, registerCalm } from "../calm";
@@ -34,7 +35,7 @@ import { projectFleet } from "../herdr";
 import { deckV2Home, stateFiles } from "../home";
 import { standingRulesDigest } from "./standing-rules";
 import { readMeta } from "../meta";
-import { observePsSnapshot } from "../observer";
+import { observePsSnapshotWithInspect } from "../observer";
 import { registerQuestions } from "../questions";
 import { enqueue, pending } from "../queue";
 import { pipelineDir, startShip } from "../ship";
@@ -66,7 +67,12 @@ const RECONCILE_MS = 30_000;
 
 type DeckV2Dependencies = {
 	collectPsSnapshot?: typeof collectPsSnapshot;
+	inspectRun?: (command: string, args: readonly string[], cwd: string) => Promise<{ stdout: string; exitCode: number } | null>;
 };
+
+const inspectRun = promisify(execFile);
+const INSPECT_TIMEOUT_MS = 15_000;
+const INSPECT_MAX_BUFFER = 4_000_000;
 
 export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): void {
 	const collectSnapshot = dependencies.collectPsSnapshot ?? collectPsSnapshot;
@@ -673,25 +679,49 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 	async function getCurrentFrame(): Promise<Awaited<ReturnType<typeof buildFrame>>> {
 		const snapshot = workflowCwd === undefined ? { runs: [] as never[] } : await collectSnapshot(workflowCwd);
 		if (workflowCwd !== undefined) void reconcileRecuts(workflowCwd, pipelineDir(), snapshot.runs).catch(() => {});
-		observePsSnapshot(snapshot.runs);
+		if (workflowCwd !== undefined) {
+			await observePsSnapshotWithInspect({
+				rows: snapshot.runs,
+				workspace: workflowCwd,
+				run: dependencies.inspectRun ?? (async (command, args, cwd) => {
+					try {
+						const result = await inspectRun(command, [...args], {
+							cwd,
+							timeout: INSPECT_TIMEOUT_MS,
+							maxBuffer: INSPECT_MAX_BUFFER,
+						});
+						return { stdout: result.stdout, exitCode: 0 };
+					} catch (error: any) {
+						return { stdout: String(error?.stdout ?? ""), exitCode: Number(error?.code ?? 1) };
+					}
+				}),
+			});
+		}
 		const frame = await buildFrame(workflowCwd === undefined ? {} : { workflowCwd, psRuns: snapshot.runs });
 		lastFooterFrame = frame;
 		return frame;
 	}
 
+	let refreshingStatusline: Promise<Awaited<ReturnType<typeof buildFrame>>> | undefined;
 	async function refreshStatusline(ctx: any): Promise<Awaited<ReturnType<typeof buildFrame>>> {
-		try {
-			const frame = await getCurrentFrame();
-			ctx.ui?.setStatus?.("deck-usage", undefined);
-			// Herdr projection rides the same cadence: every reconcile cycle mirrors
-			// worker state into herdr agents (smithers runs are fleet-only). Guarded
-			// inside; herdr being down makes this a no-op, never a fault.
-			await projectFleet(frame);
-			return frame;
-		} catch {
-			// A statusline is decoration; never let it break a turn.
-			return lastFooterFrame;
-		}
+		if (refreshingStatusline !== undefined) return refreshingStatusline;
+		refreshingStatusline = (async () => {
+			try {
+				const frame = await getCurrentFrame();
+				ctx.ui?.setStatus?.("deck-usage", undefined);
+				// Herdr projection rides the same cadence: every reconcile cycle mirrors
+				// worker state into herdr agents (smithers runs are fleet-only). Guarded
+				// inside; herdr being down makes this a no-op, never a fault.
+				await projectFleet(frame);
+				return frame;
+			} catch {
+				// A statusline is decoration; never let it break a turn.
+				return lastFooterFrame;
+			} finally {
+				refreshingStatusline = undefined;
+			}
+		})();
+		return refreshingStatusline;
 	}
 
 	pi.on("session_start", async (_event: unknown, ctx: any) => {

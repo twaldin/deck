@@ -64,7 +64,7 @@ describe("observer idempotency", () => {
 			run: run("running", "implement"),
 			nodes: [{ nodeId: "implement", status: "failed", attempt: 1 }],
 		});
-		expect(events.readStatus("t1").events.filter((line) => line.verb === "working")).toHaveLength(2);
+		expect(events.readStatus("t1").events.filter((line) => line.verb === "failed")).toHaveLength(2);
 	});
 
 	test("a restarted observer does not re-announce history", async () => {
@@ -97,6 +97,57 @@ describe("observer idempotency", () => {
 });
 
 describe("observer event selection", () => {
+	test("pipeline milestones wake while the run stays running, in order and once", async () => {
+		const { observer, events } = await mods();
+		const base = { run: { ...run("running", "pipeline"), workflow: "pr-pipeline" }, nodes: [] as any[] };
+		const polls = [
+			[{ nodeId: "push-pr", status: "finished", attempt: 0, output: { prNumber: 42 } }],
+			[
+				{ nodeId: "push-pr", status: "finished", attempt: 0, output: { prNumber: 42 } },
+				{ nodeId: "landing-poll", status: "finished", attempt: 0, output: { landed: true, sha: "abc123" } },
+			],
+		];
+		for (const nodes of polls) observer.observeOnce("t1", { ...base, nodes });
+		observer.observeOnce("t1", { ...base, nodes: polls[1]! });
+		const emitted = events.readStatus("t1").events;
+		expect(emitted.map((event) => event.verb)).toEqual(["resolved", "resolved"]);
+		expect(emitted.map((event) => event.note)).toEqual(["PR opened (prNumber 42)", "PR landed (sha abc123)"]);
+	});
+
+	test("production ps observation enriches milestones from inspect output", async () => {
+		const { observer, events } = await mods();
+		fs.mkdirSync(path.join(home, "state", "ship"), { recursive: true });
+		fs.writeFileSync(path.join(home, "state", "ship", "run-1.input.json"), JSON.stringify({ ticket: "ticket-1" }));
+		const calls: string[] = [];
+		const emitted = await observer.observePsSnapshotWithInspect({
+			rows: [{ id: "run-1", status: "running", workflow: "pr-pipeline" }],
+			workspace: "/tmp/workspace",
+			run: async (_command, args, cwd) => {
+				calls.push(`${cwd}:${args.join(" ")}`);
+				return { exitCode: 0, stdout: JSON.stringify({
+					run: { id: "run-1", workflow: "pr-pipeline", status: "running" },
+				nodes: [{ nodeId: "push-pr", state: "finished", attempt: 0, output: { prNumber: 42 } }],
+			}) };
+			},
+		});
+		expect(calls).toHaveLength(1);
+		expect(emitted[0]?.note).toBe("PR opened (prNumber 42)");
+		expect(events.readStatus("ticket-1").events).toHaveLength(1);
+	});
+
+	test("production ps observation falls back when inspect fails", async () => {
+		const { observer, events } = await mods();
+		fs.mkdirSync(path.join(home, "state", "ship"), { recursive: true });
+		fs.writeFileSync(path.join(home, "state", "ship", "run-1.input.json"), JSON.stringify({ ticket: "ticket-1" }));
+		const emitted = await observer.observePsSnapshotWithInspect({
+			rows: [{ id: "run-1", status: "waiting-approval", step: "r0-stamp", workflow: "pr-pipeline" }],
+			workspace: "/tmp/workspace",
+			run: async () => ({ exitCode: 1, stdout: "not json" }),
+		});
+		expect(emitted[0]?.verb).toBe("needs-decision");
+		expect(events.readStatus("ticket-1").events).toHaveLength(1);
+	});
+
 	test("a running workflow with healthy nodes says nothing", async () => {
 		const { observer } = await mods();
 		const events = observer.observeOnce("t1", {
@@ -223,7 +274,7 @@ describe("polling a real run shape", () => {
 		});
 		// It stopped at the terminal state rather than polling forever.
 		expect(calls).toBe(3);
-		expect(emitted.map((event) => event.verb)).toEqual(["working", "done"]);
+		expect(emitted.map((event) => event.verb)).toEqual(["failed", "done"]);
 	});
 
 	// A failed CLI read is not a failed run. Reporting it as one appends a terminal
