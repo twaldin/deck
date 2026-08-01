@@ -53,11 +53,13 @@ import {
 	fetchRecentAuthors,
 	fetchRequestedReviewers,
 	fetchWatchSnapshot,
+	isCollaborator,
 	requestReviewers,
 	resolveReviewerLogin,
 } from "./lib/gh.ts";
 import { findLandingCommit } from "./lib/landing.ts";
 import { detectMigrations, MIGRATION_STAGES, migrationEvidenceComplete } from "./lib/migrations.ts";
+import { generatePullRequestDescription } from "./lib/description.ts";
 import {
 	defaultModelPolicy,
 	parseModelRef,
@@ -69,6 +71,7 @@ import { findProfile, type ProjectProfile } from "./lib/profiles.ts";
 import {
 	falloutPrompt,
 	implementPrompt,
+	reviewersDecisionPrompt,
 	localFixPrompt,
 	localReviewPrompt,
 	watchFixPrompt,
@@ -104,16 +107,25 @@ const DEFAULT_FIXTURES = {
 	headChangeRounds: [] as number[],
 };
 
-const DEFAULT_GITHUB = {
+export const DEFAULT_GITHUB = {
 	gh: "gh",
 	git: "git",
 	selfLogins: ["twaldin"],
 	excludedApprovers: ["ali"],
+	reviewerDenylist: ["mackcooper1408", "spencer-negri", "daniel-covelli", "akshat-lindy"],
 	reviewers: [] as string[],
 	/** Explicit opt-out only: reviewers are always requested by default. */
 	skipReviewerRequest: false,
 	maxReviewers: 2,
 };
+
+export function reviewerExcludeList(github: {
+	selfLogins: string[];
+	excludedApprovers: string[];
+	reviewerDenylist: string[];
+}): string[] {
+	return [...github.selfLogins, ...github.excludedApprovers, ...github.reviewerDenylist];
+}
 
 const DEFAULT_COMMANDS = {
 	merge: "gt merge",
@@ -187,6 +199,7 @@ const inputSchema = z.object({
 			git: z.string().optional(),
 			selfLogins: z.array(z.string()).optional(),
 			excludedApprovers: z.array(z.string()).optional(),
+			reviewerDenylist: z.array(z.string()).optional(),
 			reviewers: z.array(z.string()).optional(),
 			skipReviewerRequest: z.boolean().optional(),
 			maxReviewers: z.number().int().positive().optional(),
@@ -251,6 +264,7 @@ const schemas = {
 		verified: z.array(z.string()),
 		source: z.string(),
 		at: z.string(),
+		reviewerPrompt: z.string(),
 	}),
 	prRecord: z.object({
 		prNumber: z.number().int(),
@@ -939,11 +953,11 @@ export default smithers((ctx) => {
 										"--base", baseBranch,
 										"--title", `${input.ticket}: ${brief?.title ?? input.ticket}`,
 										"--body",
-										`${brief?.summary ?? ""}\n\nAcceptance criteria:\n${(brief?.acceptanceCriteria ?? [])
-											.map((criterion) => `- [ ] ${criterion}`)
-											.join("\n")}${latestLocalReview?.nits?.length
-											? `\n\nLocal review nits (non-blocking):\n${latestLocalReview.nits.map((nit) => `- ${nit}`).join("\n")}`
-											: ""}\n\nManaged by lindy-pr-pipeline run ${ctx.runId}.`,
+										generatePullRequestDescription({
+											brief: brief ?? { summary: "", acceptanceCriteria: [] },
+											testing: implementation.testEvidence,
+											reviewOutcome: latestLocalReview?.summary,
+										}),
 									]);
 									url = createOut.trim().split("\n").pop() ?? "";
 									const match = url.match(/\/pull\/(\d+)/);
@@ -994,6 +1008,7 @@ export default smithers((ctx) => {
 										verified: [],
 										source: "explicit-skip",
 										at: nowIso(),
+										reviewerPrompt: reviewersDecisionPrompt(github.reviewerDenylist),
 									};
 								}
 								if (dryRun) {
@@ -1003,6 +1018,7 @@ export default smithers((ctx) => {
 										verified: ["dry-reviewer"],
 										source: "dry-run",
 										at: nowIso(),
+										reviewerPrompt: reviewersDecisionPrompt(github.reviewerDenylist),
 									};
 								}
 								// Selection + request + silent-no-op verification live in
@@ -1010,10 +1026,10 @@ export default smithers((ctx) => {
 								// Explicit sources MERGE (brief + input config, deduped in
 								// selection); entries may be display names (name->login
 								// lookup; unresolvable entries escalate, never dropped).
-								return executeReviewerRequest(
+								const result = await executeReviewerRequest(
 									{
 										explicit: [...(brief?.suggestedReviewers ?? []), ...github.reviewers],
-										exclude: [...github.selfLogins, ...github.excludedApprovers],
+										exclude: reviewerExcludeList(github),
 										max: github.maxReviewers,
 									},
 									{
@@ -1021,12 +1037,13 @@ export default smithers((ctx) => {
 										fetchCodeowners: () => fetchCodeowners(ghCtx),
 										fetchRecentAuthors: (files) => fetchRecentAuthors(ghCtx, files),
 										resolveLogin: (entry) => resolveReviewerLogin(ghCtx, entry),
-										requestReviewers: (logins) =>
-											requestReviewers(ghCtx, pr.prNumber, logins),
-										fetchRequestedReviewers: () =>
-											fetchRequestedReviewers(ghCtx, pr.prNumber),
+										isCollaborator: (login) => isCollaborator(ghCtx, login),
+										logSkip: (login, reason) => console.warn(`[reviewer-skip] ${login}: ${reason}`),
+										requestReviewers: (logins) => requestReviewers(ghCtx, pr.prNumber, logins),
+										fetchRequestedReviewers: () => fetchRequestedReviewers(ghCtx, pr.prNumber),
 									},
 								);
+								return { ...result, reviewerPrompt: reviewersDecisionPrompt(github.reviewerDenylist) };
 							})()
 						}
 					</Task>
