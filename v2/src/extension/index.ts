@@ -111,7 +111,7 @@ export default function deckV2(pi: any): void {
 			if (typeof pi.sendMessage !== "function") return;
 			const result = pi.sendMessage(
 				{ customType: "deck.standing-rules.v1", content: standingRulesDigest(), display: false },
-				{ deliverAs: "nextTurn", triggerTurn: false },
+				{ deliverAs: key === "session_start" ? "nextTurn" : "steer", triggerTurn: false },
 			);
 			if (result instanceof Promise) await result;
 		} catch {

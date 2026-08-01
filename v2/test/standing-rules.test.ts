@@ -28,11 +28,11 @@ test("truncates oldest content and stays within the byte budget", () => {
 test("injects once at session start and once for each compaction", async () => {
 	fs.writeFileSync(path.join(home, "data", "captain.md"), "captain");
 	const handlers = new Map<string, ((event: any, ctx: any) => unknown)[]>();
-	const sent: string[] = [];
+	const sent: { content: string; options?: Record<string, unknown> }[] = [];
 	const pi = {
 		registerTool() {}, registerCommand() {},
 		on(event: string, handler: any) { handlers.set(event, [...(handlers.get(event) ?? []), handler]); },
-		sendMessage(message: { content: string }) { sent.push(message.content); },
+		sendMessage(message: { content: string }, options?: Record<string, unknown>) { sent.push({ content: message.content, options }); },
 	};
 	deckV2(pi as never);
 	const ctx = { mode: "print", isIdle: () => true, hasPendingMessages: () => false };
@@ -40,5 +40,8 @@ test("injects once at session start and once for each compaction", async () => {
 		for (const handler of handlers.get(event) ?? []) await handler(payload, ctx);
 	}
 	expect(sent).toHaveLength(3);
-	expect(sent.every((message) => message.includes(STANDING_RULES_DIGEST_MARKER))).toBe(true);
+	expect(sent.every((message) => message.content.includes(STANDING_RULES_DIGEST_MARKER))).toBe(true);
+	expect(sent[0]?.options).toEqual({ deliverAs: "nextTurn", triggerTurn: false });
+	expect(sent[1]?.options).toEqual({ deliverAs: "steer", triggerTurn: false });
+	expect(sent[2]?.options).toEqual({ deliverAs: "steer", triggerTurn: false });
 });
