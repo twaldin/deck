@@ -20,7 +20,7 @@ import { lastEvent, openDecisions } from "./events";
 import { internalSummary } from "./backlog";
 import { stateDir, stateFiles } from "./home";
 import { readMeta } from "./meta";
-import { ask, openQuestions, queueFile, type Question } from "./questions-store";
+import { openQuestions, queueFile } from "./questions-store";
 import { pending } from "./queue";
 import { unresolvedReceipts } from "./side-effects";
 import { SMITHERS_SPEC } from "./smithers";
@@ -147,9 +147,9 @@ export type FleetFrame = {
 		openQuestions: number;
 		internalOpen: number;
 		internalCap: number;
-		efforts: number;
-		agents: number;
-		unhealedFailures: number;
+		efforts?: number;
+		agents?: number;
+		unhealedFailures?: number;
 	};
 	sources: SourceHealth[];
 };
@@ -1503,9 +1503,9 @@ export function renderFooterLines(
 ): string[] {
 	const attention = [
 		`Nq ${frame.counters.openQuestions}`,
-		`${frame.counters.efforts} efforts`,
-		`${frame.counters.agents} agents`,
-		frame.counters.unhealedFailures > 0 ? `fail ${frame.counters.unhealedFailures}` : null,
+		`${frame.counters.efforts ?? frame.efforts.length} efforts`,
+		`${frame.counters.agents ?? frame.agents.length} agents`,
+		(frame.counters.unhealedFailures ?? frame.efforts.filter((effort) => effort.failed).length) > 0 ? `fail ${frame.counters.unhealedFailures ?? frame.efforts.filter((effort) => effort.failed).length}` : null,
 	].filter((value): value is string => value !== null);
 	const lines = [
 		footerIdentity(bits),
