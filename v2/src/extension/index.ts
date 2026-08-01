@@ -30,6 +30,7 @@ import {
 	renderFrame,
 	renderFooterLines,
 	type FooterSessionBits,
+	type PsRun,
 } from "../fleet";
 import { projectFleet } from "../herdr";
 import { deckV2Home, stateFiles } from "../home";
@@ -681,9 +682,9 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 		const snapshots = workflowWorkspaces.length === 0
 			? []
 			: await Promise.all(workflowWorkspaces.map(async (workspace) => ({ workspace, snapshot: await collectSnapshot(workspace) })));
-		const snapshot = snapshots[0]?.snapshot ?? { runs: [] as never[] };
+		const workflowSnapshot = snapshots.find(({ workspace }) => workspace === workflowCwd)?.snapshot;
 		const rows = snapshots.flatMap(({ workspace, snapshot: current }) => current.runs.map((run) => ({ ...run, workspace }))) as PsSnapshotRow[];
-		if (workflowCwd !== undefined) void reconcileRecuts(workflowCwd, pipelineDir(), snapshot.runs).catch(() => {});
+		if (workflowCwd !== undefined) void reconcileRecuts(workflowCwd, pipelineDir(), workflowSnapshot?.runs ?? []).catch(() => {});
 		if (workflowCwd !== undefined) {
 			await observePsSnapshotWithInspect({
 				rows,
@@ -702,7 +703,7 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 				}),
 			});
 		}
-		const frame = await buildFrame(workflowCwd === undefined ? {} : { workflowCwd, psRuns: rows });
+		const frame = await buildFrame(workflowCwd === undefined ? {} : { workflowCwd, psRuns: rows as PsRun[] });
 		lastFooterFrame = frame;
 		return frame;
 	}

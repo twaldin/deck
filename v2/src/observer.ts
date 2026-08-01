@@ -201,6 +201,8 @@ export function transitionKey(input: {
 	nodeId: string;
 	transition: string;
 	seq: number;
+	/** Workspace that owns the run. */
+	workspace?: string;
 	/**
 	 * Distinguishes repeats that share every other field.
 	 *
