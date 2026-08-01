@@ -80,6 +80,7 @@ export type SpawnRequest = {
 	 * `low`, `medium`, `high`, `xhigh`, or `max`) or an Anthropic budget as
 	 * `budget:<tokens>`; Pi sends the provider-native value without remapping.
 	 */
+	reasoning?: "low" | "medium" | "high" | "xhigh" | "max";
 	thinking?: string;
 };
 
