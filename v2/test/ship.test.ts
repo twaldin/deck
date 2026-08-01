@@ -14,7 +14,7 @@ import { profilesFile, seedProfiles, type ProjectProfile } from "../src/projects
 import { existingPrFromFlag, runCli } from "../src/cli";
 import { buildPipelineInput, pipelineDir, startShip, type ShipRequest } from "../src/ship";
 import { assertShipGoesThroughPipeline, shipProfileFor, workerModelFor } from "../src/spawn";
-import { smithersWorkspaceCwd, smithersWorkspaceRoot } from "../src/workspace";
+import { discoverSmithersWorkspaces, smithersWorkspaceCwd, smithersWorkspaceRoot } from "../src/workspace";
 
 let home: string;
 const saved: Record<string, string | undefined> = {};
@@ -186,6 +186,29 @@ describe("buildPipelineInput", () => {
 });
 
 describe("smithers workspace", () => {
+	test("discovers configured roots, deduplicates, and respects the depth limit", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "deck-discovery-"));
+		const first = path.join(root, "first", ".smithers");
+		const second = path.join(root, "second", ".smithers");
+		const deep = path.join(root, ...Array.from({ length: 7 }, (_, i) => `d${i}`), ".smithers");
+		fs.mkdirSync(first, { recursive: true });
+		fs.mkdirSync(second, { recursive: true });
+		fs.mkdirSync(deep, { recursive: true });
+		const previous = process.env.DECK_SMITHERS_ROOTS;
+		process.env.DECK_SMITHERS_ROOTS = `${root}${path.delimiter}${root}`;
+		try {
+			const found = discoverSmithersWorkspaces(path.join(root, "deck-home"));
+			expect(found).toContain(path.join(root, "first"));
+			expect(found).toContain(path.join(root, "second"));
+			expect(found.filter((cwd) => cwd === path.join(root, "first"))).toHaveLength(1);
+			expect(found).not.toContain(path.join(root, ...Array.from({ length: 7 }, (_, i) => `d${i}`)));
+		} finally {
+			if (previous === undefined) delete process.env.DECK_SMITHERS_ROOTS;
+			else process.env.DECK_SMITHERS_ROOTS = previous;
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	test("REGRESSION: ship invokes Smithers from the shared workspace parent", () => {
 		expect(smithersWorkspaceRoot(home)).toBe(path.join(home, "workflows", ".smithers"));
 		expect(smithersWorkspaceCwd(home)).toBe(path.join(home, "workflows"));

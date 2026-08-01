@@ -17,12 +17,19 @@ export function smithersWorkspaceCwd(home = deckV2Home()): string {
  * search roots are deliberately configurable so the home-sync layout can
  * replace the repository scan without changing the observer.
  */
+let discoveryCache: { key: string; expiresAt: number; workspaces: string[] } | undefined;
+const DISCOVERY_CACHE_MS = 30_000;
+
 export function discoverSmithersWorkspaces(home = deckV2Home()): string[] {
 	const configured = process.env.DECK_SMITHERS_ROOTS?.split(path.delimiter)
 		.map((root) => root.trim()).filter(Boolean);
 	const roots = configured?.length
 		? configured
 		: [home, process.env.DECK_REPO_ROOT ?? process.cwd()];
+	const key = JSON.stringify([home, ...roots.map((root) => path.resolve(root))]);
+	if (discoveryCache?.key === key && discoveryCache.expiresAt > Date.now()) {
+		return [...discoveryCache.workspaces];
+	}
 	const found = new Set<string>();
 	const visit = (directory: string, depth: number): void => {
 		if (depth > 6) return;
@@ -37,7 +44,9 @@ export function discoverSmithersWorkspaces(home = deckV2Home()): string[] {
 	};
 	for (const root of roots) visit(path.resolve(root), 0);
 	found.add(smithersWorkspaceCwd(home));
-	return [...found].sort();
+	const workspaces = [...found].sort();
+	discoveryCache = { key, expiresAt: Date.now() + DISCOVERY_CACHE_MS, workspaces };
+	return [...workspaces];
 }
 
 /** Report the old per-workflow workspace without deleting operator-owned runs. */

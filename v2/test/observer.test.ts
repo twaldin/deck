@@ -136,6 +136,19 @@ describe("observer event selection", () => {
 		expect(event?.note).toContain("merge-gate");
 	});
 
+	test("waiting-event includes the blocked node in the wake", async () => {
+		const { observer, events } = await mods();
+		fs.mkdirSync(path.join(home, "state", "ship"), { recursive: true });
+		fs.writeFileSync(path.join(home, "state", "ship", "run-1.input.json"), JSON.stringify({ ticket: "ticket-1" }));
+		const emitted = observer.observePsSnapshot([{
+			id: "run-1", status: "waiting-event", runState: { state: "waiting-event", blocked: { nodeId: "await-ci" } },
+			workflow: "pr-pipeline",
+		} as any]);
+		expect(emitted[0]?.verb).toBe("blocked");
+		expect(emitted[0]?.note).toContain("await-ci");
+		expect(events.readStatus("ticket-1").events[0]?.note).toContain("await-ci");
+	});
+
 	test("ps reconcile creates a T0 status for a ship escalation", async () => {
 		const { observer, events } = await mods();
 		fs.mkdirSync(path.join(home, "state", "ship"), { recursive: true });
@@ -230,6 +243,15 @@ describe("polling a real run shape", () => {
 		const lines = events.readStatus("t1").events;
 		expect(lines.filter((line) => line.verb === "failed")).toHaveLength(0);
 		expect(lines.filter((line) => line.verb === "done")).toHaveLength(1);
+	});
+
+	test("inspect prefers the explicit blocked node over the current step", async () => {
+		const { observer } = await mods();
+		const parsed = observer.parseInspect(JSON.stringify({
+			run: { id: "r", status: "waiting", step: "previous-step", blockedNode: "await-ci" },
+			runState: { state: "waiting-event", blocked: { nodeId: "await-ci" } },
+		}));
+		expect(parsed?.run.step).toBe("await-ci");
 	});
 
 	test("unparseable output is skipped rather than guessed at", async () => {
