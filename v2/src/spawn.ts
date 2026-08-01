@@ -330,7 +330,8 @@ function launchRun(
 	assertIsolatedWorktree(worktree, primaryCheckout);
 	ensureTaskDirs(request.taskId);
 
-	const model = request.model ?? DEFAULT_WORKER_MODEL;
+	const configuredModel = shipProfileFor(request)?.models?.implementer;
+	const model = request.model ?? configuredModel ?? DEFAULT_WORKER_MODEL;
 	const sessionDir = stateFiles(request.taskId).sessions;
 	fs.mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
 

@@ -439,6 +439,7 @@ export default smithers((ctx) => {
 
 	const policy: ModelPolicy = {
 		...defaultModelPolicy(),
+		...(profile !== null && !profileRepoMismatch ? (profile.models ?? {}) : {}),
 		...(input.models?.implementer !== undefined ? { implementer: input.models.implementer } : {}),
 		...(input.models?.reviewer !== undefined ? { reviewer: input.models.reviewer } : {}),
 		...(input.models?.watcher !== undefined ? { watcher: input.models.watcher } : {}),

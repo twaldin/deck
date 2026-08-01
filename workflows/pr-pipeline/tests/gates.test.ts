@@ -144,6 +144,8 @@ describe("model policy (deck catalog + family opposition)", () => {
 		const policy = { ...defaultModelPolicy(), reviewer: undefined };
 		expect(modelFamily(resolveAdversary("deck/claude-sonnet-5", policy))).toBe("openai");
 		expect(modelFamily(resolveAdversary("deck/gpt-5.6-terra", policy))).toBe("anthropic");
+		expect(modelFamily(resolveAdversary("deck/gpt-5.6-luna", policy))).toBe("anthropic");
+		expect(resolveAdversary("deck/claude-fable-5", policy)).toBe("deck/gpt-5.6-sol");
 	});
 
 	test("same-family reviewer with opposition ON is a violation", () => {

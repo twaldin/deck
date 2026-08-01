@@ -22,6 +22,15 @@ import * as path from "node:path";
 export const PIPELINES = ["lindy-full", "yolo-ship", "ask-then-yolo"] as const;
 export type PipelineId = (typeof PIPELINES)[number];
 
+export type ModelSeats = {
+	implementer: string;
+	reviewer?: string;
+	watcher: string;
+	fallout: string;
+	familyOpposition: boolean;
+	oppositionDefaults: Record<string, string>;
+};
+
 export type ProjectProfile = {
 	/** Stable id; doubles as the repo alias (spawn --repo <id>). */
 	id: string;
@@ -38,6 +47,8 @@ export type ProjectProfile = {
 	knowledge: string[];
 	/** Project-specific doctrine prose, inlined verbatim into briefs. */
 	doctrine?: string;
+	/** Captain-editable workflow seat models. */
+	models?: ModelSeats;
 };
 
 /** Same resolution as home.ts, inlined so this module stays dependency-free. */
@@ -83,6 +94,16 @@ export function seedProfiles(home = defaultHome()): ProjectProfile[] {
 				path.join(distill, "SETUP-CHECKLIST.md"),
 				path.join(distill, "CREDS-AND-TOOLS.md"),
 			],
+			models: {
+				implementer: "deck/gpt-5.6-luna",
+				watcher: "deck/gpt-5.6-luna",
+				fallout: "deck/gpt-5.6-sol",
+				familyOpposition: true,
+				oppositionDefaults: {
+					anthropic: "deck/gpt-5.6-sol",
+					openai: "deck/claude-fable-5",
+				},
+			},
 			doctrine: `The 3 load-bearing traps (verbatim, non-negotiable):
 
 ${LINDY_TRAPS}
@@ -102,6 +123,17 @@ And:
 			yolo: true,
 			stamp: false,
 			knowledge: [],
+			models: {
+				implementer: "deck/gpt-5.6-luna",
+				reviewer: undefined,
+				watcher: "deck/gpt-5.6-luna",
+				fallout: "deck/gpt-5.6-sol",
+				familyOpposition: true,
+				oppositionDefaults: {
+					anthropic: "deck/gpt-5.6-sol",
+					openai: "deck/claude-fable-5",
+				},
+			},
 		},
 	];
 }
@@ -157,6 +189,36 @@ export function validateProfiles(parsed: unknown, source: string): ProjectProfil
 		if (p.doctrine !== undefined && typeof p.doctrine !== "string") {
 			throw new Error(`${where} (${p.id}): doctrine must be a string`);
 		}
+		let models: ModelSeats | undefined;
+		if (p.models !== undefined) {
+			if (p.models === null || typeof p.models !== "object" || Array.isArray(p.models)) {
+				throw new Error(`${where} (${p.id}): models must be an object`);
+			}
+			const m = p.models as Record<string, unknown>;
+			if (typeof m.implementer !== "string" || typeof m.watcher !== "string" || typeof m.fallout !== "string") {
+				throw new Error(`${where} (${p.id}): models implementer, watcher, and fallout must be strings`);
+			}
+			if (m.reviewer !== undefined && typeof m.reviewer !== "string") {
+				throw new Error(`${where} (${p.id}): models reviewer must be a string`);
+			}
+			if (typeof m.familyOpposition !== "boolean" || m.oppositionDefaults === null || typeof m.oppositionDefaults !== "object" || Array.isArray(m.oppositionDefaults)) {
+				throw new Error(`${where} (${p.id}): models familyOpposition and oppositionDefaults are required`);
+			}
+			models = {
+				implementer: m.implementer,
+				...(m.reviewer === undefined ? {} : { reviewer: m.reviewer }),
+				watcher: m.watcher,
+				fallout: m.fallout,
+				familyOpposition: m.familyOpposition,
+				oppositionDefaults: (() => {
+					const entries = Object.entries(m.oppositionDefaults);
+					if (entries.some(([, value]) => typeof value !== "string" || value.length === 0)) {
+						throw new Error(`${where} (${p.id}): models.oppositionDefaults values must be non-empty strings`);
+					}
+					return Object.fromEntries(entries) as Record<string, string>;
+				})(),
+			};
+		}
 		return {
 			id: p.id,
 			repo: p.repo,
@@ -166,6 +228,7 @@ export function validateProfiles(parsed: unknown, source: string): ProjectProfil
 			stamp: p.stamp,
 			knowledge: knowledge as string[],
 			...(p.doctrine === undefined ? {} : { doctrine: p.doctrine }),
+			...(models === undefined ? {} : { models }),
 		};
 	});
 }
