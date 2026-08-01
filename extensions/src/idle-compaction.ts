@@ -6,7 +6,7 @@ import {
 	selectIdleCompactionConfig,
 	hasProviderNativeCompaction,
 	type IdleCompactionConfig,
-} from "./idle-compaction-policy";
+} from "./idle-compaction-policy.ts";
 
 const STATE_ENTRY_TYPE = "deck.idle-compaction.v1";
 const KEEP_WARM_MESSAGE_TYPE = "deck.idle-keepwarm.v1";
@@ -451,8 +451,8 @@ export function registerIdleCompaction(
 	});
 }
 
-export { DEFAULT_IDLE_COMPACTION_CONFIG } from "./idle-compaction-policy";
-export type { IdleCompactionConfig } from "./idle-compaction-policy";
+export { DEFAULT_IDLE_COMPACTION_CONFIG } from "./idle-compaction-policy.ts";
+export type { IdleCompactionConfig } from "./idle-compaction-policy.ts";
 
 export default function idleCompactionExtension(pi: IdleCompactionExtensionApi): void {
 	registerIdleCompaction(pi);

@@ -52,7 +52,7 @@ export function hasProviderNativeCompaction(model: IdleCompactionModel | undefin
 		const id = model.id.slice(model.id.lastIndexOf("/") + 1);
 		return id.startsWith("claude-") || id.startsWith("gpt-") || id.startsWith("glm-");
 	}
-	return true;
+	return false;
 }
 
 /**

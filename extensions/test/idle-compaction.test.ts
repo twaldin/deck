@@ -1,10 +1,37 @@
-import { describe, expect, test } from "bun:test";
+import assert from "node:assert/strict";
+import { describe, test } from "node:test";
+
+const expect = <T>(value: T) => ({
+	toBe: (expected: T) => assert.strictEqual(value, expected),
+	toEqual: (expected: unknown) => assert.deepStrictEqual(value, expected),
+	toBeFalse: () => assert.strictEqual(value, false),
+	toBeTrue: () => assert.strictEqual(value, true),
+	toBeUndefined: () => assert.strictEqual(value, undefined),
+	toHaveLength: (length: number) => assert.strictEqual((value as { length: number }).length, length),
+	toMatchObject: (expected: Record<string, unknown>) => {
+		assert.deepStrictEqual(
+			Object.fromEntries(Object.keys(expected).map((key) => [key, (value as Record<string, unknown>)[key]])),
+			Object.fromEntries(Object.keys(expected).map((key) => [key, expected[key]])),
+		);
+	},
+	toContain: (expected: unknown) => assert.ok((value as string).includes(expected as string)),
+	toContainEqual: (expected: unknown) => {
+		assert.ok((value as unknown[]).some((item) => {
+			try {
+				assert.deepStrictEqual(item, expected);
+				return true;
+			} catch {
+				return false;
+			}
+		}));
+	},
+});
 import {
 	getContextMarker,
 	registerIdleCompaction,
 	type IdleCompactionExtensionApi,
 	type IdleCompactionRuntime,
-} from "../src/idle-compaction";
+} from "../src/idle-compaction.ts";
 import {
 	DEFAULT_IDLE_COMPACTION_CONFIG,
 	decideIdleCompaction,
@@ -12,7 +39,7 @@ import {
 	parseIdleCompactionConfig,
 	selectIdleCompactionConfig,
 	hasProviderNativeCompaction,
-} from "../src/idle-compaction-policy";
+} from "../src/idle-compaction-policy.ts";
 
 class FakeRuntime implements IdleCompactionRuntime {
 	currentTime = 0;
@@ -226,6 +253,7 @@ describe("idle compaction policy", () => {
 		expect(decideIdleCompaction(base)).toEqual({ compact: false, reason: "keep-warm" });
 		expect(hasProviderNativeCompaction({ provider: "xai", id: "grok-4" })).toBeFalse();
 		expect(hasProviderNativeCompaction({ provider: "deck", id: "grok-4" })).toBeFalse();
+		expect(hasProviderNativeCompaction({ provider: "unknown", id: "custom-model" })).toBeFalse();
 		expect(hasProviderNativeCompaction({ provider: "deck", id: "claude-sonnet-4-5" })).toBeTrue();
 	});
 
