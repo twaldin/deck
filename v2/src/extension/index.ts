@@ -72,21 +72,30 @@ export default function deckV2(pi: any): void {
 	let timer: ReturnType<typeof setInterval> | undefined;
 	let unwatch: (() => void) | undefined;
 	let workflowCwd: string | undefined;
-	// Send-failure backoff. deliver() fires on the 30s timer AND on every fs.watch
-	// nudge, so a failing sendUserMessage with no backoff is a tight retry loop:
-	// every status append re-triggers the same failing send. Events are durable
-	// (outbox + status files), so deferring costs nothing.
+	// Send-failure backoff protects against real queue transport errors. Wakes
+	// remain durable in the outbox while a failed call is retried.
 	let sendFailures = 0;
 	let sendRetryAt = 0;
 	const SEND_BACKOFF_BASE_MS = 60_000;
 	const SEND_BACKOFF_MAX_MS = 15 * 60_000;
-	// Tracks the startup and active-turn window. Pi only accepts `followUp` while
-	// streaming, so the first idle send starts normally and later sends use the
-	// native queue rather than racing a second prompt into startup.
+	// Busy fence prevents each timer/watch cycle from queueing another follow-up
+	// during one turn. Events remain in the durable outbox until the turn settles.
+	// This is intentional: follow-ups are queued only when pi is idle, then
+	// acknowledged when the queued turn actually starts.
 	let agentBusy = false;
+	let pendingAckIds: string[] = [];
 	// Re-entrancy lock: deliver() fires from the interval AND every fs.watch
 	// nudge; two overlapping async passes would drain the same outbox twice.
 	let delivering = false;
+
+	function busy(ctx: any): boolean {
+		return (
+			agentBusy ||
+			pendingAckIds.length > 0 ||
+			ctx?.isIdle?.() === false ||
+			ctx?.hasPendingMessages?.() === true
+		);
+	}
 	let lastFooterFrame = {
 		generatedAt: new Date().toISOString(),
 		tasks: [],
@@ -529,14 +538,14 @@ export default function deckV2(pi: any): void {
 	 * message, T2 never. The fold is the fix for six queued follow-ups each
 	 * burning a turn after the first drain had already handled them.
 	 *
-	 * Pi owns the in-flight message queue. Sends during a turn use `followUp`, so
-	 * Pi queues them and delivers them after the turn settles. The first idle send
-	 * starts a normal turn; the busy fence makes later sends native follow-ups.
+	 * Injection only happens while pi is IDLE. Injecting mid-turn is rejected
+	 * ("Agent is already processing"), and forcing it through with a steer is
+	 * exactly the interruption class this design removes. A wake deferred by one
+	 * cycle is correct; the events are durable and reconcile is idempotent, so
+	 * nothing is lost by waiting. Only the statusline updates while busy.
 	 */
 	async function deliver(ctx: any): Promise<void> {
-		// Backing off after a failed send is the same shape as busy: return before
-		// reconcile so no cursor moves and nothing is consumed unsent.
-		if (delivering || Date.now() < sendRetryAt) {
+		if (delivering || busy(ctx) || Date.now() < sendRetryAt) {
 			void refreshStatusline(ctx);
 			return;
 		}
@@ -594,7 +603,9 @@ export default function deckV2(pi: any): void {
 				delivered.push(...batched.map((entry) => entry.id));
 			}
 		}
-		ackWakes(delivered);
+		// sendMessage confirms queue acceptance, not turn delivery. Keep these
+		// entries owed until pi reports that the queued follow-up has started.
+		pendingAckIds.push(...delivered);
 		if (sent < attempted) {
 			// A send failed: back off exponentially, capped. Undelivered wakes stay
 			// owed in the outbox and are retried when the window opens.
@@ -609,17 +620,16 @@ export default function deckV2(pi: any): void {
 	}
 
 	/**
-	 * Send one message, reporting whether it was accepted by Pi's native queue.
-	 * A false return leaves the wake owed, so the next cycle retries it. The
-	 * follow-up delivery mode queues during a running turn and preserves FIFO
-	 * order without surfacing the active-prompt error. A rejection is a failed
-	 * send, never a rethrow.
+	 * Send one message through pi's queue. Pi queues follow-ups while busy and
+	 * starts a turn when idle. A false return leaves the wake owed.
 	 */
-	async function send(ctx: any, text: string): Promise<boolean> {
+	async function send(_ctx: any, text: string): Promise<boolean> {
 		try {
-			if (typeof pi.sendUserMessage !== "function") return false;
-			agentBusy = true;
-			const out = pi.sendUserMessage(text, { deliverAs: "followUp" }) as unknown;
+			if (typeof pi.sendMessage !== "function") return false;
+			const out = pi.sendMessage(
+				{ customType: "deck.wake", content: text, display: true },
+				{ deliverAs: "followUp", triggerTurn: true },
+			) as unknown;
 			if (out instanceof Promise) await out;
 			return true;
 		} catch {
@@ -700,9 +710,9 @@ export default function deckV2(pi: any): void {
 		});
 		// The wake loop only runs for an interactive orchestrator.
 		//
-		// Waking means injecting a user message, which needs a live session with a
-		// captain reading it. In print mode there is no live captain to wake. RPC
-		// has a caller driving the conversation, so unsolicited turns are the
+		// Waking needs a live session with a captain reading it. In print mode there
+		// is a single prompt and no one to wake, so automatic waking is gated.
+		// RPC has a caller driving the conversation, so unsolicited turns are the
 		// caller's business, not ours.
 		//
 		// The tools still work in every mode; only the automatic waking is gated.
@@ -715,11 +725,17 @@ export default function deckV2(pi: any): void {
 		unwatch = (await import("../wake")).watchStatusDir(() => void deliver(ctx));
 	});
 
+	// A queued follow-up is durable until the next turn starts. This avoids
+	// acknowledging a wake that is still only in pi's in-memory queue.
 	pi.on("before_agent_start", async () => {
 		agentBusy = true;
 	});
 	pi.on("agent_start", async () => {
 		agentBusy = true;
+		if (pendingAckIds.length > 0) {
+			ackWakes(pendingAckIds);
+			pendingAckIds = [];
+		}
 	});
 	pi.on("agent_settled", async () => {
 		agentBusy = false;
@@ -735,6 +751,11 @@ export default function deckV2(pi: any): void {
 		unwatch?.();
 		timer = undefined;
 		unwatch = undefined;
+		// Queue acceptance is not delivery. If shutdown happens before the
+		// queued turn starts, leave the outbox entries owed and drop only the
+		// in-memory fence so a later session can retry them.
+		pendingAckIds = [];
+		agentBusy = false;
 	});
 }
 

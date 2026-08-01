@@ -1,30 +1,19 @@
-/**
- * The wake delivery guards. The failure these tests pin down is real: isIdle()
- * read true, a turn started, then sendUserMessage hit an active run and pi
- * emitted `Extension "<runtime>" error: Agent is already processing a prompt`
- * — pi's bindCore catches the rejection internally, so the caller never sees
- * it. Pi's native follow-up queue accepts input during the active turn and
- * delivers it in FIFO order. These tests verify the extension uses that queue.
- */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import deckV2 from "../src/extension/index";
 import { appendStatus } from "../src/events";
+import { pendingWakes } from "../src/wake";
 
 let home: string;
 let savedPath: string | undefined;
-
 beforeEach(() => {
 	home = fs.mkdtempSync(path.join(os.tmpdir(), "deckv2-deliver-"));
 	process.env.DECK_V2_HOME = home;
-	// No herdr, no bunx: the statusline refresh degrades to skipped sources
-	// instead of spawning real subprocesses (herdr projection creates panes).
 	savedPath = process.env.PATH;
 	process.env.PATH = "/nonexistent";
 });
-
 afterEach(() => {
 	fs.rmSync(home, { recursive: true, force: true });
 	delete process.env.DECK_V2_HOME;
@@ -32,151 +21,95 @@ afterEach(() => {
 });
 
 type Handler = (event: unknown, ctx: unknown) => unknown;
-
-/** Fake pi that keeps EVERY handler per event, like the real runner. */
-function fakePi(sendUserMessage?: (...args: unknown[]) => unknown) {
+function fakePi(sendMessage?: (...args: unknown[]) => unknown) {
 	const handlers = new Map<string, Handler[]>();
 	const sent: unknown[][] = [];
 	const api = {
-		registerTool: () => {},
-		registerCommand: () => {},
-		on: (event: string, handler: Handler) => {
-			const list = handlers.get(event) ?? [];
-			list.push(handler);
-			handlers.set(event, list);
-		},
-		sendUserMessage:
-			sendUserMessage ??
-			((...args: unknown[]) => {
-				sent.push(args);
-			}),
+		registerTool: () => {}, registerCommand: () => {},
+		on: (event: string, handler: Handler) => handlers.set(event, [...(handlers.get(event) ?? []), handler]),
+		sendMessage: sendMessage ?? ((...args: unknown[]) => { sent.push(args); }),
 	};
-	const emit = async (event: string, ctx: unknown): Promise<void> => {
+	const emit = async (event: string, ctx: unknown) => {
 		for (const handler of handlers.get(event) ?? []) await handler({}, ctx);
 	};
 	return { api, emit, sent };
 }
-
-function tuiCtx(overrides: Record<string, unknown> = {}) {
-	return {
-		mode: "tui",
-		isIdle: () => true,
-		hasPendingMessages: () => false,
-		ui: undefined,
-		...overrides,
-	};
-}
-
+const ctx = (busy = false) => ({ mode: "tui", isIdle: () => !busy, hasPendingMessages: () => busy, ui: undefined });
 const settle = () => new Promise((resolve) => setTimeout(resolve, 25));
+const wakeCalls = (calls: unknown[][]) =>
+	calls.filter((call) => (call[0] as { customType?: string } | undefined)?.customType === "deck.wake");
 
-describe("wake delivery guards", () => {
-	test("baseline: an idle session delivers a blocked wake once", async () => {
+describe("wake delivery", () => {
+	test("queues a wake after a busy cycle through followUp", async () => {
 		appendStatus("t1", "blocked", "main is red");
 		const pi = fakePi();
 		deckV2(pi.api as never);
-		const ctx = tuiCtx();
-		await pi.emit("session_start", ctx);
+		const busyCtx = ctx(true);
+		await pi.emit("session_start", busyCtx);
 		await settle();
-		await pi.emit("session_shutdown", ctx);
-		expect(pi.sent).toHaveLength(1);
-		expect(String(pi.sent[0]?.[0])).toContain("t1: blocked");
+		expect(wakeCalls(pi.sent)).toHaveLength(0);
+		// A status watcher retries the durable outbox after the turn becomes idle.
+		const idleCtx = ctx();
+		await pi.emit("agent_settled", idleCtx);
+		await pi.emit("session_start", idleCtx);
+		await settle();
+		const sent = wakeCalls(pi.sent);
+		expect(sent).toHaveLength(1);
+		expect(sent[0]?.[0]).toMatchObject({ customType: "deck.wake", display: true });
+		expect(sent[0]?.[1]).toEqual({ deliverAs: "followUp", triggerTurn: true });
 	});
 
-	test("agent_start queues sends during the active turn", async () => {
+	test("acks a queued wake only when agent_start fires", async () => {
 		appendStatus("t1", "blocked", "main is red");
 		const pi = fakePi();
 		deckV2(pi.api as never);
-		const ctx = tuiCtx();
-		// A turn is running when the session starts delivering.
-		await pi.emit("agent_start", ctx);
-		await pi.emit("session_start", ctx);
+		await pi.emit("session_start", ctx());
 		await settle();
-		expect(pi.sent).toHaveLength(1);
-		expect(pi.sent[0]?.[1]).toEqual({ deliverAs: "followUp" });
-		await pi.emit("session_shutdown", ctx);
+		expect(pendingWakes()).toHaveLength(1);
+		await pi.emit("agent_start", ctx());
+		expect(pendingWakes()).toHaveLength(0);
+		await pi.emit("agent_start", ctx());
+		expect(pendingWakes()).toHaveLength(0);
 	});
 
-	test("before_agent_start queues input during the pre-start window", async () => {
+	test("keeps a queued wake owed when shutdown happens before agent_start", async () => {
 		appendStatus("t1", "blocked", "main is red");
 		const pi = fakePi();
 		deckV2(pi.api as never);
-		const ctx = tuiCtx();
-		// The earliest turn signal, before agent_start, while isIdle still
-		// reads true: a nudge landing here must not send.
-		await pi.emit("before_agent_start", ctx);
-		await pi.emit("session_start", ctx);
+		await pi.emit("session_start", ctx());
 		await settle();
-		expect(pi.sent).toHaveLength(1);
-		expect(pi.sent[0]?.[1]).toEqual({ deliverAs: "followUp" });
-		await pi.emit("session_shutdown", ctx);
+		expect(pendingWakes()).toHaveLength(1);
+		await pi.emit("session_shutdown", ctx());
+		expect(pendingWakes()).toHaveLength(1);
 	});
 
-	test("hasPendingMessages does not block native queueing", async () => {
+	test("acks only after a successful queue call", async () => {
 		appendStatus("t1", "blocked", "main is red");
-		const pi = fakePi();
+		const pi = fakePi(() => { throw new Error("transport"); });
 		deckV2(pi.api as never);
-		const ctx = tuiCtx({ hasPendingMessages: () => true });
-		await pi.emit("session_start", ctx);
+		await pi.emit("session_start", ctx());
 		await settle();
-		await pi.emit("session_shutdown", ctx);
-		expect(pi.sent).toHaveLength(1);
-		expect(pi.sent[0]?.[1]).toEqual({ deliverAs: "followUp" });
-	});
-
-	test("multiple messages are accepted in FIFO order while a turn runs", async () => {
-		appendStatus("t1", "blocked", "red");
-		appendStatus("t2", "blocked", "also red");
-		const calls: unknown[][] = [];
-		const pi = fakePi((...args: unknown[]) => {
-			calls.push(args);
-		});
-		deckV2(pi.api as never);
-		const ctx = tuiCtx({ isIdle: () => false, hasPendingMessages: () => true });
-		await pi.emit("session_start", ctx);
-		await settle();
-		await pi.emit("session_shutdown", ctx);
-		expect(calls).toHaveLength(2);
-		expect(calls.map((call) => call[1])).toEqual([{ deliverAs: "followUp" }, { deliverAs: "followUp" }]);
-		expect(String(calls[0]?.[0])).toContain("t1: blocked");
-		expect(String(calls[1]?.[0])).toContain("t2: blocked");
-	});
-
-	test("a rejected send promise is a failed send, not a success and not a throw", async () => {
-		appendStatus("t1", "blocked", "main is red");
-		const pi = fakePi(() => Promise.reject(new Error("Agent is already processing a prompt")));
-		deckV2(pi.api as never);
-		const ctx = tuiCtx();
-		await pi.emit("session_start", ctx);
-		await settle();
-		await pi.emit("session_shutdown", ctx);
-
-		// Undelivered: the wake is still owed in the outbox.
 		const { pendingWakes } = await import("../src/wake");
 		expect(pendingWakes()).toHaveLength(1);
 	});
 
-	test("re-entrancy: overlapping deliver passes drain the outbox once", async () => {
-		appendStatus("t1", "blocked", "main is red");
-		let release: () => void = () => {};
-		const gate = new Promise<void>((resolve) => {
-			release = resolve;
-		});
-		const calls: unknown[][] = [];
-		const pi = fakePi((...args: unknown[]) => {
-			calls.push(args);
-			return gate; // the first pass parks inside its send
-		});
+	test("T1 events fold into one queued message", async () => {
+		appendStatus("t1", "done", "one");
+		appendStatus("t1", "resolved", "two");
+		const pi = fakePi();
 		deckV2(pi.api as never);
-		const ctx = tuiCtx();
-		// Two overlapping passes: session_start fires deliver, and firing the
-		// session_start handler again is the same shape as the interval/watch
-		// nudge landing while the first pass is mid-send.
-		const first = pi.emit("session_start", ctx);
-		const second = pi.emit("session_start", ctx);
-		await Promise.all([first, second]);
-		release();
+		await pi.emit("session_start", ctx());
 		await settle();
-		await pi.emit("session_shutdown", ctx);
-		expect(calls).toHaveLength(1);
+		expect(wakeCalls(pi.sent)).toHaveLength(1);
+	});
+
+	test("does not expose a bare user injection path", async () => {
+		appendStatus("t1", "blocked", "main is red");
+		const calls: unknown[][] = [];
+		const pi = fakePi((...args) => { calls.push(args); });
+		deckV2(pi.api as never);
+		await pi.emit("session_start", ctx());
+		await settle();
+		expect(wakeCalls(calls)[0]?.[0]).not.toBeTypeOf("string");
 	});
 });
