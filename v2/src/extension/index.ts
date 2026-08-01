@@ -687,6 +687,7 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 			? []
 			: await Promise.all(workflowWorkspaces.map(async (workspace) => ({ workspace, snapshot: await collectSnapshot(workspace) })));
 		const workflowSnapshot = snapshots.find(({ workspace }) => workspace === workflowCwd)?.snapshot;
+		const allRuns = snapshots.flatMap(({ snapshot: current }) => current.runs);
 		const rows = snapshots.flatMap(({ workspace, snapshot: current }) => current.runs.map((run) => ({ ...run, workspace }))) as PsSnapshotRow[];
 		if (workflowCwd !== undefined) void reconcileRecuts(workflowCwd, pipelineDir(), workflowSnapshot?.runs ?? []).catch(() => {});
 		if (workflowCwd !== undefined) {
@@ -709,7 +710,10 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 		}
 		const frame = workflowCwd === undefined
 			? await buildFrame({})
-			: await buildFrame({ workflowCwd, psRuns: workflowSnapshot?.runs ?? [] });
+			: await buildFrame({
+					workflowCwd,
+					psRuns: allRuns,
+				});
 		lastFooterFrame = frame;
 		return frame;
 	}

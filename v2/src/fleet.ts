@@ -494,9 +494,20 @@ async function collectRunsOnce(
 					try {
 						const review = await run("gh", ["pr", "view", String(prNumber), "--repo", input.repo, "--json", "reviewDecision,reviews"], { cwd, timeout: 15_000, maxBuffer: 1_000_000 });
 						const [owner, name] = input.repo.split("/");
-						const threads = await run("gh", ["api", "graphql", "-f", `query=query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){nodes{isResolved}}}}}`, "-F", `owner=${owner}`, "-F", `name=${name}`, "-F", `number=${prNumber}`], { cwd, timeout: 15_000, maxBuffer: 1_000_000 });
+						const threadNodes: Array<{ isResolved?: boolean }> = [];
+						let cursor: string | null = null;
+						do {
+							const query = `query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$cursor){nodes{isResolved} pageInfo{hasNextPage endCursor}}}}}`;
+							const args = ["gh", "api", "graphql", "-f", `query=${query}`, "-F", `owner=${owner}`, "-F", `name=${name}`, "-F", `number=${prNumber}`];
+							if (cursor !== null) args.push("-F", `cursor=${cursor}`);
+							const page = await run("gh", args, { cwd, timeout: 15_000, maxBuffer: 1_000_000 });
+							const pageValue = JSON.parse(page.stdout) as { data?: { repository?: { pullRequest?: { reviewThreads?: { nodes?: Array<{ isResolved?: boolean }>; pageInfo?: { hasNextPage?: boolean; endCursor?: string | null } } } } } };
+							const threadsPage = pageValue.data?.repository?.pullRequest?.reviewThreads;
+							threadNodes.push(...(threadsPage?.nodes ?? []));
+							cursor = threadsPage?.pageInfo?.hasNextPage ? (threadsPage.pageInfo.endCursor ?? null) : null;
+						} while (cursor !== null);
 						const value = JSON.parse(review.stdout) as { reviewDecision?: string; reviews?: Array<{ author?: { login?: string }; state?: string; submittedAt?: string }> };
-						const threadValue = JSON.parse(threads.stdout) as { data?: { repository?: { pullRequest?: { reviewThreads?: { nodes?: Array<{ isResolved?: boolean }> } } } } };
+						const threadValue = { data: { repository: { pullRequest: { reviewThreads: { nodes: threadNodes } } } } };
 						const latest = new Map<string, { state?: string }>();
 						for (const item of [...(value.reviews ?? [])].sort((a, b) => (Date.parse(a.submittedAt ?? "") || 0) - (Date.parse(b.submittedAt ?? "") || 0))) {
 							const login = item.author?.login ?? "unknown";
@@ -1617,7 +1628,9 @@ function factoryRows(frame: FleetFrame): Array<{ effort: EffortRow; workflow: Wo
 	});
 	const represented = new Set(rows.map(({ workflow }) => workflow.runId));
 	for (const task of frame.tasks) {
-		if (["done", "failed", "cancelled"].includes(task.lastVerb ?? "") || (task.runId !== null && represented.has(task.runId))) continue;
+		const terminal = ["done", "cancelled"].includes(task.lastVerb ?? "");
+		const actionableFailure = task.lastVerb === "failed" && (task.openDecisions > 0 || task.queuedMessages > 0 || task.unresolvedSideEffects > 0 || task.waitingFor !== null || task.lastNote !== null);
+		if ((terminal || (task.lastVerb === "failed" && !actionableFailure)) || (task.runId !== null && represented.has(task.runId))) continue;
 		const runId = task.runId ?? `task:${task.taskId}`;
 		const wakeReason = task.waitingFor ?? task.lastNote ?? task.lastVerb;
 		const workflow: WorkflowRow = { runId, workflow: null, status: task.lastVerb, state: task.runState, step: task.stage, taskId: task.taskId, ticket: task.ticket, prNumber: task.prNumber, prTitle: task.prTitle, phase: task.phase, waitingFor: wakeReason as WaitingFor, activity: task.activity, startedAt: null };
