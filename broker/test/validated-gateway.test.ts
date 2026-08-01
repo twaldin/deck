@@ -15,7 +15,7 @@ async function withFakeUpstream(options: Partial<FastGatewayOptions> = {}, upstr
 		 port: 0,
 		 fetch: async request => {
 			forwarded.push({ path: new URL(request.url).pathname, body: await request.json() as Record<string, unknown> });
-			return upstreamResponse.clone();
+			return upstreamResponse.clone() as any;
 		},
 	});
 	const upstream = {
