@@ -14,7 +14,7 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { Api, Model } from "@oh-my-pi/pi-ai";
+import { PROVIDER_REGISTRY, type Api, type Model } from "@oh-my-pi/pi-ai";
 import { getBundledModels, getBundledProviders, type GeneratedProvider } from "@oh-my-pi/pi-catalog/models";
 import { z } from "zod";
 import { BROKER_DIR } from "./paths";
@@ -63,6 +63,27 @@ export const DEFAULT_ALLOWLIST: Record<string, readonly string[]> = {
 	...Object.fromEntries(getBundledProviders().map(provider => [provider, ["*"]])),
 	...PLAN_ALLOWLIST,
 };
+
+/** Public, non-secret view of every provider supported by pi-ai. */
+export interface ProviderCatalogEntry {
+	id: string;
+	name: string;
+	modelCount: number;
+	auth: "oauth" | "api-key";
+	needsAuth: boolean;
+}
+
+/** Enumerate the pi-ai registry, including OAuth providers with no account. */
+export function getProviderCatalog(storedProviders: ReadonlySet<string> = new Set()): ProviderCatalogEntry[] {
+	const bundledProviders = new Set<string>(getBundledProviders());
+	return PROVIDER_REGISTRY.map(provider => ({
+		id: provider.id,
+		name: provider.name,
+		modelCount: bundledProviders.has(provider.id) ? getBundledModels(provider.id as GeneratedProvider).length : 0,
+		auth: provider.login ? "oauth" : "api-key",
+		needsAuth: provider.login ? !storedProviders.has(provider.id) : false,
+	}));
+}
 
 const allowlistFile = z.record(z.string(), z.array(z.string()));
 

@@ -16,6 +16,7 @@
 import * as fs from "node:fs";
 import { timingSafeEqual } from "node:crypto";
 import type { AuthStorage, StoredCredentialBlock } from "@oh-my-pi/pi-ai";
+import { getProviderCatalog } from "./models";
 import { refreshUsageRoster } from "./usage";
 
 interface ControlDeps {
@@ -151,6 +152,8 @@ export function startControlSocket(sockPath: string, deps: ControlDeps): { close
 		try {
 			switch (op) {
 				case "status": {
+					const accounts = describeAccounts(deps.storage, deps.listBlocks);
+					const usage = await refreshUsageRoster(deps.storage);
 					send(socket, {
 						id,
 						ok: true,
@@ -159,7 +162,9 @@ export function startControlSocket(sockPath: string, deps: ControlDeps): { close
 							pid: process.pid,
 							uptimeMs: Date.now() - deps.startedAt,
 							gateway: deps.gatewayUrl,
-							accounts: describeAccounts(deps.storage, deps.listBlocks),
+							accounts,
+							providers: getProviderCatalog(new Set(accounts.map(account => account.provider))),
+							usage,
 						},
 					});
 					return;
