@@ -1684,11 +1684,23 @@ export default smithers((ctx) => {
 								const prior = queueRows[queueRows.length - 1];
 								const ejected = lifecycle.state === "open" && prior?.autoMergeRequest === true && !lifecycle.autoMergeRequest;
 								if (ejected) {
-									// GitHub removes auto-merge when a queued PR is ejected. Re-enable it
-									// before returning the poll row so the next queue loop iteration can
-									// observe a fresh queue request instead of dying on a retry.
+									// GitHub removes auto-merge when a queued PR is ejected. Re-submit it
+									// with the configured merge mechanism. This can be Graphite's
+									// queue-aware `gt merge`, so do not substitute a GitHub strategy.
 									if (!dryRun) {
-										await execOrThrow(bunExec, [ghCtx.gh, "pr", "merge", String(pr.prNumber), "--auto", "--merge"], { cwd: input.worktree });
+										const mergeBranch = (
+											await execOrThrow(
+												bunExec,
+												[github.git, "rev-parse", "--abbrev-ref", "HEAD"],
+												{ cwd: input.worktree },
+											)
+										).trim();
+										if (mergeBranch !== input.branch) {
+											throw new Error(
+													`[escalate] worktree is on branch "${mergeBranch}", not "${input.branch}" - refusing to re-submit the merge command there (it acts on the current branch and would merge the wrong PR).`,
+											);
+										}
+										await runShell(commands.merge, input.worktree);
 									}
 								}
 								return { poll: pollNo, state: lifecycle.state, autoMergeRequest: ejected ? true : lifecycle.autoMergeRequest, ejected, reason: ejected ? "PR ejected; auto-merge re-submitted" : lifecycle.state === "closed" ? "PR closed; verify squash on base" : "waiting in merge queue" };
