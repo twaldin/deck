@@ -206,6 +206,9 @@ export async function runCli(argv: string[]): Promise<number> {
 				if (id === undefined) throw new Error("spawn needs a task id");
 				const accept = str(args.flags, "accept");
 				const worktreeFlag = str(args.flags, "worktree");
+				// Validate before allocation so malformed reasoning cannot produce a
+				// worktree-side error and the CLI reports the actual argument failure.
+				const reasoning = str(args.flags, "reasoning") === undefined ? undefined : parseReasoning(need(args.flags, "reasoning"));
 				const result = startRun(
 					{
 						taskId: id,
@@ -226,7 +229,7 @@ export async function runCli(argv: string[]): Promise<number> {
 						...(str(args.flags, "model") === undefined
 							? {}
 							: { model: need(args.flags, "model") }),
-						...(str(args.flags, "reasoning") === undefined ? {} : { reasoning: parseReasoning(need(args.flags, "reasoning")) }),
+						...(reasoning === undefined ? {} : { reasoning }),
 					},
 					deckV2Home(),
 				);

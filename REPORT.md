@@ -1,17 +1,16 @@
 # Reasoning control report
 
 ## Verdict
-Named reasoning is validated at the CLI, selected from the explicit request before legacy thinking, passed to Pi with `--thinking`, and converted by the gateway to the provider-native wire field. Anthropic named levels become `thinking: {type: "enabled", budget_tokens}`. OpenAI and xAI use `reasoning_effort`.
+Named reasoning is validated at the CLI, selected from the explicit request before legacy thinking, passed to Pi as `--thinking`, and converted by the broker gateway to the provider-native wire field. Pi's thinking level is a **named reasoning/effort selector**, not a token cap and not itself a native `reasoning_effort` field. The gateway performs the provider conversion: Anthropic uses `thinking.type="enabled"` with `budget_tokens`; OpenAI-compatible and xAI routes use `reasoning_effort`.
 
 ## Wire and type evidence
-- Pi's installed TypeScript API defines the `ThinkingLevel` vocabulary and `Model.thinkingLevelMap`; the Deck provider registers the same map in `broker/pi/deck-provider.ts`. This is the type and metadata boundary that controls which Pi values can be sent.
-- Pi's `clampThinkingLevel` applies `thinkingLevelMap` before the request is built. The OpenAI-completions implementation then writes the mapped value as `reasoning_effort` in the outbound payload. This is why Deck's OpenAI-compatible Claude route stays on `reasoning_effort`.
-- `v2/src/cli.ts` parses and validates `--reasoning`; `v2/src/spawn.ts:launchRun` chooses the explicit request before legacy `thinking` and passes the selected value to Pi as `--thinking`.
-- `broker/src/validated-gateway.ts` classifies explicit `anthropic/...` model routes as Anthropic, validates and clamps the selector, and emits Anthropic `thinking` budgets. Explicit xAI routes emit xAI `reasoning_effort`; other routes emit OpenAI `reasoning_effort`.
-- `broker/pi/deck-provider.ts` maps every advertised Pi level to a supported wire selector. Unsupported model levels map to the nearest supported selector instead of being advertised as null.
+- Installed Pi source: `/Users/twaldin/.bun/install/cache/@oh-my-pi/pi-agent-core@17.0.1@@@1/src/thinking.ts:8-20` defines the `ThinkingLevel` vocabulary. Installed Pi model-resolution source: `/Users/twaldin/.bun/install/cache/@oh-my-pi/pi-catalog@17.2.2@@@1/src/model-thinking.ts:715-730` clamps requested effort to model capabilities. These are the Pi type and model-capability boundaries.
+- The pinned Smithers type is auditable in `workflows/pr-pipeline/node_modules/smithers-orchestrator/docs/llms-full.txt:8516`: `PiAgent.thinking` accepts `off|minimal|low|medium|high|xhigh`. Therefore pipeline profile `max` is deliberately translated to Pi `xhigh` in `workflows/pr-pipeline/pipeline.tsx:417-429`; the broker remains the final wire boundary.
+- `broker/pi/deck-provider.ts:7,52-101` registers `thinkingLevelMap`, including the per-model mapping for `max`; `broker/src/validated-gateway.ts:30-50` selects provider routing, clamps supported levels, and builds the outbound payload; `broker/src/reasoning.ts:44-62` converts selectors to native fields and rejects unsupported xAI values.
+- `v2/src/cli.ts:33-36,229` validates `--reasoning`; `v2/src/spawn.ts:373-374` gives explicit reasoning precedence over legacy `thinking` and passes it to Pi.
 
 ## End-to-end evidence
-`v2/test/spawn-alloc.test.ts` invokes the CLI validation path, launches a fake Pi executable, captures its actual argv, and verifies explicit reasoning overrides a profile's legacy reasoning value. The gateway tests verify the three provider-native payload shapes and rejection of invalid xAI input. These tests are dependency-gated and must run with the repository dependencies installed.
+`v2/test/spawn-alloc.test.ts:89-106` supplies required `--accept`, proves invalid reasoning reaches the reasoning validator, then launches a fake Pi and captures the explicit `high` argv over a profile `low` default. `workflows/pr-pipeline/tests/pipeline.test.tsx` renders the real pipeline and inspects the constructed implementer PiAgent options; it proves profile `max` reaches that seat as Pi-compatible `xhigh`. `broker/test/validated-gateway.test.ts` proves OpenAI, xAI, and Anthropic wire shapes and rejects invalid xAI input.
 
 ## Delivery
-The implementation is committed on `deck/reasoning-control/V1`. A PR body must include this report's verdict and wire/type evidence. This worktree instruction forbids pushing, so PR creation is an external delivery step and is not claimed here.
+This report is the evidence text for the PR body. The current worktree instruction forbids pushing, so no PR is created from this worktree.

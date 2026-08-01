@@ -13,6 +13,7 @@ import { runCli } from "../src/cli";
 import { DEFAULT_WORKER_MODEL, piArgs, resolveRepo, startRun } from "../src/spawn";
 
 const DECK_BIN = path.resolve(import.meta.dir, "../../cli/bin/deck");
+const V2_BIN = path.resolve(import.meta.dir, "../bin/deck-v2");
 
 let root: string;
 const savedEnv: Record<string, string | undefined> = {};
@@ -87,7 +88,7 @@ describe("spawn worktree allocation", () => {
 	});
 
 	test("CLI validates reasoning and the launched Pi receives the explicit value over profile defaults", async () => {
-		const invalid = await run([Bun.which("bun") as string, DECK_BIN, "spawn", "bad", "--task", "x", "--repo", path.join(root, "repo"), "--reasoning", "turbo", "--no-pipeline"], root);
+		const invalid = await run([Bun.which("bun") as string, V2_BIN, "spawn", "bad", "--task", "x", "--accept", "ok", "--repo", path.join(root, "repo"), "--reasoning", "turbo", "--no-pipeline"], root);
 		expect(invalid.exitCode).toBe(1);
 		expect(invalid.stderr).toContain("reasoning must be");
 
@@ -101,6 +102,9 @@ describe("spawn worktree allocation", () => {
 		}]));
 		const exitCode = await runCli(["spawn", "cli-proof", "--task", "x", "--accept", "ok", "--kind", "scout", "--worktree", escape, "--project", "fixture", "--reasoning", "high"]);
 		expect(exitCode).toBe(0);
+		for (let attempt = 0; attempt < 20 && !fs.existsSync(process.env.DECK_TEST_PI_ARGS as string); attempt++) {
+			await new Promise((resolve) => setTimeout(resolve, 50));
+		}
 		expect(fs.readFileSync(process.env.DECK_TEST_PI_ARGS as string, "utf8").split("\n")).toContain("high");
 	});
 	test("repo-only spawn allocates an isolated worktree under DECK_HOME/wt and records it", () => {

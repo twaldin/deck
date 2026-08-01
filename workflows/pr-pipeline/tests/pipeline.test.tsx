@@ -75,7 +75,7 @@ describe("workflow rendering contracts", () => {
 		profile: Record<string, unknown>,
 		inputModels: Record<string, unknown> | null | undefined,
 		repo: string,
-	): Promise<string> {
+	): Promise<{ model: string; thinking: string }> {
 		const savedHome = process.env.DECK_V2_HOME;
 		const home = fs.mkdtempSync(path.join(os.tmpdir(), "deck-pipeline-models-"));
 		try {
@@ -102,7 +102,10 @@ describe("workflow rendering contracts", () => {
 			const agent = implementer?.agent;
 			expect(agent).toBeDefined();
 			expect(Array.isArray(agent)).toBe(false);
-			return String((agent as { model: string }).model);
+			return {
+			model: String((agent as unknown as { model: string }).model),
+			thinking: String((agent as { opts?: { thinking?: string }; thinking?: string }).opts?.thinking ?? (agent as { thinking?: string }).thinking ?? ""),
+		};
 		} finally {
 			if (savedHome === undefined) delete process.env.DECK_V2_HOME;
 			else process.env.DECK_V2_HOME = savedHome;
@@ -125,6 +128,12 @@ describe("workflow rendering contracts", () => {
 		expect(policy.reasoningFallout).toBe("high");
 	});
 
+	test("profile reasoning reaches the rendered PiAgent seat", async () => {
+		const rendered = await renderWithProfile({ ...profileBase, models: { ...fullModels, reasoning: "max" } }, undefined, "example/test");
+		expect(rendered.model).toBe("claude-fable-5");
+		expect(rendered.thinking).toBe("xhigh");
+	});
+
 	test.each([
 		["full profile models", { ...profileBase, models: fullModels }, undefined, "example/test", "claude-fable-5"],
 		["missing profile models", profileBase, undefined, "example/test", "gpt-5.6-luna"],
@@ -132,7 +141,7 @@ describe("workflow rendering contracts", () => {
 		["partial profile models with input models", { ...profileBase, models: { implementer: "deck/claude-fable-5" } }, { watcher: "deck/gpt-5.6-sol" }, "example/test", "claude-fable-5"],
 		["repo-mismatched profile", { ...profileBase, models: fullModels }, { implementer: "deck/claude-sonnet-5" }, "other/repo", "gpt-5.6-luna"],
 	] as const)("renders with %s", async (_name, profile, inputModels, repo, expectedImplementer) => {
-		expect(await renderWithProfile(profile, inputModels, repo)).toBe(expectedImplementer);
+		expect((await renderWithProfile(profile, inputModels, repo)).model).toBe(expectedImplementer);
 	});
 });
 

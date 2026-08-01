@@ -139,7 +139,7 @@ describe("validated gateway outbound requests", () => {
 		const response = await fetch(`${gateway.url}/v1/chat/completions`, {
 			method: "POST",
 			headers: { "content-type": "application/json" },
-			body: JSON.stringify({ model: "xai/grok-4.5", reasoning_effort: "xhigh" }),
+			body: JSON.stringify({ model: "xai/grok-4.5", reasoning_effort: "turbo" }),
 		});
 		expect(response.status).toBe(400);
 		expect(forwarded).toEqual([]);

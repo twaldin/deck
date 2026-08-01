@@ -421,12 +421,13 @@ function seat(ref: ModelSeat): { ref: string; reasoning?: string } {
 function makeAgent(ref: ModelSeat, cwd: string, timeoutMs: number, reasoning = "medium"): PiAgent {
 	const selected = seat(ref);
 	const { provider, model } = parseModelRef(selected.ref);
+	const piThinking = (selected.reasoning ?? reasoning) === "max" ? "xhigh" : (selected.reasoning ?? reasoning);
 	return new PiAgent({
 		provider,
 		model,
 		cwd,
 		timeoutMs,
-		thinking: selected.reasoning ?? reasoning,
+		thinking: piThinking,
 		noSession: true,
 	});
 }
