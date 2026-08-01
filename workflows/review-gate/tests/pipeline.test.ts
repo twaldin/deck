@@ -1,7 +1,20 @@
 import { expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { askIfAbsent, openQuestions } from "../../../v2/src/questions-store.ts";
 
 const source = readFileSync(new URL("../pipeline.tsx", import.meta.url), "utf8");
+
+test("atomic global asks queue one event under concurrent callers", () => {
+  const dir = mkdtempSync(join(tmpdir(), "review-gate-"));
+  const file = join(dir, "queue.jsonl");
+  const input = { id: "review-gate-pr-7-head", idScope: "global" as const, question: "Approve PR 7?", sessionId: "run", cwd: dir };
+  const first = askIfAbsent(file, input);
+  const second = askIfAbsent(file, input);
+  expect(first.id).toBe(second.id);
+  expect(openQuestions(file)).toHaveLength(1);
+});
 
 test("polls the captain review-request queue programmatically", () => {
   expect(source).toContain('"--reviewer"');
