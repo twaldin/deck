@@ -65,7 +65,7 @@ describe("seeds", () => {
 		expect(lindy?.doctrine).toContain("state=closed, merged=false");
 		expect(lindy?.models?.implementer).toBe("deck/gpt-5.6-luna");
 		expect(lindy?.models?.reviewer).toBeUndefined();
-		expect(lindy?.models?.oppositionDefaults.openai).toBe("deck/claude-fable-5");
+		expect(lindy?.models?.oppositionDefaults?.openai).toBe("deck/claude-fable-5");
 
 		const deck = findProfile("deck");
 		expect(deck?.pipeline).toBe("yolo-ship");
@@ -107,7 +107,7 @@ describe("config file", () => {
 	] as const)("normalizes %s model config to a defaultable policy", (_name, models) => {
 		writeConfig([{ ...deckOverride, models }]);
 		const profile = loadProfiles()[0];
-		expect(profile.models?.implementer).toBe(models && "implementer" in models ? "deck/claude-fable-5" : undefined);
+		expect(profile?.models?.implementer).toBe(models && "implementer" in models ? "deck/claude-fable-5" : undefined);
 	});
 
 	test("malformed entries are refused with the reason", () => {
