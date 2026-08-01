@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { startValidatedGateway } from "../src/validated-gateway";
+import type { FastGatewayOptions } from "../src/fast-gateway";
 
 const gateways: Array<{ close: () => Promise<void> }> = [];
 
@@ -7,7 +8,7 @@ afterEach(async () => {
 	for (const gateway of gateways.splice(0)) await gateway.close();
 });
 
-async function withFakeUpstream() {
+async function withFakeUpstream(options: Partial<FastGatewayOptions> = {}) {
 	const forwarded: Array<{ path: string; body: Record<string, unknown> }> = [];
 	const upstreamServer = Bun.serve({
 		 hostname: "127.0.0.1",
@@ -21,7 +22,7 @@ async function withFakeUpstream() {
 		url: `http://127.0.0.1:${upstreamServer.port}`,
 		close: async () => upstreamServer.stop(),
 	};
-	const gateway = startValidatedGateway({ bind: "127.0.0.1:0" } as Parameters<typeof startValidatedGateway>[0], (() => upstream) as never);
+	const gateway = startValidatedGateway({ bind: "127.0.0.1:0", ...options } as Parameters<typeof startValidatedGateway>[0], (() => upstream) as never);
 	gateways.push(gateway);
 	return { gateway, forwarded };
 }
@@ -58,6 +59,36 @@ describe("validated gateway outbound requests", () => {
 		});
 		expect(response.status).toBe(200);
 		expect(forwarded[0]?.body).toEqual({ model: "anthropic/claude-sonnet-4-5", thinking: { type: "enabled", budget_tokens: 32768 } });
+	});
+
+	test("skips cooling accounts, pins the selected credential, and forwards fallback model", async () => {
+		const events: unknown[] = [];
+		const pins: unknown[] = [];
+		const { gateway, forwarded } = await withFakeUpstream({
+			quotaAccounts: () => [
+				{ credentialId: 1, provider: "anthropic", authProvider: "anthropic", blocked: ["fable-7d"] },
+				{ credentialId: 2, provider: "anthropic", authProvider: "anthropic", blocked: ["all-model-5h", "all-model-7d"] },
+				{ credentialId: 3, provider: "anthropic", authProvider: "anthropic", blocked: ["fable-7d"] },
+			],
+			quotaPreferences: () => [{ id: "claude-sonnet-5", provider: "anthropic" }],
+			onQuotaEvent: event => events.push(event),
+			storage: { pinSessionOAuthAccount: (...args: unknown[]) => { pins.push(args); return true; } } as never,
+		});
+		const response = await fetch(`${gateway.url}/v1/messages`, { method: "POST", body: JSON.stringify({ model: "anthropic/claude-fable-5", prompt_cache_key: "session-1" }) });
+		expect(response.status).toBe(200);
+		expect(forwarded[0]?.body.model).toBe("anthropic/claude-sonnet-5");
+		expect(pins).toEqual([["anthropic", "session-1", 1]]);
+		expect(events).toHaveLength(1);
+	});
+
+	test("returns structured 503 and does not forward when all accounts cool", async () => {
+		const { gateway, forwarded } = await withFakeUpstream({
+			quotaAccounts: () => [{ credentialId: 1, provider: "anthropic", blocked: ["all-model-5h", "all-model-7d"] }],
+		});
+		const response = await fetch(`${gateway.url}/v1/messages`, { method: "POST", body: JSON.stringify({ model: "anthropic/claude-sonnet-5" }) });
+		expect(response.status).toBe(503);
+		expect(await response.json()).toMatchObject({ error: { code: "NO_QUOTA", type: "quota_exhausted", provider: "anthropic" } });
+		expect(forwarded).toEqual([]);
 	});
 
 	test("returns 400 and does not forward invalid provider payloads", async () => {
