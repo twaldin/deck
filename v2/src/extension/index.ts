@@ -40,6 +40,7 @@ import { reconcileRecuts } from "../recut";
 import { peekSession, startRun } from "../spawn";
 import { STATUS_VERBS, type StatusVerb } from "../status";
 import { readUsageRoster, usageStatusLine } from "../usage-roster";
+import { smithersWorkspaceRoot, warnOnShadowWorkspace } from "../workspace";
 import { evaluateTeardown, formatVerdict } from "../teardown";
 import { ackWakes, detectStale, foldBatched, pendingWakes, reconcile } from "../wake";
 import {
@@ -413,12 +414,16 @@ export default function deckV2(pi: any): void {
 			"Fleet overlay: attention-first (q/Esc close, r refresh, a show-all, j/k scroll; /fleet all opens expanded)",
 		handler: async (args: string, ctx: any) => {
 			const frameOptions = workflowCwd === undefined ? {} : { workflowCwd };
-			let frame = await buildFrame(frameOptions);
+			// First paint is cache-only. Smithers ps is a slow shell-out and must
+			// never delay opening the overlay.
+			let frame = lastFooterFrame;
 			// ctx.ui.custom is TUI-only; degrade to a printed frame elsewhere.
 			if (ctx.mode !== "tui" || ctx.ui?.custom === undefined) {
 				ctx.ui?.notify?.(renderFrame(frame), "info");
+				void refreshStatusline(ctx);
 				return;
 			}
+			void refreshStatusline(ctx);
 			let showAll = args.trim() === "all";
 			await ctx.ui.custom(
 				(tui: any, rawTheme: any, _kb: any, done: any) => {
@@ -659,7 +664,8 @@ export default function deckV2(pi: any): void {
 		injectedCompactions.clear();
 		compactionSequence = 0;
 		await injectStandingRules(ctx, "session_start");
-		workflowCwd = `${deckV2Home()}/workflows/.smithers`;
+		workflowCwd = smithersWorkspaceRoot();
+		warnOnShadowWorkspace();
 		// The deck footer owns quota presentation. Block the legacy deck-usage
 		// status slot so its timer cannot paint a second chrome strip.
 		const setStatus = ctx.ui?.setStatus;

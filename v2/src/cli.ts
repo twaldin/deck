@@ -27,6 +27,7 @@ import { peekSession, startRun } from "./spawn";
 import { STATUS_VERBS, type StatusVerb } from "./status";
 import { evaluateTeardown, formatVerdict } from "./teardown";
 import { detectStale, foldBatched, reconcile } from "./wake";
+import { smithersWorkspaceRoot } from "./workspace";
 
 const USAGE = `deck-v2 — fleet primitives
 
@@ -259,7 +260,7 @@ export async function runCli(argv: string[]): Promise<number> {
 
 			case "fleet": {
 				const workflowCwd =
-					str(args.flags, "workflows") ?? path.join(deckV2Home(), "workflows", ".smithers");
+					str(args.flags, "workflows") ?? smithersWorkspaceRoot(deckV2Home());
 				const frame = await buildFrame({ workflowCwd });
 				if (args.flags.project === true) {
 					const health = await projectFleet(frame);

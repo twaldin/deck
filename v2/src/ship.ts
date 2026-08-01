@@ -24,6 +24,7 @@ import { readMeta, updateMeta } from "./meta";
 import { findProfile, type ProjectProfile } from "./projects";
 import { SMITHERS_SPEC } from "./smithers";
 import { pipelineHash } from "./recut";
+import { smithersWorkspaceCwd, warnOnShadowWorkspace } from "./workspace";
 
 export type ShipRequest = {
 	/** Ticket / effort id; also seeds the smithers run id. */
@@ -188,6 +189,8 @@ export async function startShip(
 		);
 	}
 	const dir = pipelineDir();
+	const workspaceCwd = smithersWorkspaceCwd(home);
+	warnOnShadowWorkspace(home);
 	if (!fs.existsSync(path.join(dir, "pipeline.tsx"))) {
 		throw new Error(
 			`pr-pipeline not found at ${dir} (set DECK_PIPELINE_DIR if the layout differs)`,
@@ -220,14 +223,14 @@ export async function startShip(
 		[
 			SMITHERS_SPEC,
 			"up",
-			"pipeline.tsx",
+			path.join(dir, "pipeline.tsx"),
 			"--input",
 			JSON.stringify(input),
 			"--run-id",
 			runId,
 		],
 		{
-			cwd: dir,
+			cwd: workspaceCwd,
 			detached: true,
 			stdio: ["ignore", log, log],
 			env: { ...process.env },
