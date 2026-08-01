@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { spawn } from "node:child_process";
 import { EFFORT_FILES, effortDir, loadConfig, manifestSchema, ulid } from "@deck/core";
 import { DeckError } from "@deck/core";
 import { z } from "zod";
@@ -52,6 +53,51 @@ function replaceEntry(state: WorktreesState, replacement: WorktreeEntry): Worktr
 		v: 1,
 		entries: state.entries.map((entry) => (entry.id === replacement.id ? replacement : entry)),
 	});
+}
+
+const DEPS_READY = ".deck-deps-ready";
+const DEPS_FAILED = ".deck-deps-failed";
+
+function dependencyInstall(repo: string): { command: string; enabled: boolean } {
+	const home = process.env.DECK_V2_HOME ?? path.join(process.env.HOME ?? process.cwd(), ".deck");
+	try {
+		const profiles = JSON.parse(fs.readFileSync(path.join(home, "config", "projects.json"), "utf8")) as unknown;
+		if (Array.isArray(profiles)) {
+			const profile = profiles.find((p) => p && typeof p === "object" && (p as Record<string, unknown>).primary === repo) as Record<string, unknown> | undefined;
+			if (profile?.depsWarm === false) return { command: "", enabled: false };
+			if (typeof profile?.installCommand === "string") return { command: profile.installCommand, enabled: true };
+		}
+	} catch { /* absent or invalid profile: use lockfile inference */ }
+		if (fs.existsSync(path.join(repo, "pnpm-lock.yaml"))) return { command: "pnpm install --prefer-offline", enabled: true };
+	if (fs.existsSync(path.join(repo, "bun.lock")) || fs.existsSync(path.join(repo, "bun.lockb"))) return { command: "bun install", enabled: true };
+	return { command: "", enabled: false };
+}
+
+/** Best effort only. Never link node_modules: package-manager layouts and bins are checkout-specific. */
+export function warmDependencies(worktree: string, repo: string): void {
+	const install = dependencyInstall(repo);
+	if (!install.enabled) return;
+	for (const marker of [DEPS_READY, DEPS_FAILED]) {
+		try { fs.rmSync(path.join(worktree, marker)); } catch { /* absent */ }
+	}
+	const ready = path.join(worktree, DEPS_READY);
+	const failed = path.join(worktree, DEPS_FAILED);
+	const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
+	const command = `{ if sh -lc ${shellQuote(install.command)} >${shellQuote(`${failed}.log`)} 2>&1; then printf 'ready\\n' >${shellQuote(ready)}; else tail -c 4000 ${shellQuote(`${failed}.log`)} >${shellQuote(failed)}; fi; rm -f ${shellQuote(`${failed}.log`)}; }`;
+	try {
+		const child = spawn("sh", ["-lc", command], {
+			cwd: worktree,
+			detached: true,
+			stdio: "ignore",
+			env: process.env,
+		});
+		child.on("error", (error) => {
+			try { fs.writeFileSync(failed, `${errorMessage(error)}\n`); } catch { /* best effort marker */ }
+		});
+		child.unref();
+	} catch (error) {
+		fs.writeFileSync(failed, `${errorMessage(error)}\n`);
+	}
 }
 
 function errorMessage(error: unknown): string {
@@ -132,6 +178,7 @@ export async function allocateWorktree(request: AllocateRequest): Promise<Worktr
 		try {
 			await addWorktree(repo, worktreePath, branch, base);
 			fs.chmodSync(worktreePath, 0o700);
+			warmDependencies(worktreePath, repo);
 		} catch (error) {
 			try {
 				await removeWorktree(repo, worktreePath, branch, fs.existsSync(worktreePath));

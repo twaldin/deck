@@ -49,6 +49,10 @@ export type ProjectProfile = {
 	doctrine?: string;
 	/** Captain-editable workflow seat models. */
 	models?: ModelSeats;
+	/** Dependency install command for allocated worktrees. */
+	installCommand?: string;
+	/** Whether allocation should warm dependencies in the background. */
+	depsWarm: boolean;
 };
 
 /** Same resolution as home.ts, inlined so this module stays dependency-free. */
@@ -104,6 +108,7 @@ export function seedProfiles(home = defaultHome()): ProjectProfile[] {
 					openai: "deck/claude-fable-5",
 				},
 			},
+			depsWarm: true,
 			doctrine: `The 3 load-bearing traps (verbatim, non-negotiable):
 
 ${LINDY_TRAPS}
@@ -134,6 +139,7 @@ And:
 					openai: "deck/claude-fable-5",
 				},
 			},
+			depsWarm: true,
 		},
 	];
 }
@@ -219,6 +225,12 @@ export function validateProfiles(parsed: unknown, source: string): ProjectProfil
 				})(),
 			};
 		}
+		if (p.installCommand !== undefined && typeof p.installCommand !== "string") {
+			throw new Error(`${where} (${p.id}): installCommand must be a string`);
+		}
+		if (p.depsWarm !== undefined && typeof p.depsWarm !== "boolean") {
+			throw new Error(`${where} (${p.id}): depsWarm must be a boolean`);
+		}
 		return {
 			id: p.id,
 			repo: p.repo,
@@ -229,6 +241,8 @@ export function validateProfiles(parsed: unknown, source: string): ProjectProfil
 			knowledge: knowledge as string[],
 			...(p.doctrine === undefined ? {} : { doctrine: p.doctrine }),
 			...(models === undefined ? {} : { models }),
+			...(p.installCommand === undefined ? {} : { installCommand: p.installCommand }),
+			depsWarm: p.depsWarm ?? true
 		};
 	});
 }
