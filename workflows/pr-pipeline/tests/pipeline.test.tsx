@@ -16,7 +16,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { simulate } from "smithers-orchestrator/testing";
+import { renderWorkflow, simulate } from "smithers-orchestrator/testing";
 
 import pipeline, { buildModelPolicy, DEFAULT_GITHUB } from "../pipeline.tsx";
 import { localFixPrompt, localReviewPrompt, reviewersDecisionPrompt } from "../lib/prompts.ts";
@@ -51,6 +51,28 @@ async function run(input: Record<string, unknown>) {
 	}
 	return { sim, error };
 }
+
+describe("workflow rendering contracts", () => {
+	test("renders and starts nodes when the profile loader supplies models: null", async () => {
+		const rendered = await renderWorkflow(pipeline, {
+			input: { ...baseInput, models: null },
+			outputs: {
+				preflight: [
+					{
+						nodeId: "preflight",
+						ok: true,
+						openQuestions: [],
+						briefDigest: "",
+						resolvedReviewerModel: "deck/claude-fable-5",
+					},
+				],
+			},
+			workflowPath: "pipeline.tsx",
+		});
+
+		expect(rendered.tasks.map((task) => task.nodeId)).toEqual(["preflight", "implement"]);
+	});
+});
 
 describe("reviewer selection contracts", () => {
 	test("reviewer prompt uses the lookup skill and real line breaks", () => {

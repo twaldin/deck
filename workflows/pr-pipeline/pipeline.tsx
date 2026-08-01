@@ -436,27 +436,27 @@ export function buildModelPolicy(
 		familyOpposition?: boolean;
 		oppositionDefaults?: Record<string, string>;
 	} | null | undefined,
-	profileSelected = false,
 ): ModelPolicy {
-	// Profile files are validated before they reach the workflow, but a profile
-	// can still be supplied by a caller or an older loader with null/partial
-	// models. Normalize that boundary here so rendering never dereferences null.
+	// The project-profile loader can preserve a JSON `models: null` value from
+	// config/projects.json. Normalize it before reading `profileModels.reviewer`
+	// or `profileModels.oppositionDefaults`; mismatched profiles provide neither
+	// their loaded policy nor their input snapshot.
 	const profileModels =
 		profile !== null && !profileRepoMismatch && profile.models !== null && typeof profile.models === "object"
 			? profile.models
 			: undefined;
-	const policy: ModelPolicy = {
+	const models = profileRepoMismatch ? undefined : inputModels ?? undefined;
+	return {
 		...defaultModelPolicy(),
 		...(profileModels ?? {}),
 		...(profileModels !== undefined ? { reviewer: profileModels.reviewer } : {}),
-		...(inputModels ?? {}),
+		...(models ?? {}),
 		oppositionDefaults: {
 			...defaultModelPolicy().oppositionDefaults,
 			...(profileModels?.oppositionDefaults ?? {}),
-			...(inputModels?.oppositionDefaults ?? {}),
+			...(models?.oppositionDefaults ?? {}),
 		},
 	};
-	return policy;
 }
 
 export default smithers((ctx) => {
@@ -481,7 +481,7 @@ export default smithers((ctx) => {
 	const watchSetPath =
 		input.watchSetPath ?? `${process.env.HOME ?? "~"}/dev/fm2/data/watch-set.jsonl`;
 
-	const policy = buildModelPolicy(profile, profileRepoMismatch, input.models, input.profile !== undefined);
+	const policy = buildModelPolicy(profile, profileRepoMismatch, input.models);
 
 	const ghCtx = { gh: github.gh, repo: input.repo };
 
