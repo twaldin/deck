@@ -47,7 +47,7 @@ import { pipelineDir, startShip } from "../ship";
 import { reconcileRecuts } from "../recut";
 import { peekSession, startRun } from "../spawn";
 import { STATUS_VERBS, type StatusVerb } from "../status";
-import { readUsageRoster, usageStatusLine } from "../usage-roster";
+import { mergeLiveAccounts, readLiveControlAccounts, readUsageRoster, usageStatusLine } from "../usage-roster";
 import { discoverSmithersWorkspaces, smithersWorkspaceCwd, uiWarn, warnOnShadowWorkspace } from "../workspace";
 import { evaluateTeardown, formatVerdict } from "../teardown";
 import { ackWakes, detectStale, foldBatched, pendingWakes, reconcile } from "../wake";
@@ -544,7 +544,11 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 
 	pi.registerCommand("usage", {
 		description: "Show broker quota by account and tier",
-		handler: async (_args: string, ctx: any) => ctx.ui?.notify?.(buildUsageText(readUsageRoster(), asFleetTheme(ctx.ui?.theme ?? PLAIN_FLEET_THEME)), "info"),
+		handler: async (_args: string, ctx: any) => {
+			const roster = readUsageRoster();
+			const accounts = await readLiveControlAccounts();
+			ctx.ui?.notify?.(buildUsageText(roster === null ? null : mergeLiveAccounts(roster, accounts), asFleetTheme(ctx.ui?.theme ?? PLAIN_FLEET_THEME)), "info");
+		},
 	});
 
 	pi.registerCommand("status", {

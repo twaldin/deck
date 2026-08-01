@@ -287,10 +287,20 @@ export function registerQuestions(
 		const rawId = entry.id.startsWith("deck-fleet:") ? entry.id.slice("deck-fleet:".length) : entry.id;
 		const parts = rawId.split(":");
 		const runId = rawId.startsWith("stamp:") ? parts.at(-2) : undefined;
-		const node = rawId.startsWith("stamp:") ? parts.slice(2).join(":") || "r0-stamp" : "r0-stamp";
+		// The stamp id is stamp:<repo>:<pr>:stamp:<run>:<node>. The node may
+		// contain colons, so it is the final segment, not the remainder.
+		const node = rawId.startsWith("stamp:") ? parts.at(-1) || "r0-stamp" : "r0-stamp";
 		if (runId === undefined) return resolve(ctx, entry, "Stamp", "answered");
 		try {
-			await exec("smithers", ["approve", runId, "--node", node, "--by", "captain"], { cwd: pipelineDir(), timeout: 15_000 });
+			try {
+				await exec("smithers", ["approve", runId, "--node", node, "--by", "captain"], { cwd: pipelineDir(), timeout: 15_000 });
+			} catch (error) {
+				// Approval is idempotent for this recovery path. A retry after the
+				// approval succeeded but resume failed reports the gate as no longer
+				// pending; continue to resume instead of asking for approval twice.
+				const message = error instanceof Error ? error.message : String(error);
+				if (!/already|not pending|approved|resolved/i.test(message)) throw error;
+			}
 			await exec("smithers", ["up", "pipeline.tsx", "--run-id", runId, "--resume", "true"], { cwd: pipelineDir(), timeout: 15_000 });
 			return resolve(ctx, entry, "Stamp", "answered");
 		} catch (error) {
