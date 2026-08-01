@@ -25,12 +25,15 @@ export type RecutOptions = {
 	inspect: (runId: string) => Promise<unknown>;
 	cancel: (runId: string) => Promise<void>;
 	start: (runId: string, input: RecutInput) => Promise<void>;
+	/** Optional live check that the replacement is visible before cancellation. */
+	verifyStart?: (runId: string) => Promise<boolean>;
 	syncWorktree?: (input: RecutInput) => Promise<void>;
 	recordDir?: string;
 };
 
 const TERMINAL = new Set(["succeeded", "failed", "cancelled", "finished"]);
 const APPROVAL = new Set(["waiting-approval", "waiting-human"]);
+let reconcileLock: Promise<RecutResult[]> | null = null;
 
 export function pipelineHash(pipelineDir: string): string {
 	const hash = createHash("sha256");
@@ -86,38 +89,52 @@ export async function recutChangedRuns(options: RecutOptions): Promise<RecutResu
 	const used = new Set(options.runs.map((run) => run.id));
 	const results: RecutResult[] = [];
 	for (const run of options.runs) {
-		const state = (run.state ?? run.status ?? "").toLowerCase();
-		if (run.workflow !== undefined && !["pr-pipeline", "lindy-pr-pipeline"].includes(run.workflow)) continue;
-		if (TERMINAL.has(state)) continue;
-		const recorded = findHash(await options.inspect(run.id));
-		if (recorded === undefined || recorded === current || ledger[run.id] === current) continue;
-		const input = inputFor(recordDir, run.id);
-		if (input === null) continue;
+		try {
+			const state = (run.state ?? run.status ?? "").toLowerCase();
+			if (run.workflow !== undefined && !["pr-pipeline", "lindy-pr-pipeline"].includes(run.workflow)) continue;
+			if (TERMINAL.has(state)) continue;
+			const input = inputFor(recordDir, run.id);
+			if (input === null) continue;
+			// Smithers 0.30 inspect intentionally omits configJson. The launch
+			// record is the durable run metadata that carries this value.
+			const recorded = findHash(await options.inspect(run.id))
+				?? (typeof input.__smithersDurability === "object" && input.__smithersDurability !== null
+					? findHash({ config: { __smithersDurability: input.__smithersDurability } }) : undefined);
+			if (recorded === undefined || recorded === current || ledger[run.id] === current) continue;
 		const mode = APPROVAL.has(state) ? "stamp" : "safe-boundary";
 		// A running run is recut only at a named watch/fix boundary. Unknown steps
 		// are left for the next poll instead of risking a mid-node duplicate.
 		if (mode === "safe-boundary" && !/(watch-poll|ready-poll)$/i.test(run.step ?? "")) continue;
-		await options.syncWorktree?.(input);
-		const newRunId = nextRunId(run.id, used);
-		used.add(newRunId);
-		await options.cancel(run.id);
-		const nextInput = { ...input };
-		await options.start(newRunId, nextInput);
-		fs.writeFileSync(path.join(recordDir, `${newRunId}.input.json`), `${JSON.stringify(nextInput, null, 2)}\n`, { mode: 0o600 });
+			await options.syncWorktree?.(input);
+			const newRunId = nextRunId(run.id, used);
+			used.add(newRunId);
+			const nextInput = { ...input };
+			await options.start(newRunId, nextInput);
+			if (options.verifyStart !== undefined && !(await options.verifyStart(newRunId))) {
+				used.delete(newRunId);
+				continue;
+			}
+			await options.cancel(run.id);
+			fs.writeFileSync(path.join(recordDir, `${newRunId}.input.json`), `${JSON.stringify(nextInput, null, 2)}\n`, { mode: 0o600 });
 		ledger[run.id] = current;
 		writeLedger(recordDir, ledger);
 		const evidence = { oldRunId: run.id, newRunId, pipelineHash: current, mode };
 		fs.appendFileSync(path.join(recordDir, "recuts.jsonl"), `${JSON.stringify(evidence)}\n`, { mode: 0o600 });
 		if (typeof input.ticket === "string") appendStatus(input.ticket, "working", `pipeline drift recut: ${run.id} -> ${newRunId}`);
-		results.push({ oldRunId: run.id, newRunId, mode });
+			results.push({ oldRunId: run.id, newRunId, mode });
+		} catch {
+			// One stale run must not prevent later runs from being reconciled.
+			continue;
+		}
 	}
 	return results;
 }
 
 /** Default worktree preparation. It never destroys commits ahead of the PR head. */
 export async function reconcileRecuts(workspace: string, pipeline: string, runs: readonly RecutRun[]): Promise<RecutResult[]> {
+	if (reconcileLock !== null) return reconcileLock;
 	const shipDir = path.join(stateDir(), "ship");
-	return recutChangedRuns({
+	const work = recutChangedRuns({
 		runs,
 		pipelineDir: pipeline,
 		inspect: async (runId) => {
@@ -127,21 +144,30 @@ export async function reconcileRecuts(workspace: string, pipeline: string, runs:
 		cancel: async (runId) => { await execFile("bunx", [SMITHERS_SPEC, "cancel", runId], { cwd: workspace }); },
 		start: async (runId, input) => {
 			await new Promise<void>((resolve, reject) => {
-				const child = spawn("bunx", [SMITHERS_SPEC, "up", "pipeline.tsx", "--input", JSON.stringify(input), "--run-id", runId], { cwd: pipeline, detached: true, stdio: "ignore" });
+				const log = fs.openSync(path.join(shipDir, `${runId}.log`), "a");
+				const child = spawn("bunx", [SMITHERS_SPEC, "up", "pipeline.tsx", "--input", JSON.stringify(input), "--run-id", runId], { cwd: pipeline, detached: true, stdio: ["ignore", log, log] });
 				child.once("spawn", () => { child.unref(); resolve(); });
-				child.once("error", reject);
+				child.once("error", (error) => { fs.closeSync(log); reject(error); });
 			});
+		},
+		verifyStart: async (runId) => {
+			for (let attempt = 0; attempt < 3; attempt++) {
+				try { await execFile("bunx", [SMITHERS_SPEC, "inspect", runId, "--format", "json"], { cwd: workspace }); return true; } catch { await new Promise((resolve) => setTimeout(resolve, 250)); }
+			}
+			return false;
 		},
 		syncWorktree: syncAdoptWorktree,
 		recordDir: shipDir,
 	});
+	reconcileLock = work;
+	try { return await work; } finally { reconcileLock = null; }
 }
 
 export async function syncAdoptWorktree(input: RecutInput): Promise<void> {
 	const worktree = typeof input.worktree === "string" ? input.worktree : undefined;
 	const pr = typeof input.existingPr === "number" ? input.existingPr : undefined;
 	if (worktree === undefined || pr === undefined) return;
-	await execFile("git", ["fetch", "origin", `pull/${pr}/head:refs/remotes/origin/pr-${pr}`], { cwd: worktree });
+	await execFile("git", ["fetch", "origin", `+pull/${pr}/head:refs/remotes/origin/pr-${pr}`], { cwd: worktree });
 	const { stdout: ahead } = await execFile("git", ["rev-list", "--count", `refs/remotes/origin/pr-${pr}..HEAD`], { cwd: worktree });
 	if (Number(ahead.trim()) > 0) return;
 	await execFile("git", ["reset", "--hard", `refs/remotes/origin/pr-${pr}`], { cwd: worktree });
