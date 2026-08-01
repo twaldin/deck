@@ -14,8 +14,9 @@
  * orchestrator's own process, so there is no second thing that can die silently
  * while the orchestrator keeps running. fm2 lost a watcher for 23.8h that way.
  */
-import { spawn as spawnProcess } from "node:child_process";
+import { execFile, spawn as spawnProcess } from "node:child_process";
 import * as path from "node:path";
+import { promisify } from "node:util";
 import { Box, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { DECK_OPERATIONAL_PREFIX, registerCalm } from "../calm";
@@ -34,7 +35,7 @@ import { projectFleet } from "../herdr";
 import { deckV2Home, stateFiles } from "../home";
 import { standingRulesDigest } from "./standing-rules";
 import { readMeta } from "../meta";
-import { observePsSnapshot } from "../observer";
+import { observePsSnapshotWithInspect } from "../observer";
 import { registerQuestions } from "../questions";
 import { enqueue, pending } from "../queue";
 import { pipelineDir, startShip } from "../ship";
@@ -66,7 +67,10 @@ const RECONCILE_MS = 30_000;
 
 type DeckV2Dependencies = {
 	collectPsSnapshot?: typeof collectPsSnapshot;
+	inspectRun?: (command: string, args: readonly string[], cwd: string) => Promise<{ stdout: string; exitCode: number } | null>;
 };
+
+const inspectRun = promisify(execFile);
 
 export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): void {
 	const collectSnapshot = dependencies.collectPsSnapshot ?? collectPsSnapshot;
@@ -673,7 +677,20 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 	async function getCurrentFrame(): Promise<Awaited<ReturnType<typeof buildFrame>>> {
 		const snapshot = workflowCwd === undefined ? { runs: [] as never[] } : await collectSnapshot(workflowCwd);
 		if (workflowCwd !== undefined) void reconcileRecuts(workflowCwd, pipelineDir(), snapshot.runs).catch(() => {});
-		observePsSnapshot(snapshot.runs);
+		if (workflowCwd !== undefined) {
+			await observePsSnapshotWithInspect({
+				rows: snapshot.runs,
+				workspace: workflowCwd,
+				run: dependencies.inspectRun ?? (async (command, args, cwd) => {
+					try {
+						const result = await inspectRun(command, [...args], { cwd });
+						return { stdout: result.stdout, exitCode: 0 };
+					} catch (error: any) {
+						return { stdout: String(error?.stdout ?? ""), exitCode: Number(error?.code ?? 1) };
+					}
+				}),
+			});
+		}
 		const frame = await buildFrame(workflowCwd === undefined ? {} : { workflowCwd, psRuns: snapshot.runs });
 		lastFooterFrame = frame;
 		return frame;

@@ -345,33 +345,61 @@ export function isFinished(observation: Observation): boolean {
 }
 
 /** Observe one `smithers ps --json` snapshot. This is the production poll wire. */
+function taskIdForRow(row: PsSnapshotRow): string | null {
+	if (typeof row.id !== "string") return null;
+	const shipDir = path.resolve(stateDir(), "ship");
+	const inputPath = path.resolve(shipDir, `${row.id}.input.json`);
+	if (inputPath === shipDir || !inputPath.startsWith(`${shipDir}${path.sep}`)) return null;
+	try {
+		const input = JSON.parse(fs.readFileSync(inputPath, "utf8")) as { ticket?: unknown };
+		return typeof input.ticket === "string" && /^[a-z0-9][a-z0-9-]{0,63}$/.test(input.ticket) ? input.ticket : null;
+	} catch {
+		return null;
+	}
+}
+
+function observationFromPsRow(row: PsSnapshotRow): Observation | null {
+	if (typeof row.id !== "string") return null;
+	const taskId = taskIdForRow(row);
+	if (taskId === null) return null;
+	const status = typeof row.status === "string" ? row.status : typeof row.state === "string" ? row.state : "";
+	const outcome = typeof row.state === "string" && (TERMINAL.has(row.state) || status === "") ? row.state : status;
+	if (TERMINAL.has(outcome)) return null;
+	const pending = row.pendingApprovals?.find((approval) => approval.status === "requested")?.nodeId
+		?? row.pendingApprovals?.[0]?.nodeId
+		?? row.blockedNode
+		?? row.runState?.blocked?.nodeId;
+	const step = typeof pending === "string" ? pending : typeof row.step === "string" && row.step !== "—" ? row.step : null;
+	return {
+		run: { id: row.id, workflow: typeof row.workflow === "string" ? row.workflow : "", status: outcome, step, rootDir: typeof row.rootDir === "string" ? row.rootDir : null },
+		nodes: [],
+	};
+}
+
 export function observePsSnapshot(rows: readonly PsSnapshotRow[]): EmittedEvent[] {
 	const emitted: EmittedEvent[] = [];
 	for (const row of rows) {
-		if (typeof row.id !== "string") continue;
-		const shipDir = path.resolve(stateDir(), "ship");
-		const inputPath = path.resolve(shipDir, `${row.id}.input.json`);
-		if (inputPath !== shipDir && !inputPath.startsWith(`${shipDir}${path.sep}`)) continue;
-		let taskId: string;
-		try {
-			const input = JSON.parse(fs.readFileSync(inputPath, "utf8")) as { ticket?: unknown };
-			if (typeof input.ticket !== "string" || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(input.ticket)) continue;
-			taskId = input.ticket;
-		} catch {
-			continue;
-		}
-		const status = typeof row.status === "string" ? row.status : typeof row.state === "string" ? row.state : "";
-		const outcome = typeof row.state === "string" && (TERMINAL.has(row.state) || status === "") ? row.state : status;
-		if (TERMINAL.has(outcome)) continue;
-		const pending = row.pendingApprovals?.find((approval) => approval.status === "requested")?.nodeId
-			?? row.pendingApprovals?.[0]?.nodeId
-			?? row.blockedNode
-			?? row.runState?.blocked?.nodeId;
-		const step = typeof pending === "string" ? pending : typeof row.step === "string" && row.step !== "—" ? row.step : null;
-		emitted.push(...observeOnce(taskId, {
-			run: { id: row.id, workflow: typeof row.workflow === "string" ? row.workflow : "", status: outcome, step, rootDir: typeof row.rootDir === "string" ? row.rootDir : null },
-			nodes: [],
-		}));
+		const observation = observationFromPsRow(row);
+		const taskId = taskIdForRow(row);
+		if (observation !== null && taskId !== null) emitted.push(...observeOnce(taskId, observation));
+	}
+	return emitted;
+}
+
+/** Inspect each live Smithers row so production polling includes node transitions. */
+export async function observePsSnapshotWithInspect(options: {
+	rows: readonly PsSnapshotRow[];
+	workspace: string;
+	run: (command: string, args: readonly string[], cwd: string) => Promise<{ stdout: string; exitCode: number } | null>;
+}): Promise<EmittedEvent[]> {
+	const emitted: EmittedEvent[] = [];
+	for (const row of options.rows) {
+		const base = observationFromPsRow(row);
+		const taskId = taskIdForRow(row);
+		if (base === null || taskId === null || typeof row.id !== "string") continue;
+		const result = await options.run("bunx", [SMITHERS_SPEC, "inspect", row.id, "--format", "json"], options.workspace).catch(() => null);
+		const inspected = result !== null && result.exitCode === 0 ? parseInspect(result.stdout) : null;
+		emitted.push(...observeOnce(taskId, inspected ?? base));
 	}
 	return emitted;
 }
