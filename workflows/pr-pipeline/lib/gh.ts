@@ -5,6 +5,7 @@
  */
 
 import type { PrOverview } from "./adopt.ts";
+import { signedCommentBody } from "./comments.ts";
 import type {
 	CheckRun,
 	CommentActivity,
@@ -44,6 +45,24 @@ export async function execOrThrow(exec: ExecFn, argv: string[], options?: { cwd?
 		throw new Error(`command failed (${result.code}): ${argv.join(" ")}\n${result.stderr.slice(0, 2000)}`);
 	}
 	return result.stdout;
+}
+
+/** Post an issue or pull-request comment with the configured signature. */
+export async function postComment(
+	ctx: { gh: string; repo: string; exec: ExecFn },
+	project: string | undefined,
+	issueNumber: number,
+	body: string,
+): Promise<void> {
+	await execOrThrow(ctx.exec, [
+		ctx.gh,
+		"api",
+		"-X",
+		"POST",
+		`repos/${ctx.repo}/issues/${issueNumber}/comments`,
+		"-f",
+		`body=${signedCommentBody(project, body)}`,
+	]);
 }
 
 // ---------------------------------------------------------------------------

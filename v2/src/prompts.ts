@@ -18,6 +18,8 @@
 import * as path from "node:path";
 import { dataDir } from "./home";
 import { findProfile, mergeHint } from "./projects";
+import { AGENT_COMMENT_SIGNATURE, signatureProjects } from "./signature";
+export { AGENT_COMMENT_SIGNATURE, signatureProjects } from "./signature";
 
 /**
  * Projects whose convention is to sign agent-authored comments.
@@ -37,17 +39,6 @@ import { findProfile, mergeHint } from "./projects";
  *
  * Set DECK_SIGNATURE_PROJECTS to a comma-separated list to change this.
  */
-function signatureProjects(): Set<string> {
-	const configured = process.env.DECK_SIGNATURE_PROJECTS;
-	if (configured === undefined) return new Set(["lindy"]);
-	return new Set(
-		configured
-			.split(",")
-			.map((name) => name.trim())
-			.filter((name) => name.length > 0),
-	);
-}
-
 /**
  * Standing doctrine for a worker brief, driven by the project's PROFILE
  * (config/projects.json): knowledge paths, project doctrine (e.g. the frozen
@@ -260,7 +251,7 @@ In PR threads: agree, or answer with facts. Never argue with a reviewer — if y
 believe a reviewer is wrong, append \`needs-decision:\` and stop. Write comments in
 Simplified Technical English.${signatureProjects().has(project ?? "") ? `
 
-Sign every comment you post \`-- tim's agent\`, because a reader deserves to know a
+Sign every comment you post \`${AGENT_COMMENT_SIGNATURE}\`, because a reader deserves to know a
 person did not write it.` : ""}
 
 If review or CI comes back: a scoped correctness fix (a failing assertion, a
