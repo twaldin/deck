@@ -1,6 +1,9 @@
-import { startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
+import { startFastGateway, type FastGatewayOptions } from "./fast-gateway";
 import { DEFAULT_GATEWAY_BIND } from "./paths";
 import { nativeReasoning } from "./reasoning";
+
+type GatewayUpstream = { url: string; close(): Promise<void> };
+type StartUpstream = (options: FastGatewayOptions) => GatewayUpstream;
 
 function gatewayBind(bind: string): { hostname: string; port: number } {
 	const separator = bind.lastIndexOf(":");
@@ -9,8 +12,8 @@ function gatewayBind(bind: string): { hostname: string; port: number } {
 }
 
 export function startValidatedGateway(
-	options: Parameters<typeof startAuthGateway>[0],
-	startUpstream: typeof startAuthGateway = startAuthGateway,
+	options: FastGatewayOptions,
+	startUpstream: StartUpstream = startFastGateway,
 ) {
 	const upstream = startUpstream({ ...options, bind: "127.0.0.1:0" });
 	const { hostname, port } = gatewayBind(options.bind ?? DEFAULT_GATEWAY_BIND);
