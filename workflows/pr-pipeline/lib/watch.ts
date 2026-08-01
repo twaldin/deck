@@ -71,6 +71,12 @@ export function reviewersNeedingReRequest(
  * needs one reply before exit; that is cheaper than the failure class this
  * gate exists for ("leaving some random gh comment unaddressed").
  */
+export function isReviewFinding(comment: CommentActivity): boolean {
+	const body = (comment.body ?? "").trim().toLowerCase();
+	if (body === "") return true;
+	return !/(linear|graphite).*(link|banner)|graphite.*generated|linear.*generated/.test(body);
+}
+
 export function unansweredComments(
 	comments: CommentActivity[],
 	selfLogins: string[],
@@ -85,7 +91,7 @@ export function unansweredComments(
 	}
 	let count = 0;
 	for (const comment of comments) {
-		if (self.has(comment.author.toLowerCase())) continue;
+		if (self.has(comment.author.toLowerCase()) || !isReviewFinding(comment)) continue;
 		if (comment.createdAt > ourLatest) count++;
 	}
 	return count;
@@ -98,7 +104,10 @@ export interface WatchExitOptions {
 /** The machine-checked exit condition for the watch-ci-review loop. */
 export function evaluateWatchExit(snapshot: WatchSnapshot, options: WatchExitOptions): WatchExitVerdict {
 	const reasons: string[] = [];
+	// behindBy is authoritative. GitHub can report BLOCKED while checks are green;
+	// that state must rebase before any review or approval work.
 	const needsRebase =
+		snapshot.behindBy > 0 ||
 		snapshot.mergeable === "CONFLICTING" ||
 		["DIRTY", "BEHIND"].includes(snapshot.mergeStateStatus.toUpperCase());
 	if (needsRebase) reasons.push("PR is out of date or not mergeable; needs rebase onto its base branch.");
@@ -121,12 +130,14 @@ export function evaluateWatchExit(snapshot: WatchSnapshot, options: WatchExitOpt
 	}
 
 	const ci = assessCi(snapshot.checkRuns);
+	if (snapshot.behindBy > 0) reasons.unshift(`PR is ${snapshot.behindBy} commit(s) behind base; update branch first.`);
 	if (ci === "red") reasons.push("CI has hard-red check runs (agent-fixable class first).");
 	if (ci === "will-be-green") reasons.push("CI is still running; Smithers will poll again.");
 	if (ci === "none") reasons.push("CI has not reported checks; Smithers will poll again.");
 
 	const actionable = needsRebase || unresolved > 0 || unanswered > 0 || needReRequest.length > 0 || ci === "red";
 	const exitOk = !actionable && ci === "green";
+	if (!actionable && ci === "green") reasons.push("CI is green; watch remains active to keep the PR mergeable while approval is pending.");
 	const disposition = exitOk ? "complete" : actionable ? "fix" : "wait";
 
 	return {

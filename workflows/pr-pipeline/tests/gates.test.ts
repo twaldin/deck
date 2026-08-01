@@ -190,6 +190,7 @@ function snapshot(overrides: Partial<WatchSnapshot> = {}): WatchSnapshot {
 		headSha: "abc123",
 		mergeable: "MERGEABLE",
 		mergeStateStatus: "CLEAN",
+		behindBy: 0,
 		lastPushAt: "2026-07-27T10:00:00Z",
 		threads: [],
 		comments: [],
@@ -236,6 +237,20 @@ describe("evaluateWatchExit", () => {
 		);
 		expect(verdict.exitOk).toBe(false);
 		expect(verdict.unresolvedThreads).toBe(1);
+	});
+
+	test("noise comments do not create watch work", () => {
+		const verdict = evaluateWatchExit(snapshot({
+			comments: [{ author: "graphite[bot]", isBot: true, createdAt: "2026-07-27T11:00:00Z", body: "Graphite banner: generated link" }],
+		}), { selfLogins: ["twaldin"] });
+		expect(verdict.exitOk).toBe(true);
+		expect(verdict.unansweredComments).toBe(0);
+	});
+
+	test("behind count wins over green checks and is the first reaction", () => {
+		const verdict = evaluateWatchExit(snapshot({ mergeStateStatus: "BLOCKED", behindBy: 21 }), { selfLogins: ["twaldin"] });
+		expect(verdict.disposition).toBe("fix");
+		expect(verdict.reasons[0]).toContain("21 commit(s) behind");
 	});
 
 	test("unanswered comment newer than our last activity blocks exit", () => {

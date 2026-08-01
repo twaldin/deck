@@ -129,7 +129,7 @@ export function parseActivity(
 			const author = isRecord(node.author) ? node.author : null;
 			const login = author !== null ? str(author.login) : "";
 			if (login === "") continue;
-			comments.push({ author: login, isBot: isBotAuthor(author), createdAt: str(node.createdAt) });
+			comments.push({ author: login, isBot: isBotAuthor(author), createdAt: str(node.createdAt), body: str(node.body) });
 		}
 	}
 	if (Array.isArray(reviewNodes)) {
@@ -141,7 +141,7 @@ export function parseActivity(
 			const submittedAt = str(node.submittedAt);
 			// Review summaries count as comments too (they can carry asks).
 			if (str(node.body) !== "") {
-				comments.push({ author: login, isBot: isBotAuthor(author), createdAt: submittedAt });
+				comments.push({ author: login, isBot: isBotAuthor(author), createdAt: submittedAt, body: str(node.body) });
 			}
 			const prior = latestByReviewer.get(login.toLowerCase());
 			if (prior === undefined || submittedAt > prior.lastActivityAt) {
@@ -182,6 +182,7 @@ query($owner: String!, $name: String!, $number: Int!) {
       headRefOid
       mergeable
       mergeStateStatus
+      baseRefOid
       commits(last: 1) { nodes { commit { committedDate } } }
       reviewThreads(first: 100) {
         nodes {
@@ -194,7 +195,7 @@ query($owner: String!, $name: String!, $number: Int!) {
         nodes { author { login __typename } state submittedAt body }
       }
       comments(first: 100) {
-        nodes { author { login __typename } createdAt }
+        nodes { author { login __typename } createdAt body }
       }
     }
   }
@@ -219,6 +220,9 @@ export async function fetchWatchSnapshot(ctx: GhContext, prNumber: number, selfL
 	const requested = parseRequestedReviewers(JSON.parse(requestedOut));
 
 	const headSha = str(pr.headRefOid);
+	const baseSha = str(pr.baseRefOid);
+	const compareOut = await execOrThrow(exec, [ctx.gh, "api", `repos/${ctx.repo}/compare/${baseSha}...${headSha}`]);
+	const behindBy = Number((JSON.parse(compareOut) as Record<string, unknown>).behind_by ?? 0);
 	const checksOut = await execOrThrow(exec, [
 		ctx.gh, "api", `repos/${ctx.repo}/commits/${headSha}/check-runs?per_page=100`,
 	]);
@@ -231,6 +235,7 @@ export async function fetchWatchSnapshot(ctx: GhContext, prNumber: number, selfL
 		headSha,
 		mergeable: pr.mergeable === "MERGEABLE" || pr.mergeable === "CONFLICTING" ? pr.mergeable : "UNKNOWN",
 		mergeStateStatus: str(pr.mergeStateStatus),
+		behindBy: Number.isFinite(behindBy) ? behindBy : 0,
 		lastPushAt,
 		threads: parseReviewThreads(pr?.reviewThreads?.nodes),
 		comments,
