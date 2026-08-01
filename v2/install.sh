@@ -114,23 +114,36 @@ EOF
 chmod +x "$SMITHERS_SHIM"
 printf 'installed smithers shim (%s) at %s\n' "$SMITHERS_VERSION" "$SMITHERS_SHIM"
 
-# Workflows: the fleet reads smithers runs from <home>/workflows/.smithers.
-# The home is a plain directory, so the workspace arrives by symlink into the
-# repo checkout (state stays gitignored there; the home itself gains no .git).
-WORKFLOWS_LINK="${WORKFLOWS_LINK:-$DECK_V2_HOME_DIR/workflows}"
-# Overridable so tests link a fixture instead of the real workspace (and never
-# trigger the bun install below against the checkout).
+# Smithers runtime must be outside the development checkout. Copy only the
+# workspace's static pack files; db, executions and logs are created here.
 WORKFLOWS_SOURCE="${WORKFLOWS_SOURCE:-$(cd "$REPO_V2/../workflows" && pwd)}"
+WORKSPACE_ROOT="$DECK_V2_HOME_DIR/state/smithers"
+WORKSPACE_PACK="$WORKSPACE_ROOT/.smithers"
+mkdir -p "$WORKSPACE_ROOT"
+if [ -d "$WORKFLOWS_SOURCE/.smithers" ]; then
+  mkdir -p "$WORKSPACE_PACK"
+  # Copy the complete static pack. Preserve machine-local runtime directories
+  # when an update refreshes the installed static files.
+  for item in "$WORKFLOWS_SOURCE/.smithers"/* "$WORKFLOWS_SOURCE/.smithers"/.[!.]*; do
+    [ -e "$item" ] || continue
+    name="$(basename "$item")"
+    case "$name" in node_modules|executions|runs|reports|sandboxes|logs|state|tmp|pg) continue ;; esac
+    rm -rf "$WORKSPACE_PACK/$name"
+    cp -a "$item" "$WORKSPACE_PACK/$name"
+  done
+  # agents.ts is part of the pack but its model catalog is owned by the pipeline.
+  # Keep that relative import valid in the isolated runtime workspace.
+  mkdir -p "$WORKSPACE_ROOT/pr-pipeline/lib"
+  rm -f "$WORKSPACE_ROOT/pr-pipeline/lib/models.ts"
+  cp -a "$WORKFLOWS_SOURCE/pr-pipeline/lib/models.ts" "$WORKSPACE_ROOT/pr-pipeline/lib/models.ts"
+fi
+# Keep the old link name only for static compatibility. It is never the runtime
+# workspace and no state is written through it.
+WORKFLOWS_LINK="${WORKFLOWS_LINK:-$DECK_V2_HOME_DIR/workflows}"
 if [ -L "$WORKFLOWS_LINK" ] || [ ! -e "$WORKFLOWS_LINK" ]; then
   mkdir -p "$(dirname "$WORKFLOWS_LINK")"
   ln -sfn "$WORKFLOWS_SOURCE" "$WORKFLOWS_LINK"
-  printf 'linked %s -> %s\n' "$WORKFLOWS_LINK" "$WORKFLOWS_SOURCE"
-else
-  printf 'note: %s exists and is not a symlink; left alone.\n' "$WORKFLOWS_LINK"
 fi
-
-# `smithers ps` resolves through the workspace's own node_modules, so a fresh
-# checkout needs one install before the fleet chip can read runs.
-if [ -d "$WORKFLOWS_SOURCE/.smithers" ] && [ ! -d "$WORKFLOWS_SOURCE/.smithers/node_modules" ]; then
-  bun install --cwd "$WORKFLOWS_SOURCE/.smithers"
+if [ -f "$WORKSPACE_PACK/package.json" ] && [ ! -d "$WORKSPACE_PACK/node_modules" ]; then
+  bun install --cwd "$WORKSPACE_PACK"
 fi

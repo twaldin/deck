@@ -4,12 +4,17 @@ import { deckV2Home } from "./home";
 
 /** The single Smithers workspace used by every deck-v2 reader and spawner. */
 export function smithersWorkspaceRoot(home = deckV2Home()): string {
-	return path.resolve(home, "workflows", ".smithers");
+	return path.resolve(smithersStateDirFor(home));
+}
+
+/** Resolve the durable, machine-local Smithers workspace. */
+export function smithersStateDirFor(home = deckV2Home()): string {
+	return path.join(home, "state", "smithers");
 }
 
 /** Parent directory from which Smithers must be invoked to use this workspace. */
 export function smithersWorkspaceCwd(home = deckV2Home()): string {
-	return path.dirname(smithersWorkspaceRoot(home));
+	return smithersStateDirFor(home);
 }
 
 /**
@@ -76,13 +81,15 @@ export function warnOnShadowWorkspace(
 	warnedFingerprints = new Set<string>(),
 ): string[] {
 	const shadow = path.join(home, "workflows", "pr-pipeline", ".smithers");
-	if (!fs.existsSync(shadow)) return [];
-	const ids = shadowRunIds(shadow);
+	const legacy = path.join(home, "workflows", ".smithers");
+	const workspaces = [shadow, legacy].filter((workspace) => fs.existsSync(workspace));
+	if (workspaces.length === 0) return [];
+	const ids = workspaces.flatMap(shadowRunIds);
 	if (ids.length > 0) {
-		const fingerprint = `${shadow}\0${ids.join("\0")}`;
+		const fingerprint = `${workspaces.join("\0")}\0${ids.join("\0")}`;
 		if (!warnedFingerprints.has(fingerprint)) {
 			warnedFingerprints.add(fingerprint);
-			log(`[deck-v2] WARNING: shadow Smithers workspace has orphaned runs: ${ids.join(", ")}. Workspace: ${shadow}. Finish or migrate them manually; nothing was deleted.`);
+			log(`[deck-v2] WARNING: legacy Smithers workspace has orphaned runs: ${ids.join(", ")}. Workspaces: ${workspaces.join(", ")}. Finish or migrate them manually; nothing was deleted.`);
 		}
 	}
 	return ids;

@@ -5,7 +5,7 @@ describe("pull request description", () => {
 	test("rewrites internal input into a team-facing template", () => {
 		const output = generatePullRequestDescription({
 			brief: {
-				summary: "Fix the pipeline. See /Users/twaldin/.deck/wt/deck-18. READ BOTH FIRST.",
+				summary: "Fix the pipeline. See $DECK_HOME/wt/example. READ BOTH FIRST.",
 				acceptanceCriteria: ["No local paths"],
 			},
 			testing: "Managed by lindy-pr-pipeline run abc123. Local review nits (non-blocking):\n- nit",

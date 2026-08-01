@@ -210,8 +210,8 @@ describe("smithers workspace", () => {
 	});
 
 	test("REGRESSION: ship invokes Smithers from the shared workspace parent", () => {
-		expect(smithersWorkspaceRoot(home)).toBe(path.join(home, "workflows", ".smithers"));
-		expect(smithersWorkspaceCwd(home)).toBe(path.join(home, "workflows"));
+		expect(smithersWorkspaceRoot(home)).toBe(path.join(home, "state", "smithers"));
+		expect(smithersWorkspaceCwd(home)).toBe(path.join(home, "state", "smithers"));
 	});
 });
 
@@ -261,7 +261,7 @@ describe("startShip", () => {
 
 		await startShip(request({ runId: "cwd-test" }), home, fakeSpawn);
 		expect(command).toBe("bunx");
-		expect(options?.cwd).toBe(path.join(home, "workflows"));
+		expect(options?.cwd).toBe(path.join(home, "state", "smithers"));
 		expect(args[2]).toBe(path.join(fakeDir, "pipeline.tsx"));
 	});
 

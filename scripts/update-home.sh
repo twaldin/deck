@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Pull latest deck main + reinstall shims/extension. Safe to re-run.
+# Existing installs are the primary case. Private home sync needs `gh auth login`.
 # Does NOT overwrite ~/.deck/AGENTS.md, broker store, or state.
 set -euo pipefail
 
@@ -19,6 +20,34 @@ bun install --cwd "$REPO/v2"
 bun install --cwd "$REPO/broker"
 bun install --cwd "$REPO/cli"
 bash "$REPO/v2/install.sh"
+
+# Sync the machine's filtered home profile into the plain operator directory.
+# Clone to a temporary directory. Never turn ~/.deck into a git checkout.
+HOME_REPO="${DECK_HOME_REPO:-$HOME/.deck}"
+HOME_PROFILE="${DECK_HOME_PROFILE:-personal}"
+if command -v gh >/dev/null && gh auth status >/dev/null 2>&1; then
+  TEMP_HOME="$(mktemp -d)"
+  trap 'rm -rf "$TEMP_HOME"' EXIT
+  HOME_REMOTE="${DECK_HOME_GIT_REMOTE:-twaldin/deck-home}"
+  if gh repo clone "$HOME_REMOTE" "$TEMP_HOME/repo" -- --branch "profile/$HOME_PROFILE" >/dev/null 2>&1; then
+    if [ "$HOME_PROFILE" = "personal" ] && find "$TEMP_HOME/repo" -type f \( -name 'lindy-*' -o -path '*/secrets-map.md' \) -not -path '*/.git/*' -print -quit | grep -q .; then
+      echo "error: Lindy material in personal home" >&2
+      exit 1
+    fi
+    mkdir -p "$HOME_REPO"
+    # Preserve live state, data, contract, and local secrets. Copy only profile files.
+    for item in "$TEMP_HOME/repo"/* "$TEMP_HOME/repo"/.[!.]*; do
+      [ -e "$item" ] || continue
+      name="$(basename "$item")"
+      case "$name" in .git|.pi|.env|AGENTS.md|data|state|wt|logs|run|questions|broker) continue ;; esac
+      cp -a "$item" "$HOME_REPO/"
+    done
+  else
+    echo "home sync skipped: unable to clone $HOME_REMOTE profile/$HOME_PROFILE" >&2
+  fi
+else
+  echo "home sync skipped: gh auth is not configured" >&2
+fi
 
 # Seed the operator contract on first update. Never overwrite captain edits.
 # Use the repository shim directly because ~/.local/bin may not be on PATH yet.

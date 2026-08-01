@@ -23,7 +23,14 @@ let workflowsSource: string;
 beforeEach(() => {
 	target = fs.mkdtempSync(path.join(os.tmpdir(), "deckv2-install-"));
 	workflowsSource = path.join(target, "workflows-src");
-	fs.mkdirSync(workflowsSource, { recursive: true });
+	fs.mkdirSync(path.join(workflowsSource, ".smithers"), { recursive: true });
+	fs.writeFileSync(path.join(workflowsSource, ".smithers", "package.json"), '{"name":"fixture","dependencies":{}}\n');
+	for (const item of ["agents.ts", "bunfig.toml", "preload.ts", "smithers.config.ts", "smithers.toon"]) fs.writeFileSync(path.join(workflowsSource, ".smithers", item), item === "bunfig.toml" ? "logLevel = \"debug\"\n" : `fixture ${item}\n`);
+	fs.copyFileSync(path.join(REPO_V2, "..", "workflows", ".smithers", "bun.lock"), path.join(workflowsSource, ".smithers", "bun.lock"));
+	fs.mkdirSync(path.join(workflowsSource, ".smithers", "ui"));
+	fs.writeFileSync(path.join(workflowsSource, ".smithers", "ui", "fixture.tsx"), "fixture\n");
+	fs.mkdirSync(path.join(workflowsSource, "pr-pipeline", "lib"), { recursive: true });
+	fs.writeFileSync(path.join(workflowsSource, "pr-pipeline", "lib", "models.ts"), "fixture models\n");
 });
 
 afterEach(() => {
@@ -34,6 +41,7 @@ function install(): void {
 	execFileSync(path.join(REPO_V2, "install.sh"), [], {
 		env: {
 			...process.env,
+			DECK_V2_HOME: path.join(target, "home"),
 			INSTALL_TARGET: path.join(target, "agent"),
 			BIN_TARGET: path.join(target, "bin"),
 			WORKFLOWS_LINK: path.join(target, "home", "workflows"),
@@ -122,6 +130,14 @@ describe("installer layout", () => {
 		expect(fs.readFileSync(path.join(bin, "deck"), "utf8")).toContain("someone else's");
 	});
 
+	test("copies the isolated Smithers workspace and installs its dependencies", () => {
+		install();
+		const workspace = path.join(target, "home", "state", "smithers");
+		for (const item of ["package.json", "agents.ts", "bunfig.toml", "preload.ts", "smithers.config.ts", "smithers.toon", "ui/fixture.tsx"]) expect(fs.existsSync(path.join(workspace, ".smithers", item))).toBe(true);
+		expect(fs.readFileSync(path.join(workspace, "pr-pipeline", "lib", "models.ts"), "utf8")).toBe("fixture models\n");
+		expect(fs.existsSync(path.join(workspace, ".smithers", "node_modules"))).toBe(true);
+	});
+
 	test("installs a pinned smithers shim that matches src/smithers.ts", () => {
 		install();
 		const shim = path.join(target, "bin", "smithers");
@@ -167,8 +183,8 @@ describe("installer layout", () => {
 			env: {
 				...process.env,
 				HOME: target,
-				INSTALL_TARGET: "",
 				DECK_V2_HOME: "",
+				INSTALL_TARGET: "",
 				BIN_TARGET: path.join(target, "bin"),
 				WORKFLOWS_SOURCE: workflowsSource,
 				WORKFLOWS_LINK: path.join(target, "home", "workflows"),

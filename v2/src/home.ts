@@ -48,6 +48,11 @@ export function stateDir(): string {
 	return path.join(deckV2Home(), "state");
 }
 
+/** Smithers runtime data is machine-local and never belongs to the deck checkout. */
+export function smithersStateDir(): string {
+	return path.join(stateDir(), "smithers");
+}
+
 /** Machine short-name for machine-qualified refs. */
 export const MACHINE = process.env.DECK_MACHINE ?? os.hostname().split(".")[0] ?? "local";
 
