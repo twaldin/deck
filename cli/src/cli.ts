@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import { DeckError, type DeckErrorCode } from "@deck/core";
+import { DeckError, type DeckErrorCode } from "./core";
 import { z } from "zod";
 import {
 	allocCommandSchema,

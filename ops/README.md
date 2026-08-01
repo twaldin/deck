@@ -28,7 +28,7 @@ The installer:
 - copies available units to `~/Library/LaunchAgents`;
 - runs `launchctl bootstrap gui/$(id -u) <plist>`, falling back to `launchctl load -w <plist>` on older launchctl behavior;
 - leaves an already loaded service running and reports its status;
-- skips a unit with a warning when its `~/dev/deck/<daemon>/src/main.ts` entrypoint is missing. This currently allows the router unit to remain staged before the router package lands.
+- skips a unit with a warning when its `~/dev/deck/<daemon>/src/main.ts` entrypoint is missing.
 
 `RunAtLoad` starts each installed daemon. `KeepAlive` restarts it after an exit, with launchd throttling restarts to one attempt every five seconds.
 
@@ -36,7 +36,6 @@ Check launchd status:
 
 ```sh
 launchctl print gui/$(id -u)/ai.deck.broker
-launchctl print gui/$(id -u)/ai.deck.router
 ```
 
 ## Logs
@@ -44,13 +43,12 @@ launchctl print gui/$(id -u)/ai.deck.router
 Both stdout and stderr go to one file per daemon:
 
 - broker: `~/.deck/logs/broker.log`
-- router: `~/.deck/logs/router.log`
 
 Follow them with:
 
 ```sh
 tail -f ~/.deck/logs/broker.log
-tail -f ~/.deck/logs/router.log
+tail -f ~/.deck/logs/broker.log
 ```
 
 ## Uninstall

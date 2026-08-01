@@ -1,8 +1,0 @@
-count: 3
-tasks[3]{id,state,kind,repo,title,body,created,hold_reason}:
-  alpha,in_flight,task,deck,"Read-only fleet dashboard: agent tree + workflows","Captain vote: a TUI showing all agents in a tree, watchable live.\n... (truncated, 541 chars total - use show alpha --full to see complete text)",2026-07-27,"-"
-  delta,queued,task,"-",Shadow the live old firstmate before cutover,Read-only shadow of ~/firstmate; blocked on captain word.,2026-07-27,captain word pending
-  epsilon,done,task,deck,"Durable intake list: PRs authored by / review-requested of Tim","data/intake-prs.md from GitHub search author:twaldin, diffed each sweep.","-","-"
-help[2]:
-  - Run `tasks-axi show <id>` for full notes on a task
-  - Run `tasks-axi ready` to see unblocked queued work

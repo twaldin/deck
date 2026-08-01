@@ -1,8 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { spawn } from "node:child_process";
-import { EFFORT_FILES, effortDir, loadConfig, manifestSchema, ulid } from "@deck/core";
-import { DeckError } from "@deck/core";
+import { EFFORT_FILES, effortDir, loadConfig, manifestSchema, ulid, DeckError } from "./core";
 import { z } from "zod";
 import { addWorktree, prepareBase, removeWorktree, resolveRepository, validateBranchName } from "./git";
 import {

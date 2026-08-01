@@ -220,20 +220,4 @@ An unauthenticated `getRun` received HTTP 401 `A bearer token is required`. Auth
 - `listRunTokenUsage` returned an empty event list for these Pi-backed tasks even though the durable execution log contains exact usage. Deck should not depend on that RPC for Pi cost accounting without an upstream fix or adapter.
 - Plain `up` exits at a pending approval in 0.30.0. A live-process kill drill must use `up --serve`; ordinary resume does not need serve mode.
 
-## Deck primitive kit
-
-`../kit` is package `@deck/smithers-kit` v0.0.0:
-
-- `DeckPiAgent`: broker-only `provider=deck`, composed base/role/integration prompt, dispatch skills, and the Smithers Pi plugin.
-- `DeckWorktree`: shell-free, Zod-validated delegation to `deck wt alloc|release|ls|reap`.
-- `DeckApproval`: idempotent, CAS-safe mutation of an existing effort manifest and paired lifecycle event.
-
-Run its checks with:
-
-```sh
-cd ~/dev/deck/kit
-bun test
-bun run typecheck
-```
-
 The reverse Deck-card-to-Smithers-decision bridge is intentionally not faked; it is the remaining Gateway integration point described above.

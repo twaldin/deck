@@ -11,11 +11,9 @@ DOMAIN="gui/${USER_UID}"
 
 LABELS=(
 	"ai.deck.broker"
-	"ai.deck.router"
 )
 ENTRYPOINTS=(
 	"${DECK_ROOT}/broker/src/main.ts"
-	"${DECK_ROOT}/router/src/main.ts"
 )
 
 usage() {
