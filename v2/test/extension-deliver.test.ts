@@ -3,10 +3,8 @@
  * read true, a turn started, then sendUserMessage hit an active run and pi
  * emitted `Extension "<runtime>" error: Agent is already processing a prompt`
  * — pi's bindCore catches the rejection internally, so the caller never sees
- * it. The fix is a busy fence (agent_start/agent_settled + isIdle +
- * hasPendingMessages, re-checked at the send) plus a re-entrancy lock so the
- * interval and the fs.watch nudge cannot drain the outbox twice. Every test
- * here fails against the pre-fix extension.
+ * it. Pi's native follow-up queue accepts input during the active turn and
+ * delivers it in FIFO order. These tests verify the extension uses that queue.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
@@ -84,7 +82,7 @@ describe("wake delivery guards", () => {
 		expect(String(pi.sent[0]?.[0])).toContain("t1: blocked");
 	});
 
-	test("agent_start blocks sends until agent_settled, and the wake is not lost", async () => {
+	test("agent_start queues sends during the active turn", async () => {
 		appendStatus("t1", "blocked", "main is red");
 		const pi = fakePi();
 		deckV2(pi.api as never);
@@ -93,18 +91,12 @@ describe("wake delivery guards", () => {
 		await pi.emit("agent_start", ctx);
 		await pi.emit("session_start", ctx);
 		await settle();
-		expect(pi.sent).toHaveLength(0);
-		await pi.emit("session_shutdown", ctx);
-
-		// After the run settles, the next cycle delivers the owed wake.
-		await pi.emit("agent_settled", ctx);
-		await pi.emit("session_start", ctx);
-		await settle();
-		await pi.emit("session_shutdown", ctx);
 		expect(pi.sent).toHaveLength(1);
+		expect(pi.sent[0]?.[1]).toEqual({ deliverAs: "followUp" });
+		await pi.emit("session_shutdown", ctx);
 	});
 
-	test("before_agent_start already fences: the pre-start window is closed", async () => {
+	test("before_agent_start queues input during the pre-start window", async () => {
 		appendStatus("t1", "blocked", "main is red");
 		const pi = fakePi();
 		deckV2(pi.api as never);
@@ -114,17 +106,12 @@ describe("wake delivery guards", () => {
 		await pi.emit("before_agent_start", ctx);
 		await pi.emit("session_start", ctx);
 		await settle();
-		expect(pi.sent).toHaveLength(0);
-		await pi.emit("session_shutdown", ctx);
-
-		await pi.emit("agent_settled", ctx);
-		await pi.emit("session_start", ctx);
-		await settle();
-		await pi.emit("session_shutdown", ctx);
 		expect(pi.sent).toHaveLength(1);
+		expect(pi.sent[0]?.[1]).toEqual({ deliverAs: "followUp" });
+		await pi.emit("session_shutdown", ctx);
 	});
 
-	test("hasPendingMessages defers delivery", async () => {
+	test("hasPendingMessages does not block native queueing", async () => {
 		appendStatus("t1", "blocked", "main is red");
 		const pi = fakePi();
 		deckV2(pi.api as never);
@@ -132,25 +119,26 @@ describe("wake delivery guards", () => {
 		await pi.emit("session_start", ctx);
 		await settle();
 		await pi.emit("session_shutdown", ctx);
-		expect(pi.sent).toHaveLength(0);
+		expect(pi.sent).toHaveLength(1);
+		expect(pi.sent[0]?.[1]).toEqual({ deliverAs: "followUp" });
 	});
 
-	test("busy is re-checked at the send: a turn starting mid-pass stops it", async () => {
+	test("multiple messages are accepted in FIFO order while a turn runs", async () => {
 		appendStatus("t1", "blocked", "red");
 		appendStatus("t2", "blocked", "also red");
-		let idle = true;
+		const calls: unknown[][] = [];
 		const pi = fakePi((...args: unknown[]) => {
 			calls.push(args);
-			// The first send lands; a turn starts before the second.
-			idle = false;
 		});
-		const calls: unknown[][] = [];
 		deckV2(pi.api as never);
-		const ctx = tuiCtx({ isIdle: () => idle });
+		const ctx = tuiCtx({ isIdle: () => false, hasPendingMessages: () => true });
 		await pi.emit("session_start", ctx);
 		await settle();
 		await pi.emit("session_shutdown", ctx);
-		expect(calls).toHaveLength(1);
+		expect(calls).toHaveLength(2);
+		expect(calls.map((call) => call[1])).toEqual([{ deliverAs: "followUp" }, { deliverAs: "followUp" }]);
+		expect(String(calls[0]?.[0])).toContain("t1: blocked");
+		expect(String(calls[1]?.[0])).toContain("t2: blocked");
 	});
 
 	test("a rejected send promise is a failed send, not a success and not a throw", async () => {

@@ -80,12 +80,9 @@ export default function deckV2(pi: any): void {
 	let sendRetryAt = 0;
 	const SEND_BACKOFF_BASE_MS = 60_000;
 	const SEND_BACKOFF_MAX_MS = 15 * 60_000;
-	// Busy fence for the isIdle race: isIdle() can read true, then a turn starts,
-	// then sendUserMessage hits an active run and pi emits
-	// "Agent is already processing" as an extension error (pi's bindCore catches
-	// the rejection; the caller never sees it). agent_start/agent_settled bound
-	// the run window; agent_settled (not agent_end) because pi may auto-retry or
-	// continue with queued follow-ups after agent_end.
+	// Tracks the startup and active-turn window. Pi only accepts `followUp` while
+	// streaming, so the first idle send starts normally and later sends use the
+	// native queue rather than racing a second prompt into startup.
 	let agentBusy = false;
 	// Re-entrancy lock: deliver() fires from the interval AND every fs.watch
 	// nudge; two overlapping async passes would drain the same outbox twice.
@@ -101,10 +98,6 @@ export default function deckV2(pi: any): void {
 	const injectedCompactions = new Set<string>();
 	let injectedSession = false;
 	let compactionSequence = 0;
-
-	function busy(ctx: any): boolean {
-		return agentBusy || ctx?.isIdle?.() === false || ctx?.hasPendingMessages?.() === true;
-	}
 
 	async function injectStandingRules(ctx: any, key: string): Promise<void> {
 		if (key === "session_start" ? injectedSession : injectedCompactions.has(key)) return;
@@ -122,7 +115,6 @@ export default function deckV2(pi: any): void {
 			else injectedCompactions.delete(key);
 		}
 	}
-
 	// ---- tools --------------------------------------------------------------
 
 	pi.registerTool({
@@ -537,16 +529,14 @@ export default function deckV2(pi: any): void {
 	 * message, T2 never. The fold is the fix for six queued follow-ups each
 	 * burning a turn after the first drain had already handled them.
 	 *
-	 * Injection only happens while pi is IDLE. Injecting mid-turn is rejected
-	 * ("Agent is already processing"), and forcing it through with a steer is
-	 * exactly the interruption class this design removes. A wake deferred by one
-	 * cycle is correct; the events are durable and reconcile is idempotent, so
-	 * nothing is lost by waiting. Only the statusline updates while busy.
+	 * Pi owns the in-flight message queue. Sends during a turn use `followUp`, so
+	 * Pi queues them and delivers them after the turn settles. The first idle send
+	 * starts a normal turn; the busy fence makes later sends native follow-ups.
 	 */
 	async function deliver(ctx: any): Promise<void> {
 		// Backing off after a failed send is the same shape as busy: return before
 		// reconcile so no cursor moves and nothing is consumed unsent.
-		if (delivering || busy(ctx) || Date.now() < sendRetryAt) {
+		if (delivering || Date.now() < sendRetryAt) {
 			void refreshStatusline(ctx);
 			return;
 		}
@@ -619,17 +609,20 @@ export default function deckV2(pi: any): void {
 	}
 
 	/**
-	 * Send one message, reporting whether it actually went out. A false return
-	 * leaves the wake owed, so the next cycle retries it. Busy is re-checked
-	 * immediately before the call: a turn can start between deliver()'s gate
-	 * and this send. If the API ever returns a promise, a rejection is a
-	 * failed send, never a rethrow.
+	 * Send one message, reporting whether it was accepted by Pi's native queue.
+	 * A false return leaves the wake owed, so the next cycle retries it. The
+	 * follow-up delivery mode queues during a running turn and preserves FIFO
+	 * order without surfacing the active-prompt error. A rejection is a failed
+	 * send, never a rethrow.
 	 */
 	async function send(ctx: any, text: string): Promise<boolean> {
-		if (busy(ctx)) return false;
 		try {
 			if (typeof pi.sendUserMessage !== "function") return false;
-			const out = pi.sendUserMessage(text, { deliverAs: "followUp" }) as unknown;
+			const options = agentBusy || ctx?.isIdle?.() === false || ctx?.hasPendingMessages?.() === true
+				? { deliverAs: "followUp" }
+				: undefined;
+			agentBusy = true;
+			const out = pi.sendUserMessage(text, options) as unknown;
 			if (out instanceof Promise) await out;
 			return true;
 		} catch {
@@ -711,11 +704,8 @@ export default function deckV2(pi: any): void {
 		// The wake loop only runs for an interactive orchestrator.
 		//
 		// Waking means injecting a user message, which needs a live session with a
-		// captain reading it. In print mode there is a single prompt and no one to
-		// wake: the injection is rejected outright ("Agent is already processing")
-		// because the run is already under way by the time a timer fires, and even
-		// at session_start, when isIdle() is still true, the send lands mid-startup.
-		// RPC has a caller driving the conversation, so unsolicited turns are the
+		// captain reading it. In print mode there is no live captain to wake. RPC
+		// has a caller driving the conversation, so unsolicited turns are the
 		// caller's business, not ours.
 		//
 		// The tools still work in every mode; only the automatic waking is gated.
@@ -728,10 +718,6 @@ export default function deckV2(pi: any): void {
 		unwatch = (await import("../wake")).watchStatusDir(() => void deliver(ctx));
 	});
 
-	// Bound the agent's run window for the busy fence. before_agent_start fires
-	// earlier than agent_start, so fencing there too closes the pre-start window
-	// where isIdle() still reads true. agent_settled (not agent_end) clears it:
-	// pi may auto-retry or continue with queued follow-ups after agent_end.
 	pi.on("before_agent_start", async () => {
 		agentBusy = true;
 	});
