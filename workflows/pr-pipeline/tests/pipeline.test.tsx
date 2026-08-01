@@ -71,6 +71,16 @@ describe("reviewer selection contracts", () => {
 });
 
 describe("model policy wiring", () => {
+	test.each([
+		["full profile models", { models: { implementer: "deck/gpt-5.6-luna", watcher: "deck/gpt-5.6-luna", fallout: "deck/gpt-5.6-sol", familyOpposition: true, oppositionDefaults: {} } }, false, undefined],
+		["missing profile models", {}, false, undefined],
+		["null profile models", { models: null }, false, undefined],
+		["input implementer override", { models: { implementer: "deck/gpt-5.6-luna", watcher: "deck/gpt-5.6-luna", fallout: "deck/gpt-5.6-sol", familyOpposition: true, oppositionDefaults: {} } }, false, { implementer: "deck/claude-sonnet-5" }],
+		["repo-mismatched profile", { models: { implementer: "deck/claude-sonnet-5" } }, true, undefined],
+	] as const)("renders with %s", (_name, profile, mismatch, inputModels) => {
+		expect(() => buildModelPolicy(profile as never, mismatch, inputModels)).not.toThrow();
+	});
+
 	test("profile opposition mapping resolves the reviewer when reviewer is absent", () => {
 		const policy = buildModelPolicy(
 			{
