@@ -208,9 +208,6 @@ export function validateProfiles(parsed: unknown, source: string): ProjectProfil
 					throw new Error(`${where} (${p.id}): models.${role} must be a string`);
 				}
 			}
-			if (m.reviewer !== undefined && typeof m.reviewer !== "string") {
-				throw new Error(`${where} (${p.id}): models reviewer must be a string`);
-			}
 			if (m.familyOpposition !== undefined && typeof m.familyOpposition !== "boolean") {
 				throw new Error(`${where} (${p.id}): models.familyOpposition must be a boolean`);
 			}

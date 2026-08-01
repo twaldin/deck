@@ -100,6 +100,16 @@ describe("config file", () => {
 		expect(() => loadProfiles()).toThrow(/oppositionDefaults values/);
 	});
 
+	test.each([
+		["missing", undefined],
+		["null", null],
+		["partial", { implementer: "deck/claude-fable-5" }],
+	] as const)("normalizes %s model config to a defaultable policy", (_name, models) => {
+		writeConfig([{ ...deckOverride, models }]);
+		const profile = loadProfiles()[0];
+		expect(profile.models?.implementer).toBe(models && "implementer" in models ? "deck/claude-fable-5" : undefined);
+	});
+
 	test("malformed entries are refused with the reason", () => {
 		expect(() => validateProfiles({}, "x")).toThrow(/array/);
 		expect(() => validateProfiles([{ ...deckOverride, primary: "relative" }], "x")).toThrow(

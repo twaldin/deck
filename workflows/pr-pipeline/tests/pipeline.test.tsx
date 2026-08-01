@@ -99,13 +99,20 @@ describe("workflow rendering contracts", () => {
 			});
 			const implementer = rendered.tasks.find((task) => task.nodeId === "implement");
 			expect(implementer).toBeDefined();
-			return String(implementer?.agent?.model);
+			const agent = implementer?.agent;
+			expect(agent).toBeDefined();
+			expect(Array.isArray(agent)).toBe(false);
+			return String((agent as { model: string }).model);
 		} finally {
 			if (savedHome === undefined) delete process.env.DECK_V2_HOME;
 			else process.env.DECK_V2_HOME = savedHome;
 			fs.rmSync(home, { recursive: true, force: true });
 		}
 	}
+
+	test("input schema accepts null models", () => {
+		expect(pipeline.inputSchema.safeParse({ ...baseInput, models: null }).success).toBe(true);
+	});
 
 	test.each([
 		["full profile models", { ...profileBase, models: fullModels }, undefined, "example/test", "claude-fable-5"],
