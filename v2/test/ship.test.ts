@@ -4,9 +4,11 @@
  * project is refused; --no-pipeline is the explicit escape hatch).
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { EventEmitter } from "node:events";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { ChildProcess, SpawnOptions } from "node:child_process";
 import { validateBrief } from "../../workflows/pr-pipeline/lib/brief";
 import { profilesFile, seedProfiles, type ProjectProfile } from "../src/projects";
 import { existingPrFromFlag, runCli } from "../src/cli";
@@ -218,30 +220,26 @@ describe("startShip", () => {
 
 	test("REGRESSION: spawn uses the shared workspace cwd and an absolute pipeline path", async () => {
 		const fakeDir = path.join(home, "fake-pipeline");
-		const bin = path.join(home, "bin");
-		const cwdFile = path.join(home, "spawn-cwd");
-		const pipelineFile = path.join(home, "spawn-pipeline");
 		fs.mkdirSync(fakeDir, { recursive: true });
-		fs.mkdirSync(path.join(home, "workflows"), { recursive: true });
-		fs.mkdirSync(bin, { recursive: true });
 		fs.writeFileSync(path.join(fakeDir, "pipeline.tsx"), "// fake\\n");
-		fs.writeFileSync(path.join(bin, "bunx"), `#!/bin/sh
-printf '%s' "$PWD" > ${JSON.stringify(cwdFile)}
-printf '%s' "$3" > ${JSON.stringify(pipelineFile)}
-`);
-		fs.chmodSync(path.join(bin, "bunx"), 0o755);
 		process.env.DECK_PIPELINE_DIR = fakeDir;
-		const savedPath = process.env.PATH;
-		process.env.PATH = bin;
-		try {
-			await startShip(request({ runId: "cwd-test" }), home);
-			for (let attempt = 0; attempt < 20 && !fs.existsSync(cwdFile); attempt++)
-				await new Promise((resolve) => setTimeout(resolve, 10));
-			expect(fs.realpathSync(fs.readFileSync(cwdFile, "utf8"))).toBe(fs.realpathSync(path.join(home, "workflows")));
-			expect(fs.readFileSync(pipelineFile, "utf8")).toBe(path.join(fakeDir, "pipeline.tsx"));
-		} finally {
-			process.env.PATH = savedPath;
-		}
+		let command = "";
+		let args: string[] = [];
+		let options: SpawnOptions | undefined;
+		const fakeSpawn = ((spawnCommand: string, spawnArgs: string[], spawnOptions: SpawnOptions) => {
+			command = spawnCommand;
+			args = spawnArgs;
+			options = spawnOptions;
+			const child = Object.assign(new EventEmitter(), { pid: 123 }) as ChildProcess;
+			child.unref = () => child;
+			queueMicrotask(() => child.emit("spawn"));
+			return child;
+		}) as typeof import("node:child_process").spawn;
+
+		await startShip(request({ runId: "cwd-test" }), home, fakeSpawn);
+		expect(command).toBe("bunx");
+		expect(options?.cwd).toBe(path.join(home, "workflows"));
+		expect(args[2]).toBe(path.join(fakeDir, "pipeline.tsx"));
 	});
 
 	test("REGRESSION: a launch that never starts REJECTS instead of reporting started", async () => {

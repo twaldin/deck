@@ -168,6 +168,7 @@ export type ShipResult = {
 export async function startShip(
 	request: ShipRequest,
 	home = deckV2Home(),
+	spawn = spawnProcess,
 ): Promise<ShipResult> {
 	const profile = findProfile(request.profile, home);
 	if (profile === null) {
@@ -218,28 +219,29 @@ export async function startShip(
 	});
 
 	const log = fs.openSync(logPath, "a");
-	const child = spawnProcess(
-		"bunx",
-		[
-			SMITHERS_SPEC,
-			"up",
-			path.join(dir, "pipeline.tsx"),
-			"--input",
-			JSON.stringify(input),
-			"--run-id",
-			runId,
-		],
-		{
-			cwd: workspaceCwd,
-			detached: true,
-			stdio: ["ignore", log, log],
-			env: { ...process.env },
-		},
-	);
+	let child: ReturnType<typeof spawn>;
 	// Child startup errors arrive asynchronously; without this wait, a launch
 	// that never happened (bunx missing, spawn EPERM) would still print
 	// "started" — a silent false positive on the default ship path.
 	try {
+		child = spawn(
+			"bunx",
+			[
+				SMITHERS_SPEC,
+				"up",
+				path.join(dir, "pipeline.tsx"),
+				"--input",
+				JSON.stringify(input),
+				"--run-id",
+				runId,
+			],
+			{
+				cwd: workspaceCwd,
+				detached: true,
+				stdio: ["ignore", log, log],
+				env: { ...process.env },
+			},
+		);
 		await new Promise<void>((resolve, reject) => {
 			child.once("spawn", () => resolve());
 			child.once("error", (error) =>
