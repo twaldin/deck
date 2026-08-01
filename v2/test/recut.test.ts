@@ -30,7 +30,7 @@ describe("pipeline recut", () => {
 		const result = await recutChangedRuns({
 			runs: [{ id: "run-v1", workflow: "pr-pipeline", status: "waiting-approval", step: "r0-stamp" }],
 			pipelineDir: pipeline,
-			inspect: async () => ({ metadata: { pipelineHash: old + "-old" } }),
+			inspect: async () => ({ config: { __smithersDurability: { entryWorkflowHash: old + "-old" } } }),
 			cancel: async () => {},
 			start: async (id, input) => starts.push([id, input]),
 			recordDir: ship,
@@ -45,13 +45,13 @@ describe("pipeline recut", () => {
 		const options = {
 			runs: [{ id: "run-v1", workflow: "pr-pipeline", status: "waiting-approval", step: "r0-stamp" }],
 			pipelineDir: pipeline,
-			inspect: async () => ({ metadata: { pipelineHash: "old" } }),
+			inspect: async () => ({ config: { __smithersDurability: { entryWorkflowHash: "old" } } }),
 			cancel: async () => {}, start: async () => { count++; }, recordDir: ship,
 		};
 		await recutChangedRuns(options);
 		await recutChangedRuns(options);
 		expect(count).toBe(1);
-		const noOp = await recutChangedRuns({ ...options, inspect: async () => ({ metadata: { pipelineHash: pipelineHash(pipeline) } }) });
+		const noOp = await recutChangedRuns({ ...options, inspect: async () => ({ config: { __smithersDurability: { entryWorkflowHash: pipelineHash(pipeline) } } }) });
 		expect(noOp).toHaveLength(0);
 	});
 });

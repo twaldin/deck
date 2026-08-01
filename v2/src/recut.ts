@@ -41,8 +41,13 @@ export function pipelineHash(pipelineDir: string): string {
 
 function findHash(value: unknown): string | undefined {
 	if (typeof value !== "object" || value === null) return undefined;
-	for (const [key, candidate] of Object.entries(value as Record<string, unknown>)) {
-		if (/pipeline|workflow|content|metadata/i.test(key) && /hash|digest/i.test(key) && typeof candidate === "string") return candidate;
+	const row = value as Record<string, unknown>;
+	const durability = row.config && typeof row.config === "object" ? (row.config as Record<string, unknown>).__smithersDurability : undefined;
+	if (durability && typeof durability === "object") {
+		const hash = (durability as Record<string, unknown>).entryWorkflowHash;
+		if (typeof hash === "string") return hash;
+	}
+	for (const candidate of Object.values(row)) {
 		const nested = findHash(candidate);
 		if (nested !== undefined) return nested;
 	}
@@ -82,21 +87,23 @@ export async function recutChangedRuns(options: RecutOptions): Promise<RecutResu
 	const results: RecutResult[] = [];
 	for (const run of options.runs) {
 		const state = (run.state ?? run.status ?? "").toLowerCase();
-		if (run.workflow !== undefined && run.workflow !== "pr-pipeline") continue;
+		if (run.workflow !== undefined && !["pr-pipeline", "lindy-pr-pipeline"].includes(run.workflow)) continue;
 		if (TERMINAL.has(state)) continue;
 		const recorded = findHash(await options.inspect(run.id));
 		if (recorded === undefined || recorded === current || ledger[run.id] === current) continue;
 		const input = inputFor(recordDir, run.id);
 		if (input === null) continue;
-		await options.syncWorktree?.(input);
 		const mode = APPROVAL.has(state) ? "stamp" : "safe-boundary";
 		// A running run is recut only at a named watch/fix boundary. Unknown steps
 		// are left for the next poll instead of risking a mid-node duplicate.
-		if (mode === "safe-boundary" && !/(watch|fix|ready)/i.test(run.step ?? "")) continue;
+		if (mode === "safe-boundary" && !/(watch-poll|ready-poll)$/i.test(run.step ?? "")) continue;
+		await options.syncWorktree?.(input);
 		const newRunId = nextRunId(run.id, used);
 		used.add(newRunId);
 		await options.cancel(run.id);
-		await options.start(newRunId, { ...input });
+		const nextInput = { ...input };
+		await options.start(newRunId, nextInput);
+		fs.writeFileSync(path.join(recordDir, `${newRunId}.input.json`), `${JSON.stringify(nextInput, null, 2)}\n`, { mode: 0o600 });
 		ledger[run.id] = current;
 		writeLedger(recordDir, ledger);
 		const evidence = { oldRunId: run.id, newRunId, pipelineHash: current, mode };
@@ -108,19 +115,19 @@ export async function recutChangedRuns(options: RecutOptions): Promise<RecutResu
 }
 
 /** Default worktree preparation. It never destroys commits ahead of the PR head. */
-export async function reconcileRecuts(cwd: string, runs: readonly RecutRun[]): Promise<RecutResult[]> {
+export async function reconcileRecuts(workspace: string, pipeline: string, runs: readonly RecutRun[]): Promise<RecutResult[]> {
 	const shipDir = path.join(stateDir(), "ship");
 	return recutChangedRuns({
 		runs,
-		pipelineDir: cwd,
+		pipelineDir: pipeline,
 		inspect: async (runId) => {
-			const result = await execFile("bunx", [SMITHERS_SPEC, "inspect", runId, "--format", "json"], { cwd });
+			const result = await execFile("bunx", [SMITHERS_SPEC, "inspect", runId, "--format", "json"], { cwd: workspace });
 			return JSON.parse(result.stdout);
 		},
-		cancel: async (runId) => { await execFile("bunx", [SMITHERS_SPEC, "cancel", runId], { cwd }); },
+		cancel: async (runId) => { await execFile("bunx", [SMITHERS_SPEC, "cancel", runId], { cwd: workspace }); },
 		start: async (runId, input) => {
 			await new Promise<void>((resolve, reject) => {
-				const child = spawn("bunx", [SMITHERS_SPEC, "up", "pipeline.tsx", "--input", JSON.stringify(input), "--run-id", runId], { cwd, detached: true, stdio: "ignore" });
+				const child = spawn("bunx", [SMITHERS_SPEC, "up", "pipeline.tsx", "--input", JSON.stringify(input), "--run-id", runId], { cwd: pipeline, detached: true, stdio: "ignore" });
 				child.once("spawn", () => { child.unref(); resolve(); });
 				child.once("error", reject);
 			});
