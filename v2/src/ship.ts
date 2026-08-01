@@ -24,7 +24,7 @@ import { readMeta, updateMeta } from "./meta";
 import { findProfile, type ProjectProfile } from "./projects";
 import { SMITHERS_SPEC } from "./smithers";
 import { pipelineHash } from "./recut";
-import { smithersWorkspaceCwd, warnOnShadowWorkspace } from "./workspace";
+import { smithersWorkspaceCwd, uiWarn, warnOnShadowWorkspace } from "./workspace";
 
 export type ShipRequest = {
 	/** Ticket / effort id; also seeds the smithers run id. */
@@ -57,6 +57,9 @@ export type ShipRequest = {
 	 * continuous watch/ready/stamp loop as a normal ship.
 	 */
 	existingPr?: number;
+	/** Extension UI seam for the shadow-workspace preflight. */
+	warningContext?: { ui?: { notify?: (message: string, type?: "warning") => void } };
+	warningFingerprints?: Set<string>;
 };
 
 /**
@@ -191,7 +194,13 @@ export async function startShip(
 	}
 	const dir = pipelineDir();
 	const workspaceCwd = smithersWorkspaceCwd(home);
-	warnOnShadowWorkspace(home);
+	warnOnShadowWorkspace(
+		home,
+		request.warningContext === undefined
+			? undefined
+			: (message) => uiWarn(request.warningContext, message),
+		request.warningFingerprints,
+	);
 	if (!fs.existsSync(path.join(dir, "pipeline.tsx"))) {
 		throw new Error(
 			`pr-pipeline not found at ${dir} (set DECK_PIPELINE_DIR if the layout differs)`,

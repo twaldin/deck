@@ -40,7 +40,7 @@ import { reconcileRecuts } from "../recut";
 import { peekSession, startRun } from "../spawn";
 import { STATUS_VERBS, type StatusVerb } from "../status";
 import { readUsageRoster, usageStatusLine } from "../usage-roster";
-import { discoverSmithersWorkspaces, smithersWorkspaceCwd, warnOnShadowWorkspace } from "../workspace";
+import { smithersWorkspaceCwd, uiWarn, warnOnShadowWorkspace } from "../workspace";
 import { evaluateTeardown, formatVerdict } from "../teardown";
 import { ackWakes, detectStale, foldBatched, pendingWakes, reconcile } from "../wake";
 import {
@@ -93,6 +93,7 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 	// Re-entrancy lock: deliver() fires from the interval AND every fs.watch
 	// nudge; two overlapping async passes would drain the same outbox twice.
 	let delivering = false;
+	const warnedShadowFingerprints = new Set<string>();
 
 	function busy(ctx: any): boolean {
 		return (
@@ -214,7 +215,7 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 				}),
 			),
 		}),
-		async execute(_id: string, params: Record<string, unknown>) {
+		async execute(_id: string, params: Record<string, unknown>, _signal: unknown, _onUpdate: unknown, ctx: any) {
 			const result = await startShip({
 				ticket: params.ticket as string,
 				profile: params.profile as string,
@@ -233,6 +234,8 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 					: { deployEvidence: params.deploy_evidence as string }),
 				...(params.dry_run === true ? { dryRun: true } : {}),
 				...(params.existing_pr === undefined ? {} : { existingPr: params.existing_pr as number }),
+				warningContext: ctx,
+				warningFingerprints: warnedShadowFingerprints,
 			});
 			return text(
 				`ship ${result.runId} started (pid ${result.pid}) \u2014 profile ${result.profile} (${result.pipeline})${result.dryRun ? " [DRY RUN]" : ""}\n` +
@@ -648,19 +651,10 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 	}
 
 	async function getCurrentFrame(): Promise<Awaited<ReturnType<typeof buildFrame>>> {
-		const workspaces = discoverSmithersWorkspaces();
-		const snapshots = await Promise.all(workspaces.map(async (cwd) => ({ cwd, snapshot: await collectSnapshot(cwd) })));
-		// Run IDs are only unique inside one Smithers workspace. Keep same-ID runs
-		// from different roots; collapse only a duplicate returned by one workspace.
-		const runs = [...new Map(snapshots.flatMap(({ cwd, snapshot }) =>
-			snapshot.runs.map((run) => [`${cwd}\0${run.id}`, run] as const),
-		)).values()];
-		const primary = workflowCwd === undefined
-			? undefined
-			: snapshots.find(({ cwd }) => cwd === workflowCwd);
-		if (primary !== undefined) void reconcileRecuts(primary.cwd, pipelineDir(), primary.snapshot.runs).catch(() => {});
-		observePsSnapshot(runs);
-		const frame = await buildFrame(primary === undefined ? {} : { workflowCwd: primary.cwd, psRuns: runs });
+		const snapshot = workflowCwd === undefined ? { runs: [] as never[] } : await collectSnapshot(workflowCwd);
+		if (workflowCwd !== undefined) void reconcileRecuts(workflowCwd, pipelineDir(), snapshot.runs).catch(() => {});
+		observePsSnapshot(snapshot.runs);
+		const frame = await buildFrame(workflowCwd === undefined ? {} : { workflowCwd, psRuns: snapshot.runs });
 		lastFooterFrame = frame;
 		return frame;
 	}
@@ -684,9 +678,14 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 		injectedSession = false;
 		injectedCompactions.clear();
 		compactionSequence = 0;
+		warnedShadowFingerprints.clear();
 		await injectStandingRules(ctx, "session_start");
 		workflowCwd = smithersWorkspaceCwd();
-		warnOnShadowWorkspace();
+		warnOnShadowWorkspace(
+			undefined,
+			(message) => uiWarn(ctx, message),
+			warnedShadowFingerprints,
+		);
 		// The deck footer owns quota presentation. Block the legacy deck-usage
 		// status slot so its timer cannot paint a second chrome strip.
 		const setStatus = ctx.ui?.setStatus;

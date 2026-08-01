@@ -38,6 +38,7 @@ import {
 import { Box, Container, getKeybindings, type Component } from "@earendil-works/pi-tui";
 import type { TSchema } from "typebox";
 import { deckV2Home } from "./home";
+import { uiWarn } from "./workspace";
 
 /**
  * Every operational injection the extension sends carries this prefix, so it is
@@ -112,7 +113,7 @@ function installAdapter(name: string, install: () => void): void {
 		install();
 	} catch (error) {
 		const reason = error instanceof Error ? error.message : String(error);
-		console.error(`deck calm: ${name} presentation adapter unavailable, skipping. ${reason}`);
+		uiWarn(undefined, `deck calm: ${name} presentation adapter unavailable, skipping. ${reason}`);
 	}
 }
 
