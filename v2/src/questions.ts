@@ -7,6 +7,8 @@
  * with `ask_captain`, and the captain clears the backlog with `/questions`.
  */
 import { Type } from "typebox";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import {
 	answer as recordAnswer,
 	ask,
@@ -80,6 +82,7 @@ const defaultRuntime: QuestionsRuntime = {
 const DISMISSED = "(dismissed by the captain without an answer)";
 /** Control actions, always after the agent's own options and matched by position. */
 const CONTROLS = ["Write an answer...", "Dismiss", "Skip", "Stop reviewing"] as const;
+const exec = promisify(execFile);
 
 /** One question rendered for the captain: everything needed to decide, nothing more. */
 export function describe(entry: Question, nowMs: number): string {
@@ -261,7 +264,21 @@ export function registerQuestions(
 					if (written === undefined || written.trim() === "") continue;
 					text = written.trim();
 				}
-				if (resolve(ctx, entry, text, "answered")) answered += 1;
+				if (resolve(ctx, entry, text, "answered")) {
+					answered += 1;
+					if (entry.questionKind === "stamp" && text === "Stamp") {
+						const runId = entry.id.startsWith("stamp:") ? entry.id.slice(entry.id.lastIndexOf(":") + 1) : undefined;
+						if (runId !== undefined) {
+							try {
+								await exec("smithers", ["approve", runId, "--node", "r0-stamp", "--by", "captain"], { cwd: entry.cwd, timeout: 15_000 });
+								await exec("smithers", ["up", "pipeline.tsx", "--run-id", runId, "--resume", "true"], { cwd: entry.cwd, timeout: 15_000 });
+								ctx.ui.notify(`Stamped ${runId} and resumed the pipeline.`, "info");
+							} catch (error) {
+								ctx.ui.notify(`Stamp recorded, but the pipeline did not resume: ${error instanceof Error ? error.message : "unknown error"}`, "error");
+							}
+						}
+					}
+				}
 			}
 
 			// Answers to questions this very session asked are deliverable right away.

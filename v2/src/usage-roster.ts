@@ -8,7 +8,7 @@ export type UsageRoster = {
 	generatedAt?: string;
 	reports?: Array<{
 		provider?: string;
-		metadata?: { email?: string };
+		metadata?: { email?: string; accountId?: string; account?: string; cooling?: boolean; blocked?: boolean };
 		limits?: Array<{
 			id?: string;
 			label?: string;

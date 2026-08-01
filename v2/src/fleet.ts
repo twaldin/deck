@@ -483,6 +483,21 @@ async function collectRunsOnce(
 						// A run before push-pr has no PR number yet.
 					}
 				}
+				let ciState = psRun.ciState;
+				let reviewState = psRun.reviewState;
+				if (prNumber !== undefined && input.repo !== null) {
+					try {
+						const checks = await run("gh", ["pr", "checks", String(prNumber), "--repo", input.repo, "--json", "state"], { cwd, timeout: 15_000, maxBuffer: 1_000_000 });
+						const states = (JSON.parse(checks.stdout) as Array<{ state?: string }>).map((row) => row.state?.toUpperCase()).filter((state): state is string => state !== undefined);
+						ciState = states.length === 0 ? "no checks" : states.every((state) => state === "SUCCESS") ? "passing" : states.some((state) => ["FAILURE", "CANCELLED", "ERROR"].includes(state)) ? "failing" : "pending";
+					} catch { ciState = "unavailable"; }
+					try {
+						const review = await run("gh", ["pr", "view", String(prNumber), "--repo", input.repo, "--json", "reviewDecision,reviews"], { cwd, timeout: 15_000, maxBuffer: 1_000_000 });
+						const value = JSON.parse(review.stdout) as { reviewDecision?: string; reviews?: Array<{ author?: { login?: string }; state?: string }> };
+						const approvals = (value.reviews ?? []).filter((item) => item.state === "APPROVED").map((item) => item.author?.login ?? "unknown");
+						reviewState = `${value.reviewDecision ?? "REVIEW_REQUIRED"} · approvals: ${approvals.length ? approvals.join(", ") : "none"}`;
+					} catch { reviewState = "unavailable"; }
+				}
 				let landed = psRun.landed;
 				let pushPrNull = psRun.pushPrNull;
 				if (activityFor(psRun.step, psRun.status) === "failed") {
@@ -517,12 +532,12 @@ async function collectRunsOnce(
 					(approval) => approval.status === "requested",
 				)?.nodeId;
 				if (pendingNode !== undefined)
-					return { ...psRun, blockedNode: pendingNode, prNumber, landed, pushPrNull };
+					return { ...psRun, blockedNode: pendingNode, prNumber, landed, pushPrNull, ciState, reviewState };
 				if (
 					psRun.status !== "waiting-approval" &&
 					psRun.state !== "waiting-approval"
 				)
-					return { ...psRun, prNumber, landed, pushPrNull };
+					return { ...psRun, prNumber, landed, pushPrNull, ciState, reviewState };
 				try {
 					const inspected = await run(
 						"bunx",
@@ -546,7 +561,7 @@ async function collectRunsOnce(
 						pushPrNull,
 					};
 				} catch {
-					return { ...psRun, prNumber, landed, pushPrNull };
+					return { ...psRun, prNumber, landed, pushPrNull, ciState, reviewState };
 				}
 			}),
 		);
@@ -808,17 +823,11 @@ export async function buildFrame(
 			return [];
 		}
 	};
-	const effortMap = new Map<string, WorkflowRow>();
-	for (const wf of liveRuns) {
-		const repo = workflowIdentity(wf);
-		const key = wf.prNumber !== null && wf.prNumber !== undefined
-			? `pr:${repo}:${wf.prNumber}`
-			: `ticket:${repo}:${wf.ticket ?? wf.runId}`;
-		const prior = effortMap.get(key);
-		if (prior === undefined || (wf.startedAt ?? "") > (prior.startedAt ?? "")) effortMap.set(key, wf);
-	}
 	const wfRunState = (wf: WorkflowRow, sourceRuns: PsRun[]): PsRun | undefined => sourceRuns.find((source) => source.id === wf.runId);
-	const efforts: EffortRow[] = [...effortMap].map(([identity, wf]) => {
+	// Keep every live generation visible. A re-cut is a separate effort and can
+	// have a different blocker even when it targets the same PR.
+	const efforts: EffortRow[] = liveRuns.map((wf) => {
+		const identity = `run:${wf.runId}`;
 		const input = readShipInput(wf.runId);
 		return {
 		identity, workflow: wf.workflow, step: wf.step, runtimeMs: wf.startedAt ? ageMs(wf.startedAt) : null,
@@ -847,17 +856,14 @@ export async function buildFrame(
 		const history = generations === 0
 			? "No prior pipeline generations are recorded. Implementation, adversarial review rounds, fixes, and re-cuts are recorded in the pipeline run history."
 			: `${generations} prior pipeline generation(s) are recorded. Implementation, adversarial review rounds, fixes, and re-cuts are recorded in the pipeline run history.`;
-		const review = wf.activity === "failed"
-			? "Review state: the pipeline reports a failure; human approvals, bot findings, and CI must be checked for outstanding work."
-			: wf.waitingFor === "stamp"
-				? "Review state: the pipeline is ready for stamp after its adversarial review and watch checks; verify human approvals by name, resolved or outstanding bot findings, and CI state in the PR."
-				: `Review state: ${wf.state ?? wf.status ?? "unknown"}; verify human approvals, bot findings, and CI in the PR.`;
-		return `Stamp PR #${pr ?? "unknown"}: ${title} · URL: ${url} · Why: ${why} · History: ${history} · ${review} · merge or no?`;
+		const effort = efforts.find((item) => item.runId === wf.runId);
+		const review = `CI: ${effort?.ciState ?? "unknown"}; review: ${effort?.reviewState ?? "unknown"}. These are live GitHub values.`;
+		return `Stamp PR #${pr ?? "unknown"}: ${title} · URL: ${url} · Why: ${why} · History: ${history} · ${review} · choose Stamp only if CI passes and the named human approvals and bot findings are acceptable · merge or no?`;
 	};
 	for (const wf of liveRuns.filter((row) => row.waitingFor === "stamp")) {
 		// Include the run so a later generation of the same PR gets a fresh
 		// decision, while every render of this parked run uses one stable id.
-		const id = `stamp:${workflowIdentity(wf)}:${wf.prNumber ?? "unknown-pr"}:${wf.runId}`;
+		const id = `stamp:${wf.runId}`;
 		try {
 			const existing = readQuestionsForStamp(queueFile(), id);
 			if (!existing) {
@@ -1687,13 +1693,14 @@ export function buildUsageText(roster: import("./usage-roster").UsageRoster | nu
 	if (roster === null) return "deck usage\n\nNo broker roster available.";
 	const lines = [theme.bold(theme.fg("accent", "deck usage"))];
 	for (const report of roster.reports ?? []) {
-		const label = report.metadata?.email ?? "unknown account";
+		const label = report.metadata?.email ?? report.metadata?.accountId ?? report.metadata?.account ?? "unknown account";
 		lines.push("", `${label} · ${report.provider ?? "?"}`);
 		for (const limit of report.limits ?? []) {
 			const free = limit.amount?.remainingFraction ?? (limit.amount?.usedFraction === undefined ? null : 1 - limit.amount.usedFraction);
 			const value = free === null || !Number.isFinite(free) ? "?" : `${Math.round(Math.max(0, Math.min(1, free)) * 100)}% free`;
 			const tier = typeof limit.scope?.tier === "string" ? ` · tier ${limit.scope.tier}` : "";
-			const temperature = limit.status === "exhausted" ? " · cooling" : " · warm";
+			const cooling = report.metadata?.cooling === true || report.metadata?.blocked === true || limit.status === "exhausted";
+			const temperature = cooling ? " · cooling" : " · warm";
 			lines.push(`  ${limit.window?.id ?? limit.label ?? limit.id ?? "limit"}${tier}: ${value}${temperature}`);
 		}
 	}
