@@ -2,15 +2,13 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { randomBytes } from "node:crypto";
 import { dlopen, FFIType, type Library } from "bun:ffi";
-import { DECK_HOME, WORKTREES_STATE } from "@deck/core";
-import { DeckError } from "@deck/core";
+import { DECK_HOME, WORKTREES_STATE, DeckError } from "./core";
 import { z } from "zod";
 import { type WorktreesState, worktreesStateSchema } from "./schema";
 
 /**
  * Worktree pool paths are runtime state under ~/.deck/wt/ (SPEC §0 layout).
- * WORKTREES_STATE remains sourced from @deck/core; only the CLI owns this
- * additional pool directory and its allocator lock.
+ * The CLI owns this additional pool directory and its allocator lock.
  */
 export const WORKTREE_POOL_DIR = path.join(DECK_HOME, "wt");
 export const WORKTREES_LOCK = `${WORKTREES_STATE}.lock`;

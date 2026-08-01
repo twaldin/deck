@@ -1,6 +1,0 @@
-window=default:w6:p2
-worktree=/tmp/fleet-fixture/beta
-harness=codex
-kind=review
-model=deck/claude-opus-5
-effort=high

@@ -29,19 +29,10 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   from its global cache and can silently pick a NEWER version than the workspace pin
   (observed: 0.31.0 vs 0.30.0). `workflows/pr-pipeline/` has its own package.json pin
   for the same reason; keep the two pins in lockstep.
-- Deck's router/manifest/TUI layer is dormant by decision; new workflows are written
-  against plain smithers (kit/ is design reference only).
+- The router-era manifest/TUI stack is deleted. New workflows use plain Smithers and v2.
 - Broker model allowlist: `broker/src/models.ts` (`DEFAULT_ALLOWLIST`). The pipeline's
   agent-pickable catalog (`workflows/pr-pipeline/lib/models.ts DECK_AGENT_CATALOG`)
   must stay a subset of it.
-- `fleet/` is the standalone read-only fleet dashboard TUI (`@deck/fleet`,
-  bin `deck-fleet`). It reads firstmate `state/*.meta`+`.status` tails and Smithers
-  runs via the **public read-only CLI only** (`smithers ps|inspect --json`; never the
-  private db, never Gateway lifecycle). Collectors are separable from the renderer
-  (herdr-plugin reuse); runs correlate only by a unique exact absolute
-  `rootDir==worktree`.
-  Invocation/config/herdr-embed notes in `fleet/README.md`.
-
 - `v2/` is the agent-fleet layer: one library (`v2/src/`) behind two faces — a pi
   extension (`v2/src/extension/`) and a thin CLI (`v2/bin/deck-v2`). Neither wraps
   the other; both import the same modules, so there is no subprocess hop in the

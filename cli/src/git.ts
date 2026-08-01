@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { DeckError, type DeckErrorCode } from "@deck/core";
+import { DeckError, type DeckErrorCode } from "./core";
 import { z } from "zod";
 
 const gitOutputSchema = z.string();

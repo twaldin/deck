@@ -7,7 +7,6 @@ DOMAIN="gui/${USER_UID}"
 
 LABELS=(
 	"ai.deck.broker"
-	"ai.deck.router"
 )
 
 usage() {

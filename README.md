@@ -88,6 +88,10 @@ Sync code with git. **Never rsync `~/.deck` between hosts** (credentials + state
 | [`workflows/pr-pipeline/README.md`](workflows/pr-pipeline/README.md) | Pipeline stages |
 | [`v2/seed/orchestrator-contract.md`](v2/seed/orchestrator-contract.md) | Seed for `~/.deck/AGENTS.md` |
 
+## Historical directories
+
+The router-era `router/`, `fleet/`, `shadow/`, `core/`, `tui/`, `gateway/`, `mcpx/`, `kit/`, `skills/`, and `prompts/` directories were removed in deadwood-phase1. Their design history remains in git.
+
 ## Develop deck itself
 
 Branch from **`main`**. Ship with the deck profile (yolo).

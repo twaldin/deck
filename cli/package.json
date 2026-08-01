@@ -10,7 +10,6 @@
 		"typecheck": "tsc --noEmit"
 	},
 	"dependencies": {
-		"@deck/core": "file:../core",
 		"zod": "^4"
 	},
 	"devDependencies": {

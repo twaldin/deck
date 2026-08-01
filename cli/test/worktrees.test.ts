@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { manifestSchema } from "@deck/core";
+import { manifestSchema } from "../src/core";
 import { type WorktreeEntry, worktreesStateSchema } from "../src/schema";
 import { warmDependencies } from "../src/worktrees";
 
