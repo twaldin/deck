@@ -496,8 +496,10 @@ export function registerCalm(pi: ExtensionAPI): void {
 		// Headless contexts (print/RPC, and test fakes) have no ui surface.
 		const ui = ctx.ui as typeof ctx.ui | undefined;
 		if (ui === undefined) return;
-		ui.setWorkingVisible(true);
-		ui.setHiddenThinkingLabel(calmPresentationIsActive() ? "" : undefined);
+		if (typeof ui.setWorkingVisible === "function") ui.setWorkingVisible(true);
+		if (typeof ui.setHiddenThinkingLabel === "function") {
+			ui.setHiddenThinkingLabel(calmPresentationIsActive() ? "" : undefined);
+		}
 		removeTerminalInputHandler?.();
 		if (typeof ui.onTerminalInput !== "function") return;
 		// /export and /share must render the stock transcript even while Calm is
