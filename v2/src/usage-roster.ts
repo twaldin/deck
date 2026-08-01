@@ -2,17 +2,24 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { createConnection } from "node:net";
 
 export type UsageTheme = { fg: (key: string, text: string) => string; bold: (text: string) => string };
+export type UsageAccount = { provider?: string; email?: string | null; accountId?: string | null; id?: number; blocks?: Array<{ blockedUntilMs?: number }> };
 export type UsageRoster = {
+	generatedAt?: string;
+	accounts?: UsageAccount[];
 	reports?: Array<{
 		provider?: string;
+		metadata?: { email?: string; accountId?: string; account?: string; cooling?: boolean; blocked?: boolean };
+		blocks?: Array<{ providerKey?: string; blockScope?: string; blockedUntilMs?: number }>;
 		limits?: Array<{
 			id?: string;
 			label?: string;
 			window?: { id?: string };
 			scope?: Record<string, unknown>;
 			amount?: { usedFraction?: number; remainingFraction?: number };
+			status?: "ok" | "warning" | "exhausted" | "unknown";
 		}>;
 	}>;
 };
@@ -26,6 +33,7 @@ type UsageLimit = {
 	window?: { id?: string };
 	scope?: Record<string, unknown>;
 	amount?: { usedFraction?: number; remainingFraction?: number };
+	status?: "ok" | "warning" | "exhausted" | "unknown";
 };
 
 function freeFraction(limit: UsageLimit): number | null {
@@ -68,6 +76,32 @@ export function aggregate(roster: UsageRoster): { provider: string; tag: string;
 	return [...buckets.values()]
 		.map(bucket => ({ provider: bucket.provider, tag: bucket.tag, free: bucket.sum / bucket.count, count: bucket.count }))
 		.sort((a, b) => a.provider.localeCompare(b.provider) || a.tag.localeCompare(b.tag));
+}
+
+export async function readLiveControlAccounts(home = homedir()): Promise<UsageAccount[]> {
+	try {
+		const base = join(home, ".deck");
+		const cap = readFileSync(join(base, "broker", "control.token"), "utf8").trim();
+		const socket = createConnection(join(base, "run", "broker.sock"));
+		return await new Promise<UsageAccount[]>((resolve, reject) => {
+			let buffer = "";
+			const timer = setTimeout(() => { socket.destroy(); reject(new Error("broker status timeout")); }, 2000);
+			socket.on("connect", () => socket.write(`${JSON.stringify({ id: "deck-usage", cap, op: "status" })}\n`));
+			socket.on("data", chunk => {
+				buffer += chunk.toString();
+				const line = buffer.split("\n")[0];
+				if (!line) return;
+				clearTimeout(timer); socket.destroy();
+				const response = JSON.parse(line) as { ok?: boolean; data?: { accounts?: UsageAccount[] } };
+				if (!response.ok) reject(new Error("broker status failed")); else resolve(response.data?.accounts ?? []);
+			});
+			socket.on("error", error => { clearTimeout(timer); reject(error); });
+		});
+	} catch { return []; }
+}
+
+export function mergeLiveAccounts(roster: UsageRoster, accounts: UsageAccount[]): UsageRoster {
+	return { ...roster, accounts };
 }
 
 export function readUsageRoster(home = homedir()): UsageRoster | null {

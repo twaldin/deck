@@ -618,6 +618,55 @@ describe("questions extension", () => {
 		expect(readQuestions(file)[0]?.status).toBe("answered");
 	});
 
+	test("stamp approves the exact gate and resumes the exact run", async () => {
+		const file = freshFile();
+		const pi = new Harness();
+		const commands: Array<{ command: string; args: string[] }> = [];
+		const executor = async (command: string, args: string[]) => { commands.push({ command, args }); return {}; };
+		registerQuestions(pi as any, envFor(file), pi.runtime, executor as any);
+		ask(file, { id: "deck-fleet:stamp:owner/repo:12:stamp:run-7:stamp", question: "Stamp?", questionKind: "stamp", options: ["Stamp"], sessionId: "s", cwd: "/" });
+		const captain = fakeContext("captain", ["1. Stamp"]);
+		await pi.commands.get("questions")!.handler("", captain);
+		expect(commands).toEqual([
+			{ command: "smithers", args: ["approve", "run-7", "--node", "stamp", "--by", "captain"] },
+			{ command: "smithers", args: ["up", "pipeline.tsx", "--run-id", "run-7", "--resume", "true"] },
+		]);
+		expect(openQuestions(file)).toHaveLength(0);
+	});
+
+	test("stamp approval failure does not resume or resolve", async () => {
+		const file = freshFile();
+		const pi = new Harness();
+		const commands: string[][] = [];
+		registerQuestions(pi as any, envFor(file), pi.runtime, async (_command, args) => { commands.push(args); throw new Error("permission denied"); });
+		ask(file, { id: "deck-fleet:stamp:owner/repo:12:stamp:run-7:gate", question: "Stamp?", questionKind: "stamp", options: ["Stamp"], sessionId: "s", cwd: "/" });
+		await pi.commands.get("questions")!.handler("", fakeContext("captain", ["1. Stamp"]));
+		expect(commands).toHaveLength(1);
+		expect(openQuestions(file)).toHaveLength(1);
+	});
+
+	test("stamp keeps the question open when resume fails", async () => {
+		const file = freshFile();
+		const pi = new Harness();
+		const commands: string[][] = [];
+		registerQuestions(pi as any, envFor(file), pi.runtime, async (_command, args) => { commands.push(args); if (commands.length === 2) throw new Error("resume failed"); return {}; });
+		ask(file, { id: "deck-fleet:stamp:owner/repo:12:stamp:run-7:gate", question: "Stamp?", questionKind: "stamp", options: ["Stamp"], sessionId: "s", cwd: "/" });
+		await pi.commands.get("questions")!.handler("", fakeContext("captain", ["1. Stamp"]));
+		expect(commands).toHaveLength(2);
+		expect(openQuestions(file)).toHaveLength(1);
+	});
+
+	test("stamp retries resume after an already-approved error", async () => {
+		const file = freshFile();
+		const pi = new Harness();
+		const commands: string[][] = [];
+		registerQuestions(pi as any, envFor(file), pi.runtime, async (_command, args) => { commands.push(args); if (commands.length === 1) throw new Error("approval is already approved"); return {}; });
+		ask(file, { id: "deck-fleet:stamp:owner/repo:12:stamp:run-7:gate", question: "Stamp?", questionKind: "stamp", options: ["Stamp"], sessionId: "s", cwd: "/" });
+		await pi.commands.get("questions")!.handler("", fakeContext("captain", ["1. Stamp"]));
+		expect(commands).toHaveLength(2);
+		expect(openQuestions(file)).toHaveLength(0);
+	});
+
 	test("/questions on an empty queue says so rather than opening a dialog", async () => {
 		const file = freshFile();
 		const pi = new Harness();

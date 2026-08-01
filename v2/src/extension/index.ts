@@ -22,12 +22,17 @@ import { Type } from "typebox";
 import { DECK_OPERATIONAL_PREFIX, registerCalm } from "../calm";
 import { appendStatus, readStatus } from "../events";
 import {
-	buildFleetView,
+	buildFactoryText,
+	buildFactoryView,
+	buildUsageText,
 	buildFrame,
 	collectPsSnapshot,
+	collectRuns,
 	type FleetTheme,
 	PLAIN_FLEET_THEME,
 	renderFrame,
+	renderStatus,
+	renderDeltaStatus,
 	renderFooterLines,
 	type FooterSessionBits,
 	type PsRun,
@@ -43,7 +48,7 @@ import { pipelineDir, startShip } from "../ship";
 import { reconcileRecuts } from "../recut";
 import { peekSession, startRun } from "../spawn";
 import { STATUS_VERBS, type StatusVerb } from "../status";
-import { readUsageRoster, usageStatusLine } from "../usage-roster";
+import { mergeLiveAccounts, readLiveControlAccounts, readUsageRoster, usageStatusLine } from "../usage-roster";
 import { discoverSmithersWorkspaces, smithersWorkspaceCwd, uiWarn, warnOnShadowWorkspace } from "../workspace";
 import { evaluateTeardown, formatVerdict } from "../teardown";
 import { ackWakes, detectStale, foldBatched, pendingWakes, reconcile } from "../wake";
@@ -67,7 +72,9 @@ const text = (body: string): ToolResult => ({
 const RECONCILE_MS = 30_000;
 
 type DeckV2Dependencies = {
+	/** Test seam for the raw ps command. Production uses the enriched collector below. */
 	collectPsSnapshot?: typeof collectPsSnapshot;
+	collectRuns?: typeof collectRuns;
 	inspectRun?: (command: string, args: readonly string[], cwd: string) => Promise<{ stdout: string; exitCode: number } | null>;
 };
 
@@ -76,7 +83,13 @@ const INSPECT_TIMEOUT_MS = 15_000;
 const INSPECT_MAX_BUFFER = 4_000_000;
 
 export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): void {
-	const collectSnapshot = dependencies.collectPsSnapshot ?? collectPsSnapshot;
+	// Keep the raw snapshot seam for focused extension tests, but never use it in
+	// production. collectRuns performs the GitHub and Smithers enrichment needed
+	// by every extension view and the statusline.
+	const collectSnapshot = dependencies.collectPsSnapshot;
+	const collectEnrichedRuns = dependencies.collectRuns ?? (collectSnapshot === undefined
+		? collectRuns
+		: async (cwd: string) => collectSnapshot(cwd));
 	// Calm is presentation-only (see ../calm.ts); it never touches delivery.
 	registerCalm(pi);
 	// ask_captain + /questions live HERE, not in a globally installed extension:
@@ -121,6 +134,7 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 		sources: [],
 	} as Awaited<ReturnType<typeof buildFrame>>;
 
+	let previousStatusFrame: Awaited<ReturnType<typeof buildFrame>> | null = null;
 	const injectedCompactions = new Set<string>();
 	let injectedSession = false;
 	let compactionSequence = 0;
@@ -315,13 +329,13 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 	});
 
 	pi.registerTool({
-		name: "fleet",
-		label: "Fleet",
-		description: "What every task and workflow is doing right now.",
+		name: "factory",
+		label: "Factory",
+		description: "What every effort and workflow is doing right now.",
 		parameters: Type.Object({}),
 		async execute() {
 			const frame = await getCurrentFrame();
-			return text(renderFrame(frame));
+			return text(buildFactoryText(frame, PLAIN_FLEET_THEME));
 		},
 	});
 
@@ -445,113 +459,113 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 		},
 	});
 
-	pi.registerCommand("fleet", {
-		description:
-			"Fleet overlay: attention-first (q/Esc close, r refresh, a show-all, j/k scroll; /fleet all opens expanded)",
-		handler: async (args: string, ctx: any) => {
-			// First paint is cache-only. Smithers ps is a slow shell-out and must
-			// never delay opening the overlay.
-			let frame = lastFooterFrame;
-			// ctx.ui.custom is TUI-only; degrade to a printed frame elsewhere.
-			if (ctx.mode !== "tui" || ctx.ui?.custom === undefined) {
-				const liveFrame = await refreshStatusline(ctx);
-				ctx.ui?.notify?.(renderFrame(liveFrame), "info");
-				return;
-			}
-			void refreshStatusline(ctx);
-			let showAll = args.trim() === "all";
-			await ctx.ui.custom(
-				(tui: any, rawTheme: any, _kb: any, done: any) => {
-					const theme = asFleetTheme(rawTheme);
-					// The Box owns ALL the chrome: background fill + padding. The view
-					// renders bare text; a second unicode frame inside the Box
-					// width-mismatches and garbles the overlay.
-					const box = new Box(2, 1, asBgFn(rawTheme));
-					// Body budget: terminal rows minus overlay margin (2), box padding
-					// (2), title + blank (2), blank + footer (2), so the panel stays on
-					// screen when tasks outnumber rows. No floor above 1: a floor that
-					// exceeds a tiny viewport reintroduces the overflow.
-					const maxBodyLines = (): number =>
-						Math.max(1, (tui.terminal?.rows ?? 40) - 8);
-					// Usable row columns: 90% overlay width minus box padding (2+2).
-					const maxRowWidth = (): number =>
-						Math.floor((tui.terminal?.cols ?? 120) * 0.9) - 4;
-					let scrollOffset = 0;
-					let scrollable = false;
-					const render = (): string => {
-						const view = buildFleetView(frame, theme, {
-							showAll,
-							maxBodyLines: maxBodyLines(),
-							scrollOffset,
-							maxRowWidth: maxRowWidth(),
-							chrome: "bare",
-						});
-						// The view clamps the offset; adopt it so k after over-scrolling
-						// moves immediately instead of unwinding phantom distance.
-						scrollOffset = view.scrollOffset;
-						scrollable = view.scrollable;
-						return view.text;
-					};
-					const body = new Text(render(), 0, 0);
-					box.addChild(body);
-
-					// In-flight guard: buildFrame shells out to smithers ps, which can
-					// outlast a tick; overlapping rebuilds would pile up subprocesses.
-					let busy = false;
-					const refresh = async (): Promise<void> => {
-						if (busy) return;
-						busy = true;
-						try {
-							frame = await getCurrentFrame();
+	const factoryCommand = async (_args: string, ctx: any): Promise<void> => {
+		// First paint is cache-only. Smithers ps is a slow shell-out and must
+		// never delay opening the overlay.
+		let frame = lastFooterFrame;
+		// ctx.ui.custom is TUI-only; degrade to a printed frame elsewhere.
+		if (ctx.mode !== "tui" || ctx.ui?.custom === undefined) {
+			const liveFrame = await refreshStatusline(ctx);
+			ctx.ui?.notify?.(buildFactoryText(liveFrame, asFleetTheme(ctx.ui?.theme ?? PLAIN_FLEET_THEME)), "info");
+			return;
+		}
+		void refreshStatusline(ctx);
+		await ctx.ui.custom(
+			(tui: any, rawTheme: any, _kb: any, done: any) => {
+				const theme = asFleetTheme(rawTheme);
+				const box = new Box(2, 1, asBgFn(rawTheme));
+				const maxBodyLines = (): number => Math.max(1, (tui.terminal?.rows ?? 40) - 8);
+				const maxRowWidth = (): number => Math.floor((tui.terminal?.cols ?? 120) * 0.9) - 4;
+				let scrollOffset = 0;
+				let scrollable = false;
+				const render = (): string => {
+					const view = buildFactoryView(frame, theme, {
+						maxBodyLines: maxBodyLines(),
+						scrollOffset,
+						maxRowWidth: maxRowWidth(),
+						chrome: "bare",
+					});
+					scrollOffset = view.scrollOffset;
+					scrollable = view.scrollable;
+					return view.text;
+				};
+				const body = new Text(render(), 0, 0);
+				box.addChild(body);
+				let busy = false;
+				const refresh = async (): Promise<void> => {
+					if (busy) return;
+					busy = true;
+					try {
+						frame = await getCurrentFrame();
+						body.setText(render());
+						tui.requestRender();
+					} catch {
+						// Keep the last good frame on a failed refresh.
+					} finally {
+						busy = false;
+					}
+				};
+				const timer = setInterval(() => void refresh(), 5_000);
+				timer.unref?.();
+				return {
+					render: (width: number) => box.render(width),
+					invalidate: () => box.invalidate(),
+					handleInput: (data: string) => {
+						if (data === "q" || data === "\u001b" || data === "\u0003") {
+							clearInterval(timer);
+							done(undefined);
+							return;
+						}
+						if (data === "j" || data === "\u001b[B") {
+							if (!scrollable) return;
+							scrollOffset += 1;
 							body.setText(render());
 							tui.requestRender();
-						} catch {
-							// keep the last good frame on a failed refresh
-						} finally {
-							busy = false;
+							return;
 						}
-					};
-					const timer = setInterval(() => void refresh(), 5_000);
-					timer.unref?.();
+						if (data === "k" || data === "\u001b[A") {
+							if (scrollOffset === 0) return;
+							scrollOffset -= 1;
+							body.setText(render());
+							tui.requestRender();
+							return;
+						}
+						if (data === "r") void refresh();
+					},
+				};
+			},
+			{ overlay: true, overlayOptions: { anchor: "center", width: "90%", minWidth: 80, margin: 1, maxHeight: "100%" } },
+		);
+	};
 
-					return {
-						render: (width: number) => box.render(width),
-						invalidate: () => box.invalidate(),
-						handleInput: (data: string) => {
-							if (data === "q" || data === "\u001b" || data === "\u0003") {
-								clearInterval(timer);
-								done(undefined);
-								return;
-							}
-							if (data === "a") {
-								showAll = !showAll;
-								scrollOffset = 0;
-								body.setText(render());
-								tui.requestRender();
-								return;
-							}
-							if (data === "j" || data === "\u001b[B") {
-								if (!scrollable) return;
-								scrollOffset += 1;
-								body.setText(render());
-								tui.requestRender();
-								return;
-							}
-							if (data === "k" || data === "\u001b[A") {
-								if (scrollOffset === 0) return;
-								scrollOffset -= 1;
-								body.setText(render());
-								tui.requestRender();
-								return;
-							}
-							if (data === "r") void refresh();
-						},
-					};
-				},
-				// maxHeight is the last-resort clip for terminals too short for even
-				// a one-line body; the body clamp keeps the border intact above that.
-				{ overlay: true, overlayOptions: { anchor: "center", width: "90%", minWidth: 80, margin: 1, maxHeight: "100%" } },
-			);
+	pi.registerCommand("factory", {
+		description: "Factory overlay: live effort state (q/Esc close, r refresh, j/k scroll)",
+		handler: factoryCommand,
+	});
+
+	pi.registerCommand("fleet", {
+		description: "Deprecated alias for /factory",
+		handler: async (args: string, ctx: any) => {
+			ctx.ui?.notify?.("/fleet is now /factory.", "warning");
+			await factoryCommand(args, ctx);
+		},
+	});
+
+	pi.registerCommand("usage", {
+		description: "Show broker quota by account and tier",
+		handler: async (_args: string, ctx: any) => {
+			const roster = readUsageRoster();
+			const accounts = await readLiveControlAccounts();
+			ctx.ui?.notify?.(buildUsageText(roster === null ? null : mergeLiveAccounts(roster, accounts), asFleetTheme(ctx.ui?.theme ?? PLAIN_FLEET_THEME)), "info");
+		},
+	});
+
+	pi.registerCommand("status", {
+		description: "Show full diagnostic factory state, including completed and failed work",
+		handler: async (_args: string, ctx: any) => {
+			const current = await getCurrentFrame();
+			ctx.ui?.notify?.(`${renderStatus(current)}\n${renderDeltaStatus(current, previousStatusFrame)}`, "info");
+			previousStatusFrame = current;
 		},
 	});
 
@@ -680,8 +694,9 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 	async function getCurrentFrame(): Promise<Awaited<ReturnType<typeof buildFrame>>> {
 		const snapshots = workflowWorkspaces.length === 0
 			? []
-			: await Promise.all(workflowWorkspaces.map(async (workspace) => ({ workspace, snapshot: await collectSnapshot(workspace) })));
+			: await Promise.all(workflowWorkspaces.map(async (workspace) => ({ workspace, snapshot: await collectEnrichedRuns(workspace) })));
 		const workflowSnapshot = snapshots.find(({ workspace }) => workspace === workflowCwd)?.snapshot;
+		const allRuns = snapshots.flatMap(({ snapshot: current }) => current.runs);
 		const rows = snapshots.flatMap(({ workspace, snapshot: current }) => current.runs.map((run) => ({ ...run, workspace }))) as PsSnapshotRow[];
 		if (workflowCwd !== undefined) void reconcileRecuts(workflowCwd, pipelineDir(), workflowSnapshot?.runs ?? []).catch(() => {});
 		if (workflowCwd !== undefined) {
@@ -702,7 +717,12 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 				}),
 			});
 		}
-		const frame = await buildFrame(workflowCwd === undefined ? {} : { workflowCwd, psRuns: rows as PsRun[] });
+		const frame = workflowCwd === undefined
+			? await buildFrame({})
+			: await buildFrame({
+					workflowCwd,
+					psRuns: allRuns,
+				});
 		lastFooterFrame = frame;
 		return frame;
 	}
@@ -892,6 +912,7 @@ export const TOOL_NAMES = [
 	"send",
 	"status",
 	"peek",
+	"factory",
 	"fleet",
 	"teardown_check",
 	"note",

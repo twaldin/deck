@@ -7,6 +7,9 @@
  * with `ask_captain`, and the captain clears the backlog with `/questions`.
  */
 import { Type } from "typebox";
+import { pipelineDir } from "./ship";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import {
 	answer as recordAnswer,
 	ask,
@@ -80,6 +83,8 @@ const defaultRuntime: QuestionsRuntime = {
 const DISMISSED = "(dismissed by the captain without an answer)";
 /** Control actions, always after the agent's own options and matched by position. */
 const CONTROLS = ["Write an answer...", "Dismiss", "Skip", "Stop reviewing"] as const;
+const exec = promisify(execFile);
+type CommandExecutor = (command: string, args: string[], options: { cwd: string; timeout: number }) => Promise<unknown>;
 
 /** One question rendered for the captain: everything needed to decide, nothing more. */
 export function describe(entry: Question, nowMs: number): string {
@@ -107,6 +112,7 @@ export function registerQuestions(
 	pi: QuestionsExtensionApi,
 	env: Record<string, string | undefined> = process.env,
 	runtime: QuestionsRuntime = defaultRuntime,
+	executor: CommandExecutor = exec as unknown as CommandExecutor,
 ): void {
 	const file = queueFile(env);
 	let poll: ReturnType<typeof setInterval> | undefined;
@@ -261,7 +267,13 @@ export function registerQuestions(
 					if (written === undefined || written.trim() === "") continue;
 					text = written.trim();
 				}
-				if (resolve(ctx, entry, text, "answered")) answered += 1;
+				let applied = false;
+				if (entry.questionKind === "stamp" && text === "Stamp") {
+					applied = await approveStamp(ctx, entry);
+				} else {
+					applied = resolve(ctx, entry, text, "answered");
+				}
+				if (applied) answered += 1;
 			}
 
 			// Answers to questions this very session asked are deliverable right away.
@@ -272,6 +284,33 @@ export function registerQuestions(
 			);
 		},
 	});
+
+	const approveStamp = async (ctx: QuestionsContext, entry: Question): Promise<boolean> => {
+		const scopedId = entry.id.includes("deck-fleet:") ? entry.id.slice(entry.id.indexOf("deck-fleet:")) : entry.id;
+		const rawId = scopedId.startsWith("deck-fleet:") ? scopedId.slice("deck-fleet:".length) : scopedId;
+		const parts = rawId.split(":");
+		const runId = rawId.startsWith("stamp:") ? parts.at(-2) : undefined;
+		// The stamp id is stamp:<repo>:<pr>:stamp:<run>:<node>. The node may
+		// contain colons, so it is the final segment, not the remainder.
+		const node = rawId.startsWith("stamp:") ? parts.at(-1) || "r0-stamp" : "r0-stamp";
+		if (runId === undefined) return resolve(ctx, entry, "Stamp", "answered");
+		try {
+			try {
+				await executor("smithers", ["approve", runId, "--node", node, "--by", "captain"], { cwd: pipelineDir(), timeout: 15_000 });
+			} catch (error) {
+				// Approval is idempotent for this recovery path. A retry after the
+				// approval succeeded but resume failed reports the gate as no longer
+				// pending; continue to resume instead of asking for approval twice.
+				const message = error instanceof Error ? error.message : String(error);
+				if (!/(?:approval|gate)\s+(?:is\s+)?(?:already\s+approved|already\s+resolved)|already\s+approved|approval\s+is\s+not\s+pending|gate\s+is\s+not\s+pending/i.test(message)) throw error;
+			}
+			await executor("smithers", ["up", "pipeline.tsx", "--run-id", runId, "--resume", "true"], { cwd: pipelineDir(), timeout: 15_000 });
+			return resolve(ctx, entry, "Stamp", "answered");
+		} catch (error) {
+			ctx.ui.notify(`Stamp was not recorded; the pipeline remains actionable: ${error instanceof Error ? error.message : "unknown error"}`, "error");
+			return false;
+		}
+	};
 
 	/** Records one resolution, telling the captain when another session got there first. */
 	const resolve = (

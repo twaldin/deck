@@ -26,6 +26,7 @@ import { unresolvedReceipts } from "./side-effects";
 import { SMITHERS_SPEC } from "./smithers";
 import { pidAlive } from "./spawn";
 import { deckOwnedTasks } from "./wake";
+import { defaultModelPolicy, resolveAdversary } from "../../workflows/pr-pipeline/lib/models";
 
 const run = promisify(execFile);
 
@@ -55,6 +56,8 @@ export type FleetActivity = "idle" | "fixing" | "working" | "failed";
 export type TaskRow = {
 	taskId: string;
 	kind: string;
+	/** Selected worker model, when this effort was spawned outside a pipeline. */
+	model?: string | null;
 	project: string | null;
 	/** Live process, finished run, or never started. */
 	runState: "running" | "finished" | "none";
@@ -94,6 +97,14 @@ export type AgentRow = {
 };
 
 export type EffortRow = {
+	/** Captain-facing factory metadata. */
+	workflow?: string | null;
+	step?: string | null;
+	runtimeMs?: number | null;
+	ciState?: string | null;
+	reviewState?: string | null;
+	model?: string | null;
+	prUrl?: string | null;
 	identity: string;
 	ticket: string | null;
 	prNumber: number | null;
@@ -162,6 +173,9 @@ export type FleetFrame = {
 
 export type PsRun = {
 	id: string;
+	/** Optional live external truth supplied by the workflow watcher. */
+	ciState?: string;
+	reviewState?: string;
 	ticket?: string;
 	worktree?: string;
 	prNumber?: number;
@@ -185,6 +199,14 @@ type ShipInput = {
 	existingPr?: unknown;
 	repo?: unknown;
 	brief?: { title?: unknown; summary?: unknown };
+	models?: {
+		implementer?: unknown;
+		reviewer?: unknown;
+		watcher?: unknown;
+		fallout?: unknown;
+		familyOpposition?: unknown;
+		oppositionDefaults?: unknown;
+	};
 	ticket?: unknown;
 	worktree?: unknown;
 };
@@ -196,6 +218,7 @@ type ShipIdentity = {
 	why: string | null;
 	ticket: string | null;
 	worktree: string | null;
+	modelSeats: string | null;
 };
 
 function readShipInput(runId: string): ShipIdentity {
@@ -224,9 +247,33 @@ function readShipInput(runId: string): ShipIdentity {
 			ticket: typeof input.ticket === "string" ? input.ticket : null,
 			worktree:
 				typeof input.worktree === "string" ? input.worktree : null,
+			modelSeats: (() => {
+				const defaults = defaultModelPolicy();
+				const models = input.models;
+				const policy = {
+					...defaults,
+					...(typeof models?.implementer === "string" ? { implementer: models.implementer } : {}),
+					...(typeof models?.reviewer === "string" ? { reviewer: models.reviewer } : {}),
+					...(typeof models?.watcher === "string" ? { watcher: models.watcher } : {}),
+					...(typeof models?.fallout === "string" ? { fallout: models.fallout } : {}),
+					...(typeof models?.familyOpposition === "boolean" ? { familyOpposition: models.familyOpposition } : {}),
+					oppositionDefaults: {
+						...defaults.oppositionDefaults,
+						...(models?.oppositionDefaults !== null && typeof models?.oppositionDefaults === "object" && !Array.isArray(models?.oppositionDefaults)
+							? Object.fromEntries(Object.entries(models.oppositionDefaults).filter(([, value]) => typeof value === "string"))
+							: {}),
+					},
+				};
+				return [
+					`implement ${policy.implementer}`,
+					`review ${resolveAdversary(policy.implementer, policy)}`,
+					`watch ${policy.watcher}`,
+					`fallout ${policy.fallout}`,
+				].join(" · ");
+			})(),
 		};
 	} catch {
-		return { repo: null, prNumber: null, prTitle: null, why: null, ticket: null, worktree: null };
+		return { repo: null, prNumber: null, prTitle: null, why: null, ticket: null, worktree: null, modelSeats: null };
 	}
 }
 
@@ -436,6 +483,42 @@ async function collectRunsOnce(
 						// A run before push-pr has no PR number yet.
 					}
 				}
+				let ciState = psRun.ciState;
+				let reviewState = psRun.reviewState;
+				if (prNumber !== undefined && input.repo !== null) {
+					try {
+						const checks = await run("gh", ["pr", "checks", String(prNumber), "--repo", input.repo, "--json", "state"], { cwd, timeout: 15_000, maxBuffer: 1_000_000 });
+						const states = (JSON.parse(checks.stdout) as Array<{ state?: string }>).map((row) => row.state?.toUpperCase()).filter((state): state is string => state !== undefined);
+						ciState = states.length === 0 ? "no checks" : states.every((state) => state === "SUCCESS") ? "passing" : states.some((state) => ["FAILURE", "CANCELLED", "ERROR"].includes(state)) ? "failing" : "pending";
+					} catch { ciState = "unavailable"; }
+					try {
+						const review = await run("gh", ["pr", "view", String(prNumber), "--repo", input.repo, "--json", "reviewDecision,reviews"], { cwd, timeout: 15_000, maxBuffer: 1_000_000 });
+						const [owner, name] = input.repo.split("/");
+						const threadNodes: Array<{ isResolved?: boolean }> = [];
+						let cursor: string | null = null;
+						do {
+							const query = `query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$cursor){nodes{isResolved} pageInfo{hasNextPage endCursor}}}}}`;
+							const args = ["gh", "api", "graphql", "-f", `query=${query}`, "-F", `owner=${owner}`, "-F", `name=${name}`, "-F", `number=${prNumber}`];
+							if (cursor !== null) args.push("-F", `cursor=${cursor}`);
+							const page = await run("gh", args, { cwd, timeout: 15_000, maxBuffer: 1_000_000 });
+							const pageValue = JSON.parse(page.stdout) as { data?: { repository?: { pullRequest?: { reviewThreads?: { nodes?: Array<{ isResolved?: boolean }>; pageInfo?: { hasNextPage?: boolean; endCursor?: string | null } } } } } };
+							const threadsPage = pageValue.data?.repository?.pullRequest?.reviewThreads;
+							threadNodes.push(...(threadsPage?.nodes ?? []));
+							cursor = threadsPage?.pageInfo?.hasNextPage ? (threadsPage.pageInfo.endCursor ?? null) : null;
+						} while (cursor !== null);
+						const value = JSON.parse(review.stdout) as { reviewDecision?: string; reviews?: Array<{ author?: { login?: string }; state?: string; submittedAt?: string }> };
+						const threadValue = { data: { repository: { pullRequest: { reviewThreads: { nodes: threadNodes } } } } };
+						const latest = new Map<string, { state?: string }>();
+						for (const item of [...(value.reviews ?? [])].sort((a, b) => (Date.parse(a.submittedAt ?? "") || 0) - (Date.parse(b.submittedAt ?? "") || 0))) {
+							const login = item.author?.login ?? "unknown";
+							latest.set(login, item);
+						}
+						const approvals = [...latest.entries()].filter(([, item]) => item.state === "APPROVED").map(([login]) => login);
+						const unresolved = (threadValue.data?.repository?.pullRequest?.reviewThreads?.nodes ?? []).filter((thread) => thread.isResolved !== true).length;
+						const bots = [...latest.entries()].filter(([login, item]) => /\[bot\]|bot$/i.test(login) && item.state !== "APPROVED").map(([login]) => login);
+						reviewState = `${value.reviewDecision ?? "REVIEW_REQUIRED"} · approvals: ${approvals.length ? approvals.join(", ") : "none"} · unresolved threads: ${unresolved} · bot findings: ${bots.length ? bots.join(", ") : "none"}`;
+					} catch { reviewState = "unavailable"; }
+				}
 				let landed = psRun.landed;
 				let pushPrNull = psRun.pushPrNull;
 				if (activityFor(psRun.step, psRun.status) === "failed") {
@@ -470,12 +553,12 @@ async function collectRunsOnce(
 					(approval) => approval.status === "requested",
 				)?.nodeId;
 				if (pendingNode !== undefined)
-					return { ...psRun, blockedNode: pendingNode, prNumber, landed, pushPrNull };
+					return { ...psRun, blockedNode: pendingNode, prNumber, landed, pushPrNull, ciState, reviewState };
 				if (
 					psRun.status !== "waiting-approval" &&
 					psRun.state !== "waiting-approval"
 				)
-					return { ...psRun, prNumber, landed, pushPrNull };
+					return { ...psRun, prNumber, landed, pushPrNull, ciState, reviewState };
 				try {
 					const inspected = await run(
 						"bunx",
@@ -497,9 +580,11 @@ async function collectRunsOnce(
 						prNumber,
 						landed,
 						pushPrNull,
+						ciState,
+						reviewState,
 					};
 				} catch {
-					return { ...psRun, prNumber, landed, pushPrNull };
+					return { ...psRun, prNumber, landed, pushPrNull, ciState, reviewState };
 				}
 			}),
 		);
@@ -588,6 +673,10 @@ function realpath(target: string): string {
 	}
 }
 
+function frameModelForTask(taskId: string, tasks: TaskRow[]): string | null {
+	return tasks.find((task) => task.taskId === taskId)?.model ?? null;
+}
+
 export async function buildFrame(
 	options: { workflowCwd?: string; psRuns?: PsRun[] } = {},
 ): Promise<FleetFrame> {
@@ -660,6 +749,7 @@ export async function buildFrame(
 		tasks.push({
 			taskId,
 			kind: meta?.kind ?? "ship",
+			model: meta?.model ?? null,
 			project: meta?.project ?? null,
 			runState:
 				pid === undefined
@@ -745,7 +835,10 @@ export async function buildFrame(
 	} catch {
 		// an unreadable queue must not take the fleet view down with it
 	}
-	const liveRuns = workflows.filter((wf) => !isTerminalWorkflow(wf) && !wf.superseded);
+	const liveRuns = [...workflows.filter((wf) =>
+		!wf.superseded &&
+		(!isTerminalWorkflow(wf) || isActionableWorkflowFailure(wf, workflows)),
+	)].sort((a, b) => Date.parse(b.startedAt ?? "") - Date.parse(a.startedAt ?? ""));
 	const workflowIdentity = (wf: WorkflowRow): string =>
 		wf.repo ?? wf.rootDir ?? "unknown-repo";
 	const readOpenQuestions = (): ReturnType<typeof openQuestions> => {
@@ -756,20 +849,23 @@ export async function buildFrame(
 			return [];
 		}
 	};
-	const effortMap = new Map<string, WorkflowRow>();
-	for (const wf of liveRuns) {
-		const repo = workflowIdentity(wf);
-		const key = wf.prNumber !== null && wf.prNumber !== undefined
-			? `pr:${repo}:${wf.prNumber}`
-			: `ticket:${repo}:${wf.ticket ?? wf.runId}`;
-		const prior = effortMap.get(key);
-		if (prior === undefined || (wf.startedAt ?? "") > (prior.startedAt ?? "")) effortMap.set(key, wf);
-	}
-	const efforts: EffortRow[] = [...effortMap].map(([identity, wf]) => ({
-		identity, ticket: wf.ticket ?? null, prNumber: wf.prNumber ?? null, prTitle: wf.prTitle ?? null,
+	const wfRunState = (wf: WorkflowRow, sourceRuns: PsRun[]): PsRun | undefined => sourceRuns.find((source) => source.id === wf.runId);
+	// Keep every live generation visible. A re-cut is a separate effort and can
+	// have a different blocker even when it targets the same PR.
+	const efforts: EffortRow[] = liveRuns.map((wf) => {
+		const identity = `run:${wf.runId}`;
+		const input = readShipInput(wf.runId);
+		return {
+		identity, workflow: wf.workflow, step: wf.step, runtimeMs: wf.startedAt ? ageMs(wf.startedAt) : null,
+			ciState: wfRunState(wf, runs)?.ciState ?? null,
+		reviewState: wfRunState(wf, runs)?.reviewState ?? null,
+		model: input.modelSeats ?? (wf.taskId ? frameModelForTask(wf.taskId, tasks) : null),
+		prUrl: wf.repo && wf.prNumber ? `https://github.com/${wf.repo}/pull/${wf.prNumber}` : null,
+		ticket: wf.ticket ?? null, prNumber: wf.prNumber ?? null, prTitle: wf.prTitle ?? null,
 		runId: wf.runId, state: wf.state ?? wf.status, waitingFor: wf.waitingFor === "stamp" ? "stamp-question" : (wf.waitingFor ?? null),
 		failed: wf.activity === "failed",
-	}));
+	};
+	});
 	const stampQuestion = (wf: WorkflowRow): string => {
 		const input = readShipInput(wf.runId);
 		const repo = input.repo ?? workflowIdentity(wf);
@@ -786,17 +882,14 @@ export async function buildFrame(
 		const history = generations === 0
 			? "No prior pipeline generations are recorded. Implementation, adversarial review rounds, fixes, and re-cuts are recorded in the pipeline run history."
 			: `${generations} prior pipeline generation(s) are recorded. Implementation, adversarial review rounds, fixes, and re-cuts are recorded in the pipeline run history.`;
-		const review = wf.activity === "failed"
-			? "Review state: the pipeline reports a failure; human approvals, bot findings, and CI must be checked for outstanding work."
-			: wf.waitingFor === "stamp"
-				? "Review state: the pipeline is ready for stamp after its adversarial review and watch checks; verify human approvals by name, resolved or outstanding bot findings, and CI state in the PR."
-				: `Review state: ${wf.state ?? wf.status ?? "unknown"}; verify human approvals, bot findings, and CI in the PR.`;
-		return `Stamp PR #${pr ?? "unknown"}: ${title} · URL: ${url} · Why: ${why} · History: ${history} · ${review} · merge or no?`;
+		const effort = efforts.find((item) => item.runId === wf.runId);
+		const review = `CI: ${effort?.ciState ?? "unknown"}; review: ${effort?.reviewState ?? "unknown"}. These are live GitHub values.`;
+		return `Stamp PR #${pr ?? "unknown"}: ${title} · URL: ${url} · Why: ${why} · History: ${history} · ${review} · choose Stamp only if CI passes and the named human approvals and bot findings are acceptable · merge or no?`;
 	};
 	for (const wf of liveRuns.filter((row) => row.waitingFor === "stamp")) {
 		// Include the run so a later generation of the same PR gets a fresh
 		// decision, while every render of this parked run uses one stable id.
-		const id = `stamp:${workflowIdentity(wf)}:${wf.prNumber ?? "unknown-pr"}:${wf.runId}`;
+		const id = `stamp:${wf.repo ?? wf.rootDir ?? "unknown"}:${wf.prNumber ?? "unknown"}:stamp:${wf.runId}:${wf.step ?? "r0-stamp"}`;
 		try {
 			const existing = readQuestionsForStamp(queueFile(), id);
 			if (!existing) {
@@ -810,7 +903,7 @@ export async function buildFrame(
 	questionsOpen = readOpenQuestions().length;
 	const liveAgents = tasks.filter((task) => task.runState === "running");
 	const agents: AgentRow[] = liveAgents.map((task) => ({
-			id: task.taskId, model: task.kind, status: `${task.lastVerb ?? "working"}: ${task.lastNote ?? ""}`.trim(), ageMs: task.statusAgeMs,
+			id: task.taskId, model: task.model ?? null, status: `${task.lastVerb ?? "working"}: ${task.lastNote ?? ""}`.trim(), ageMs: task.statusAgeMs,
 		}));
 	const unhealedFailures = efforts.filter((effort) => effort.failed).length;
 	return {
@@ -944,6 +1037,37 @@ export function renderFrame(frame: FleetFrame): string {
 			.map((source) => `${source.name}=${source.state}`)
 			.join("  ")}`,
 	);
+	return lines.join("\n");
+}
+
+/**
+ * Full status is the diagnostic complement to factory: it includes terminal
+ * workflow rows so a captain can see the state transition that removed work
+ * from the live view. The normal fleet frame stays attention-first.
+ */
+export function renderDeltaStatus(frame: FleetFrame, previous?: FleetFrame | null): string {
+	if (previous === undefined || previous === null) return `Delta · baseline · ${frame.counters.running} running · ${frame.counters.openQuestions} questions`;
+	const delta = (now: number, before: number): string => `${now - before >= 0 ? "+" : ""}${now - before}`;
+	return `Delta · running ${delta(frame.counters.running, previous.counters.running)} · blocked ${delta(frame.counters.blocked, previous.counters.blocked)} · questions ${delta(frame.counters.openQuestions, previous.counters.openQuestions)} · queued ${delta(frame.counters.queuedMessages, previous.counters.queuedMessages)}`;
+}
+
+export function renderStatus(frame: FleetFrame): string {
+	const lines = [`Status · ${frame.workflows.length} workflow row(s) · ${frame.tasks.length} task(s)`];
+	for (const workflow of frame.workflows) {
+		const identity = workflow.prNumber === null || workflow.prNumber === undefined
+			? `wf:${truncateTail(workflow.runId, 16)}`
+			: `PR #${workflow.prNumber}`;
+		const details = [
+			workflow.state ?? workflow.status ?? "unknown",
+			workflow.step === null ? null : `@${workflow.step}`,
+			workflow.ticket === null || workflow.ticket === undefined ? null : `ticket=${workflow.ticket}`,
+			workflow.waitingFor === null || workflow.waitingFor === undefined ? null : `waitingFor=${workflow.waitingFor}`,
+		]
+			.filter((value): value is string => value !== null)
+			.join(" · ");
+		lines.push(`▸ ${identity}  ${details}`);
+	}
+	if (frame.workflows.length === 0) lines.push("  (no workflows)");
 	return lines.join("\n");
 }
 
@@ -1487,6 +1611,134 @@ export function buildFleetView(
 		scrollOffset,
 		scrollable,
 	};
+}
+
+export type FactoryViewOptions = {
+	maxBodyLines?: number;
+	scrollOffset?: number;
+	maxRowWidth?: number;
+	chrome?: "frame" | "bare";
+};
+
+function factoryRows(frame: FleetFrame): Array<{ effort: EffortRow; workflow: WorkflowRow }> {
+	const workflows = new Map(frame.workflows.map((workflow) => [workflow.runId, workflow]));
+	const rows = (frame.efforts ?? []).flatMap((effort) => {
+		const workflow = workflows.get(effort.runId);
+		return workflow === undefined || workflow.superseded ||
+			(isTerminalWorkflow(workflow) && !isActionableWorkflowFailure(workflow, frame.workflows))
+			? []
+			: [{ effort, workflow }];
+	});
+	const represented = new Set(rows.map(({ workflow }) => workflow.runId));
+	for (const task of frame.tasks) {
+		const terminal = ["done", "cancelled"].includes(task.lastVerb ?? "");
+		const actionableFailure = task.lastVerb === "failed" && (task.openDecisions > 0 || task.queuedMessages > 0 || task.unresolvedSideEffects > 0 || task.waitingFor !== null || task.lastNote !== null);
+		if ((terminal || (task.lastVerb === "failed" && !actionableFailure)) || (task.runId !== null && represented.has(task.runId))) continue;
+		const runId = task.runId ?? `task:${task.taskId}`;
+		const wakeReason = task.waitingFor ?? task.lastNote ?? task.lastVerb;
+		const workflow: WorkflowRow = { runId, workflow: null, status: task.lastVerb, state: task.runState, step: task.stage, taskId: task.taskId, ticket: task.ticket, prNumber: task.prNumber, prTitle: task.prTitle, phase: task.phase, waitingFor: wakeReason as WaitingFor, activity: task.activity, startedAt: null };
+		rows.push({ effort: { identity: task.taskId, ticket: task.ticket ?? null, prNumber: task.prNumber ?? null, prTitle: task.prTitle ?? null, runId, state: task.runState, waitingFor: wakeReason, failed: task.lastVerb === "failed", workflow: task.kind, step: task.stage, runtimeMs: task.statusAgeMs, model: task.model ?? null }, workflow });
+	}
+	return rows;
+}
+
+function factoryState(workflow: WorkflowRow): "STAMPABLE" | "IMPLEMENTING" | "WATCHING" {
+	if (workflow.waitingFor === "stamp") return "STAMPABLE";
+	if (workflow.activity === "fixing" || workflow.phase === "implement") return "IMPLEMENTING";
+	return "WATCHING";
+}
+
+/**
+ * Captain's one-pane factory view. Completed, cancelled, and superseded work is
+ * omitted. Failed work stays visible when it still requires recovery.
+ */
+export function buildFactoryView(
+	frame: FleetFrame,
+	theme: FleetTheme = PLAIN_FLEET_THEME,
+	options: FactoryViewOptions = {},
+): { text: string; scrollOffset: number; scrollable: boolean } {
+	const rowWidth = Math.max(40, Math.min(options.maxRowWidth ?? 110, 200));
+	const rows = factoryRows(frame);
+	const sections: Record<ReturnType<typeof factoryState>, Array<{ effort: EffortRow; workflow: WorkflowRow }>> = {
+		STAMPABLE: [],
+		WATCHING: [],
+		IMPLEMENTING: [],
+	};
+	for (const row of rows) sections[factoryState(row.workflow)].push(row);
+
+	const lines = [
+		`${theme.bold(theme.fg("accent", "deck factory"))}  ${rows.length} live effort(s) · ${frame.counters.openQuestions} question(s)`,
+	];
+	for (const state of ["STAMPABLE", "WATCHING", "IMPLEMENTING"] as const) {
+		const entries = sections[state];
+		if (entries.length === 0) continue;
+		lines.push("", theme.bold(theme.fg(state === "STAMPABLE" ? "success" : state === "WATCHING" ? "accent" : "warning", `${state} (${entries.length})`)));
+		for (const { effort, workflow } of entries) {
+			const identity = effort.prUrl ?? (effort.prNumber === null ? effort.ticket ?? `run:${truncateTail(effort.runId, 12)}` : `PR #${effort.prNumber}`);
+			const details = [
+				workflow.step ?? "step ?",
+				effort.runtimeMs === null || effort.runtimeMs === undefined ? "runtime ?" : humanAge(effort.runtimeMs),
+				effort.waitingFor === null ? null : `waiting ${effort.waitingFor}`,
+				`CI ${effort.ciState ?? "unknown"}`,
+				`review ${effort.reviewState ?? "unknown"}`,
+				`model ${effort.model ?? "?"}`,
+			]
+				.filter((value): value is string => value !== null)
+				.join(" · ");
+			lines.push(`  ${truncate(identity, rowWidth)}`);
+			lines.push(`    ${truncate(details, rowWidth - 4)}`);
+		}
+	}
+	if (rows.length === 0) lines.push("", theme.fg("dim", "No live efforts. The factory is quiet."));
+
+	let body = lines;
+	let scrollOffset = 0;
+	let scrollable = false;
+	if (options.maxBodyLines !== undefined && body.length > options.maxBodyLines) {
+		scrollable = true;
+		const visible = sliceVisible(body, options.scrollOffset ?? 0, options.maxBodyLines);
+		scrollOffset = visible.offset;
+		body = [
+			...(visible.above > 0 ? [theme.fg("dim", `  … +${visible.above} line(s) above`)] : []),
+			...visible.visible,
+			...(visible.below > 0 ? [theme.fg("dim", `  … +${visible.below} more line(s)`)] : []),
+		];
+	}
+	const scrollHint = scrollable ? `${theme.fg("accent", "[j/k]")} ${theme.fg("dim", "scroll")}   ` : "";
+	const footer = `${theme.fg("accent", "[q/Esc]")} ${theme.fg("dim", "close")}   ${theme.fg("accent", "[r]")} ${theme.fg("dim", "refresh")}   ${scrollHint}${theme.fg("dim", "live · refreshes every 5s")}`;
+	if ((options.chrome ?? "frame") === "bare") {
+		return { text: [...body, "", footer].join("\n"), scrollOffset, scrollable };
+	}
+	return { text: framed("deck factory", body.join("\n"), footer, theme), scrollOffset, scrollable };
+}
+
+export function buildFactoryText(
+	frame: FleetFrame,
+	theme: FleetTheme = PLAIN_FLEET_THEME,
+	options: FactoryViewOptions = {},
+): string {
+	return buildFactoryView(frame, theme, options).text;
+}
+
+export function buildUsageText(roster: import("./usage-roster").UsageRoster | null, theme: FleetTheme = PLAIN_FLEET_THEME): string {
+	if (roster === null) return "deck usage\n\nNo broker roster available.";
+	const lines = [theme.bold(theme.fg("accent", "deck usage"))];
+	for (const report of roster.reports ?? []) {
+		const identity = report.metadata?.email ?? report.metadata?.accountId ?? report.metadata?.account;
+		const account = (roster.accounts ?? []).find((candidate) => candidate.email === identity || candidate.accountId === identity || candidate.provider === report.provider);
+		const label = identity ?? "unknown account";
+		lines.push("", `${label} · ${report.provider ?? "?"}`);
+		for (const limit of report.limits ?? []) {
+			const free = limit.amount?.remainingFraction ?? (limit.amount?.usedFraction === undefined ? null : 1 - limit.amount.usedFraction);
+			const value = free === null || !Number.isFinite(free) ? "?" : `${Math.round(Math.max(0, Math.min(1, free)) * 100)}% free`;
+			const tier = typeof limit.scope?.tier === "string" ? ` · tier ${limit.scope.tier}` : "";
+			const blocks = report.blocks ?? [];
+			const cooling = report.metadata?.cooling === true || report.metadata?.blocked === true || limit.status === "exhausted" || blocks.some((block) => typeof block.blockedUntilMs === "number" && block.blockedUntilMs > Date.now()) || (account?.blocks ?? []).some((block) => typeof block.blockedUntilMs === "number" && block.blockedUntilMs > Date.now());
+			const temperature = cooling ? " · cooling" : " · warm";
+			lines.push(`  ${limit.window?.id ?? limit.label ?? limit.id ?? "limit"}${tier}: ${value}${temperature}`);
+		}
+	}
+	return lines.join("\n");
 }
 
 /** Text-only convenience over buildFleetView. */
