@@ -269,7 +269,12 @@ function adapters(overrides: Partial<ReviewerRequestAdapters> = {}): ReviewerReq
 	};
 }
 
-const config = { explicit: [], exclude: ["twaldin", "ali"], max: 2 };
+const config = {
+	explicit: [],
+	exclude: ["twaldin", "ali"],
+	denylist: ["ex-employee"],
+	max: 2,
+};
 
 describe("executeReviewerRequest", () => {
 	test("happy path: selects, requests, verifies", async () => {
@@ -282,6 +287,15 @@ describe("executeReviewerRequest", () => {
 		expect(requested).toEqual([["Swader", "bgar324"]]);
 		expect(result.verified).toEqual(["Swader", "bgar324"]);
 		expect(result.skipped).toBe(false);
+	});
+
+	test("filters the configured denylist before collaborator checks", async () => {
+		const requested: string[][] = [];
+		const result = await executeReviewerRequest({ ...config, denylist: ["bgar324"] }, adapters({
+			requestReviewers: async (logins) => requested.push(logins),
+		}));
+		expect(requested).toEqual([["Swader"]]);
+		expect(result.skippedNonCollaborators).toEqual([]);
 	});
 
 	test("escalates on zero candidates (never a silent unreviewed PR)", async () => {
