@@ -183,6 +183,7 @@ query($owner: String!, $name: String!, $number: Int!) {
       mergeable
       mergeStateStatus
       baseRefOid
+      baseRefName
       commits(last: 1) { nodes { commit { committedDate } } }
       reviewThreads(first: 100) {
         nodes {
@@ -220,11 +221,11 @@ export async function fetchWatchSnapshot(ctx: GhContext, prNumber: number, selfL
 	const requested = parseRequestedReviewers(JSON.parse(requestedOut));
 
 	const headSha = str(pr.headRefOid);
-	const baseSha = str(pr.baseRefOid);
+	const baseRef = str(pr.baseRefName);
 	let behindBy = 0;
-	if (baseSha !== "" && headSha !== "") {
+	if (baseRef !== "" && headSha !== "") {
 		try {
-			const compareOut = await execOrThrow(exec, [ctx.gh, "api", `repos/${ctx.repo}/compare/${baseSha}...${headSha}`]);
+			const compareOut = await execOrThrow(exec, [ctx.gh, "api", `repos/${ctx.repo}/compare/${baseRef}...${headSha}`]);
 			const parsedCompare = JSON.parse(compareOut) as Record<string, unknown>;
 			const parsedBehindBy = Number(parsedCompare.behind_by ?? 0);
 			if (Number.isFinite(parsedBehindBy)) behindBy = parsedBehindBy;

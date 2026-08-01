@@ -254,7 +254,8 @@ describe("evaluateWatchExit", () => {
 	});
 
 	test("known bot banner requires both author and exact banner shape", () => {
-		expect(isReviewFinding({ author: "graphite[bot]", isBot: true, createdAt: "", body: "Graphite banner: generated link" })).toBe(false);
+		expect(isReviewFinding({ author: "graphite-app[bot]", isBot: true, createdAt: "", body: "### Graphite Automations\nGenerated link" })).toBe(false);
+		expect(isReviewFinding({ author: "linear[bot]", isBot: true, createdAt: "", body: "<!-- linear-linkback -->" })).toBe(false);
 		expect(isReviewFinding({ author: "graphite[bot]", isBot: true, createdAt: "", body: "the linear scan here breaks the link handling" })).toBe(true);
 		expect(isReviewFinding({ author: "graphite", isBot: true, createdAt: "", body: "Graphite banner: generated link" })).toBe(true);
 	});
