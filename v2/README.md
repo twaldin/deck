@@ -62,9 +62,9 @@ authorized another, and the two orders conflicted. Now workers spawn with the
 question tool excluded, so the second channel cannot exist.
 
 The orchestrator's operating contract lives in `~/.deck/AGENTS.md`, seeded from
-`seed/orchestrator-contract.md`. It is about 1,200 words on purpose: the previous
-version was 500 lines, always loaded, and its rules decayed within days — one was
-violated three days after being written.
+`seed/orchestrator-contract.md`. It stays under the contract size cap on purpose: the previous version was 500
+lines, always loaded, and its rules decayed within days — one was violated three
+days after being written.
 
 ## The questions queue
 
