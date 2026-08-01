@@ -36,7 +36,7 @@ describe("pipeline recut", () => {
 			// Smithers inspect does not expose the launch config. Detection must use input.json.
 			inspect: async () => ({ run: { id: "run-v1", status: "waiting-approval" } }),
 			cancel: async () => {},
-			start: async (id, input) => starts.push([id, input]),
+			start: async (id, input) => { starts.push([id, input]); },
 			recordDir: ship,
 		});
 		expect(result[0]?.newRunId).toBe("run-v2");
