@@ -40,6 +40,7 @@ import { reconcileRecuts } from "../recut";
 import { peekSession, startRun } from "../spawn";
 import { STATUS_VERBS, type StatusVerb } from "../status";
 import { readUsageRoster, usageStatusLine } from "../usage-roster";
+import { smithersWorkspaceCwd, warnOnShadowWorkspace } from "../workspace";
 import { evaluateTeardown, formatVerdict } from "../teardown";
 import { ackWakes, detectStale, foldBatched, pendingWakes, reconcile } from "../wake";
 import {
@@ -61,7 +62,12 @@ const text = (body: string): ToolResult => ({
 /** Poll cadence for the reconcile pass. A nudge shortens latency, never truth. */
 const RECONCILE_MS = 30_000;
 
-export default function deckV2(pi: any): void {
+type DeckV2Dependencies = {
+	collectPsSnapshot?: typeof collectPsSnapshot;
+};
+
+export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): void {
+	const collectSnapshot = dependencies.collectPsSnapshot ?? collectPsSnapshot;
 	// Calm is presentation-only (see ../calm.ts); it never touches delivery.
 	registerCalm(pi);
 	// ask_captain + /questions live HERE, not in a globally installed extension:
@@ -413,12 +419,16 @@ export default function deckV2(pi: any): void {
 			"Fleet overlay: attention-first (q/Esc close, r refresh, a show-all, j/k scroll; /fleet all opens expanded)",
 		handler: async (args: string, ctx: any) => {
 			const frameOptions = workflowCwd === undefined ? {} : { workflowCwd };
-			let frame = await buildFrame(frameOptions);
+			// First paint is cache-only. Smithers ps is a slow shell-out and must
+			// never delay opening the overlay.
+			let frame = lastFooterFrame;
 			// ctx.ui.custom is TUI-only; degrade to a printed frame elsewhere.
 			if (ctx.mode !== "tui" || ctx.ui?.custom === undefined) {
-				ctx.ui?.notify?.(renderFrame(frame), "info");
+				const liveFrame = await refreshStatusline(ctx);
+				ctx.ui?.notify?.(renderFrame(liveFrame), "info");
 				return;
 			}
+			void refreshStatusline(ctx);
 			let showAll = args.trim() === "all";
 			await ctx.ui.custom(
 				(tui: any, rawTheme: any, _kb: any, done: any) => {
@@ -637,20 +647,27 @@ export default function deckV2(pi: any): void {
 		}
 	}
 
-	async function refreshStatusline(ctx: any): Promise<void> {
+	async function getCurrentFrame(): Promise<Awaited<ReturnType<typeof buildFrame>>> {
+		const snapshot = workflowCwd === undefined ? { runs: [] as never[] } : await collectSnapshot(workflowCwd);
+		if (workflowCwd !== undefined) void reconcileRecuts(workflowCwd, pipelineDir(), snapshot.runs).catch(() => {});
+		observePsSnapshot(snapshot.runs);
+		const frame = await buildFrame(workflowCwd === undefined ? {} : { workflowCwd, psRuns: snapshot.runs });
+		lastFooterFrame = frame;
+		return frame;
+	}
+
+	async function refreshStatusline(ctx: any): Promise<Awaited<ReturnType<typeof buildFrame>>> {
 		try {
-			const snapshot = workflowCwd === undefined ? { runs: [] as never[] } : await collectPsSnapshot(workflowCwd);
-			if (workflowCwd !== undefined) void reconcileRecuts(workflowCwd, pipelineDir(), snapshot.runs).catch(() => {});
-			observePsSnapshot(snapshot.runs);
-			const frame = await buildFrame(workflowCwd === undefined ? {} : { workflowCwd, psRuns: snapshot.runs });
-			lastFooterFrame = frame;
+			const frame = await getCurrentFrame();
 			ctx.ui?.setStatus?.("deck-usage", undefined);
 			// Herdr projection rides the same cadence: every reconcile cycle mirrors
 			// worker state into herdr agents (smithers runs are fleet-only). Guarded
 			// inside; herdr being down makes this a no-op, never a fault.
 			await projectFleet(frame);
+			return frame;
 		} catch {
 			// A statusline is decoration; never let it break a turn.
+			return lastFooterFrame;
 		}
 	}
 
@@ -659,7 +676,8 @@ export default function deckV2(pi: any): void {
 		injectedCompactions.clear();
 		compactionSequence = 0;
 		await injectStandingRules(ctx, "session_start");
-		workflowCwd = `${deckV2Home()}/workflows/.smithers`;
+		workflowCwd = smithersWorkspaceCwd();
+		warnOnShadowWorkspace();
 		// The deck footer owns quota presentation. Block the legacy deck-usage
 		// status slot so its timer cannot paint a second chrome strip.
 		const setStatus = ctx.ui?.setStatus;

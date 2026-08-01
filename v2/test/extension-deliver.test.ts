@@ -5,6 +5,7 @@ import * as path from "node:path";
 import deckV2 from "../src/extension/index";
 import { appendStatus } from "../src/events";
 import { pendingWakes } from "../src/wake";
+import { warnOnShadowWorkspace } from "../src/workspace";
 
 let home: string;
 let savedPath: string | undefined;
@@ -23,21 +24,101 @@ afterEach(() => {
 type Handler = (event: unknown, ctx: unknown) => unknown;
 function fakePi(sendMessage?: (...args: unknown[]) => unknown) {
 	const handlers = new Map<string, Handler[]>();
+	const commands = new Map<string, (args: string, ctx: unknown) => unknown>();
 	const sent: unknown[][] = [];
 	const api = {
-		registerTool: () => {}, registerCommand: () => {},
+		registerTool: () => {},
+		registerCommand: (name: string, command: { handler: (args: string, ctx: unknown) => unknown }) =>
+			commands.set(name, command.handler),
 		on: (event: string, handler: Handler) => handlers.set(event, [...(handlers.get(event) ?? []), handler]),
 		sendMessage: sendMessage ?? ((...args: unknown[]) => { sent.push(args); }),
 	};
 	const emit = async (event: string, ctx: unknown) => {
 		for (const handler of handlers.get(event) ?? []) await handler({}, ctx);
 	};
-	return { api, emit, sent };
+	return { api, emit, sent, commands };
 }
 const ctx = (busy = false) => ({ mode: "tui", isIdle: () => !busy, hasPendingMessages: () => busy, ui: undefined });
 const settle = () => new Promise((resolve) => setTimeout(resolve, 25));
 const wakeCalls = (calls: unknown[][]) =>
 	calls.filter((call) => (call[0] as { customType?: string } | undefined)?.customType === "deck.wake");
+
+describe("fleet workspace safeguards", () => {
+	test("REGRESSION: shadow warning lists execution run ids only", () => {
+		const shadow = path.join(home, "workflows", "pr-pipeline", ".smithers");
+		fs.mkdirSync(path.join(shadow, "executions", "run-123"), { recursive: true });
+		fs.mkdirSync(path.join(shadow, "lib"), { recursive: true });
+		const warnings: string[] = [];
+		const ids = warnOnShadowWorkspace(home, (message) => warnings.push(message));
+		expect(ids).toEqual(["run-123"]);
+		expect(warnings[0]).toContain("run-123");
+		expect(warnings[0]).not.toContain("lib");
+	});
+
+	test("REGRESSION: an empty shadow workspace does not warn", () => {
+		const shadow = path.join(home, "workflows", "pr-pipeline", ".smithers");
+		fs.mkdirSync(path.join(shadow, "executions"), { recursive: true });
+		const warnings: string[] = [];
+		expect(warnOnShadowWorkspace(home, (message) => warnings.push(message))).toEqual([]);
+		expect(warnings).toEqual([]);
+	});
+
+	test("REGRESSION: TUI fleet opens from the cached frame before Smithers ps returns", async () => {
+		fs.mkdirSync(path.join(home, "workflows", ".smithers"), { recursive: true });
+		let releaseSnapshot = () => {};
+		const delayedSnapshot = new Promise<{ runs: []; health: { name: string; state: "ok"; detail: string } }>((resolve) => {
+			releaseSnapshot = () => resolve({ runs: [], health: { name: "smithers", state: "ok", detail: "0 run(s)" } });
+		});
+		const pi = fakePi();
+		let customOpened = false;
+		deckV2(pi.api as never, { collectPsSnapshot: () => delayedSnapshot });
+		const tuiContext = {
+			mode: "tui",
+			ui: {
+				custom: async () => {
+					customOpened = true;
+				},
+				setStatus: () => {},
+				setWorkingVisible: () => {},
+				setHiddenThinkingLabel: () => {},
+				setFooter: () => {},
+			},
+		};
+		await pi.emit("session_start", tuiContext);
+		const fleet = pi.commands.get("fleet");
+		const pending = fleet?.("", tuiContext);
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		expect(customOpened).toBe(true);
+		releaseSnapshot();
+		await delayedSnapshot;
+		await pending;
+	});
+
+	test("REGRESSION: non-TUI fleet prints a live first frame", async () => {
+		fs.mkdirSync(path.join(home, "workflows", ".smithers"), { recursive: true });
+		const pi = fakePi();
+		const notifications: string[] = [];
+		deckV2(pi.api as never, {
+			collectPsSnapshot: async () => ({
+				runs: [{ id: "live-run", status: "running" }],
+				health: { name: "smithers", state: "ok", detail: "1 run(s)" },
+			}),
+		});
+		const printCtx = {
+			mode: "print",
+			ui: {
+				notify: (value: string) => notifications.push(value),
+				setWorkingVisible: () => {},
+				setHiddenThinkingLabel: () => {},
+				setFooter: () => {},
+				setStatus: () => {},
+			},
+		};
+		await pi.emit("session_start", printCtx);
+		await pi.commands.get("fleet")?.("", printCtx);
+		expect(notifications.join("\n")).toContain("live-run");
+	});
+});
 
 describe("wake delivery", () => {
 	test("queues a wake after a busy cycle through followUp", async () => {

@@ -1177,8 +1177,10 @@ export function buildFleetView(
 	const c = frame.counters;
 	const counts = workflowCounts(frame);
 	const lines: string[] = [];
+	const ageSeconds = Math.max(0, Math.floor((Date.now() - Date.parse(frame.generatedAt)) / 1000));
 	const header = [
 		`${theme.bold(String(counts.active))} active`,
+		`as of ${ageSeconds}s ago`,
 		`${c.tasks} task(s)`,
 		c.blocked > 0 ? theme.fg("error", `${c.blocked} blocked`) : null,
 		c.openDecisions > 0

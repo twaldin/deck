@@ -24,6 +24,7 @@ import { readMeta, updateMeta } from "./meta";
 import { findProfile, type ProjectProfile } from "./projects";
 import { SMITHERS_SPEC } from "./smithers";
 import { pipelineHash } from "./recut";
+import { smithersWorkspaceCwd, warnOnShadowWorkspace } from "./workspace";
 
 export type ShipRequest = {
 	/** Ticket / effort id; also seeds the smithers run id. */
@@ -167,6 +168,7 @@ export type ShipResult = {
 export async function startShip(
 	request: ShipRequest,
 	home = deckV2Home(),
+	spawn = spawnProcess,
 ): Promise<ShipResult> {
 	const profile = findProfile(request.profile, home);
 	if (profile === null) {
@@ -188,6 +190,8 @@ export async function startShip(
 		);
 	}
 	const dir = pipelineDir();
+	const workspaceCwd = smithersWorkspaceCwd(home);
+	warnOnShadowWorkspace(home);
 	if (!fs.existsSync(path.join(dir, "pipeline.tsx"))) {
 		throw new Error(
 			`pr-pipeline not found at ${dir} (set DECK_PIPELINE_DIR if the layout differs)`,
@@ -215,28 +219,29 @@ export async function startShip(
 	});
 
 	const log = fs.openSync(logPath, "a");
-	const child = spawnProcess(
-		"bunx",
-		[
-			SMITHERS_SPEC,
-			"up",
-			"pipeline.tsx",
-			"--input",
-			JSON.stringify(input),
-			"--run-id",
-			runId,
-		],
-		{
-			cwd: dir,
-			detached: true,
-			stdio: ["ignore", log, log],
-			env: { ...process.env },
-		},
-	);
+	let child: ReturnType<typeof spawn>;
 	// Child startup errors arrive asynchronously; without this wait, a launch
 	// that never happened (bunx missing, spawn EPERM) would still print
 	// "started" — a silent false positive on the default ship path.
 	try {
+		child = spawn(
+			"bunx",
+			[
+				SMITHERS_SPEC,
+				"up",
+				path.join(dir, "pipeline.tsx"),
+				"--input",
+				JSON.stringify(input),
+				"--run-id",
+				runId,
+			],
+			{
+				cwd: workspaceCwd,
+				detached: true,
+				stdio: ["ignore", log, log],
+				env: { ...process.env },
+			},
+		);
 		await new Promise<void>((resolve, reject) => {
 			child.once("spawn", () => resolve());
 			child.once("error", (error) =>
