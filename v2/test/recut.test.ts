@@ -24,20 +24,58 @@ function setup(id: string, input: Record<string, unknown>): void {
 
 describe("pipeline recut", () => {
 	test("recuts a stamp park and preserves input and existing PR", async () => {
-		setup("run-v1", { ticket: "t1", existingPr: 42, worktree: "/tmp/wt" });
+		setup("run-v1", {
+			ticket: "t1", existingPr: 42, worktree: "/tmp/wt",
+			__smithersDurability: { entryWorkflowHash: "stale" },
+		});
 		const old = pipelineHash(pipeline);
 		const starts: Array<[string, Record<string, unknown>]> = [];
 		const result = await recutChangedRuns({
 			runs: [{ id: "run-v1", workflow: "pr-pipeline", status: "waiting-approval", step: "r0-stamp" }],
 			pipelineDir: pipeline,
-			inspect: async () => ({ config: { __smithersDurability: { entryWorkflowHash: old + "-old" } } }),
+			// Smithers inspect does not expose the launch config. Detection must use input.json.
+			inspect: async () => ({ run: { id: "run-v1", status: "waiting-approval" } }),
 			cancel: async () => {},
 			start: async (id, input) => starts.push([id, input]),
 			recordDir: ship,
 		});
 		expect(result[0]?.newRunId).toBe("run-v2");
 		expect(starts[0]?.[1].existingPr).toBe(42);
+		expect((starts[0]?.[1].__smithersDurability as Record<string, unknown>).entryWorkflowHash).toBe(old);
 		expect(JSON.parse(fs.readFileSync(path.join(ship, "recuts.jsonl"), "utf8")).oldRunId).toBe("run-v1");
+	});
+	test("does not recut the replacement on a second reconcile pass", async () => {
+		setup("run-v1", { __smithersDurability: { entryWorkflowHash: "old" } });
+		let starts = 0;
+		const options = {
+			runs: [{ id: "run-v1", workflow: "pr-pipeline", status: "waiting-approval", step: "r0-stamp" }],
+			pipelineDir: pipeline,
+			inspect: async () => ({}),
+			cancel: async () => {},
+			start: async (id: string, input: Record<string, unknown>) => {
+				starts++;
+				setup(id, input);
+			},
+			recordDir: ship,
+		};
+		const first = await recutChangedRuns(options);
+		const second = await recutChangedRuns({
+			...options,
+			runs: [{ id: first[0]!.newRunId, workflow: "pr-pipeline", status: "waiting-approval", step: "r0-stamp" }],
+		});
+		expect(starts).toBe(1);
+		expect(second).toHaveLength(0);
+	});
+	test("cancels a replacement when startup verification fails", async () => {
+		setup("run-v1", { __smithersDurability: { entryWorkflowHash: "old" } });
+		const cancelled: string[] = [];
+		await recutChangedRuns({
+			runs: [{ id: "run-v1", workflow: "pr-pipeline", status: "waiting-approval", step: "r0-stamp" }],
+			pipelineDir: pipeline, inspect: async () => ({}),
+			cancel: async (id) => { cancelled.push(id); }, start: async () => {},
+			verifyStart: async () => false, recordDir: ship,
+		});
+		expect(cancelled).toEqual(["run-v2"]);
 	});
 	test("matching hash is a no-op and a second cycle is rate limited", async () => {
 		setup("run-v1", { ticket: "t1", existingPr: 42 });

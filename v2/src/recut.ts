@@ -108,10 +108,19 @@ export async function recutChangedRuns(options: RecutOptions): Promise<RecutResu
 			await options.syncWorktree?.(input);
 			const newRunId = nextRunId(run.id, used);
 			used.add(newRunId);
-			const nextInput = { ...input };
+			const nextInput = {
+				...input,
+				__smithersDurability: {
+					...(typeof input.__smithersDurability === "object" && input.__smithersDurability !== null
+						? input.__smithersDurability as Record<string, unknown>
+						: {}),
+					entryWorkflowHash: current,
+				},
+			};
 			await options.start(newRunId, nextInput);
 			if (options.verifyStart !== undefined && !(await options.verifyStart(newRunId))) {
 				used.delete(newRunId);
+				await options.cancel(newRunId);
 				continue;
 			}
 			await options.cancel(run.id);
@@ -151,7 +160,8 @@ export async function reconcileRecuts(workspace: string, pipeline: string, runs:
 			});
 		},
 		verifyStart: async (runId) => {
-			for (let attempt = 0; attempt < 3; attempt++) {
+			// bunx startup can exceed one second before the detached run is inspectable.
+			for (let attempt = 0; attempt < 12; attempt++) {
 				try { await execFile("bunx", [SMITHERS_SPEC, "inspect", runId, "--format", "json"], { cwd: workspace }); return true; } catch { await new Promise((resolve) => setTimeout(resolve, 250)); }
 			}
 			return false;
