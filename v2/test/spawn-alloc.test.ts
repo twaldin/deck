@@ -101,7 +101,7 @@ describe("spawn worktree allocation", () => {
 		}]));
 		const exitCode = await runCli(["spawn", "cli-proof", "--task", "x", "--accept", "ok", "--kind", "scout", "--worktree", escape, "--project", "fixture", "--reasoning", "high"]);
 		expect(exitCode).toBe(0);
-		expect(fs.readFileSync(process.env.DECK_TEST_PI_ARGS as string, "utf8").split("\\n")).toContain("high");
+		expect(fs.readFileSync(process.env.DECK_TEST_PI_ARGS as string, "utf8").split("\n")).toContain("high");
 	});
 	test("repo-only spawn allocates an isolated worktree under DECK_HOME/wt and records it", () => {
 		const result = startRun(
