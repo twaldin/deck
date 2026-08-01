@@ -54,7 +54,7 @@ async function run(input: Record<string, unknown>) {
 }
 
 describe("workflow rendering contracts", () => {
-	const profileBase = {
+	const profileBase: ProjectProfile = {
 		id: "test",
 		repo: "example/test",
 		primary: "/tmp/test",
@@ -119,7 +119,7 @@ describe("workflow rendering contracts", () => {
 	}
 
 	test("input schema accepts null models", () => {
-		expect(pipeline.inputSchema.safeParse({ ...baseInput, models: null }).success).toBe(true);
+		expect((pipeline as typeof pipeline & { inputSchema: { safeParse: (value: unknown) => { success: boolean } } }).inputSchema.safeParse({ ...baseInput, models: null }).success).toBe(true);
 	});
 
 	test("profile reasoning flows to each seat, with explicit seat overrides", () => {
