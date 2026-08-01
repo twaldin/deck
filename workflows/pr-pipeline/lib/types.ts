@@ -66,6 +66,8 @@ export interface CommentActivity {
 	author: string;
 	isBot: boolean;
 	createdAt: string;
+	/** Comment body is used to distinguish review findings from automation noise. */
+	body?: string;
 }
 
 /** Snapshot of PR feedback state used by the watch-ci-review exit check. */
@@ -77,6 +79,8 @@ export interface WatchSnapshot {
 	mergeable: MergeableState;
 	/** GitHub's merge queue status, including BEHIND and DIRTY rebase signals. */
 	mergeStateStatus: string;
+	/** Compare API's count of commits the head is behind its base. */
+	behindBy: number;
 	/** ISO timestamp of the last push to the PR branch. */
 	lastPushAt: string;
 	threads: ReviewThread[];
