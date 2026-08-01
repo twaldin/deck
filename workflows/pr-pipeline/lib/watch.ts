@@ -60,8 +60,9 @@ export function reviewersNeedingReRequest(
 		// CHANGES_REQUESTED must enter the response loop immediately; approval
 		// polling here was the cause of PRs being parked while blockers remained.
 		if (reviewer.lastReviewState === "CHANGES_REQUESTED") {
-			// Once the request is visible, the fix worker has completed its one
-			// re-request. Wait for the reviewer instead of starting another fix.
+			// A visible request proves that this response cycle is complete. Do
+			// not start another fixer until the reviewer submits a new review.
+			if (requested.has(login)) continue;
 			out.push(reviewer.login);
 			continue;
 		}

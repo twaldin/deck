@@ -52,6 +52,7 @@ import { mergeLiveAccounts, readLiveControlAccounts, readUsageRoster, usageStatu
 import { discoverSmithersWorkspaces, smithersWorkspaceCwd, uiWarn, warnOnShadowWorkspace } from "../workspace";
 import { evaluateTeardown, formatVerdict } from "../teardown";
 import { ackWakes, detectStale, foldBatched, pendingWakes, reconcile } from "../wake";
+import { reconcileWakeProducers } from "../wake-producers";
 import {
 	assertDispatchable,
 	closeInternal,
@@ -757,6 +758,7 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 		await injectStandingRules(ctx, "session_start");
 		workflowCwd = smithersWorkspaceCwd();
 		workflowWorkspaces = discoverSmithersWorkspaces();
+		for (const workspace of workflowWorkspaces) reconcileWakeProducers(path.join(workspace, "wake-producers.json"));
 		// Automatic wake is TUI-only by design. A future deck-notifier projection
 		// can consume this same multi-workspace observation for no-TUI sessions.
 		warnOnShadowWorkspace(

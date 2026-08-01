@@ -126,8 +126,11 @@ function isTerminalExecution(executions: string, id: string): boolean {
 			const event = JSON.parse(line) as Record<string, unknown>;
 			// Only the envelope's event name and status are authoritative. Do not
 			// search payload text: a review body can contain "RunFailed".
-			const kind = [event.type, event.event, event.kind, event.name].find((value) => typeof value === "string");
-			const status = event.status;
+			const payload = event.payload && typeof event.payload === "object" ? event.payload as Record<string, unknown> : undefined;
+			const frame = event.frame && typeof event.frame === "object" ? event.frame as Record<string, unknown> : undefined;
+			const framePayload = frame?.payload && typeof frame.payload === "object" ? frame.payload as Record<string, unknown> : undefined;
+			const kind = [event.type, event.event, event.kind, event.name, payload?.type, frame?.event, framePayload?.type].find((value) => typeof value === "string");
+			const status = [event.status, payload?.status, frame?.status, framePayload?.status].find((value) => typeof value === "string");
 			if (typeof status === "string" && /^(completed|succeeded|failed|cancelled|finished)$/i.test(status)) return true;
 			if (typeof kind === "string" && /^(?:run[._-])?(completed|succeeded|failed|cancelled|finished)$/i.test(kind)) return true;
 			if (typeof kind === "string" && /^(?:run[._-])?(started|resumed|paused)$/i.test(kind)) break;

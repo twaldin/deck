@@ -133,6 +133,7 @@ const DEFAULT_COMMANDS = {
 	migrationProdRun: undefined as string | undefined,
 	migrationProdVerify: undefined as string | undefined,
 	falloutProbes: [] as string[],
+	test: "bun test",
 };
 
 // ---------------------------------------------------------------------------
@@ -218,6 +219,7 @@ export const inputSchema = z.object({
 			migrationProdRun: z.string().optional(),
 			migrationProdVerify: z.string().optional(),
 			falloutProbes: z.array(z.string()).optional(),
+			test: z.string().optional(),
 		})
 		.optional(),
 	watchSetPath: z.string().optional(),
@@ -1340,7 +1342,7 @@ export default smithers((ctx) => {
 																})
 															: latestWatch.rebaseRequired
 															? async () => {
-																	const actions = await rebaseAndPush(bunExec, { git: github.git, worktree: input.worktree, branch: input.branch, baseBranch });
+																	const actions = await rebaseAndPush(bunExec, { git: github.git, worktree: input.worktree, branch: input.branch, baseBranch, testCommand: commands.test });
 																	return { round: k, afterPoll: latestWatch.poll, actions, pushed: true, reRequested: [], summary: "Rebased, tested, and pushed the branch." };
 																}
 															: watchFixPrompt({

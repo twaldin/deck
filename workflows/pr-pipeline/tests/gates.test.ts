@@ -335,6 +335,11 @@ describe("evaluateWatchExit", () => {
 		expect(verdict.exitOk).toBe(false);
 	});
 
+	test("re-requested CHANGES_REQUESTED reviewer enters silent polling", () => {
+		const snapshot = makeSnapshot({ reviewers: [{ login: "rev", isBot: false, lastActivityAt: "2024-01-01T00:00:00Z", lastReviewState: "CHANGES_REQUESTED" }], requestedReviewers: ["rev"] });
+		expect(evaluateWatchExit(snapshot, { selfLogins: [] }).reviewersNeedingReRequest).toEqual([]);
+	});
+
 	test("re-requested reviewer (verified via requested_reviewers) passes", () => {
 		const verdict = evaluateWatchExit(
 			snapshot({
