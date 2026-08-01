@@ -231,7 +231,6 @@ export function validateProfiles(parsed: unknown, source: string): ProjectProfil
 		if (p.depsWarm !== undefined && typeof p.depsWarm !== "boolean") {
 			throw new Error(`${where} (${p.id}): depsWarm must be a boolean`);
 		}
-		}
 		return {
 			id: p.id,
 			repo: p.repo,
