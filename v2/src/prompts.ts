@@ -136,7 +136,11 @@ ${acceptance.map((item) => `- ${item}`).join("\n")}`);
 
 	// Isolation assertion. Non-negotiable: a worker that writes to the primary
 	// checkout corrupts the captain's own working copy.
-	sections.push(`## Isolation
+	sections.push(`## Dependencies
+
+Dependency warming starts in the background when this worktree is allocated. Before running tests, check \`${worktree}/.deck-deps-ready\`. If it is absent, wait for the install to finish. If \`${worktree}/.deck-deps-failed\` exists, read its error tail and continue when possible; dependency warming is best effort and never blocks this task.
+
+## Isolation
 
 You are in a disposable worktree: ${worktree}
 

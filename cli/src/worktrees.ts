@@ -54,6 +54,44 @@ function replaceEntry(state: WorktreesState, replacement: WorktreeEntry): Worktr
 	});
 }
 
+const DEPS_READY = ".deck-deps-ready";
+const DEPS_FAILED = ".deck-deps-failed";
+
+function dependencyInstall(repo: string): { command: string; enabled: boolean } {
+	const home = process.env.DECK_V2_HOME ?? path.join(process.env.HOME ?? process.cwd(), ".deck");
+	try {
+		const profiles = JSON.parse(fs.readFileSync(path.join(home, "config", "projects.json"), "utf8")) as unknown;
+		if (Array.isArray(profiles)) {
+			const profile = profiles.find((p) => p && typeof p === "object" && (p as Record<string, unknown>).primary === repo) as Record<string, unknown> | undefined;
+			if (profile?.depsWarm === false) return { command: "", enabled: false };
+			if (typeof profile?.installCommand === "string") return { command: profile.installCommand, enabled: true };
+		}
+	} catch { /* absent or invalid profile: use lockfile inference */ }
+		if (fs.existsSync(path.join(repo, "pnpm-lock.yaml"))) return { command: "pnpm install --prefer-offline", enabled: true };
+	if (fs.existsSync(path.join(repo, "bun.lock")) || fs.existsSync(path.join(repo, "bun.lockb"))) return { command: "bun install", enabled: true };
+	return { command: "", enabled: false };
+}
+
+/** Best effort only. Never link node_modules: package-manager layouts and bins are checkout-specific. */
+export function warmDependencies(worktree: string, repo: string): void {
+	const install = dependencyInstall(repo);
+	if (!install.enabled) return;
+	for (const marker of [DEPS_READY, DEPS_FAILED]) {
+		try { fs.rmSync(path.join(worktree, marker)); } catch { /* absent */ }
+	}
+	const child = Bun.spawn(["sh", "-lc", install.command], { cwd: worktree, stdout: "pipe", stderr: "pipe" });
+	void (async () => {
+		const [stdout, stderr, code] = await Promise.all([
+			new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited,
+		]);
+		if (code === 0) fs.writeFileSync(path.join(worktree, DEPS_READY), "ready\n");
+		else {
+			const output = `${stdout}\n${stderr}`.trim().slice(-4000);
+			fs.writeFileSync(path.join(worktree, DEPS_FAILED), `${output}\n`);
+		}
+	})();
+}
+
 function errorMessage(error: unknown): string {
 	if (error instanceof Error) {
 		return error.message;
@@ -132,6 +170,7 @@ export async function allocateWorktree(request: AllocateRequest): Promise<Worktr
 		try {
 			await addWorktree(repo, worktreePath, branch, base);
 			fs.chmodSync(worktreePath, 0o700);
+			warmDependencies(worktreePath, repo);
 		} catch (error) {
 			try {
 				await removeWorktree(repo, worktreePath, branch, fs.existsSync(worktreePath));
