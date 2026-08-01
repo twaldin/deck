@@ -187,6 +187,15 @@ describe("observer event selection", () => {
 		expect(event?.note).toContain("merge-gate");
 	});
 
+	test("terminal ps outcomes produce wake events", async () => {
+		const { observer, events } = await mods();
+		fs.mkdirSync(path.join(home, "state", "ship"), { recursive: true });
+		fs.writeFileSync(path.join(home, "state", "ship", "run-1.input.json"), JSON.stringify({ ticket: "ticket-1" }));
+		const emitted = observer.observePsSnapshot([{ id: "run-1", status: "finished", state: "succeeded", workflow: "pr-pipeline" }]);
+		expect(emitted[0]?.verb).toBe("done");
+		expect(events.readStatus("ticket-1").events).toHaveLength(1);
+	});
+
 	test("waiting-event includes the blocked node in the wake", async () => {
 		const { observer, events } = await mods();
 		fs.mkdirSync(path.join(home, "state", "ship"), { recursive: true });

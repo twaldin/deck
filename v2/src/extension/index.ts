@@ -35,7 +35,7 @@ import { projectFleet } from "../herdr";
 import { deckV2Home, stateFiles } from "../home";
 import { standingRulesDigest } from "./standing-rules";
 import { readMeta } from "../meta";
-import { observePsSnapshotWithInspect } from "../observer";
+import { observePsSnapshotWithInspect, type PsSnapshotRow } from "../observer";
 import { registerQuestions } from "../questions";
 import { enqueue, pending } from "../queue";
 import { pipelineDir, startShip } from "../ship";
@@ -43,7 +43,7 @@ import { reconcileRecuts } from "../recut";
 import { peekSession, startRun } from "../spawn";
 import { STATUS_VERBS, type StatusVerb } from "../status";
 import { readUsageRoster, usageStatusLine } from "../usage-roster";
-import { smithersWorkspaceCwd, uiWarn, warnOnShadowWorkspace } from "../workspace";
+import { discoverSmithersWorkspaces, smithersWorkspaceCwd, uiWarn, warnOnShadowWorkspace } from "../workspace";
 import { evaluateTeardown, formatVerdict } from "../teardown";
 import { ackWakes, detectStale, foldBatched, pendingWakes, reconcile } from "../wake";
 import {
@@ -86,6 +86,7 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 	let timer: ReturnType<typeof setInterval> | undefined;
 	let unwatch: (() => void) | undefined;
 	let workflowCwd: string | undefined;
+	let workflowWorkspaces: string[] = [];
 	// Send-failure backoff protects against real queue transport errors. Wakes
 	// remain durable in the outbox while a failed call is retried.
 	let sendFailures = 0;
@@ -677,11 +678,15 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 	}
 
 	async function getCurrentFrame(): Promise<Awaited<ReturnType<typeof buildFrame>>> {
-		const snapshot = workflowCwd === undefined ? { runs: [] as never[] } : await collectSnapshot(workflowCwd);
+		const snapshots = workflowWorkspaces.length === 0
+			? []
+			: await Promise.all(workflowWorkspaces.map(async (workspace) => ({ workspace, snapshot: await collectSnapshot(workspace) })));
+		const snapshot = snapshots[0]?.snapshot ?? { runs: [] as never[] };
+		const rows = snapshots.flatMap(({ workspace, snapshot: current }) => current.runs.map((run) => ({ ...run, workspace }))) as PsSnapshotRow[];
 		if (workflowCwd !== undefined) void reconcileRecuts(workflowCwd, pipelineDir(), snapshot.runs).catch(() => {});
 		if (workflowCwd !== undefined) {
 			await observePsSnapshotWithInspect({
-				rows: snapshot.runs,
+				rows,
 				workspace: workflowCwd,
 				run: dependencies.inspectRun ?? (async (command, args, cwd) => {
 					try {
@@ -697,7 +702,7 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 				}),
 			});
 		}
-		const frame = await buildFrame(workflowCwd === undefined ? {} : { workflowCwd, psRuns: snapshot.runs });
+		const frame = await buildFrame(workflowCwd === undefined ? {} : { workflowCwd, psRuns: rows });
 		lastFooterFrame = frame;
 		return frame;
 	}
@@ -731,6 +736,9 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 		warnedShadowFingerprints.clear();
 		await injectStandingRules(ctx, "session_start");
 		workflowCwd = smithersWorkspaceCwd();
+		workflowWorkspaces = discoverSmithersWorkspaces();
+		// Automatic wake is TUI-only by design. A future deck-notifier projection
+		// can consume this same multi-workspace observation for no-TUI sessions.
 		warnOnShadowWorkspace(
 			undefined,
 			(message) => uiWarn(ctx, message),
