@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { enqueueWakeConditions, type WakeCondition } from "./wake";
+import { clearWakeConditions, enqueueWakeConditions, type WakeCondition } from "./wake";
 
 /** Durable producers used by workflow observers and the headless reconciler. */
 export type ProducerSnapshot = {
@@ -22,6 +22,9 @@ export function produceWakeConditions(snapshot: ProducerSnapshot): void {
 	add("main-red", snapshot.mainRed, "main branch failure requires shared diagnosis");
 	add("migration-gate", snapshot.migrationBlocked, "migration gate is blocking progress");
 	add("broker-no-quota", snapshot.brokerNoQuota, "broker has no available quota");
+	const keys: WakeCondition["key"][] = ["max-adversarial", "reviewer-silent", "main-red", "migration-gate", "broker-no-quota"];
+	const active = new Set(conditions.map((condition) => condition.key));
+	clearWakeConditions(snapshot.taskId, keys.filter((key) => !active.has(key)));
 	enqueueWakeConditions(conditions);
 }
 
@@ -46,7 +49,7 @@ export function claimMainFailure(root: string, fingerprint: string, owner: strin
 		const current = JSON.parse(fs.readFileSync(file, "utf8")) as { fingerprint?: string; owner?: string };
 		if (current.fingerprint === fingerprint) return current.owner === owner;
 	} catch { /* no record */ }
-	const lock = `${file}.${fingerprint}.lock`;
+	const lock = `${file}.lock`;
 	let acquired = false;
 	try {
 		fs.mkdirSync(lock, { recursive: false, mode: 0o700 });

@@ -108,10 +108,17 @@ function loadBaseline(): Baseline {
 
 function saveBaseline(baseline: Baseline): void {
 	const file = wakeFiles().baseline;
-	const tmp = `${file}.tmp`;
+	const tmp = `${file}.${process.pid}.tmp`;
 	fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
 	fs.writeFileSync(tmp, `${JSON.stringify(baseline, null, 2)}\n`, { mode: 0o600 });
 	fs.renameSync(tmp, file);
+}
+
+/** Clear resolved external conditions so a later recurrence is a new edge. */
+export function clearWakeConditions(taskId: string, keys: WakeCondition["key"][]): void {
+	const baseline = loadBaseline();
+	for (const key of keys) delete baseline[`${taskId}:${key}`];
+	saveBaseline(baseline);
 }
 
 /** Tasks deck owns. An fm2-owned task is skipped during the parallel run. */

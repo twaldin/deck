@@ -819,9 +819,12 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 		// print/RPC sessions must still reconcile and expose owed wakes, otherwise
 		// blocked workflow runs silently stall when no interactive session exists.
 		if (ctx?.mode !== "tui") {
-			// Headless sessions still use the same durable outbox. Deliver now so a
-			// workflow wake is not trapped behind a missing TUI.
+			// Headless sessions still use the same durable outbox. Keep a small
+			// reconciler alive because workflow producers can publish after startup;
+			// the durable outbox remains the source of truth if this process exits.
 			void deliver(ctx);
+			timer = setInterval(() => void deliver(ctx), RECONCILE_MS);
+			unwatch = (await import("../wake")).watchStatusDir(() => void deliver(ctx));
 			return;
 		}
 

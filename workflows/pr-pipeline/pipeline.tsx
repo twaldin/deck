@@ -427,16 +427,22 @@ function publishWakeProducer(input: { taskId: string; maxAdversarial?: boolean; 
 	if (input.taskId.length === 0) return;
 	const file = path.join(process.cwd(), "wake-producers.json");
 	fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-	let records: Array<typeof input> = [];
+	const lock = `${file}.lock`;
+	try { fs.mkdirSync(lock, { mode: 0o700 }); } catch { return; }
 	try {
-		const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as typeof input | Array<typeof input>;
-		records = Array.isArray(parsed) ? parsed : [parsed];
-	} catch { /* create the producer log on first publish */ }
-	records = records.filter((record) => record.taskId !== input.taskId);
-	records.push(input);
-	const tmp = `${file}.${process.pid}.tmp`;
-	fs.writeFileSync(tmp, `${JSON.stringify(records)}\n`, { mode: 0o600 });
-	fs.renameSync(tmp, file);
+		let records: Array<typeof input> = [];
+		try {
+			const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as typeof input | Array<typeof input>;
+			records = Array.isArray(parsed) ? parsed : [parsed];
+		} catch { /* create the producer log on first publish */ }
+		records = records.filter((record) => record.taskId !== input.taskId);
+		records.push(input);
+		const tmp = `${file}.${process.pid}.tmp`;
+		fs.writeFileSync(tmp, `${JSON.stringify(records)}\n`, { mode: 0o600 });
+		fs.renameSync(tmp, file);
+	} finally {
+		fs.rmSync(lock, { recursive: true, force: true });
+	}
 }
 
 function seat(ref: ModelSeat): { ref: string; reasoning?: string } {

@@ -78,7 +78,8 @@ export function localReviewPrompt(
 			]
 			: []),
 		"Classify every item as blocking or a nit.",
-		"IMPORTANT: The JSON Schema shown by the runner is an instruction, not an answer. Never copy or return schema keywords such as $schema, type, properties, required, or additionalProperties. Return one filled RESULT object with the review values.",
+		"IMPORTANT: The JSON Schema shown by the runner is an instruction, not an answer. A schema echo is invalid, even if it is valid JSON. Never copy or return schema keywords such as $schema, type, properties, required, or additionalProperties. Return one filled RESULT object with the review values.",
+		"If your previous response was the schema, discard it now and answer the review. Do not explain the correction.",
 		"Blocking findings are correctness, security, data loss, broken tests, contract breaks, or missing required behavior from the brief.",
 		"Naming preferences, optional polish, pre-existing style outside the diff, and 'consider later' items are nits, never blockers.",
 		"From review round 4 onward, actively reclassify remaining items. If only nits remain, approve. Do not keep the loop alive on taste.",

@@ -21,7 +21,9 @@ export function smithersWorkspaceCwd(home = deckV2Home()): string {
  * Find Smithers state directories under the configured roots.
  *
  * This remains available to callers that need discovery. Deck-v2's live frame
- * uses the single shared workspace returned by smithersWorkspaceCwd().
+ * uses the single shared workspace returned by smithersWorkspaceCwd(). Every
+ * pipeline launch must use that directory as its Smithers cwd; workflow trees
+ * are source locations, not separate state stores.
  */
 let discoveryCache: { key: string; expiresAt: number; workspaces: string[] } | undefined;
 const DISCOVERY_CACHE_MS = 30_000;
@@ -89,13 +91,11 @@ export function warnOnShadowWorkspace(
 	log: (message: string) => void = (message) => uiWarn(undefined, message),
 	warnedFingerprints = new Set<string>(),
 ): string[] {
-	const canonical = (() => {
-		try {
-			return fs.realpathSync(smithersWorkspaceRoot(home));
-		} catch {
-			return path.resolve(smithersWorkspaceRoot(home));
-		}
-	})();
+	const canonicalRoots = new Set<string>();
+	for (const candidate of [smithersWorkspaceRoot(home), path.join(smithersWorkspaceRoot(home), ".smithers")]) {
+		try { canonicalRoots.add(fs.realpathSync(candidate)); }
+		catch { canonicalRoots.add(path.resolve(candidate)); }
+	}
 	const candidates = [
 		path.join(home, "workflows", "pr-pipeline", ".smithers"),
 		path.join(home, "workflows", ".smithers"),
@@ -103,7 +103,8 @@ export function warnOnShadowWorkspace(
 	const workspaces = candidates.filter((workspace) => {
 		if (!fs.existsSync(workspace)) return false;
 		try {
-			return fs.realpathSync(workspace) !== canonical;
+			const resolved = fs.realpathSync(workspace);
+			return ![...canonicalRoots].some((root) => resolved === root || resolved.startsWith(`${root}${path.sep}`));
 		} catch {
 			return false;
 		}
