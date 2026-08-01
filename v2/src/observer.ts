@@ -63,6 +63,7 @@ type PsSnapshotRow = {
 	step?: unknown;
 	rootDir?: unknown;
 	blockedNode?: unknown;
+	runState?: { blocked?: { nodeId?: unknown } };
 	pendingApprovals?: Array<{ nodeId?: unknown; status?: unknown }>;
 };
 
@@ -99,6 +100,7 @@ const RUN_TRANSITIONS: Record<string, { verb: StatusVerb; note: string } | undef
 	failed: { verb: "failed", note: "workflow failed" },
 	cancelled: { verb: "failed", note: "workflow cancelled" },
 	"waiting-human": { verb: "needs-decision", note: "workflow is waiting for an answer" },
+	"waiting-event": { verb: "blocked", note: "workflow is waiting for an event" },
 	// Paused is deliberate waiting, not a fault, and is never treated as stale.
 	paused: { verb: "paused", note: "workflow paused" },
 };
@@ -305,7 +307,8 @@ export function observePsSnapshot(rows: readonly PsSnapshotRow[]): EmittedEvent[
 		if (TERMINAL.has(outcome)) continue;
 		const pending = row.pendingApprovals?.find((approval) => approval.status === "requested")?.nodeId
 			?? row.pendingApprovals?.[0]?.nodeId
-			?? row.blockedNode;
+			?? row.blockedNode
+			?? row.runState?.blocked?.nodeId;
 		const step = typeof pending === "string" ? pending : typeof row.step === "string" && row.step !== "—" ? row.step : null;
 		emitted.push(...observeOnce(taskId, {
 			run: { id: row.id, workflow: typeof row.workflow === "string" ? row.workflow : "", status: outcome, step, rootDir: typeof row.rootDir === "string" ? row.rootDir : null },
@@ -407,7 +410,13 @@ export function parseInspect(stdout: string): Observation | null {
 			id: run.id,
 			workflow: String(run.workflow ?? ""),
 			status: outcome,
-			step: typeof run.step === "string" && run.step !== "—" ? run.step : null,
+			step: outcome === "waiting-event"
+				? typeof run.blockedNode === "string"
+					? run.blockedNode
+					: typeof payload?.runState?.blocked?.nodeId === "string"
+						? payload.runState.blocked.nodeId
+						: typeof run.step === "string" && run.step !== "—" ? run.step : null
+				: typeof run.step === "string" && run.step !== "—" ? run.step : null,
 			rootDir: typeof payload?.config?.rootDir === "string" ? payload.config.rootDir : null,
 		},
 		nodes,
