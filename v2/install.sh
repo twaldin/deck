@@ -124,12 +124,14 @@ if [ -d "$WORKFLOWS_SOURCE/.smithers" ]; then
   mkdir -p "$WORKSPACE_PACK"
   for item in package.json bun.lock agents.ts agents ui; do
     [ -e "$WORKFLOWS_SOURCE/.smithers/$item" ] || continue
-    [ -e "$WORKSPACE_PACK/$item" ] || cp -a "$WORKFLOWS_SOURCE/.smithers/$item" "$WORKSPACE_PACK/$item"
+    rm -rf "$WORKSPACE_PACK/$item"
+    cp -a "$WORKFLOWS_SOURCE/.smithers/$item" "$WORKSPACE_PACK/$item"
   done
   # agents.ts is part of the pack but its model catalog is owned by the pipeline.
   # Keep that relative import valid in the isolated runtime workspace.
   mkdir -p "$WORKSPACE_ROOT/pr-pipeline/lib"
-  [ -e "$WORKSPACE_ROOT/pr-pipeline/lib/models.ts" ] || cp -a "$WORKFLOWS_SOURCE/pr-pipeline/lib/models.ts" "$WORKSPACE_ROOT/pr-pipeline/lib/models.ts"
+  rm -f "$WORKSPACE_ROOT/pr-pipeline/lib/models.ts"
+  cp -a "$WORKFLOWS_SOURCE/pr-pipeline/lib/models.ts" "$WORKSPACE_ROOT/pr-pipeline/lib/models.ts"
 fi
 # Keep the old link name only for static compatibility. It is never the runtime
 # workspace and no state is written through it.
