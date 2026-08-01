@@ -60,9 +60,9 @@ export function reviewersNeedingReRequest(
 		// CHANGES_REQUESTED must enter the response loop immediately; approval
 		// polling here was the cause of PRs being parked while blockers remained.
 		if (reviewer.lastReviewState === "CHANGES_REQUESTED") {
-			// A visible request proves that this response cycle is complete. Do
-			// not start another fixer until the reviewer submits a new review.
-			if (requested.has(login)) continue;
+			// A request that predates the latest push is the completed response
+			// cycle. A review after the push is a new blocker and needs a fix.
+			if (requested.has(login) && reviewer.lastActivityAt < lastPushAt) continue;
 			out.push(reviewer.login);
 			continue;
 		}
@@ -130,11 +130,18 @@ export function evaluateWatchExit(snapshot: WatchSnapshot, options: WatchExitOpt
 		snapshot.lastPushAt,
 		options.selfLogins,
 	);
+	const changesRequested = snapshot.reviewers
+		.filter((reviewer) => !reviewer.isBot && !options.selfLogins.some((login) => login.toLowerCase() === reviewer.login.toLowerCase()) && reviewer.lastReviewState === "CHANGES_REQUESTED")
+		.map((reviewer) => reviewer.login);
+	const awaitingReview = snapshot.reviewers
+		.filter((reviewer) => changesRequested.includes(reviewer.login) && reviewer.lastActivityAt < snapshot.lastPushAt && snapshot.requestedReviewers.some((login) => login.toLowerCase() === reviewer.login.toLowerCase()))
+		.map((reviewer) => reviewer.login);
 	if (needReRequest.length > 0) {
 		reasons.push(
-			`reviewer(s) not re-requested after changes (requested_reviewers check): ${needReRequest.join(", ")}.`,
+			`reviewer(s) need a response cycle (requested_reviewers check): ${needReRequest.join(", ")}.`,
 		);
 	}
+	if (awaitingReview.length > 0) reasons.push(`waiting for reviewer re-review: ${awaitingReview.join(", ")}.`);
 
 	const ci = assessCi(snapshot.checkRuns);
 	if (snapshot.behindBy > 0) reasons.unshift(`PR is ${snapshot.behindBy} commit(s) behind base; update branch first.`);
@@ -143,8 +150,8 @@ export function evaluateWatchExit(snapshot: WatchSnapshot, options: WatchExitOpt
 	if (ci === "none") reasons.push("CI has not reported checks; Smithers will poll again.");
 
 	const actionable = needsRebaseNow || unresolved > 0 || unanswered > 0 || needReRequest.length > 0 || ci === "red";
-	const exitOk = !actionable && ci === "green";
-	if (!actionable && ci === "green") reasons.push("CI is green; watch remains active to keep the PR mergeable while approval is pending.");
+	const exitOk = !actionable && awaitingReview.length === 0 && ci === "green";
+	if (!actionable && awaitingReview.length === 0 && ci === "green") reasons.push("CI is green; watch remains active to keep the PR mergeable while approval is pending.");
 	const disposition = exitOk ? "complete" : actionable ? "fix" : "wait";
 
 	return {
@@ -156,6 +163,7 @@ export function evaluateWatchExit(snapshot: WatchSnapshot, options: WatchExitOpt
 		ci,
 		reasons,
 		actionable,
+		reviewersWithChangesRequested: changesRequested,
 		rebaseRequired: needsRebaseNow,
 	};
 }

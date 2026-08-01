@@ -43,7 +43,19 @@ export function claimMainFailure(root: string, fingerprint: string, owner: strin
 		const current = JSON.parse(fs.readFileSync(file, "utf8")) as { fingerprint?: string; owner?: string };
 		if (current.fingerprint === fingerprint) return current.owner === owner;
 	} catch { /* no record */ }
-	const tmp = `${file}.tmp`;
-	fs.writeFileSync(tmp, JSON.stringify({ fingerprint, owner, state: "diagnosing" }) + "\n", { mode: 0o600 });
-	try { fs.renameSync(tmp, file); return true; } catch { return false; }
+	const lock = `${file}.${fingerprint}.lock`;
+	let acquired = false;
+	try {
+		fs.mkdirSync(lock, { recursive: false, mode: 0o700 });
+		acquired = true;
+		const claim = JSON.stringify({ fingerprint, owner, state: "diagnosing" }) + "\n";
+		fs.writeFileSync(path.join(lock, "claim.json"), claim, { mode: 0o600 });
+		fs.writeFileSync(`${file}.new`, claim, { mode: 0o600 });
+		fs.renameSync(`${file}.new`, file);
+		fs.rmSync(lock, { recursive: true, force: true });
+		return true;
+	} catch {
+		if (acquired) try { fs.rmSync(lock, { recursive: true, force: true }); } catch { /* preserve the failure */ }
+		return false;
+	}
 }

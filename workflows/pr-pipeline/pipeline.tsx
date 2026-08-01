@@ -37,6 +37,8 @@ import {
 	createSmithers,
 } from "smithers-orchestrator";
 import { z } from "zod";
+import * as fs from "node:fs";
+import * as path from "node:path";
 
 import { assertAdoptable, decideAdoptPush } from "./lib/adopt.ts";
 import { validateBrief } from "./lib/brief.ts";
@@ -418,6 +420,17 @@ function nowIso(): string {
 	return new Date().toISOString();
 }
 
+/** Publish durable wake inputs for the deck extension. The extension reads this
+ * record from the canonical Smithers workspace even without a TUI session. */
+function publishWakeProducer(input: { taskId: string; maxAdversarial?: boolean; reviewerSilent?: boolean; mainRed?: boolean; migrationBlocked?: boolean; brokerNoQuota?: boolean }): void {
+	if (input.taskId.length === 0) return;
+	const file = path.join(process.cwd(), "wake-producers.json");
+	fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+	const tmp = `${file}.tmp`;
+	fs.writeFileSync(tmp, `${JSON.stringify(input)}\n`, { mode: 0o600 });
+	fs.renameSync(tmp, file);
+}
+
 function seat(ref: ModelSeat): { ref: string; reasoning?: string } {
 	return typeof ref === "string" ? { ref } : { ref: ref.model, reasoning: ref.reasoning };
 }
@@ -429,6 +442,7 @@ function makeAgent(ref: ModelSeat, cwd: string, timeoutMs: number, reasoning = "
 	// Preserve the provider-native selector. If an older Smithers type does not
 	// yet include `max`, the compatibility cast is local and does not rewrite the
 	// value sent to Pi.
+
 	return new PiAgent({
 		provider,
 		model,
@@ -791,6 +805,7 @@ export default smithers((ctx) => {
 								id="local-review"
 								output={outputs.localReview}
 								agent={dryRun ? undefined : agents?.reviewer}
+								maxSchemaRetries={5}
 								retries={1}
 							>
 								{dryRun
@@ -1836,6 +1851,7 @@ prNumber: pr.prNumber,
 						id="fallout-watch"
 						output={outputs.fallout}
 						agent={dryRun ? undefined : agents?.fallout}
+						maxSchemaRetries={5}
 						retries={1}
 					>
 						{dryRun || deploy?.evidence.startsWith("PARK:")

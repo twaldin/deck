@@ -1,6 +1,7 @@
 import { execOrThrow, type ExecFn } from "./gh.ts";
 
-export async function runRebaseTests(exec: ExecFn, worktree: string, command = "bun test"): Promise<string> {
+export async function runRebaseTests(exec: ExecFn, worktree: string, command?: string): Promise<string> {
+	if (!command) throw new Error("A project test command is required for rebase validation.");
 	return execOrThrow(exec, ["sh", "-lc", command], { cwd: worktree });
 }
 

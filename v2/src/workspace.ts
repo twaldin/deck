@@ -48,14 +48,24 @@ export function discoverSmithersWorkspaces(home = deckV2Home()): string[] {
 			if (!entry.isDirectory() || entry.name === "node_modules" || entry.name === ".git") continue;
 			const child = path.join(directory, entry.name);
 			if (entry.name === ".smithers") {
-				found.add(path.dirname(child));
+				// Store one physical workspace per state directory. The live
+				// ~/.deck/workflows tree is commonly a symlink to this location.
+				try {
+					found.add(fs.realpathSync(path.dirname(child)));
+				} catch {
+					found.add(path.resolve(path.dirname(child)));
+				}
 				continue;
 			}
 			visit(child, depth + 1);
 		}
 	};
 	for (const root of roots) visit(path.resolve(root), 0);
-	found.add(smithersWorkspaceCwd(home));
+	try {
+		found.add(fs.realpathSync(smithersWorkspaceCwd(home)));
+	} catch {
+		found.add(path.resolve(smithersWorkspaceCwd(home)));
+	}
 	const workspaces = [...found].sort();
 	discoveryCache = { key, expiresAt: Date.now() + DISCOVERY_CACHE_MS, workspaces };
 	return [...workspaces];
