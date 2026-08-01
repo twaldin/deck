@@ -192,6 +192,8 @@ export function ask(
 		urgency?: string;
 		sessionId: string;
 		cwd: string;
+		/** Use a shared durable key when the decision is global across runs. */
+		idScope?: "session" | "global";
 		now?: number;
 	},
 ): AskEvent {
@@ -209,7 +211,9 @@ export function ask(
 		id:
 			supplied === undefined || supplied === ""
 				? `q-${randomSuffix()}`
-				: `${input.sessionId}:${supplied}`,
+				: input.idScope === "global"
+					? supplied
+					: `${input.sessionId}:${supplied}`, 
 		...(input.questionKind === undefined ? {} : { questionKind: input.questionKind }),
 		question,
 		...(input.context === undefined ? {} : { context: input.context }),
