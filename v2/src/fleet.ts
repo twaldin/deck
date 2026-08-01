@@ -306,27 +306,32 @@ export function normalizeStep(step: string | null | undefined): string | null {
 }
 
 /** Public read-only CLI only. Never the private db, never Gateway lifecycle. */
-const runsCollectionInFlight = new Map<
-	string,
-	Promise<{ runs: PsRun[]; health: SourceHealth }>
->();
+/** One cheap ps poll for the observer. It must not enrich runs with output calls. */
+function isPsRun(value: unknown): value is PsRun {
+	if (typeof value !== "object" || value === null) return false;
+	const row = value as Record<string, unknown>;
+	return typeof row.id === "string" &&
+		(row.workflow === undefined || typeof row.workflow === "string") &&
+		(row.status === undefined || typeof row.status === "string") &&
+		(row.state === undefined || typeof row.state === "string") &&
+		(row.step === undefined || typeof row.step === "string") &&
+		(row.rootDir === undefined || typeof row.rootDir === "string");
+}
 
-export async function collectRuns(
-	cwd: string,
-): Promise<{ runs: PsRun[]; health: SourceHealth }> {
-	// The key must include cwd: the fleet can display more than one workspace.
-	const existing = runsCollectionInFlight.get(cwd);
-	if (existing !== undefined) return existing;
-	const collection = collectRunsUnshared(cwd);
-	runsCollectionInFlight.set(cwd, collection);
+export async function collectPsSnapshot(cwd: string): Promise<{ runs: PsRun[]; health: SourceHealth }> {
+	if (!fs.existsSync(cwd)) return { runs: [], health: { name: "smithers", state: "skipped", detail: `no workspace at ${cwd} (run v2/install.sh)` } };
 	try {
-		return await collection;
-	} finally {
-		if (runsCollectionInFlight.get(cwd) === collection) runsCollectionInFlight.delete(cwd);
+		const { stdout } = await run("bunx", [SMITHERS_SPEC, "ps", "--json"], { cwd, timeout: 15_000, maxBuffer: 4_000_000 });
+		const parsed: unknown = JSON.parse(stdout);
+		const rows = Array.isArray(parsed) ? parsed : (parsed as { runs?: unknown })?.runs;
+		if (!Array.isArray(rows) || !rows.every(isPsRun)) throw new Error("invalid ps response");
+		return { runs: rows, health: { name: "smithers", state: "ok", detail: `${rows.length} run(s)` } };
+	} catch (error) {
+		return { runs: [], health: { name: "smithers", state: "missing", detail: error instanceof Error ? (error.message.split("\\n")[0] ?? "ps failed") : "ps failed" } };
 	}
 }
 
-async function collectRunsUnshared(
+async function collectRuns(
 	cwd: string,
 ): Promise<{ runs: PsRun[]; health: SourceHealth }> {
 	// A home whose workflows link is not installed yet has no runs to miss:
@@ -342,48 +347,50 @@ async function collectRunsUnshared(
 		};
 	}
 	try {
-		const { stdout } = await run("bunx", [SMITHERS_SPEC, "ps", "--json"], {
-			cwd,
-			timeout: 15_000,
-			maxBuffer: 4_000_000,
-		});
-		const parsed: unknown = JSON.parse(stdout);
-		const runs = Array.isArray(parsed)
-			? (parsed as PsRun[])
-			: ((parsed as { runs?: PsRun[] }).runs ?? []);
-		const enriched: PsRun[] = [];
-		for (const psRun of runs) {
+		const snapshot = await collectPsSnapshot(cwd);
+		const runs = snapshot.runs;
+		const enriched = await Promise.all(
+			runs.map(async (psRun) => {
 				const input = readShipInput(psRun.id);
-				let prNumber = psRun.prNumber ?? input.prNumber ?? undefined;
-				let landed = psRun.landed;
-				let pushPrNull = psRun.pushPrNull;
-
-				// Compute nodes do not write their return value to the detached log. Use
-				// the public output command as the durable fallback for runs without local
-				// input or ps evidence. This is also required for fresh runs after push.
-				const readOutput = async (node: string): Promise<unknown> => {
-					const output = await run(
-						"bunx",
-						[SMITHERS_SPEC, "output", psRun.id, node, "--json"],
-						{ cwd, timeout: 15_000, maxBuffer: 1_000_000 },
-					);
-					return JSON.parse(output.stdout);
-				};
-				if (prNumber === undefined) {
+				let prNumber = psRun.prNumber;
+				if (prNumber === undefined && input.prNumber === null) {
 					try {
-						const output = await readOutput("push-pr");
-						const record = Array.isArray(output) ? output.at(-1) : output;
-						const candidate =
-							typeof record === "object" && record !== null
-								? ((record as { prNumber?: unknown }).prNumber ??
-									(record as { pr_number?: unknown }).pr_number)
-								: undefined;
-						if (typeof candidate === "number" && Number.isInteger(candidate)) prNumber = candidate;
+						const output = await run(
+							"bunx",
+							[
+								SMITHERS_SPEC,
+								"output",
+								psRun.id,
+								"push-pr",
+								"--json",
+							],
+							{ cwd, timeout: 15_000, maxBuffer: 1_000_000 },
+						);
+						const record = JSON.parse(output.stdout) as {
+							pr_number?: unknown;
+							prNumber?: unknown;
+						};
+						const candidate = record.pr_number ?? record.prNumber;
+						if (
+							typeof candidate === "number" &&
+							Number.isInteger(candidate)
+						)
+							prNumber = candidate;
 					} catch {
 						// A run before push-pr has no PR number yet.
 					}
 				}
+				let landed = psRun.landed;
+				let pushPrNull = psRun.pushPrNull;
 				if (activityFor(psRun.step, psRun.status) === "failed") {
+					const readOutput = async (node: string): Promise<unknown> => {
+						const output = await run(
+							"bunx",
+							[SMITHERS_SPEC, "output", psRun.id, node, "--json"],
+							{ cwd, timeout: 15_000, maxBuffer: 1_000_000 },
+						);
+						return JSON.parse(output.stdout);
+					};
 					try {
 						const output = await readOutput("landing-poll");
 						const record = Array.isArray(output) ? output.at(-1) : output;
@@ -406,21 +413,45 @@ async function collectRunsUnshared(
 				const pendingNode = psRun.pendingApprovals?.find(
 					(approval) => approval.status === "requested",
 				)?.nodeId;
-				if (pendingNode !== undefined) {
-					enriched.push({ ...psRun, blockedNode: pendingNode, prNumber, landed, pushPrNull });
-					continue;
+				if (pendingNode !== undefined)
+					return { ...psRun, blockedNode: pendingNode, prNumber, landed, pushPrNull };
+				if (
+					psRun.status !== "waiting-approval" &&
+					psRun.state !== "waiting-approval"
+				)
+					return { ...psRun, prNumber, landed, pushPrNull };
+				try {
+					const inspected = await run(
+						"bunx",
+						[
+							SMITHERS_SPEC,
+							"inspect",
+							psRun.id,
+							"--format",
+							"json",
+						],
+						{ cwd, timeout: 15_000, maxBuffer: 4_000_000 },
+					);
+					const payload = JSON.parse(inspected.stdout) as {
+						runState?: { blocked?: { nodeId?: string } };
+					};
+					return {
+						...psRun,
+						blockedNode: payload.runState?.blocked?.nodeId,
+						prNumber,
+						landed,
+						pushPrNull,
+					};
+				} catch {
+					return { ...psRun, prNumber, landed, pushPrNull };
 				}
-				// `ps --json` already carries approval rows. Do not inspect every
-				// waiting run on each footer tick either.
-				enriched.push({ ...psRun, prNumber, landed, pushPrNull });
-		}
+			}),
+		);
 		return {
 			runs: enriched,
-			health: {
-				name: "smithers",
-				state: "ok",
-				detail: `${enriched.length} run(s)`,
-			},
+			health: snapshot.health.state === "ok"
+				? { ...snapshot.health, detail: `${enriched.length} run(s)` }
+				: snapshot.health,
 		};
 	} catch (error) {
 		return {
@@ -498,7 +529,7 @@ function realpath(target: string): string {
 }
 
 export async function buildFrame(
-	options: { workflowCwd?: string } = {},
+	options: { workflowCwd?: string; psRuns?: PsRun[] } = {},
 ): Promise<FleetFrame> {
 	const ids = deckOwnedTasks();
 	const [{ runs, health: runHealth }, { byWorktree, health: paneHealth }] =
@@ -512,7 +543,15 @@ export async function buildFrame(
 							detail: "no workflow dir configured",
 						} as SourceHealth,
 					})
-				: collectRuns(options.workflowCwd),
+				: options.psRuns === undefined
+					? collectRuns(options.workflowCwd)
+					: Promise.resolve({
+							runs: options.psRuns.map((psRun) => {
+							const pendingNode = psRun.pendingApprovals?.find((approval) => approval.status === "requested")?.nodeId;
+							return pendingNode === undefined ? psRun : { ...psRun, blockedNode: pendingNode };
+						}),
+						health: { name: "smithers", state: "ok", detail: `${options.psRuns.length} run(s)` } as SourceHealth,
+					}),
 			collectPanes(),
 		]);
 

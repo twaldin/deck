@@ -21,6 +21,7 @@ import { appendStatus, readStatus } from "../events";
 import {
 	buildFleetView,
 	buildFrame,
+	collectPsSnapshot,
 	type FleetTheme,
 	PLAIN_FLEET_THEME,
 	renderFrame,
@@ -30,6 +31,7 @@ import {
 import { projectFleet } from "../herdr";
 import { deckV2Home, stateFiles } from "../home";
 import { readMeta } from "../meta";
+import { observePsSnapshot } from "../observer";
 import { registerQuestions } from "../questions";
 import { enqueue, pending } from "../queue";
 import { startShip } from "../ship";
@@ -614,7 +616,9 @@ export default function deckV2(pi: any): void {
 
 	async function refreshStatusline(ctx: any): Promise<void> {
 		try {
-			const frame = await buildFrame(workflowCwd === undefined ? {} : { workflowCwd });
+			const snapshot = workflowCwd === undefined ? { runs: [] as never[] } : await collectPsSnapshot(workflowCwd);
+			observePsSnapshot(snapshot.runs);
+			const frame = await buildFrame(workflowCwd === undefined ? {} : { workflowCwd, psRuns: snapshot.runs });
 			lastFooterFrame = frame;
 			ctx.ui?.setStatus?.("deck-usage", undefined);
 			// Herdr projection rides the same cadence: every reconcile cycle mirrors
