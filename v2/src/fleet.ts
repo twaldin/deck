@@ -114,6 +114,8 @@ export type WorkflowRow = {
 	prTitle?: string | null;
 	/** Existing PR identity used to detect superseded failed runs. */
 	existingPr?: number | null;
+	/** GitHub repository from the durable ship input. */
+	repo?: string | null;
 	/** Workflow workspace used to avoid cross-repo PR identity collisions. */
 	rootDir?: string | null;
 	/** Landing/supersession evidence supplied by the workflow status payload. */
@@ -177,14 +179,17 @@ type PsRun = {
 };
 type ShipInput = {
 	existingPr?: unknown;
-	brief?: { title?: unknown };
+	repo?: unknown;
+	brief?: { title?: unknown; summary?: unknown };
 	ticket?: unknown;
 	worktree?: unknown;
 };
 
 type ShipIdentity = {
+	repo: string | null;
 	prNumber: number | null;
 	prTitle: string | null;
+	why: string | null;
 	ticket: string | null;
 	worktree: string | null;
 };
@@ -198,6 +203,7 @@ function readShipInput(runId: string): ShipIdentity {
 			),
 		) as ShipInput;
 		return {
+			repo: typeof input.repo === "string" ? input.repo : null,
 			prNumber:
 				typeof input.existingPr === "number" &&
 				Number.isInteger(input.existingPr)
@@ -207,12 +213,16 @@ function readShipInput(runId: string): ShipIdentity {
 				typeof input.brief?.title === "string"
 					? input.brief.title
 					: null,
+			why:
+				typeof input.brief?.summary === "string"
+					? input.brief.summary
+					: null,
 			ticket: typeof input.ticket === "string" ? input.ticket : null,
 			worktree:
 				typeof input.worktree === "string" ? input.worktree : null,
 		};
 	} catch {
-		return { prNumber: null, prTitle: null, ticket: null, worktree: null };
+		return { repo: null, prNumber: null, prTitle: null, why: null, ticket: null, worktree: null };
 	}
 }
 
@@ -700,9 +710,10 @@ export async function buildFrame(
 					: undefined) ??
 				taskByRun.get(psRun.id) ??
 				null,
-			ticket: input.ticket,
+				ticket: input.ticket,
 			prNumber: psRun.prNumber ?? input.prNumber,
 			prTitle: psRun.prTitle ?? input.prTitle,
+			repo: input.repo,
 			rootDir: psRun.rootDir === undefined ? null : realpath(psRun.rootDir),
 			existingPr: input.prNumber,
 			merged: psRun.merged,
@@ -751,14 +762,34 @@ export async function buildFrame(
 		runId: wf.runId, state: wf.state ?? wf.status, waitingFor: wf.waitingFor === "stamp" ? "stamp-question" : (wf.waitingFor ?? null),
 		failed: wf.activity === "failed",
 	}));
+	const stampQuestion = (wf: WorkflowRow): string => {
+		const input = readShipInput(wf.runId);
+		const repo = input.repo ?? "unknown-repo";
+		const pr = wf.prNumber ?? input.prNumber;
+		const url = pr === null ? "unknown URL" : `https://github.com/${repo}/pull/${pr}`;
+		const title = wf.prTitle ?? input.prTitle ?? "untitled PR";
+		const why = input.why ?? "No ship brief summary was recorded.";
+		const generations = liveRuns.filter((candidate) =>
+			candidate !== wf && candidate.repo === repo && candidate.prNumber === pr,
+		).length;
+		const history = generations === 0
+			? "No prior pipeline generations are recorded. Implementation, adversarial review rounds, fixes, and re-cuts are recorded in the pipeline run history."
+			: `${generations} prior live pipeline generation(s) are recorded. Implementation, adversarial review rounds, fixes, and re-cuts are recorded in the pipeline run history.`;
+		const review = wf.activity === "failed"
+			? "Review state: the pipeline reports a failure; human approvals, bot findings, and CI must be checked for outstanding work."
+			: wf.waitingFor === "stamp"
+				? "Review state: the pipeline is ready for stamp after its adversarial review and watch checks; verify human approvals by name, resolved or outstanding bot findings, and CI state in the PR."
+				: `Review state: ${wf.state ?? wf.status ?? "unknown"}; verify human approvals, bot findings, and CI in the PR.`;
+		return `Stamp PR #${pr ?? "unknown"}: ${title} · URL: ${url} · Why: ${why} · History: ${history} · ${review} · merge or no?`;
+	};
 	for (const wf of liveRuns.filter((row) => row.waitingFor === "stamp")) {
 		// Include the run so a later generation of the same PR gets a fresh
 		// decision, while every render of this parked run uses one stable id.
-		const id = `stamp:${wf.rootDir ?? "unknown-repo"}:${wf.prNumber ?? "unknown-pr"}:${wf.runId}`;
+		const id = `stamp:${wf.repo ?? "unknown-repo"}:${wf.prNumber ?? "unknown-pr"}:${wf.runId}`;
 		try {
 			const existing = readQuestionsForStamp(queueFile(), id);
 			if (!existing) {
-				ask(queueFile(), { id, questionKind: "stamp", question: `Stamp PR #${wf.prNumber ?? "unknown"}?`, context: wf.rootDir ?? undefined, options: ["Stamp", "Do not stamp"], recommendation: "Do not stamp until reviewed.", urgency: "high", sessionId: "deck-fleet", cwd: wf.rootDir ?? process.cwd() });
+				ask(queueFile(), { id, questionKind: "stamp", question: stampQuestion(wf), context: wf.repo ?? wf.rootDir ?? undefined, options: ["Stamp", "Do not stamp"], recommendation: "Do not stamp until reviewed.", urgency: "high", sessionId: "deck-fleet", cwd: wf.rootDir ?? process.cwd() });
 			}
 		} catch {
 			// Asking is best effort. A broken or unwritable queue must not break
