@@ -493,9 +493,16 @@ async function collectRunsOnce(
 					} catch { ciState = "unavailable"; }
 					try {
 						const review = await run("gh", ["pr", "view", String(prNumber), "--repo", input.repo, "--json", "reviewDecision,reviews"], { cwd, timeout: 15_000, maxBuffer: 1_000_000 });
-						const value = JSON.parse(review.stdout) as { reviewDecision?: string; reviews?: Array<{ author?: { login?: string }; state?: string }> };
-						const approvals = (value.reviews ?? []).filter((item) => item.state === "APPROVED").map((item) => item.author?.login ?? "unknown");
-						reviewState = `${value.reviewDecision ?? "REVIEW_REQUIRED"} · approvals: ${approvals.length ? approvals.join(", ") : "none"}`;
+						const value = JSON.parse(review.stdout) as { reviewDecision?: string; reviews?: Array<{ author?: { login?: string }; state?: string; submittedAt?: string }>; reviewThreads?: Array<{ isResolved?: boolean; comments?: Array<{ author?: { login?: string }; body?: string }> }> };
+						const latest = new Map<string, { state?: string }>();
+						for (const item of value.reviews ?? []) {
+							const login = item.author?.login ?? "unknown";
+							latest.set(login, item);
+						}
+						const approvals = [...latest.entries()].filter(([, item]) => item.state === "APPROVED").map(([login]) => login);
+						const unresolved = (value.reviewThreads ?? []).filter((thread) => thread.isResolved !== true).length;
+						const bots = [...latest.entries()].filter(([login, item]) => /\[bot\]|bot$/i.test(login) && item.state !== "APPROVED").map(([login]) => login);
+						reviewState = `${value.reviewDecision ?? "REVIEW_REQUIRED"} · approvals: ${approvals.length ? approvals.join(", ") : "none"} · unresolved threads: ${unresolved} · bot findings: ${bots.length ? bots.join(", ") : "none"}`;
 					} catch { reviewState = "unavailable"; }
 				}
 				let landed = psRun.landed;
@@ -814,7 +821,10 @@ export async function buildFrame(
 	} catch {
 		// an unreadable queue must not take the fleet view down with it
 	}
-	const liveRuns = workflows.filter((wf) => !isTerminalWorkflow(wf) && !wf.superseded);
+	const liveRuns = [...workflows.filter((wf) => !isTerminalWorkflow(wf) && !wf.superseded)].sort((a, b) => Date.parse(b.startedAt ?? "") - Date.parse(a.startedAt ?? "")).filter((wf, _, all) => {
+		const key = `${wf.repo ?? wf.rootDir ?? "unknown"}:${wf.prNumber ?? "none"}`;
+		return all.findIndex((candidate) => `${candidate.repo ?? candidate.rootDir ?? "unknown"}:${candidate.prNumber ?? "none"}` === key) === all.indexOf(wf);
+	});
 	const workflowIdentity = (wf: WorkflowRow): string =>
 		wf.repo ?? wf.rootDir ?? "unknown-repo";
 	const readOpenQuestions = (): ReturnType<typeof openQuestions> => {
@@ -865,7 +875,7 @@ export async function buildFrame(
 	for (const wf of liveRuns.filter((row) => row.waitingFor === "stamp")) {
 		// Include the run so a later generation of the same PR gets a fresh
 		// decision, while every render of this parked run uses one stable id.
-		const id = `stamp:${wf.runId}:${wf.step ?? "r0-stamp"}`;
+		const id = `stamp:${wf.repo ?? wf.rootDir ?? "unknown"}:${wf.prNumber ?? "unknown"}:stamp:${wf.runId}:${wf.step ?? "r0-stamp"}`;
 		try {
 			const existing = readQuestionsForStamp(queueFile(), id);
 			if (!existing) {
@@ -1604,10 +1614,11 @@ function factoryRows(frame: FleetFrame): Array<{ effort: EffortRow; workflow: Wo
 	});
 	const represented = new Set(rows.map(({ workflow }) => workflow.runId));
 	for (const task of frame.tasks) {
-		if (task.runState !== "running" || (task.runId !== null && represented.has(task.runId))) continue;
+		if (task.runState === "finished" || (task.runId !== null && represented.has(task.runId))) continue;
 		const runId = task.runId ?? `task:${task.taskId}`;
-		const workflow: WorkflowRow = { runId, workflow: null, status: task.lastVerb, state: task.runState, step: task.stage, taskId: task.taskId, ticket: task.ticket, prNumber: task.prNumber, prTitle: task.prTitle, phase: task.phase, waitingFor: task.waitingFor ?? null, activity: task.activity, startedAt: null };
-		rows.push({ effort: { identity: task.taskId, ticket: task.ticket ?? null, prNumber: task.prNumber ?? null, prTitle: task.prTitle ?? null, runId, state: task.runState, waitingFor: task.waitingFor ?? task.lastVerb ?? null, failed: task.lastVerb === "failed", workflow: task.kind, step: task.stage, runtimeMs: task.statusAgeMs, model: task.model ?? null }, workflow });
+		const wakeReason = task.waitingFor ?? task.lastNote ?? task.lastVerb;
+		const workflow: WorkflowRow = { runId, workflow: null, status: task.lastVerb, state: task.runState, step: task.stage, taskId: task.taskId, ticket: task.ticket, prNumber: task.prNumber, prTitle: task.prTitle, phase: task.phase, waitingFor: wakeReason as WaitingFor, activity: task.activity, startedAt: null };
+		rows.push({ effort: { identity: task.taskId, ticket: task.ticket ?? null, prNumber: task.prNumber ?? null, prTitle: task.prTitle ?? null, runId, state: task.runState, waitingFor: wakeReason, failed: task.lastVerb === "failed", workflow: task.kind, step: task.stage, runtimeMs: task.statusAgeMs, model: task.model ?? null }, workflow });
 	}
 	return rows;
 }
@@ -1701,7 +1712,8 @@ export function buildUsageText(roster: import("./usage-roster").UsageRoster | nu
 			const free = limit.amount?.remainingFraction ?? (limit.amount?.usedFraction === undefined ? null : 1 - limit.amount.usedFraction);
 			const value = free === null || !Number.isFinite(free) ? "?" : `${Math.round(Math.max(0, Math.min(1, free)) * 100)}% free`;
 			const tier = typeof limit.scope?.tier === "string" ? ` · tier ${limit.scope.tier}` : "";
-			const cooling = report.metadata?.cooling === true || report.metadata?.blocked === true || limit.status === "exhausted";
+			const blocks = (report as { blocks?: Array<{ blockedUntilMs?: number; providerKey?: string; blockScope?: string }> }).blocks ?? [];
+			const cooling = report.metadata?.cooling === true || report.metadata?.blocked === true || limit.status === "exhausted" || blocks.some((block) => typeof block.blockedUntilMs === "number" && block.blockedUntilMs > Date.now());
 			const temperature = cooling ? " · cooling" : " · warm";
 			lines.push(`  ${limit.window?.id ?? limit.label ?? limit.id ?? "limit"}${tier}: ${value}${temperature}`);
 		}

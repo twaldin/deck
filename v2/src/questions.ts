@@ -7,6 +7,7 @@
  * with `ask_captain`, and the captain clears the backlog with `/questions`.
  */
 import { Type } from "typebox";
+import { pipelineDir } from "./ship";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import {
@@ -264,24 +265,13 @@ export function registerQuestions(
 					if (written === undefined || written.trim() === "") continue;
 					text = written.trim();
 				}
-				if (resolve(ctx, entry, text, "answered")) {
-					answered += 1;
-					if (entry.questionKind === "stamp" && text === "Stamp") {
-						const rawId = entry.id.startsWith("deck-fleet:") ? entry.id.slice("deck-fleet:".length) : entry.id;
-						const parts = rawId.split(":");
-						const runId = rawId.startsWith("stamp:") ? parts[1] : undefined;
-						const node = rawId.startsWith("stamp:") ? parts.slice(2).join(":") || "r0-stamp" : "r0-stamp";
-						if (runId !== undefined) {
-							try {
-								await exec("smithers", ["approve", runId, "--node", node, "--by", "captain"], { cwd: entry.cwd, timeout: 15_000 });
-								await exec("smithers", ["up", "pipeline.tsx", "--run-id", runId, "--resume", "true"], { cwd: entry.cwd, timeout: 15_000 });
-								ctx.ui.notify(`Stamped ${runId} and resumed the pipeline.`, "info");
-							} catch (error) {
-								ctx.ui.notify(`Stamp recorded, but the pipeline did not resume: ${error instanceof Error ? error.message : "unknown error"}`, "error");
-							}
-						}
-					}
+				let applied = false;
+				if (entry.questionKind === "stamp" && text === "Stamp") {
+					applied = await approveStamp(ctx, entry);
+				} else {
+					applied = resolve(ctx, entry, text, "answered");
 				}
+				if (applied) answered += 1;
 			}
 
 			// Answers to questions this very session asked are deliverable right away.
@@ -292,6 +282,22 @@ export function registerQuestions(
 			);
 		},
 	});
+
+	const approveStamp = async (ctx: QuestionsContext, entry: Question): Promise<boolean> => {
+		const rawId = entry.id.startsWith("deck-fleet:") ? entry.id.slice("deck-fleet:".length) : entry.id;
+		const parts = rawId.split(":");
+		const runId = rawId.startsWith("stamp:") ? parts.at(-2) : undefined;
+		const node = rawId.startsWith("stamp:") ? parts.slice(2).join(":") || "r0-stamp" : "r0-stamp";
+		if (runId === undefined) return resolve(ctx, entry, "Stamp", "answered");
+		try {
+			await exec("smithers", ["approve", runId, "--node", node, "--by", "captain"], { cwd: pipelineDir(), timeout: 15_000 });
+			await exec("smithers", ["up", "pipeline.tsx", "--run-id", runId, "--resume", "true"], { cwd: pipelineDir(), timeout: 15_000 });
+			return resolve(ctx, entry, "Stamp", "answered");
+		} catch (error) {
+			ctx.ui.notify(`Stamp was not recorded; the pipeline remains actionable: ${error instanceof Error ? error.message : "unknown error"}`, "error");
+			return false;
+		}
+	};
 
 	/** Records one resolution, telling the captain when another session got there first. */
 	const resolve = (

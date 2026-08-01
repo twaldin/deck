@@ -705,7 +705,7 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 		}
 		const frame = workflowCwd === undefined
 			? await buildFrame({})
-			: await buildFrame({ workflowCwd });
+			: await buildFrame({ workflowCwd, psRuns: workflowSnapshot?.runs ?? [] });
 		lastFooterFrame = frame;
 		return frame;
 	}
