@@ -19,6 +19,17 @@ function profile(): string {
 	return process.env.DECK_HOME_PROFILE ?? "personal";
 }
 
+function gitRemote(value: string): string {
+	if (/^(?:https?|ssh|git|file):\/\//.test(value) || /^[^/]+@[^:]+:.+/.test(value) || value.startsWith("/") || value.startsWith("~")) return value;
+	return `https://github.com/${value}.git`;
+}
+
+function assertPersonalProfile(home: string): void {
+	if (profile() !== "personal") return;
+	const found = execFileSync("find", [home, "-type", "f", "(", "-name", "lindy-*", "-o", "-path", "*/secrets-map.md", ")", "-print", "-quit"], { encoding: "utf8" }).trim();
+	if (found) throw new Error("Lindy material in personal home");
+} 
+
 function cloneHome(): { root: string; repo: string } {
 	const root = mkdtempSync(path.join(tmpdir(), "deck-home-sync-"));
 	const repo = path.join(root, "repo");
@@ -26,7 +37,7 @@ function cloneHome(): { root: string; repo: string } {
 	try {
 		execFileSync("gh", ["repo", "clone", remote(), repo, "--", "--branch", branch], { stdio: "ignore" });
 	} catch {
-		execFileSync("git", ["clone", "--branch", branch, remote(), repo], { stdio: "ignore" });
+		execFileSync("git", ["clone", "--branch", branch, gitRemote(remote()), repo], { stdio: "ignore" });
 	}
 	return { root, repo };
 }
@@ -44,6 +55,7 @@ export function homeSyncStatus(home = deckV2Home()): string {
 	let clone: { root: string; repo: string } | undefined;
 	try {
 		clone = cloneHome();
+		assertPersonalProfile(home);
 		copyIdentity(home, clone.repo);
 		const result = runGit(clone.repo, ["status", "--short"]);
 		return result || "home repository: clean";
@@ -54,8 +66,9 @@ export function homeSyncPull(home = deckV2Home()): string {
 	const clone = cloneHome();
 	try {
 		fs.mkdirSync(home, { recursive: true });
-		const incoming = new Set(identityEntries(clone.repo));
-		for (const name of identityEntries(home)) if (!incoming.has(name)) fs.rmSync(path.join(home, name), { recursive: true, force: true });
+		// Pull is additive. A profile branch may be incomplete, and deleting local
+		// entries would turn a sync into silent data loss.
+		assertPersonalProfile(clone.repo);
 		copyIdentity(clone.repo, home);
 		return "home repository: pulled";
 	}
@@ -65,6 +78,7 @@ export function homeSyncPull(home = deckV2Home()): string {
 export function homeSyncPush(home = deckV2Home()): string {
 	const clone = cloneHome();
 	try {
+		assertPersonalProfile(home);
 		copyIdentity(home, clone.repo);
 		runGit(clone.repo, ["add", "-A"]);
 		const staged = runGit(clone.repo, ["diff", "--cached", "--name-only"]);

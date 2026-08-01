@@ -37,6 +37,15 @@ Run everything below **on the personal host**, as your own user.
 
    Keep updated later (works on an already-installed host): `~/dev/deck/scripts/update-home.sh`.
 
+Create the private home repository once from two reviewed profile directories. The
+second directory must be a filtered copy. The script refuses Lindy material in
+it and creates both branches. Do not create the personal branch by deleting
+files from the full branch after the fact.
+
+```sh
+~/dev/deck/scripts/bootstrap-home-repo.sh /path/to/profile-full /path/to/profile-personal
+```
+
 The private home repository is synced with plain git:
 
 ```sh
@@ -45,7 +54,8 @@ deck-v2 home pull
 deck-v2 home push
 ```
 
-The laptop uses the `profile/full` tree. Deckbox uses `profile/personal`. The
+Pull is additive. It never deletes local home entries. Review the profile before
+pushing it. The laptop uses the `profile/full` tree. Deckbox uses `profile/personal`. The
 personal profile is built without Lindy files or the Lindy project entry. Never
 copy the full profile to deckbox. Runtime state, Smithers runs, questions,
 credentials, and `.env` are machine-local and are never synced.

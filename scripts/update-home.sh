@@ -28,21 +28,23 @@ HOME_PROFILE="${DECK_HOME_PROFILE:-personal}"
 if command -v gh >/dev/null && gh auth status >/dev/null 2>&1; then
   TEMP_HOME="$(mktemp -d)"
   trap 'rm -rf "$TEMP_HOME"' EXIT
-  gh repo clone twaldin/deck-home "$TEMP_HOME/repo" -- --branch "profile/$HOME_PROFILE" >/dev/null
-  if [ "$HOME_PROFILE" = "personal" ]; then
-    if find "$TEMP_HOME/repo" -type f \( -name 'lindy-*' -o -path '*/secrets-map.md' \) -not -path '*/.git/*' -print -quit | grep -q .; then
+  HOME_REMOTE="${DECK_HOME_GIT_REMOTE:-twaldin/deck-home}"
+  if gh repo clone "$HOME_REMOTE" "$TEMP_HOME/repo" -- --branch "profile/$HOME_PROFILE" >/dev/null 2>&1; then
+    if [ "$HOME_PROFILE" = "personal" ] && find "$TEMP_HOME/repo" -type f \( -name 'lindy-*' -o -path '*/secrets-map.md' \) -not -path '*/.git/*' -print -quit | grep -q .; then
       echo "error: Lindy material in personal home" >&2
       exit 1
     fi
+    mkdir -p "$HOME_REPO"
+    # Preserve live state, data, contract, and local secrets. Copy only profile files.
+    for item in "$TEMP_HOME/repo"/* "$TEMP_HOME/repo"/.[!.]*; do
+      [ -e "$item" ] || continue
+      name="$(basename "$item")"
+      case "$name" in .git|.pi|.env|AGENTS.md|data|state|wt|logs|run|questions|broker) continue ;; esac
+      cp -a "$item" "$HOME_REPO/"
+    done
+  else
+    echo "home sync skipped: unable to clone $HOME_REMOTE profile/$HOME_PROFILE" >&2
   fi
-  mkdir -p "$HOME_REPO"
-  # Preserve live state, data, contract, and local secrets. Copy only profile files.
-  for item in "$TEMP_HOME/repo"/* "$TEMP_HOME/repo"/.[!.]*; do
-    [ -e "$item" ] || continue
-    name="$(basename "$item")"
-    case "$name" in .git|data|state|.env|AGENTS.md) continue ;; esac
-    cp -a "$item" "$HOME_REPO/"
-  done
 else
   echo "home sync skipped: gh auth is not configured" >&2
 fi
