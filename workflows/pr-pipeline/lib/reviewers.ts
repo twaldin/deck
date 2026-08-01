@@ -168,6 +168,7 @@ export interface ReviewerRequestResult {
 	skipped: boolean;
 	requested: string[];
 	verified: string[];
+	skippedNonCollaborators?: string[];
 	source: string;
 	at: string;
 }
