@@ -122,13 +122,15 @@ WORKSPACE_PACK="$WORKSPACE_ROOT/.smithers"
 mkdir -p "$WORKSPACE_ROOT"
 if [ -d "$WORKFLOWS_SOURCE/.smithers" ]; then
   mkdir -p "$WORKSPACE_PACK"
-  # Copy the complete static pack. The config, preload, toon, workflows and
-  # type assets are runtime inputs too; copying a hand-picked subset starts
-  # successfully but fails when Smithers loads a less common workflow.
-  cp -a "$WORKFLOWS_SOURCE/.smithers/." "$WORKSPACE_PACK/"
-  rm -rf "$WORKSPACE_PACK/node_modules" "$WORKSPACE_PACK/executions" "$WORKSPACE_PACK/runs" \
-    "$WORKSPACE_PACK/reports" "$WORKSPACE_PACK/sandboxes" "$WORKSPACE_PACK/logs" "$WORKSPACE_PACK/state" \
-    "$WORKSPACE_PACK/tmp" "$WORKSPACE_PACK/pg"
+  # Copy the complete static pack. Preserve machine-local runtime directories
+  # when an update refreshes the installed static files.
+  for item in "$WORKFLOWS_SOURCE/.smithers"/* "$WORKFLOWS_SOURCE/.smithers"/.[!.]*; do
+    [ -e "$item" ] || continue
+    name="$(basename "$item")"
+    case "$name" in node_modules|executions|runs|reports|sandboxes|logs|state|tmp|pg) continue ;; esac
+    rm -rf "$WORKSPACE_PACK/$name"
+    cp -a "$item" "$WORKSPACE_PACK/$name"
+  done
   # agents.ts is part of the pack but its model catalog is owned by the pipeline.
   # Keep that relative import valid in the isolated runtime workspace.
   mkdir -p "$WORKSPACE_ROOT/pr-pipeline/lib"

@@ -12,7 +12,7 @@ function runGit(cwd: string, args: string[]): string {
 }
 
 function remote(): string {
-	return process.env.DECK_HOME_GIT_REMOTE ?? process.env.DECK_HOME_REPO ?? "twaldin/deck-home";
+	return process.env.DECK_HOME_GIT_REMOTE ?? "twaldin/deck-home";
 }
 
 function profile(): string {
@@ -32,7 +32,7 @@ function cloneHome(): { root: string; repo: string } {
 }
 
 function identityEntries(home: string): string[] {
-	return fs.readdirSync(home).filter((name) => ![".git", ".env", "data", "state", "wt", "logs", "run", "questions", "broker"].includes(name));
+	return fs.readdirSync(home).filter((name) => ![".git", ".pi", ".env", "AGENTS.md", "data", "state", "wt", "logs", "run", "questions", "broker"].includes(name));
 }
 
 function copyIdentity(from: string, to: string): void {
@@ -52,7 +52,13 @@ export function homeSyncStatus(home = deckV2Home()): string {
 
 export function homeSyncPull(home = deckV2Home()): string {
 	const clone = cloneHome();
-	try { fs.mkdirSync(home, { recursive: true }); copyIdentity(clone.repo, home); return "home repository: pulled"; }
+	try {
+		fs.mkdirSync(home, { recursive: true });
+		const incoming = new Set(identityEntries(clone.repo));
+		for (const name of identityEntries(home)) if (!incoming.has(name)) fs.rmSync(path.join(home, name), { recursive: true, force: true });
+		copyIdentity(clone.repo, home);
+		return "home repository: pulled";
+	}
 	finally { rmSync(clone.root, { recursive: true, force: true }); }
 }
 
