@@ -1,0 +1,5 @@
+{
+  "extends": "../pr-pipeline/tsconfig.json",
+  "compilerOptions": { "noEmit": true },
+  "include": ["./**/*.ts", "./**/*.tsx", "../pr-pipeline/lib/**/*.ts"]
+}
