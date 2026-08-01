@@ -331,7 +331,7 @@ export async function collectPsSnapshot(cwd: string): Promise<{ runs: PsRun[]; h
 	}
 }
 
-async function collectRuns(
+export async function collectRuns(
 	cwd: string,
 ): Promise<{ runs: PsRun[]; health: SourceHealth }> {
 	// A home whose workflows link is not installed yet has no runs to miss:
