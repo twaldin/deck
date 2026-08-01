@@ -62,7 +62,7 @@ async function main(): Promise<void> {
 				credentialId: entry.id,
 				provider: routingProvider(entry.provider),
 				authProvider: entry.provider,
-				blocked: store.listCredentialBlocks([entry.id]).filter(block => block.blockedUntilMs > now).flatMap(block => normalizeBlockScopes(block.blockScope)), 
+				blocked: store.listCredentialBlocks([entry.id]).filter(block => block.blockedUntilMs > now).flatMap(block => normalizeBlockScopes(block.blockScope, entry.provider)), 
 			}));
 		},
 		quotaPreferences: () => [...models.list()].map(model => ({

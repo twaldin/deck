@@ -34,7 +34,7 @@ export function startValidatedGateway(
 					const modelParts = body.model?.split("/") ?? [];
 					if (body.model !== undefined && quotaAccounts !== undefined) {
 						const providerName = modelParts.at(-2);
-						const provider = providerName ?? (modelParts.at(-1)?.startsWith("claude-") ? "anthropic" : modelParts.at(-1)?.startsWith("grok-") ? "xai" : "openai");
+						const provider = providerName ?? (modelParts.at(-1)?.startsWith("claude-") ? "anthropic" : modelParts.at(-1)?.startsWith("grok-") ? "xai" : "openai-codex");
 						const requested: QuotaModel = { id: modelParts.at(-1) ?? body.model, provider };
 						try {
 							const routed = routeModel(requested, quotaAccounts(), options.quotaPreferences?.() ?? [], options.onQuotaEvent);
@@ -53,7 +53,7 @@ export function startValidatedGateway(
 					}
 					const modelId = modelParts.at(-1) ?? "";
 					const providerName = modelParts.at(-2);
-					const provider = routingProvider(providerName ?? (modelId.startsWith("claude-") ? "anthropic" : modelId.startsWith("grok-") ? "xai" : "openai"));
+					const provider = providerName === "openai-codex" ? "openai" : (providerName ?? (modelId.startsWith("claude-") ? "anthropic" : modelId.startsWith("grok-") ? "xai" : "openai"));
 					let effort = body.reasoning_effort ?? body.reasoning?.effort;
 					if (provider === "anthropic" && effort !== undefined && !effort.startsWith("budget:")) {
 						const budgets: Record<string, number> = { minimal: 1024, low: 4096, medium: 16384, high: 32768, xhigh: 65536, max: 65536 };
@@ -76,17 +76,18 @@ export function startValidatedGateway(
 			const response = await fetch(target, new Request(request, { headers: request.headers }));
 			if (response.status === 429 && quotaAccounts !== undefined && requestBody?.model !== undefined) {
 				const parts = requestBody.model.split("/");
-				const provider = routingProvider(parts.at(-2) ?? (parts.at(-1)?.startsWith("claude-") ? "anthropic" : "openai"));
+				const provider = routingProvider(parts.at(-2) ?? (parts.at(-1)?.startsWith("claude-") ? "anthropic" : parts.at(-1)?.startsWith("grok-") ? "xai" : "openai-codex"));
 				const requested: QuotaModel = { id: parts.at(-1) ?? requestBody.model, provider };
+				const retryAfter = response.headers.get("retry-after");
+				const retryAfterMs = retryAfter !== null && /^\\d+$/.test(retryAfter) ? Number(retryAfter) * 1000 : undefined;
 				try {
 					routeModel(requested, quotaAccounts(), [], options.onQuotaEvent);
 				} catch (error) {
-					if (error instanceof NoQuotaError) {
-						const retryAfter = response.headers.get("retry-after");
-						const retryAfterMs = retryAfter !== null && /^\\d+$/.test(retryAfter) ? Number(retryAfter) * 1000 : undefined;
-						return Response.json({ error: { code: error.code, type: "quota_exhausted", message: error.message, provider: error.provider, retry_after_ms: retryAfterMs ?? null } }, { status: 503 });
-					}
+					if (!(error instanceof NoQuotaError)) throw error;
 				}
+				// A provider 429 is a quota signal. Do not expose it as a retryable
+				// gateway response while AuthStorage records the cooling block.
+				return Response.json({ error: { code: "NO_QUOTA", type: "quota_exhausted", message: `no quota is available for provider ${requested.provider}`, provider: requested.provider, retry_after_ms: retryAfterMs ?? null } }, { status: 503 });
 			}
 			return response;
 		},

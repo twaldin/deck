@@ -211,7 +211,7 @@ export function validateProfiles(parsed: unknown, source: string): ProjectProfil
 				if (seat !== undefined && typeof seat === "object") {
 					const value = seat as Record<string, unknown>;
 					if (typeof value.model !== "string" || value.model.length === 0) throw new Error(`${where} (${p.id}): models.${role}.model must be a non-empty string`);
-					if (value.reasoning !== undefined && (typeof value.reasoning !== "string" || value.reasoning.length === 0)) throw new Error(`${where} (${p.id}): models.${role}.reasoning must be a non-empty string`);
+					if (value.reasoning !== undefined && (typeof value.reasoning !== "string" || !["minimal", "low", "medium", "high", "xhigh", "max"].includes(value.reasoning))) throw new Error(`${where} (${p.id}): models.${role}.reasoning must be one of minimal, low, medium, high, xhigh, max`);
 				}
 			}
 			if (m.familyOpposition !== undefined && typeof m.familyOpposition !== "boolean") {
