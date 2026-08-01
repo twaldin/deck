@@ -1,7 +1,7 @@
 /**
  * The ONE smithers CLI pin for deck code.
  *
- * Must match the workspace pins in workflows/.smithers/package.json and
+ * Must match the source workspace pin in workflows/.smithers/package.json and
  * workflows/pr-pipeline/package.json (asserted by test/smithers-pin.test.ts).
  * bunx from a directory without a package.json silently resolves a NEWER
  * cached CLI (observed: 0.31.0 vs 0.30.0), so every shell-out pins explicitly.

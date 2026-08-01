@@ -118,12 +118,18 @@ printf 'installed smithers shim (%s) at %s\n' "$SMITHERS_VERSION" "$SMITHERS_SHI
 # workspace's static pack files; db, executions and logs are created here.
 WORKFLOWS_SOURCE="${WORKFLOWS_SOURCE:-$(cd "$REPO_V2/../workflows" && pwd)}"
 WORKSPACE_ROOT="$DECK_V2_HOME_DIR/state/smithers"
+WORKSPACE_PACK="$WORKSPACE_ROOT/.smithers"
 mkdir -p "$WORKSPACE_ROOT"
 if [ -d "$WORKFLOWS_SOURCE/.smithers" ]; then
+  mkdir -p "$WORKSPACE_PACK"
   for item in package.json bun.lock agents.ts agents ui; do
     [ -e "$WORKFLOWS_SOURCE/.smithers/$item" ] || continue
-    [ -e "$WORKSPACE_ROOT/$item" ] || cp -a "$WORKFLOWS_SOURCE/.smithers/$item" "$WORKSPACE_ROOT/$item"
+    [ -e "$WORKSPACE_PACK/$item" ] || cp -a "$WORKFLOWS_SOURCE/.smithers/$item" "$WORKSPACE_PACK/$item"
   done
+  # agents.ts is part of the pack but its model catalog is owned by the pipeline.
+  # Keep that relative import valid in the isolated runtime workspace.
+  mkdir -p "$WORKSPACE_ROOT/pr-pipeline/lib"
+  [ -e "$WORKSPACE_ROOT/pr-pipeline/lib/models.ts" ] || cp -a "$WORKFLOWS_SOURCE/pr-pipeline/lib/models.ts" "$WORKSPACE_ROOT/pr-pipeline/lib/models.ts"
 fi
 # Keep the old link name only for static compatibility. It is never the runtime
 # workspace and no state is written through it.
@@ -132,6 +138,6 @@ if [ -L "$WORKFLOWS_LINK" ] || [ ! -e "$WORKFLOWS_LINK" ]; then
   mkdir -p "$(dirname "$WORKFLOWS_LINK")"
   ln -sfn "$WORKFLOWS_SOURCE" "$WORKFLOWS_LINK"
 fi
-if [ -f "$WORKSPACE_ROOT/package.json" ] && [ ! -d "$WORKSPACE_ROOT/node_modules" ]; then
-  bun install --cwd "$WORKSPACE_ROOT"
+if [ -f "$WORKSPACE_PACK/package.json" ] && [ ! -d "$WORKSPACE_PACK/node_modules" ]; then
+  bun install --cwd "$WORKSPACE_PACK"
 fi

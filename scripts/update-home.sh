@@ -12,8 +12,6 @@ if [ ! -d "$REPO/.git" ]; then
 fi
 
 cd "$REPO"
-command -v gh >/dev/null || { echo "error: gh is required for private home sync; run gh auth login" >&2; exit 1; }
-gh auth status >/dev/null 2>&1 || { echo "error: run gh auth login before updating" >&2; exit 1; }
 git fetch origin "$BRANCH"
 git checkout -B "$BRANCH" "origin/$BRANCH"
 git reset --hard "origin/$BRANCH"
@@ -23,16 +21,29 @@ bun install --cwd "$REPO/broker"
 bun install --cwd "$REPO/cli"
 bash "$REPO/v2/install.sh"
 
-# Sync the machine's filtered home profile. The home repo itself must expose
-# profile/full or profile/personal; no full tree is copied to a personal host.
+# Sync the machine's filtered home profile into the plain operator directory.
+# Clone to a temporary directory. Never turn ~/.deck into a git checkout.
 HOME_REPO="${DECK_HOME_REPO:-$HOME/.deck}"
 HOME_PROFILE="${DECK_HOME_PROFILE:-personal}"
-if [ ! -d "$HOME_REPO/.git" ]; then
-  gh repo clone twaldin/deck-home "$HOME_REPO" -- --branch "profile/$HOME_PROFILE"
-else
-  git -C "$HOME_REPO" pull --ff-only
+command -v gh >/dev/null || { echo "error: gh is required for home sync; run gh auth login" >&2; exit 1; }
+TEMP_HOME="$(mktemp -d)"
+trap 'rm -rf "$TEMP_HOME"' EXIT
+gh repo clone twaldin/deck-home "$TEMP_HOME/repo" -- --branch "profile/$HOME_PROFILE" >/dev/null
+if [ "$HOME_PROFILE" = "personal" ]; then
+  if find "$TEMP_HOME/repo" -type f \( -name 'lindy-*' -o -path '*/secrets-map.md' \) -not -path '*/.git/*' -print -quit | grep -q .; then
+    echo "error: Lindy material in personal home" >&2
+    exit 1
+  fi
 fi
-find "$HOME_REPO" -type f -name 'lindy-*' -o -path '*/secrets-map.md' | grep -q . && { echo "error: Lindy material in personal home" >&2; exit 1; } || true
+mkdir -p "$HOME_REPO"
+# Preserve live state, data, contract, and local secrets. Copy only regular
+# profile files and directories from the temporary checkout.
+for item in "$TEMP_HOME/repo"/* "$TEMP_HOME/repo"/.[!.]*; do
+  [ -e "$item" ] || continue
+  name="$(basename "$item")"
+  case "$name" in .git|data|state|.env|AGENTS.md) continue ;; esac
+  cp -a "$item" "$HOME_REPO/"
+done
 
 # Seed the operator contract on first update. Never overwrite captain edits.
 # Use the repository shim directly because ~/.local/bin may not be on PATH yet.

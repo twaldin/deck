@@ -81,13 +81,15 @@ export function warnOnShadowWorkspace(
 	warnedFingerprints = new Set<string>(),
 ): string[] {
 	const shadow = path.join(home, "workflows", "pr-pipeline", ".smithers");
-	if (!fs.existsSync(shadow)) return [];
-	const ids = shadowRunIds(shadow);
+	const legacy = path.join(home, "workflows", ".smithers");
+	const workspaces = [shadow, legacy].filter((workspace) => fs.existsSync(workspace));
+	if (workspaces.length === 0) return [];
+	const ids = workspaces.flatMap(shadowRunIds);
 	if (ids.length > 0) {
-		const fingerprint = `${shadow}\0${ids.join("\0")}`;
+		const fingerprint = `${workspaces.join("\0")}\0${ids.join("\0")}`;
 		if (!warnedFingerprints.has(fingerprint)) {
 			warnedFingerprints.add(fingerprint);
-			log(`[deck-v2] WARNING: shadow Smithers workspace has orphaned runs: ${ids.join(", ")}. Workspace: ${shadow}. Finish or migrate them manually; nothing was deleted.`);
+			log(`[deck-v2] WARNING: legacy Smithers workspace has orphaned runs: ${ids.join(", ")}. Workspaces: ${workspaces.join(", ")}. Finish or migrate them manually; nothing was deleted.`);
 		}
 	}
 	return ids;
