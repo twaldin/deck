@@ -105,7 +105,7 @@ export function watchFixPrompt(args: {
 		"   Resolve conflicts, run relevant tests, then force-with-lease push the existing PR branch. Do not merge.",
 		"2. Every unresolved review thread: fix the code if warranted (plain commits on THIS branch),",
 		"   reply in the thread, and resolve it (or reply why not, and resolve after agreement).",
-		"3. Every unanswered actionable comment: answer it via the gh CLI. Name or quote each finding in the response; never post a generic status update while a finding is open. Ignore Linear linkbacks and Graphite-generated banners.",
+		"3. Every unanswered actionable comment: answer it via the gh CLI. Name or quote each finding in the response; never post a generic status update while a finding is open. Ignore only exact Linear/Graphite automation banners from their [bot] accounts; treat every human comment and unknown bot comment as actionable.",
 		"4. Hard-red CI: flake -> rerun; trivial/correctness fix -> commit + push. Product/decision-class",
 		"   failures are NOT yours - describe them in the summary instead of guessing.",
 		"5. If you pushed changes, re-request every prior human reviewer:",

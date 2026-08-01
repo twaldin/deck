@@ -26,6 +26,7 @@ import {
 	evaluateWatchExit,
 	reviewersNeedingReRequest,
 	unansweredComments,
+	isReviewFinding,
 } from "../lib/watch.ts";
 import type { MigrationEvidenceEntry, WatchSnapshot } from "../lib/types.ts";
 
@@ -239,7 +240,7 @@ describe("evaluateWatchExit", () => {
 		expect(verdict.unresolvedThreads).toBe(1);
 	});
 
-	test("noise comments do not create watch work", () => {
+	test("known automation banners do not create watch work", () => {
 		const verdict = evaluateWatchExit(snapshot({
 			comments: [{ author: "graphite[bot]", isBot: true, createdAt: "2026-07-27T11:00:00Z", body: "Graphite banner: generated link" }],
 		}), { selfLogins: ["twaldin"] });
@@ -247,10 +248,32 @@ describe("evaluateWatchExit", () => {
 		expect(verdict.unansweredComments).toBe(0);
 	});
 
+	test("substantive human and unknown bot comments stay actionable", () => {
+		expect(isReviewFinding({ author: "reviewer", isBot: false, createdAt: "", body: "linear scan breaks link handling" })).toBe(true);
+		expect(isReviewFinding({ author: "claude[bot]", isBot: true, createdAt: "", body: "Please fix the linear link handling" })).toBe(true);
+	});
+
+	test("known bot banner requires both author and exact banner shape", () => {
+		expect(isReviewFinding({ author: "graphite[bot]", isBot: true, createdAt: "", body: "Graphite banner: generated link" })).toBe(false);
+		expect(isReviewFinding({ author: "graphite[bot]", isBot: true, createdAt: "", body: "the linear scan here breaks the link handling" })).toBe(true);
+		expect(isReviewFinding({ author: "graphite", isBot: true, createdAt: "", body: "Graphite banner: generated link" })).toBe(true);
+	});
+
 	test("behind count wins over green checks and is the first reaction", () => {
 		const verdict = evaluateWatchExit(snapshot({ mergeStateStatus: "BLOCKED", behindBy: 21 }), { selfLogins: ["twaldin"] });
 		expect(verdict.disposition).toBe("fix");
 		expect(verdict.reasons[0]).toContain("21 commit(s) behind");
+	});
+
+	test("behind and conflicting or dirty states all require rebase", () => {
+		for (const state of [
+			snapshot({ mergeable: "CONFLICTING", behindBy: 2 }),
+			snapshot({ mergeStateStatus: "DIRTY", behindBy: 2 }),
+		]) {
+			const verdict = evaluateWatchExit(state, { selfLogins: ["twaldin"] });
+			expect(verdict.actionable).toBe(true);
+			expect(verdict.disposition).toBe("fix");
+		}
 	});
 
 	test("unanswered comment newer than our last activity blocks exit", () => {

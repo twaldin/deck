@@ -62,19 +62,16 @@ export function reviewersNeedingReRequest(
 }
 
 /**
- * Actionable comments not yet answered: comments authored by others that are
- * newer than OUR latest activity (comment or push). "Answered" is
- * machine-approximated as: we commented (or pushed) after their comment.
- *
- * Bot comments COUNT deliberately: the watch loop owns ALL feedback including
- * the Claude bot (SOP stage 4). Cost: an occasional "LGTM"-style comment
- * needs one reply before exit; that is cheaper than the failure class this
- * gate exists for ("leaving some random gh comment unaddressed").
+ * Return false only for known automation banners. Human comments and unknown
+ * bot comments remain actionable, even when their wording contains banner
+ * keywords.
  */
 export function isReviewFinding(comment: CommentActivity): boolean {
-	const body = (comment.body ?? "").trim().toLowerCase();
-	if (body === "") return true;
-	return !/(linear|graphite).*(link|banner)|graphite.*generated|linear.*generated/.test(body);
+	if (!comment.isBot) return true;
+	const author = comment.author.trim().toLowerCase();
+	const body = (comment.body ?? "").trim();
+	if (!/^(?:graphite|linear)\[bot\]$/.test(author)) return true;
+	return !/^(?:graphite|linear)\s+(?:banner|linkback):\s+generated\s+(?:link|banner)\.?$/i.test(body);
 }
 
 export function unansweredComments(

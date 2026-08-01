@@ -221,8 +221,19 @@ export async function fetchWatchSnapshot(ctx: GhContext, prNumber: number, selfL
 
 	const headSha = str(pr.headRefOid);
 	const baseSha = str(pr.baseRefOid);
-	const compareOut = await execOrThrow(exec, [ctx.gh, "api", `repos/${ctx.repo}/compare/${baseSha}...${headSha}`]);
-	const behindBy = Number((JSON.parse(compareOut) as Record<string, unknown>).behind_by ?? 0);
+	let behindBy = 0;
+	if (baseSha !== "" && headSha !== "") {
+		try {
+			const compareOut = await execOrThrow(exec, [ctx.gh, "api", `repos/${ctx.repo}/compare/${baseSha}...${headSha}`]);
+			const parsedCompare = JSON.parse(compareOut) as Record<string, unknown>;
+			const parsedBehindBy = Number(parsedCompare.behind_by ?? 0);
+			if (Number.isFinite(parsedBehindBy)) behindBy = parsedBehindBy;
+		} catch {
+			// Compare is supplementary. A transient 404 during a force-push must
+			// not fail the entire watch poll; mergeability still comes from GraphQL.
+			behindBy = 0;
+		}
+	}
 	const checksOut = await execOrThrow(exec, [
 		ctx.gh, "api", `repos/${ctx.repo}/commits/${headSha}/check-runs?per_page=100`,
 	]);
