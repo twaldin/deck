@@ -81,6 +81,7 @@ import {
 import { evaluateReadyForStamp } from "./lib/ready.ts";
 import { executeReviewerRequest } from "./lib/reviewers.ts";
 import { assessCi, evaluateWatchExit } from "./lib/watch.ts";
+import { rebaseAndPush } from "./lib/rebase.ts";
 import type { Brief, MigrationEvidenceEntry } from "./lib/types.ts";
 
 // ---------------------------------------------------------------------------
@@ -510,7 +511,7 @@ export default smithers((ctx) => {
 
 	const policy = buildModelPolicy(profile, profileRepoMismatch, input.models);
 
-	const ghCtx = { gh: github.gh, repo: input.repo };
+	const ghCtx = { gh: github.gh, repo: input.repo, exec: bunExec };
 	const project = input.profile ?? input.repo.split("/").at(-1);
 
 	// -- persisted state reads ------------------------------------------------
@@ -1335,6 +1336,11 @@ export default smithers((ctx) => {
 																	reRequested: ["dry-reviewer"],
 																	summary: "dry-run: feedback addressed",
 																})
+															: latestWatch.reasons.some((reason) => reason.includes("needs rebase"))
+															? async () => {
+																	const actions = await rebaseAndPush(bunExec, { git: github.git, worktree: input.worktree, branch: input.branch, baseBranch });
+																	return { round: k, afterPoll: latestWatch.poll, actions, pushed: true, reRequested: [], summary: "Rebased, tested, and pushed the branch." };
+																}
 															: watchFixPrompt({
 																	worktree: input.worktree,
 																	branch: input.branch,

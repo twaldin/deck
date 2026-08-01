@@ -115,9 +115,22 @@ export function warnOnShadowWorkspace(
 }
 
 function isTerminalExecution(executions: string, id: string): boolean {
-	// Read only canonical run state records. Attempt payloads and historical
-	// events can contain words such as RunFailed while their run is active.
+	// Smithers 0.30 stores the authoritative terminal transition in the
+	// append-only stream. State files are optional and are not present in many
+	// real execution directories.
 	const runDir = path.join(executions, id);
+	const stream = path.join(runDir, "logs", "stream.ndjson");
+	try {
+		const lines = fs.readFileSync(stream, "utf8").split("\n").filter(Boolean);
+		for (const line of lines.reverse()) {
+			const event = JSON.parse(line) as Record<string, unknown>;
+			const text = JSON.stringify(event).toLowerCase();
+			if (/run(?:completed|succeeded|failed|cancelled)|status[^a-z]*(?:completed|succeeded|failed|cancelled)/.test(text)) return true;
+			if (/run(?:started|resumed|paused)/.test(text)) break;
+		}
+	} catch {
+		// Fall through to optional state files.
+	}
 	for (const name of ["run.json", "state.json", "status.json"]) {
 		try {
 			const value: unknown = JSON.parse(fs.readFileSync(path.join(runDir, name), "utf8"));

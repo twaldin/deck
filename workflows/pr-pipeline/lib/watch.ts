@@ -18,6 +18,10 @@ import type {
 } from "./types.ts";
 
 /** Map raw check runs to a single CI assessment. */
+export function needsRebase(snapshot: Pick<WatchSnapshot, "behindBy" | "mergeable" | "mergeStateStatus">): boolean {
+	return snapshot.behindBy > 0 || snapshot.mergeable === "CONFLICTING" || ["DIRTY", "BEHIND"].includes(snapshot.mergeStateStatus.toUpperCase());
+}
+
 export function assessCi(checkRuns: CheckRun[]): CiState {
 	if (checkRuns.length === 0) return "none";
 	let pending = false;
@@ -55,13 +59,9 @@ export function reviewersNeedingReRequest(
 		// A review decision is authoritative even when it predates the last push.
 		// CHANGES_REQUESTED must enter the response loop immediately; approval
 		// polling here was the cause of PRs being parked while blockers remained.
-		if (reviewer.lastReviewState === "CHANGES_REQUESTED") {
-			// CHANGES_REQUESTED is a blocker until a later review proves that this
-			// reviewer accepted the pushed head. A requested reviewer is not proof:
-			// GitHub can retain the request after an old decision, and the request
-			// can also be present while the current-head decision is unresolved.
-			// Keep the distinction explicit so callers do not mistake a stale request
-			// for a successful re-request.
+		if (reviewer.lastReviewState === "CHANGES_REQUESTED" && !requested.has(login)) {
+			// Once the request is visible, the fix worker has completed its one
+			// re-request. Wait for the reviewer instead of starting another fix.
 			out.push(reviewer.login);
 			continue;
 		}
@@ -115,11 +115,8 @@ export function evaluateWatchExit(snapshot: WatchSnapshot, options: WatchExitOpt
 	const reasons: string[] = [];
 	// behindBy is authoritative. GitHub can report BLOCKED while checks are green;
 	// that state must rebase before any review or approval work.
-	const needsRebase =
-		snapshot.behindBy > 0 ||
-		snapshot.mergeable === "CONFLICTING" ||
-		["DIRTY", "BEHIND"].includes(snapshot.mergeStateStatus.toUpperCase());
-	if (needsRebase) reasons.push("PR is out of date or not mergeable; needs rebase onto its base branch.");
+	const needsRebaseNow = needsRebase(snapshot);
+	if (needsRebaseNow) reasons.push("PR is out of date or not mergeable; needs rebase onto its base branch.");
 	const unresolved = snapshot.threads.filter((thread) => !thread.isResolved).length;
 	if (unresolved > 0) reasons.push(`${unresolved} unresolved review thread(s).`);
 
@@ -144,7 +141,7 @@ export function evaluateWatchExit(snapshot: WatchSnapshot, options: WatchExitOpt
 	if (ci === "will-be-green") reasons.push("CI is still running; Smithers will poll again.");
 	if (ci === "none") reasons.push("CI has not reported checks; Smithers will poll again.");
 
-	const actionable = needsRebase || unresolved > 0 || unanswered > 0 || needReRequest.length > 0 || ci === "red";
+	const actionable = needsRebaseNow || unresolved > 0 || unanswered > 0 || needReRequest.length > 0 || ci === "red";
 	const exitOk = !actionable && ci === "green";
 	if (!actionable && ci === "green") reasons.push("CI is green; watch remains active to keep the PR mergeable while approval is pending.");
 	const disposition = exitOk ? "complete" : actionable ? "fix" : "wait";
