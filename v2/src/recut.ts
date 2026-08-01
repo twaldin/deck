@@ -81,11 +81,37 @@ function inputFor(dir: string, runId: string): RecutInput | null {
 	try { return JSON.parse(fs.readFileSync(path.join(dir, `${runId}.input.json`), "utf8")) as RecutInput; } catch { return null; }
 }
 
+function pendingCancelsPath(dir: string): string { return path.join(dir, ".recut-cancels.json"); }
+function readPendingCancels(dir: string): string[] {
+	try {
+		const value = JSON.parse(fs.readFileSync(pendingCancelsPath(dir), "utf8"));
+		return Array.isArray(value) ? value.filter((id): id is string => typeof id === "string") : [];
+	} catch { return []; }
+}
+function writePendingCancels(dir: string, ids: Iterable<string>): void {
+	const unique = [...new Set(ids)];
+	if (unique.length === 0) {
+		try { fs.unlinkSync(pendingCancelsPath(dir)); } catch { /* already absent */ }
+		return;
+	}
+	fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+	const target = pendingCancelsPath(dir);
+	fs.writeFileSync(`${target}.tmp`, `${JSON.stringify(unique)}\n`, { mode: 0o600 });
+	fs.renameSync(`${target}.tmp`, target);
+}
+
 /** Re-cut stale live pipeline runs once for each pipeline content hash. */
 export async function recutChangedRuns(options: RecutOptions): Promise<RecutResult[]> {
 	const current = pipelineHash(options.pipelineDir);
 	const recordDir = options.recordDir ?? path.join(stateDir(), "ship");
 	const ledger = readLedger(recordDir);
+	const pendingCancels = new Set(readPendingCancels(recordDir));
+	// Cancellation can race a cold `bunx up`: retain failed cancellations and
+	// retry them on the next poll instead of losing the only reference to a live run.
+	for (const runId of [...pendingCancels]) {
+		try { await options.cancel(runId); pendingCancels.delete(runId); } catch { /* retry next pass */ }
+	}
+	writePendingCancels(recordDir, pendingCancels);
 	const used = new Set(options.runs.map((run) => run.id));
 	const results: RecutResult[] = [];
 	for (const run of options.runs) {
@@ -118,18 +144,24 @@ export async function recutChangedRuns(options: RecutOptions): Promise<RecutResu
 				},
 			};
 			await options.start(newRunId, nextInput);
-			if (options.verifyStart !== undefined && !(await options.verifyStart(newRunId))) {
+			// Persist the replacement as soon as start returns. Both the old-run
+			// cancellation and startup verification can fail or race registration.
+			// The record prevents a second replacement from being launched, and the
+			// durable cancel queue gives a later poll another chance to stop either run.
+			fs.writeFileSync(path.join(recordDir, `${newRunId}.input.json`), `${JSON.stringify(nextInput, null, 2)}\n`, { mode: 0o600 });
+			ledger[run.id] = current;
+			writeLedger(recordDir, ledger);
+			const evidence = { oldRunId: run.id, newRunId, pipelineHash: current, mode };
+			fs.appendFileSync(path.join(recordDir, "recuts.jsonl"), `${JSON.stringify(evidence)}\n`, { mode: 0o600 });
+			let verified = true;
+			if (options.verifyStart !== undefined) verified = await options.verifyStart(newRunId);
+			if (!verified) {
 				used.delete(newRunId);
-				await options.cancel(newRunId);
+				try { await options.cancel(newRunId); } catch { pendingCancels.add(newRunId); writePendingCancels(recordDir, pendingCancels); }
 				continue;
 			}
-			await options.cancel(run.id);
-			fs.writeFileSync(path.join(recordDir, `${newRunId}.input.json`), `${JSON.stringify(nextInput, null, 2)}\n`, { mode: 0o600 });
-		ledger[run.id] = current;
-		writeLedger(recordDir, ledger);
-		const evidence = { oldRunId: run.id, newRunId, pipelineHash: current, mode };
-		fs.appendFileSync(path.join(recordDir, "recuts.jsonl"), `${JSON.stringify(evidence)}\n`, { mode: 0o600 });
-		if (typeof input.ticket === "string") appendStatus(input.ticket, "working", `pipeline drift recut: ${run.id} -> ${newRunId}`);
+			try { await options.cancel(run.id); } catch { pendingCancels.add(run.id); writePendingCancels(recordDir, pendingCancels); }
+			if (typeof input.ticket === "string") appendStatus(input.ticket, "working", `pipeline drift recut: ${run.id} -> ${newRunId}`);
 			results.push({ oldRunId: run.id, newRunId, mode });
 		} catch {
 			// One stale run must not prevent later runs from being reconciled.

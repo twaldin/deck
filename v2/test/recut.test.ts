@@ -77,6 +77,35 @@ describe("pipeline recut", () => {
 		});
 		expect(cancelled).toEqual(["run-v2"]);
 	});
+	test("records the replacement before a failed old-run cancellation", async () => {
+	setup("run-v1", { __smithersDurability: { entryWorkflowHash: "old" } });
+	let cancelCalls = 0;
+	const result = await recutChangedRuns({
+		runs: [{ id: "run-v1", workflow: "pr-pipeline", status: "waiting-approval", step: "r0-stamp" }],
+		pipelineDir: pipeline, inspect: async () => ({}),
+		start: async () => {},
+		cancel: async () => { cancelCalls++; throw new Error("not registered yet"); },
+		recordDir: ship,
+	});
+	 expect(result).toHaveLength(1);
+	 expect(fs.existsSync(path.join(ship, "run-v2.input.json"))).toBe(true);
+	 expect(JSON.parse(fs.readFileSync(path.join(ship, ".recuts.json"), "utf8"))["run-v1"]).toBe(pipelineHash(pipeline));
+	 expect(JSON.parse(fs.readFileSync(path.join(ship, ".recut-cancels.json"), "utf8"))).toEqual(["run-v1"]);
+	 expect(cancelCalls).toBe(1);
+	});
+	test("keeps a late replacement recorded when startup verification times out", async () => {
+	setup("run-v1", { __smithersDurability: { entryWorkflowHash: "old" } });
+	const cancelled: string[] = [];
+	const result = await recutChangedRuns({
+		runs: [{ id: "run-v1", workflow: "pr-pipeline", status: "waiting-approval", step: "r0-stamp" }],
+		pipelineDir: pipeline, inspect: async () => ({}), start: async () => {},
+		cancel: async (id) => { cancelled.push(id); }, verifyStart: async () => false, recordDir: ship,
+	});
+	 expect(result).toHaveLength(0);
+	 expect(cancelled).toEqual(["run-v2"]);
+	 expect(fs.existsSync(path.join(ship, "run-v2.input.json"))).toBe(true);
+	 expect(JSON.parse(fs.readFileSync(path.join(ship, ".recuts.json"), "utf8"))["run-v1"]).toBe(pipelineHash(pipeline));
+	});
 	test("matching hash is a no-op and a second cycle is rate limited", async () => {
 		setup("run-v1", { ticket: "t1", existingPr: 42 });
 		let count = 0;
