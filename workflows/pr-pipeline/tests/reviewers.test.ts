@@ -263,7 +263,7 @@ function adapters(overrides: Partial<ReviewerRequestAdapters> = {}): ReviewerReq
 		fetchRecentAuthors: async () => ["Swader", "Swader", "bgar324"],
 		resolveLogin: async (entry) => entry,
 		isCollaborator: async () => true,
-		requestReviewers: async () => {},
+		requestReviewers: async () => { return; },
 		fetchRequestedReviewers: async () => ["Swader", "bgar324"],
 		...overrides,
 	};

@@ -20,7 +20,10 @@ export function clampReasoning(level: string, supported: readonly ReasoningEffor
 	if (!ORDER.includes(level as ReasoningEffort)) throw new Error(`Unsupported reasoning effort: ${level}`);
 	if (supported.includes(level as ReasoningEffort)) return level as ReasoningEffort;
 	const requested = ORDER.indexOf(level as ReasoningEffort);
-	return [...supported].sort((a, b) => Math.abs(ORDER.indexOf(a) - requested) - Math.abs(ORDER.indexOf(b) - requested))[0] ?? "minimal";
+	// Pi clamps downward: choose the highest supported level that does not
+	// exceed the request. If none is low enough, use the lowest supported level.
+	const ordered = [...supported].sort((a, b) => ORDER.indexOf(a) - ORDER.indexOf(b));
+	return [...ordered].reverse().find((candidate) => ORDER.indexOf(candidate) <= requested) ?? ordered[0] ?? "minimal";
 }
 
 export const MODEL_REASONING_LEVELS: Record<string, readonly ReasoningEffort[]> = {

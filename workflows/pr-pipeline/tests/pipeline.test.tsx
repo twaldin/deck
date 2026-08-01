@@ -19,6 +19,7 @@ import * as path from "node:path";
 import { renderWorkflow, simulate } from "smithers-orchestrator/testing";
 
 import pipeline, { buildModelPolicy, DEFAULT_GITHUB } from "../pipeline.tsx";
+import type { ProjectProfile } from "../lib/profiles.ts";
 import { falloutPrompt, localFixPrompt, localReviewPrompt, reviewersDecisionPrompt } from "../lib/prompts.ts";
 import { resolveAdversary } from "../lib/models.ts";
 
@@ -75,7 +76,7 @@ describe("workflow rendering contracts", () => {
 		profile: Record<string, unknown>,
 		inputModels: Record<string, unknown> | null | undefined,
 		repo: string,
-	): Promise<{ model: string; thinking: string }> {
+	): Promise<{ seats: Record<string, { model: string; thinking: string }>; model: string; thinking: string }> {
 		const savedHome = process.env.DECK_V2_HOME;
 		const home = fs.mkdtempSync(path.join(os.tmpdir(), "deck-pipeline-models-"));
 		try {
@@ -97,15 +98,19 @@ describe("workflow rendering contracts", () => {
 				},
 				workflowPath: path.join(import.meta.dir, "..", "pipeline.tsx"),
 			});
-			const implementer = rendered.tasks.find((task) => task.nodeId === "implement");
-			expect(implementer).toBeDefined();
-			const agent = implementer?.agent;
-			expect(agent).toBeDefined();
-			expect(Array.isArray(agent)).toBe(false);
-			return {
-			model: String((agent as unknown as { model: string }).model),
-			thinking: String((agent as { opts?: { thinking?: string }; thinking?: string }).opts?.thinking ?? (agent as { thinking?: string }).thinking ?? ""),
-		};
+			const seats: Record<string, { model: string; thinking: string }> = {};
+			for (const task of rendered.tasks) {
+				const agent = task.agent;
+				if (agent !== undefined) {
+					expect(Array.isArray(agent)).toBe(false);
+					seats[task.nodeId] = {
+						model: String((agent as unknown as { model: string }).model),
+						thinking: String((agent as { opts?: { thinking?: string }; thinking?: string }).opts?.thinking ?? (agent as { thinking?: string }).thinking ?? ""),
+					};
+				}
+			}
+			const implementer = seats.implement;
+			return { seats, model: implementer.model, thinking: implementer.thinking };
 		} finally {
 			if (savedHome === undefined) delete process.env.DECK_V2_HOME;
 			else process.env.DECK_V2_HOME = savedHome;
@@ -120,8 +125,9 @@ describe("workflow rendering contracts", () => {
 	test("profile reasoning flows to each seat, with explicit seat overrides", () => {
 		const policy = buildModelPolicy({
 			...profileBase,
+			pipeline: "lindy-full",
 			models: { reasoning: "high", reasoningReviewer: "xhigh" },
-		}, false, undefined);
+		} as ProjectProfile, false, undefined);
 		expect(policy.reasoningImplementer).toBe("high");
 		expect(policy.reasoningReviewer).toBe("xhigh");
 		expect(policy.reasoningWatcher).toBe("high");
@@ -131,7 +137,10 @@ describe("workflow rendering contracts", () => {
 	test("profile reasoning reaches the rendered PiAgent seat", async () => {
 		const rendered = await renderWithProfile({ ...profileBase, models: { ...fullModels, reasoning: "max" } }, undefined, "example/test");
 		expect(rendered.model).toBe("claude-fable-5");
-		expect(rendered.thinking).toBe("xhigh");
+		expect(rendered.thinking).toBe("max");
+		expect(rendered.seats["local-review"]?.thinking).toBe("max");
+		expect(rendered.seats["r0-watch-poll"]?.thinking).toBe("max");
+		expect(rendered.seats["fallout-watch"]?.thinking).toBe("max");
 	});
 
 	test.each([

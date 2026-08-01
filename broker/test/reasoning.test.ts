@@ -23,8 +23,9 @@ describe("native reasoning passthrough", () => {
 		expect(nativeReasoning("anthropic", "high")).toEqual({ provider: "anthropic", thinking: { type: "enabled", budget_tokens: 16384 } });
 	});
 
-	test("clamps unsupported named levels to the nearest model-supported level", () => {
+	test("clamps unsupported named levels down like Pi", () => {
 		expect(clampReasoning("medium", supportedReasoning("grok-4.5", "xai"))).toBe("low");
+		expect(clampReasoning("xhigh", ["low", "high"])).toBe("high");
 		expect(clampReasoning("max", supportedReasoning("gpt-5.6-sol", "openai"))).toBe("xhigh");
 		expect(() => clampReasoning("turbo", supportedReasoning("gpt-5.6-sol", "openai"))).toThrow("Unsupported reasoning effort");
 	});

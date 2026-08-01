@@ -138,7 +138,7 @@ const DEFAULT_COMMANDS = {
 // Schemas
 // ---------------------------------------------------------------------------
 
-const inputSchema = z.object({
+export const inputSchema = z.object({
 	ticket: z.string().min(1),
 	repo: z.string().min(1),
 	worktree: z.string().min(1),
@@ -421,13 +421,16 @@ function seat(ref: ModelSeat): { ref: string; reasoning?: string } {
 function makeAgent(ref: ModelSeat, cwd: string, timeoutMs: number, reasoning = "medium"): PiAgent {
 	const selected = seat(ref);
 	const { provider, model } = parseModelRef(selected.ref);
-	const piThinking = (selected.reasoning ?? reasoning) === "max" ? "xhigh" : (selected.reasoning ?? reasoning);
+	const thinking = selected.reasoning ?? reasoning;
+	// Preserve the provider-native selector. If an older Smithers type does not
+	// yet include `max`, the compatibility cast is local and does not rewrite the
+	// value sent to Pi.
 	return new PiAgent({
 		provider,
 		model,
 		cwd,
 		timeoutMs,
-		thinking: piThinking,
+		thinking: thinking as never,
 		noSession: true,
 	});
 }
