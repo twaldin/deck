@@ -29,6 +29,8 @@ bun install --cwd "$REPO/cli"
 
 bash "$REPO/v2/install.sh"
 bun "$REPO/v2/bin/deck-v2" bootstrap
+printf 'personal\n' > "$HOME/.deck/.deck-profile"
+chmod 600 "$HOME/.deck/.deck-profile"
 
 # glass entry + inbox
 mkdir -p "$HOME/.deck/data/inbox"
