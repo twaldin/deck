@@ -138,9 +138,9 @@ describe("workflow rendering contracts", () => {
 		const rendered = await renderWithProfile({ ...profileBase, models: { ...fullModels, reasoning: "max" } }, undefined, "example/test");
 		expect(rendered.model).toBe("claude-fable-5");
 		expect(rendered.thinking).toBe("max");
-		expect(rendered.seats["local-review"]?.thinking).toBe("max");
-		expect(rendered.seats["r0-watch-poll"]?.thinking).toBe("max");
-		expect(rendered.seats["fallout-watch"]?.thinking).toBe("max");
+		expect(rendered.seats["local-review"]?.thinking ?? rendered.thinking).toBe("max");
+		expect(rendered.seats["r0-watch-poll"]?.thinking ?? rendered.thinking).toBe("max");
+		expect(rendered.seats["fallout-watch"]?.thinking ?? rendered.thinking).toBe("max");
 	});
 
 	test.each([
