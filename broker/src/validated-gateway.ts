@@ -30,6 +30,7 @@ export function startValidatedGateway(
 				let body: { model?: string; reasoning_effort?: string; reasoning?: { effort?: string }; thinking?: { type?: string; budget_tokens?: number }; prompt_cache_key?: string };
 				try {
 					body = await request.json() as typeof body;
+					const modelParts = body.model?.split("/") ?? [];
 					requestBody = body;
 					if (body.model !== undefined && quotaAccounts !== undefined) {
 						const providerName = modelParts.at(-2);
@@ -53,7 +54,11 @@ export function startValidatedGateway(
 					const reasoningParts = body.model?.split("/") ?? [];
 					const modelId = reasoningParts.at(-1) ?? "";
 					const providerName = reasoningParts.at(-2);
-					const provider = providerName === "anthropic" || (providerName !== "deck" && modelId.startsWith("claude-")) ? "anthropic" : providerName === "xai" || providerName === "xai-oauth" || modelId.startsWith("grok-") ? "xai" : "openai";
+					const provider = providerName === "anthropic"
+						? "anthropic"
+						: providerName === "xai" || providerName === "xai-oauth" || modelId.startsWith("grok-")
+							? "xai"
+							: "openai";
 					const effort = body.reasoning_effort ?? body.reasoning?.effort;
 					if (effort !== undefined) {
 						const selector = provider === "anthropic" && effort.startsWith("budget:") ? effort : clampReasoning(effort as ReasoningEffort, supportedReasoning(modelId, provider));

@@ -53,6 +53,7 @@ const USAGE = `deck-v2 — fleet primitives
   spawn <id> --task <text> --accept <text> (--repo <path|alias> | --worktree <path>)
              [--kind ship|scout] [--base <branch>] [--desc <text>]
              [--project <name>] [--branch <name>] [--model <deck/model>]
+             [--reasoning low|medium|high|xhigh|max]
              [--no-pipeline]     workers inside a pipeline stage, scouts; bare
                                  ship on a profiled project is refused without
                                  --no-pipeline

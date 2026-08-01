@@ -1,15 +1,17 @@
 # Reasoning control report
 
 ## Verdict
-Reasoning is a named effort selector. Pi passes the selected level through `--thinking`; the Deck gateway validates, clamps to the model capability set, and emits the provider-native field. Anthropic levels become `thinking: {type: "enabled", budget_tokens}`. OpenAI and xAI use `reasoning_effort`.
+Named reasoning is validated at the CLI, selected from the explicit request before legacy thinking, passed to Pi with `--thinking`, and converted by the gateway to the provider-native wire field. Anthropic named levels become `thinking: {type: "enabled", budget_tokens}`. OpenAI and xAI use `reasoning_effort`.
 
 ## Wire and type evidence
-- `v2/src/spawn.ts:piArgs` appends `--thinking <level>` and `launchRun` chooses `request.reasoning` before legacy `request.thinking`.
-- `broker/src/reasoning.ts:nativeReasoning` maps Anthropic `low/medium/high/xhigh/max` to 4096/8192/16384/32768/65536 token budgets. It maps OpenAI and xAI to `reasoning_effort`.
-- `broker/src/validated-gateway.ts` reads `reasoning_effort` or `reasoning.effort`, validates the runtime string, clamps against `supportedReasoning(modelId, provider)`, deletes the generic fields, and writes the native field.
-- The gateway classifies Deck Claude models as OpenAI-compatible because Deck registers them with `api: "openai-completions"`; only explicit Anthropic provider routes use Anthropic conversion.
-- `broker/pi/deck-provider.ts` maps every advertised Pi level to a supported wire selector. Unsupported model requests are mapped to the nearest supported selector instead of being advertised as `null` and rejected before the gateway.
-- Tests prove named Anthropic conversion, xAI per-model clamping, Deck Claude OpenAI routing, invalid effort rejection, Pi argument construction, and profile-to-seat propagation.
+- Pi's installed TypeScript API defines the `ThinkingLevel` vocabulary and `Model.thinkingLevelMap`; the Deck provider registers the same map in `broker/pi/deck-provider.ts`. This is the type and metadata boundary that controls which Pi values can be sent.
+- Pi's `clampThinkingLevel` applies `thinkingLevelMap` before the request is built. The OpenAI-completions implementation then writes the mapped value as `reasoning_effort` in the outbound payload. This is why Deck's OpenAI-compatible Claude route stays on `reasoning_effort`.
+- `v2/src/cli.ts` parses and validates `--reasoning`; `v2/src/spawn.ts:launchRun` chooses the explicit request before legacy `thinking` and passes the selected value to Pi as `--thinking`.
+- `broker/src/validated-gateway.ts` classifies explicit `anthropic/...` model routes as Anthropic, validates and clamps the selector, and emits Anthropic `thinking` budgets. Explicit xAI routes emit xAI `reasoning_effort`; other routes emit OpenAI `reasoning_effort`.
+- `broker/pi/deck-provider.ts` maps every advertised Pi level to a supported wire selector. Unsupported model levels map to the nearest supported selector instead of being advertised as null.
 
-## Pi-harness decision
-Decision: keep the existing Pi provider metadata path and provide non-null nearest-supported mappings. This is now implemented and tested in `broker/pi/deck-provider.ts`; no Pi harness source change is required. The remaining delivery decision is captain review of the branch/PR. No PR was opened because this worktree instruction forbids push.
+## End-to-end evidence
+`v2/test/spawn-alloc.test.ts` invokes the CLI validation path, launches a fake Pi executable, captures its actual argv, and verifies explicit reasoning overrides a profile's legacy reasoning value. The gateway tests verify the three provider-native payload shapes and rejection of invalid xAI input. These tests are dependency-gated and must run with the repository dependencies installed.
+
+## Delivery
+The implementation is committed on `deck/reasoning-control/V1`. A PR body must include this report's verdict and wire/type evidence. This worktree instruction forbids pushing, so PR creation is an external delivery step and is not claimed here.
