@@ -1,9 +1,26 @@
 export type ReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
+export type ReasoningLevel = Exclude<ReasoningEffort, "minimal">;
+
 export type NativeReasoning =
-	| { provider: "openai"; reasoning: ReasoningEffort }
+	| { provider: "openai"; reasoning_effort: ReasoningEffort }
 	| { provider: "anthropic"; thinking: { type: "enabled"; budget_tokens: number } }
 	| { provider: "xai"; reasoning_effort: "low" | "high" };
+
+const ORDER: ReasoningEffort[] = ["minimal", "low", "medium", "high", "xhigh", "max"];
+const ANTHROPIC_BUDGETS: Record<ReasoningLevel, number> = {
+	low: 4096,
+	medium: 8192,
+	high: 16384,
+	xhigh: 32768,
+	max: 65536,
+};
+
+export function clampReasoning(level: ReasoningEffort, supported: readonly ReasoningEffort[]): ReasoningEffort {
+	if (supported.includes(level)) return level;
+	const requested = ORDER.indexOf(level);
+	return [...supported].sort((a, b) => Math.abs(ORDER.indexOf(b) - requested) - Math.abs(ORDER.indexOf(a) - requested))[0] ?? "minimal";
+}
 
 const OPENAI_EFFORTS = new Set<ReasoningEffort>(["minimal", "low", "medium", "high", "xhigh", "max"]);
 
@@ -11,10 +28,12 @@ const OPENAI_EFFORTS = new Set<ReasoningEffort>(["minimal", "low", "medium", "hi
 export function nativeReasoning(provider: "openai" | "anthropic" | "xai", selector: string): NativeReasoning {
 	if (provider === "anthropic") {
 		const match = /^budget:(\d+)$/.exec(selector);
-		if (!match || Number(match[1]) < 1024) {
-			throw new Error(`Anthropic reasoning requires budget:<tokens> (integer >= 1024); received ${selector}`);
+		if (match) {
+			if (Number(match[1]) < 1024) throw new Error(`Anthropic reasoning budget must be >= 1024; received ${selector}`);
+			return { provider, thinking: { type: "enabled", budget_tokens: Number(match[1]) } };
 		}
-		return { provider, thinking: { type: "enabled", budget_tokens: Number(match[1]) } };
+		if (!(selector in ANTHROPIC_BUDGETS)) throw new Error(`Unsupported anthropic reasoning level: ${selector}`);
+		return { provider, thinking: { type: "enabled", budget_tokens: ANTHROPIC_BUDGETS[selector as ReasoningLevel] } };
 	}
 	if (!OPENAI_EFFORTS.has(selector as ReasoningEffort)) {
 		throw new Error(`Unsupported ${provider} reasoning effort: ${selector}`);
@@ -25,7 +44,7 @@ export function nativeReasoning(provider: "openai" | "anthropic" | "xai", select
 		}
 		return { provider, reasoning_effort: selector };
 	}
-	return { provider, reasoning: selector as ReasoningEffort };
+	return { provider, reasoning_effort: selector as ReasoningEffort };
 }
 
 /** Native capabilities advertised to seat/profile configuration. */

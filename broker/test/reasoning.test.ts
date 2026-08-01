@@ -3,7 +3,7 @@ import { nativeReasoning, NATIVE_REASONING_LEVELS } from "../src/reasoning";
 
 describe("native reasoning passthrough", () => {
 	test("keeps OpenAI xhigh in the outgoing native field", () => {
-		expect(nativeReasoning("openai", "xhigh")).toEqual({ provider: "openai", reasoning: "xhigh" });
+		expect(nativeReasoning("openai", "xhigh")).toEqual({ provider: "openai", reasoning_effort: "xhigh" });
 	});
 
 	test("passes an explicit Anthropic token budget untouched", () => {
@@ -20,7 +20,7 @@ describe("native reasoning passthrough", () => {
 	test("rejects unsupported values instead of downgrading them", () => {
 		expect(() => nativeReasoning("xai", "xhigh")).toThrow("only low or high");
 		expect(() => nativeReasoning("openai", "turbo")).toThrow("Unsupported openai");
-		expect(() => nativeReasoning("anthropic", "high")).toThrow("budget:<tokens>");
+		expect(nativeReasoning("anthropic", "high")).toEqual({ provider: "anthropic", thinking: { type: "enabled", budget_tokens: 16384 } });
 	});
 
 	test("publishes the provider catalog surface", () => {
