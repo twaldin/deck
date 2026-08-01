@@ -1718,8 +1718,8 @@ prNumber: pr.prNumber,
 										};
 									}
 									if (pollNo > 0) await sleepSeconds(limits.landingPollSeconds);
-									// NEVER the merged flag: a queued PR can read state=closed, merged=false.
-									// Search main for "(#N)" to confirm the squash landed.
+									// NEVER rely on the merged flag. Search main for "(#N)" to
+									// confirm the squash landed.
 									const commits = await fetchMainCommitSubjects(github.git, input.worktree);
 									const landed = findLandingCommit(commits, pr.prNumber);
 									return {

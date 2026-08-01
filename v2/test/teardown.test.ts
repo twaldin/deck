@@ -110,8 +110,8 @@ describe("teardown guard", () => {
 		expect(teardown.evaluateTeardown("t1").allowed).toBe(true);
 	});
 
-	// The trap that would silently discard landed work: a GitHub merge queue-merged
-	// PR reads state=closed, merged=false. Three confirmed repros in fm2.
+	// The trap that would silently discard landed work: a closed or unmerged PR
+	// state does not replace squash-commit verification on the base branch.
 	test("REGRESSION lands-and-closes: squash-landed PR is allowed despite unreachable local commits", async () => {
 		const { teardown, meta } = await mods();
 		const { work } = makeRepo();

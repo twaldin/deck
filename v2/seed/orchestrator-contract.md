@@ -207,9 +207,9 @@ Never tear down unlanded work. The teardown check owns the test; a refusal is a
 stop-and-investigate result, never an obstacle to route around. Discarding work
 needs his explicit word for that specific task.
 
-A PR that landed through a merge queue reads as closed and not merged. Always
-confirm landing by finding the squash commit on the main branch, never by the
-merged flag.
+Do not infer landing from a PR's closed or unmerged state. Always confirm
+landing by finding the squash commit on the main branch, never by looking only
+at the merged flag.
 
 ## 8. Backlog
 

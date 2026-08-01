@@ -73,7 +73,7 @@ export function profilesFile(home = defaultHome()): string {
  * and reading the live file at brief time would make the brief depend on
  * home-file state. Keep in sync with lindy-domain.md when the traps change.
  */
-export const LINDY_TRAPS = `1. **GitHub merge queue closes PRs before landing is confirmed**: a queue-merged PR reads \`state=closed, merged=false\`. Before any "not landed" verdict, search main for the squash commit \`(#N)\`.
+export const LINDY_TRAPS = `1. **Landing requires the squash commit on the base branch**: do not infer that work is absent from a closed or unmerged PR state. Before any "not landed" verdict, search main for the squash commit \`(#N)\`.
 2. **Migration gate**: a diff touching migrations/ or packages/database-migrations/ makes the migration run (stg → verify → prod → verify, with evidence) mandatory before landing is done. Unapplied migrations block ALL of CI repo-wide.
 3. **Review requests silently no-op**: after requesting reviewers (or any GH edit), verify via the requested_reviewers API. Plausible-but-wrong logins return ok.`;
 

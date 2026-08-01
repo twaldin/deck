@@ -124,8 +124,7 @@ Enforcement notes (each maps to a cited incident in the SOP):
 - **Bot comments count as actionable** in the watch exit (deliberate: the loop
   owns Claude-bot feedback per SOP stage 4; see `lib/watch.ts`).
 - **Landing = squash commit `(#N)` on main** (`lib/landing.ts`). The merged
-  flag is never consulted (GitHub merge queue closes PRs before landing is confirmed: state=closed, merged=false;
-  3 confirmed repros).
+  flag is never consulted; verify the squash commit directly on the base branch.
 - **Done is evidence-gated** (`lib/done.ts`): merged != done.
 - **Every loop is bounded** with an escalation path: watch → `r{N}-watch-escalation`
   approval; ready → synthetic regression + fresh round; rounds → hard throw at

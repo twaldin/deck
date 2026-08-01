@@ -51,10 +51,9 @@ export const EMPTY_INTAKE_STATE: IntakeState = { v: 1, generatedAt: "", items: {
 
 /**
  * How a tracked PR that is no longer open was resolved.
- * GitHub merge queue landing check (three confirmed repros): state=closed, merged=false does NOT
- * mean the work was lost — GitHub merge queue squash-lands onto main and closes the PR.
- * "closed-without-landing" may only be reported after the squash-commit search
- * against the default branch comes back empty.
+ * A closed or unmerged state does not prove the work was lost. The
+ * "closed-without-landing" result requires an empty squash-commit search
+ * against the default branch.
  */
 export const removalResolutionSchema = z.enum([
 	"merged", // GitHub reports merged=true
