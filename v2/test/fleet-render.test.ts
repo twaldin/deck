@@ -21,6 +21,7 @@ import {
 	normalizeStep,
 	collectRuns,
 	buildFrame,
+	liveSpawnCount,
 	PLAIN_FLEET_THEME,
 	renderFooterLines,
 	sliceVisible,
@@ -79,6 +80,9 @@ function frame(overrides: Partial<FleetFrame> = {}): FleetFrame {
 }
 
 describe("fleet frame state", () => {
+	test("counts unique live spawns", () => {
+		expect(liveSpawnCount([{ taskId: "a", runState: "running" }, { taskId: "a", runState: "running" }, { taskId: "b", runState: "finished" }])).toBe(1);
+	});
 	test("asks once for a parked stamp and keeps resolved questions from reappearing", async () => {
 		const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fleet-frame-"));
 		const queue = path.join(directory, "queue.jsonl");

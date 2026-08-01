@@ -82,6 +82,10 @@ export type TaskRow = {
 	statusAgeMs: number | null;
 };
 
+export function liveSpawnCount(tasks: Pick<TaskRow, "taskId" | "runState">[]): number {
+	return new Set(tasks.filter((task) => task.runState === "running").map((task) => task.taskId)).size;
+}
+
 export type AgentRow = {
 	id: string;
 	model: string | null;
@@ -766,15 +770,16 @@ export async function buildFrame(
 	}));
 	const stampQuestion = (wf: WorkflowRow): string => {
 		const input = readShipInput(wf.runId);
-		const repo = input.repo ?? "unknown-repo";
+		const repo = input.repo ?? workflowIdentity(wf);
+		const historyRepo = workflowIdentity(wf);
 		const pr = wf.prNumber ?? input.prNumber;
 		const url = pr === null ? "unknown URL" : `https://github.com/${repo}/pull/${pr}`;
 		const title = wf.prTitle ?? input.prTitle ?? "untitled PR";
 		const why = input.why ?? "No ship brief summary was recorded.";
-		const generations = workflows.filter((candidate) =>
+		const generations = pr === null ? 0 : workflows.filter((candidate) =>
 			candidate !== wf &&
-			workflowIdentity(candidate) === repo &&
-			(candidate.prNumber ?? null) === (pr ?? null),
+			workflowIdentity(candidate) === historyRepo &&
+			(candidate.prNumber ?? null) === pr,
 		).length;
 		const history = generations === 0
 			? "No prior pipeline generations are recorded. Implementation, adversarial review rounds, fixes, and re-cuts are recorded in the pipeline run history."
@@ -828,7 +833,7 @@ export async function buildFrame(
 			internalOpen: internal.open,
 			internalCap: internal.cap,
 			efforts: efforts.length,
-			agents: liveAgents.length,
+			agents: liveSpawnCount(tasks),
 			unhealedFailures,
 		},
 		sources: [
