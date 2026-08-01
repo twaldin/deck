@@ -211,17 +211,14 @@ export function decideIdleCompaction(input: IdleCompactionInput): IdleCompaction
 	const nativeAvailable = input.providerNativeCompactionAvailable ?? true;
 	// Pre-miss compaction requires both native support and at least 50% usage.
 	// Keep-warm remains an explicit opt-in, including for non-native routes.
-	if (!nativeAvailable) {
-		return {
-			compact: false,
-			reason: config.keepWarm ? "keep-warm" : "provider-native-unavailable",
-		};
-	}
 	if (input.contextTokens < keepWarmThreshold) {
 		return {
 			compact: false,
 			reason: config.keepWarm ? "keep-warm" : "below-context-floor",
 		};
+	}
+	if (!nativeAvailable) {
+		return { compact: false, reason: "provider-native-unavailable" };
 	}
 
 	const floorTokens = Math.ceil(input.contextWindow * (config.contextFloorPercent / 100));

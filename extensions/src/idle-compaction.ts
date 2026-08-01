@@ -418,7 +418,7 @@ export function registerIdleCompaction(
 		inFlightToolCalls = Math.max(0, inFlightToolCalls - 1);
 		// A tool can outlive the cache deadline. Re-arm the deadline as soon as
 		// the last tool ends instead of waiting for agent_settled.
-		if (!compacting && inFlightToolCalls === 0 && hasCacheTouch) scheduleFromCacheTouch();
+		if (!compacting && inFlightToolCalls === 0 && hasCacheTouch && ctx.isIdle()) scheduleFromCacheTouch();
 	});
 	pi.on("agent_settled", (_event, ctx) => {
 		latestContext = ctx;

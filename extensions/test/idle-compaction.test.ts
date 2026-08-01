@@ -215,7 +215,7 @@ describe("idle compaction policy", () => {
 			isIdle: true,
 			hasPendingMessages: false,
 			inFlightToolCalls: 0,
-			contextTokens: 120_000,
+			contextTokens: 40_000,
 			contextWindow: 200_000,
 			currentContextMarker: "message-2",
 			lastCompactedContextMarker: "message-1",
@@ -679,7 +679,9 @@ describe("idle compaction extension", () => {
 		await warmAndSettle(harness, context);
 		runtime.advance(700);
 		await harness.emit("tool_execution_start", context);
+		context.idle = false;
 		runtime.advance(500);
+		context.idle = true;
 		await harness.emit("tool_execution_end", context);
 		runtime.advance(0);
 		expect(context.compactCalls).toHaveLength(1);
