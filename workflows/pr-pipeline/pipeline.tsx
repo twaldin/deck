@@ -833,6 +833,11 @@ export default smithers((ctx) => {
 											{ cwd: input.worktree },
 										)
 									).trim();
+									const ancestor = worktreeHead === overview.headSha ? null : await bunExec(
+										[github.git, "merge-base", "--is-ancestor", overview.headSha, worktreeHead],
+										{ cwd: input.worktree },
+									);
+									const worktreeIsDescendant = ancestor === null || ancestor.code === 0;
 									assertAdoptable(overview, {
 										repo: input.repo,
 										branch: input.branch,
@@ -842,16 +847,13 @@ export default smithers((ctx) => {
 										worktreeStatus,
 										worktreeOriginUrl,
 										allowWorktreeAhead: true,
+										worktreeIsDescendant,
 									});
 									if (worktreeHead !== overview.headSha) {
-										const ancestor = await bunExec(
-											[github.git, "merge-base", "--is-ancestor", overview.headSha, worktreeHead],
-											{ cwd: input.worktree },
-										);
 										const decision = decideAdoptPush({
 											worktreeHead,
 											prHead: overview.headSha,
-											isAncestor: ancestor.code === 0,
+											isAncestor: worktreeIsDescendant,
 										});
 										if (decision === "escalate") {
 											throw new Error(
@@ -869,12 +871,16 @@ export default smithers((ctx) => {
 											],
 											{ cwd: input.worktree },
 										);
-										overview = await fetchPrOverview(ghCtx, prNumber);
 										const pushedHead = (
 											await execOrThrow(bunExec, [github.git, "rev-parse", "HEAD"], {
 												cwd: input.worktree,
 											})
 									).trim();
+										for (let attempt = 0; attempt < 3; attempt++) {
+											overview = await fetchPrOverview(ghCtx, prNumber);
+											if (pushedHead === overview.headSha) break;
+											if (attempt < 2) await Bun.sleep(250);
+										}
 										if (pushedHead !== overview.headSha) {
 											throw new Error(
 													`[escalate] existing PR #${prNumber} did not advance to local HEAD ${pushedHead} after the push.`,
