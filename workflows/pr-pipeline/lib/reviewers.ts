@@ -85,7 +85,7 @@ export interface ReviewerSelectionInput {
 	codeowners: string[];
 	/** One login per recent commit on the touched files; repeats carry frequency. */
 	recentAuthors: string[];
-	/** Never requested: selfLogins, excludedApprovers, and the configured denylist. */
+	/** Never requested: selfLogins and excluded approvers. */
 	exclude: string[];
 	/** Auto-derived reviewer target (explicit entries can exceed it). */
 	max?: number;
@@ -160,7 +160,10 @@ export interface ReviewerRequestAdapters {
 export interface ReviewerRequestConfig {
 	/** Names or logins from the brief / input config. */
 	explicit: string[];
+	/** Self and other non-denylist exclusions. */
 	exclude: string[];
+	/** Configured ex-employee denylist. These candidates are removed early. */
+	denylist: string[];
 	max: number;
 }
 
@@ -177,7 +180,8 @@ export interface ReviewerRequestResult {
  * The full request-reviewers stage: select (CODEOWNERS -> recent-author
  * frequency), request, then VERIFY via the requested_reviewers read (GH
  * review requests silently no-op on plausible-but-wrong logins). Throws
- * `[escalate]` on: an unresolvable explicit entry, zero candidates, or a
+ * `[escalate]` on: an unresolvable explicit entry, no candidates after the
+ * denylist stage, no collaborator candidates after verification, or a
  * silently dropped login. The only empty-reviewer path is the caller's
  * explicit skip, which never reaches this function.
  */
@@ -201,19 +205,35 @@ export async function executeReviewerRequest(
 				`Fix the names against the roster (name->login lookup found nothing).`,
 		);
 	}
+	const denylisted = new Set((config.denylist ?? []).map((login) => login.toLowerCase()));
+	const removeDenylisted = (candidates: string[]): string[] =>
+		candidates.filter((login) => {
+			if (!denylisted.has(login.toLowerCase())) return true;
+			adapters.logSkip?.(login, "configured reviewer denylist");
+			return false;
+		});
 	const selection = selectReviewers({
-		explicit,
-		codeowners: owners,
-		recentAuthors,
+		explicit: removeDenylisted(explicit),
+		codeowners: removeDenylisted(owners),
+		recentAuthors: removeDenylisted(recentAuthors),
 		exclude: config.exclude,
 		// Validate every eligible candidate, then stop after max collaborators.
 		max: Number.MAX_SAFE_INTEGER,
 	});
+	if (selection.reviewers.length === 0) {
+		throw new Error(
+			`[escalate] no reviewer candidates after denylist and eligibility filtering ` +
+			`(CODEOWNERS empty for touched paths, no eligible recent authors). A PR never ` +
+			`proceeds unreviewed: set github.reviewers, or set ` +
+			`github.skipReviewerRequest=true on a new run to skip explicitly.`,
+		);
+	}
 	const collaborators: string[] = [];
 	const skippedNonCollaborators: string[] = [];
 	for (const login of selection.reviewers) {
-		if (collaborators.length >= config.max) break;
-		if (await adapters.isCollaborator(login)) collaborators.push(login);
+		if (await adapters.isCollaborator(login)) {
+			if (collaborators.length < config.max) collaborators.push(login);
+		}
 		else {
 			skippedNonCollaborators.push(login);
 			adapters.logSkip?.(login, "not a repository collaborator");
@@ -221,9 +241,11 @@ export async function executeReviewerRequest(
 	}
 	if (collaborators.length === 0) {
 		throw new Error(
-			`[escalate] no reviewer candidates; no collaborator reviewer candidates: ${skippedNonCollaborators.join(", ")}. ` +
+			`[escalate] no collaborator reviewer candidates after collaborator verification; ` +
+				`skipped non-collaborators: ${skippedNonCollaborators.join(", ")}. ` +
 				`A PR never proceeds unreviewed: set github.reviewers, or set ` +
 				`github.skipReviewerRequest=true on a new run to skip explicitly.`,
+
 		);
 	}
 	await adapters.requestReviewers(collaborators);

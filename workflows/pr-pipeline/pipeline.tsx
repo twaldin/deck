@@ -120,14 +120,6 @@ export const DEFAULT_GITHUB = {
 	maxReviewers: 2,
 };
 
-export function reviewerExcludeList(github: {
-	selfLogins: string[];
-	excludedApprovers: string[];
-	reviewerDenylist: string[];
-}): string[] {
-	return [...github.selfLogins, ...github.excludedApprovers, ...github.reviewerDenylist];
-}
-
 const DEFAULT_COMMANDS = {
 	merge: "gt merge",
 	deployEvidence: undefined as string | undefined,
@@ -263,6 +255,7 @@ const schemas = {
 		skipped: z.boolean(),
 		requested: z.array(z.string()),
 		verified: z.array(z.string()),
+		skippedNonCollaborators: z.array(z.string()).optional(),
 		source: z.string(),
 		at: z.string(),
 		reviewerPrompt: z.string(),
@@ -1064,7 +1057,8 @@ export default smithers((ctx) => {
 								const result = await executeReviewerRequest(
 									{
 										explicit: [...(brief?.suggestedReviewers ?? []), ...github.reviewers],
-										exclude: reviewerExcludeList(github),
+										exclude: [...github.selfLogins, ...github.excludedApprovers],
+										denylist: github.reviewerDenylist,
 										max: github.maxReviewers,
 									},
 									{

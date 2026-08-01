@@ -18,9 +18,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { simulate } from "smithers-orchestrator/testing";
 
-import pipeline, { buildModelPolicy } from "../pipeline.tsx";
+import pipeline, { buildModelPolicy, DEFAULT_GITHUB } from "../pipeline.tsx";
 import { localFixPrompt, localReviewPrompt, reviewersDecisionPrompt } from "../lib/prompts.ts";
-import { DEFAULT_GITHUB, reviewerExcludeList } from "../pipeline.tsx";
 import { resolveAdversary } from "../lib/models.ts";
 
 const validBrief = {
@@ -61,17 +60,12 @@ describe("reviewer selection contracts", () => {
 		expect(prompt).not.toContain("\\n");
 	});
 
-	test("default ex-employee denylist is merged into reviewer exclusions", () => {
+	test("default ex-employee denylist is configured", () => {
 		expect(DEFAULT_GITHUB.reviewerDenylist).toEqual([
 			"mackcooper1408",
 			"spencer-negri",
 			"daniel-covelli",
 			"akshat-lindy",
-		]);
-		expect(reviewerExcludeList(DEFAULT_GITHUB)).toEqual([
-			...DEFAULT_GITHUB.selfLogins,
-			...DEFAULT_GITHUB.excludedApprovers,
-			...DEFAULT_GITHUB.reviewerDenylist,
 		]);
 	});
 });
