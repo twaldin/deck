@@ -426,8 +426,14 @@ export function buildModelPolicy(
 		familyOpposition?: boolean;
 		oppositionDefaults?: Record<string, string>;
 	} | undefined,
+	profileSelected = false,
 ): ModelPolicy {
-	const profileModels = profile !== null && !profileRepoMismatch ? profile.models : undefined;
+	const profileModels =
+		profileSelected && inputModels !== undefined
+			? inputModels
+			: profile !== null && !profileRepoMismatch
+				? profile.models
+				: undefined;
 	const policy: ModelPolicy = {
 		...defaultModelPolicy(),
 		...(profileModels ?? {}),
@@ -476,7 +482,7 @@ export default smithers((ctx) => {
 	const watchSetPath =
 		input.watchSetPath ?? `${process.env.HOME ?? "~"}/dev/fm2/data/watch-set.jsonl`;
 
-	const policy = buildModelPolicy(profile, profileRepoMismatch, input.models);
+	const policy = buildModelPolicy(profile, profileRepoMismatch, input.models, input.profile !== undefined);
 
 	const ghCtx = { gh: github.gh, repo: input.repo };
 
