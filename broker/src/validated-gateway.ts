@@ -41,7 +41,7 @@ export function startValidatedGateway(
 							const sessionId = typeof body.prompt_cache_key === "string" ? body.prompt_cache_key : `deck-route:${routed.model.provider}:${routed.model.id}`;
 							body.prompt_cache_key = sessionId;
 							if (typeof (options.storage as unknown as { pinSessionOAuthAccount?: unknown }).pinSessionOAuthAccount === "function") {
-								(options.storage as unknown as { pinSessionOAuthAccount: (provider: string, sessionId: string, credentialId: number) => boolean }).pinSessionOAuthAccount(routed.model.provider, sessionId, routed.account.credentialId);
+								(options.storage as unknown as { pinSessionOAuthAccount: (provider: string, sessionId: string, credentialId: number) => boolean }).pinSessionOAuthAccount(routed.account.authProvider ?? routed.model.provider, sessionId, routed.account.credentialId);
 							}
 						} catch (error) {
 							if (error instanceof NoQuotaError) return Response.json({ error: { code: error.code, type: "quota_exhausted", message: error.message, provider: error.provider, retry_after_ms: error.retryAfterMs ?? null } }, { status: 503 });

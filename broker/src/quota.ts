@@ -1,6 +1,6 @@
 /** Pure quota-aware account selection. The gateway can use this without touching auth tokens. */
 export type QuotaTier = "all-model-5h" | "all-model-7d" | "fable-7d";
-export type AccountQuota = { credentialId: number; provider: string; blocked: readonly QuotaTier[]; lastUsedAt?: number };
+export type AccountQuota = { credentialId: number; provider: string; /** AuthStorage provider id, when it differs from the routing family. */ authProvider?: string; blocked: readonly QuotaTier[]; lastUsedAt?: number };
 export type QuotaModel = { id: string; provider: string };
 export type QuotaEvent = { type: "model-fallback"; requestedModel: string; selectedModel: string; provider: string; reason: "all-accounts-cooling" };
 
@@ -58,9 +58,14 @@ export function routeModel(requested: QuotaModel, accounts: readonly AccountQuot
 
 /** Convert pi-ai usage-limit block scopes into the normalized tier names. */
 export function normalizeTier(scope: string): QuotaTier | undefined {
-	const value = scope.toLowerCase();
-	if (value.includes("fable") && value.includes("7d")) return "fable-7d";
+	const value = scope.toLowerCase().replace(/^tier:/, "");
+	if (value.includes("fable")) return "fable-7d";
 	if (value.includes("7d")) return "all-model-7d";
 	if (value.includes("5h") || value.includes("5hr") || value.includes("5-hour")) return "all-model-5h";
 	return undefined;
+}
+
+/** pi-ai uses an empty scope for a provider-wide cooling block. */
+export function normalizeBlockScopes(scope: string): readonly QuotaTier[] {
+	return scope.trim() === "" ? ["all-model-5h", "all-model-7d", "fable-7d"] : normalizeTier(scope) === undefined ? [] : [normalizeTier(scope)!];
 }

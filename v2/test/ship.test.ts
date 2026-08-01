@@ -117,6 +117,14 @@ describe("existingPrFromFlag", () => {
 });
 
 describe("buildPipelineInput", () => {
+	test("preserves per-seat reasoning objects in pipeline input", () => {
+		const profile = deckProfile();
+		profile.models = { implementer: { model: "deck/gpt-5.6-luna", reasoning: "high" }, reviewer: { model: "deck/claude-fable-5", reasoning: "budget:32768" }, watcher: "deck/gpt-5.6-luna", fallout: "deck/gpt-5.6-sol" };
+		const input = buildPipelineInput(request(), profile);
+		expect((input.models as { implementer: unknown }).implementer).toEqual({ model: "deck/gpt-5.6-luna", reasoning: "high" });
+		expect((input.models as { reviewer: unknown }).reviewer).toEqual({ model: "deck/claude-fable-5", reasoning: "budget:32768" });
+	});
+
 	test("maps the profile onto the pipeline input; dryRun defaults FALSE (ship means ship)", () => {
 		const input = buildPipelineInput(request(), deckProfile());
 		expect(input.profile).toBe("deck");

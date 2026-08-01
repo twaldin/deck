@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { NoQuotaError, pickAccount, routeModel, tiersForModel } from "../src/quota";
+import { NoQuotaError, normalizeBlockScopes, normalizeTier, pickAccount, routeModel, tiersForModel } from "../src/quota";
 
 describe("quota routing self-check", () => {
+	test("normalizes pi-ai tier and provider-wide block scopes", () => {
+		expect(normalizeTier("tier:fable")).toBe("fable-7d");
+		expect(normalizeBlockScopes("")).toEqual(["all-model-5h", "all-model-7d", "fable-7d"]);
+	});
 	test("skips a cooling account and picks a warm account", () => {
 		const model = { id: "claude-fable-5", provider: "anthropic" };
 		const account = pickAccount(model, [
