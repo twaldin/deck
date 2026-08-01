@@ -53,6 +53,8 @@ export type ProjectProfile = {
 	installCommand?: string;
 	/** Whether allocation should warm dependencies in the background. */
 	depsWarm: boolean;
+	/** Optional post-landing fallout probe. */
+	falloutCommand?: string;
 };
 
 /** Same resolution as home.ts, inlined so this module stays dependency-free. */

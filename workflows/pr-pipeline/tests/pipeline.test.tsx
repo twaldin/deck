@@ -345,6 +345,54 @@ describe("approval parks (no bypass)", () => {
 	});
 });
 
+describe("merge queue lifecycle transitions", () => {
+	test("queued -> ejected -> re-submitted -> closed reaches landing", async () => {
+		const { sim, error } = await run({
+			...baseInput,
+			repo: "twaldin/deck",
+			profile: "deck",
+			bypassApprovals: true,
+			fixtures: {
+				changedFiles: ["src/feature.ts"],
+				queueLifecycle: [
+					{ state: "open", autoMergeRequest: true },
+					{ state: "open", autoMergeRequest: false },
+					{ state: "closed", autoMergeRequest: false },
+				],
+			},
+		});
+		expect(error).toBeUndefined();
+		expect(sim.status).toBe("finished");
+		expect((sim.outputs.queuePoll as Array<Record<string, unknown>>).some((row) => row.ejected === true)).toBe(true);
+		expect(sim.executed).toContain("landing-poll");
+	});
+
+	test("closed without a squash stays incomplete and escalates", async () => {
+		const { sim, error } = await run({
+			...baseInput,
+			repo: "twaldin/deck",
+			profile: "deck",
+			bypassApprovals: true,
+			limits: { landingPolls: 1 },
+			fixtures: { changedFiles: ["src/feature.ts"], queueLifecycle: [{ state: "closed", autoMergeRequest: false }], landingPollLanded: false },
+		});
+		expect(sim.status).toBe("failed");
+		expect(String(error)).toContain("squash commit");
+	});
+
+	test("no fallout probe parks the run instead of creating deploy evidence", async () => {
+		const { sim } = await run({
+			...baseInput,
+			repo: "twaldin/deck",
+			profile: "deck",
+			fixtures: { changedFiles: ["src/feature.ts"], noFalloutProbe: true },
+		});
+		expect(sim.status).toBe("waiting-approval");
+		expect((sim.outputs.deployEvidence as Array<{ evidence: string }>)[0]?.evidence).toContain("PARK:");
+		expect((sim.outputs.fallout as Array<{ verdict: string }>)[0]?.verdict).toBe("parked");
+	});
+});
+
 describe("full graph traversal (bypassApprovals, dry-run only)", () => {
 	test("clean path: all 11 stages execute in order; done record present", async () => {
 		const { sim, error } = await run({
