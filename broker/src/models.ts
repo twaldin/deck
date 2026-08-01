@@ -56,7 +56,7 @@ const PLAN_ALLOWLIST: Record<string, readonly string[]> = {
 		"gpt-5.6-terra",
 	],
 	zai: ["glm-*"],
-	xai: ["*"],
+	xai: ["grok-4.5"],
 };
 
 export const DEFAULT_ALLOWLIST: Record<string, readonly string[]> = {

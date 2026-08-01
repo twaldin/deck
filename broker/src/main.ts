@@ -45,13 +45,16 @@ function startValidatedGateway(options: Parameters<typeof startAuthGateway>[0]) 
 	const server = Bun.serve({
 		hostname,
 		port,
+		idleTimeout: 255,
 		async fetch(request) {
 			const url = new URL(request.url);
 			if (request.method === "POST" && ["/v1/chat/completions", "/v1/messages", "/v1/responses"].includes(url.pathname)) {
-				const body = await request.json() as { model?: string; reasoning_effort?: string; thinking?: { type?: string; budget_tokens?: number } };
+				let body: { model?: string; reasoning_effort?: string; thinking?: { type?: string; budget_tokens?: number } };
 				try {
+					body = await request.json() as typeof body;
 					if (body.reasoning_effort !== undefined) {
-						const provider = body.model?.startsWith("grok-") ? "xai" : "openai";
+						const modelId = body.model?.split("/").pop() ?? "";
+						const provider = modelId.startsWith("grok-") ? "xai" : "openai";
 						nativeReasoning(provider, body.reasoning_effort);
 					}
 					if (body.thinking?.type === "enabled") {
