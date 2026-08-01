@@ -331,7 +331,23 @@ export async function collectPsSnapshot(cwd: string): Promise<{ runs: PsRun[]; h
 	}
 }
 
-async function collectRuns(
+const collectingRuns = new Map<string, Promise<{ runs: PsRun[]; health: SourceHealth }>>();
+
+export async function collectRuns(
+	cwd: string,
+): Promise<{ runs: PsRun[]; health: SourceHealth }> {
+	const active = collectingRuns.get(cwd);
+	if (active !== undefined) return active;
+	const collection = collectRunsOnce(cwd);
+	collectingRuns.set(cwd, collection);
+	try {
+		return await collection;
+	} finally {
+		if (collectingRuns.get(cwd) === collection) collectingRuns.delete(cwd);
+	}
+}
+
+async function collectRunsOnce(
 	cwd: string,
 ): Promise<{ runs: PsRun[]; health: SourceHealth }> {
 	// A home whose workflows link is not installed yet has no runs to miss:

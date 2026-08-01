@@ -37,7 +37,10 @@ describe("pi is the only engine", () => {
 		for (const [seat, pool] of seats) {
 			expect(pool.length, `seat ${seat} has no agents`).toBeGreaterThan(0);
 			for (const agent of pool) {
-				expect(agent, `seat ${seat}`).toBeInstanceOf(PiAgent);
+				// CI installs the pack and the workflow workspace separately, so each
+				// can load its own copy of smithers-orchestrator. Check the public
+				// PiAgent contract instead of relying on cross-copy constructor identity.
+				expect(agent.constructor.name, `seat ${seat}`).toBe("PiAgent");
 				expect(agent.cliEngine, `seat ${seat}`).toBe("pi");
 				const opts = (agent as PiAgent).opts;
 				expect(opts.provider, `seat ${seat}`).toBe(DECK_PROVIDER);
@@ -50,7 +53,7 @@ describe("pi is the only engine", () => {
 
 	test("every declared provider is a deck pi agent", () => {
 		for (const [name, agent] of Object.entries(providers)) {
-			expect(agent, name).toBeInstanceOf(PiAgent);
+			expect(agent.constructor.name, name).toBe("PiAgent");
 			assertDeckModel(`${(agent as PiAgent).opts.provider}/${(agent as PiAgent).opts.model}`);
 		}
 	});
