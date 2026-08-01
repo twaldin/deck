@@ -745,7 +745,8 @@ export async function buildFrame(
 			ask(queueFile(), { id, questionKind: "stamp", question: `Stamp PR #${wf.prNumber ?? "unknown"}?`, context: wf.rootDir ?? undefined, options: ["Stamp", "Do not stamp"], recommendation: "Do not stamp until reviewed.", urgency: "high", sessionId: "deck-fleet", cwd: wf.rootDir ?? process.cwd() });
 		}
 	}
-		const agents: AgentRow[] = tasks.filter((task) => task.runState === "running").map((task) => ({
+		questionsOpen = openQuestions(queueFile()).length;
+	const agents: AgentRow[] = tasks.filter((task) => task.runState === "running").map((task) => ({
 			id: task.taskId, model: task.kind, status: `${task.lastVerb ?? "working"}: ${task.lastNote ?? ""}`.trim(), ageMs: task.statusAgeMs,
 		}));
 	const unhealedFailures = efforts.filter((effort) => effort.failed).length;
