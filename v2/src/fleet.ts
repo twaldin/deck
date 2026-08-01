@@ -740,6 +740,8 @@ export async function buildFrame(
 		// an unreadable queue must not take the fleet view down with it
 	}
 	const liveRuns = workflows.filter((wf) => !isTerminalWorkflow(wf) && !wf.superseded);
+	const workflowIdentity = (wf: WorkflowRow): string =>
+		wf.repo ?? wf.rootDir ?? "unknown-repo";
 	const readOpenQuestions = (): ReturnType<typeof openQuestions> => {
 		try {
 			return openQuestions(queueFile());
@@ -750,7 +752,7 @@ export async function buildFrame(
 	};
 	const effortMap = new Map<string, WorkflowRow>();
 	for (const wf of liveRuns) {
-		const repo = wf.rootDir ?? "unknown-repo";
+		const repo = workflowIdentity(wf);
 		const key = wf.prNumber !== null && wf.prNumber !== undefined
 			? `pr:${repo}:${wf.prNumber}`
 			: `ticket:${repo}:${wf.ticket ?? wf.runId}`;
@@ -769,12 +771,14 @@ export async function buildFrame(
 		const url = pr === null ? "unknown URL" : `https://github.com/${repo}/pull/${pr}`;
 		const title = wf.prTitle ?? input.prTitle ?? "untitled PR";
 		const why = input.why ?? "No ship brief summary was recorded.";
-		const generations = liveRuns.filter((candidate) =>
-			candidate !== wf && candidate.repo === repo && candidate.prNumber === pr,
+		const generations = workflows.filter((candidate) =>
+			candidate !== wf &&
+			workflowIdentity(candidate) === repo &&
+			(candidate.prNumber ?? null) === (pr ?? null),
 		).length;
 		const history = generations === 0
 			? "No prior pipeline generations are recorded. Implementation, adversarial review rounds, fixes, and re-cuts are recorded in the pipeline run history."
-			: `${generations} prior live pipeline generation(s) are recorded. Implementation, adversarial review rounds, fixes, and re-cuts are recorded in the pipeline run history.`;
+			: `${generations} prior pipeline generation(s) are recorded. Implementation, adversarial review rounds, fixes, and re-cuts are recorded in the pipeline run history.`;
 		const review = wf.activity === "failed"
 			? "Review state: the pipeline reports a failure; human approvals, bot findings, and CI must be checked for outstanding work."
 			: wf.waitingFor === "stamp"
@@ -785,7 +789,7 @@ export async function buildFrame(
 	for (const wf of liveRuns.filter((row) => row.waitingFor === "stamp")) {
 		// Include the run so a later generation of the same PR gets a fresh
 		// decision, while every render of this parked run uses one stable id.
-		const id = `stamp:${wf.repo ?? "unknown-repo"}:${wf.prNumber ?? "unknown-pr"}:${wf.runId}`;
+		const id = `stamp:${workflowIdentity(wf)}:${wf.prNumber ?? "unknown-pr"}:${wf.runId}`;
 		try {
 			const existing = readQuestionsForStamp(queueFile(), id);
 			if (!existing) {
@@ -797,7 +801,8 @@ export async function buildFrame(
 		}
 	}
 	questionsOpen = readOpenQuestions().length;
-	const agents: AgentRow[] = tasks.filter((task) => task.runState === "running").map((task) => ({
+	const liveAgents = tasks.filter((task) => task.runState === "running");
+	const agents: AgentRow[] = liveAgents.map((task) => ({
 			id: task.taskId, model: task.kind, status: `${task.lastVerb ?? "working"}: ${task.lastNote ?? ""}`.trim(), ageMs: task.statusAgeMs,
 		}));
 	const unhealedFailures = efforts.filter((effort) => effort.failed).length;
@@ -823,7 +828,7 @@ export async function buildFrame(
 			internalOpen: internal.open,
 			internalCap: internal.cap,
 			efforts: efforts.length,
-			agents: agents.length,
+			agents: liveAgents.length,
 			unhealedFailures,
 		},
 		sources: [
