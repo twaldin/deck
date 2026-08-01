@@ -3,6 +3,7 @@
 import { Loop, Parallel, PiAgent, Sequence, Task, Workflow, createSmithers } from "smithers-orchestrator";
 import { z } from "zod";
 import { ask, queueFile } from "../../v2/src/questions-store.ts";
+import { defaultModelPolicy } from "../pr-pipeline/lib/models.ts";
 
 const inputSchema = z.object({
   repo: z.string().min(1), worktree: z.string().min(1), captainLogin: z.string().min(1),
@@ -16,7 +17,7 @@ const schemas = {
   review: z.object({ round: z.number().int(), prNumber: z.number().int(), approvable: z.boolean(), blockers: z.array(z.string()), findings: z.array(z.string()), summary: z.string() }),
   fix: z.object({ round: z.number().int(), prNumber: z.number().int(), dispatched: z.boolean(), addressed: z.array(z.string()), summary: z.string() }),
   rebase: z.object({ round: z.number().int(), prNumber: z.number().int(), rebased: z.boolean(), summary: z.string() }),
-  state: z.object({ round: z.number().int(), prNumber: z.number().int(), mergeable: z.boolean(), ciGreen: z.boolean(), summary: z.string() }),
+  state: z.object({ round: z.number().int(), prNumber: z.number().int(), headSha: z.string(), mergeable: z.boolean(), ciGreen: z.boolean(), summary: z.string() }),
   captainQuestion: z.object({ queued: z.boolean(), id: z.string().nullable(), prNumber: z.number().int(), summary: z.string() }),
 };
 const { outputs, smithers } = createSmithers(schemas);
@@ -31,12 +32,12 @@ async function ghJson(gh: string, args: string[]): Promise<any> {
 async function requested(gh: string, repo: string, login: string): Promise<Pr[]> {
   return ghJson(gh, ["pr", "list", "--repo", repo, "--reviewer", login, "--state", "open", "--json", "number,url,title"]);
 }
-async function state(gh: string, repo: string, pr: number): Promise<{ mergeable: boolean; ciGreen: boolean; summary: string }> {
-  const value = await ghJson(gh, ["pr", "view", String(pr), "--repo", repo, "--json", "mergeable,mergeStateStatus,statusCheckRollup"]);
+async function state(gh: string, repo: string, pr: number): Promise<{ mergeable: boolean; ciGreen: boolean; headSha: string; summary: string }> {
+  const value = await ghJson(gh, ["pr", "view", String(pr), "--repo", repo, "--json", "mergeable,mergeStateStatus,statusCheckRollup,headRefOid"]);
   const checks = Array.isArray(value.statusCheckRollup) ? value.statusCheckRollup : [];
   const ciGreen = checks.length > 0 && checks.every((check: any) => ["SUCCESS", "SKIPPED", "NEUTRAL"].includes(String(check.conclusion ?? check.state).toUpperCase()));
-  const mergeable = value.mergeable === "MERGEABLE" && ["CLEAN", "UNSTABLE"].includes(value.mergeStateStatus);
-  return { mergeable, ciGreen, summary: `mergeable=${value.mergeable} mergeState=${value.mergeStateStatus} checks=${checks.length}` };
+  const mergeable = value.mergeable === "MERGEABLE" && value.mergeStateStatus === "CLEAN";
+  return { mergeable, ciGreen, headSha: String(value.headRefOid ?? ""), summary: `mergeable=${value.mergeable} mergeState=${value.mergeStateStatus} checks=${checks.length}` };
 }
 function agent(model: string, cwd: string): PiAgent { return new PiAgent({ provider: "deck", model, cwd, timeoutMs: 30 * 60_000, thinking: "medium", noSession: true }); }
 
@@ -44,9 +45,10 @@ export default smithers((ctx) => {
   const input = ctx.input; const dryRun = input.dryRun !== false; const gh = input.github?.gh ?? "gh";
   const fixtures = input.fixtures ?? {}; const rounds = input.limits?.rounds ?? 8; const polls = input.limits?.polls ?? 8;
   const queueRows = (ctx.outputs.queue ?? []) as Array<{ poll: number; prs: Pr[] }>;
-  const queue = ctx.latest(outputs.queue, "review-requested-poll");
-  const prs = queue?.prs ?? [];
-  const reviewModel = agent("claude-fable-5", input.worktree); const fixModel = agent("claude-fable-5", input.worktree); const rebaseModel = agent("claude-fable-5", input.worktree);
+  const prs = [...new Map(queueRows.flatMap((row) => row.prs).map((pr) => [pr.number, pr])).values()];
+  const policy = defaultModelPolicy();
+  const reviewModel = agent("gpt-5.6-sol", input.worktree); const fixModel = agent("gpt-5.6-luna", input.worktree); const rebaseModel = agent("gpt-5.6-luna", input.worktree);
+  void policy;
   const poll = async (): Promise<Pr[]> => {
     if (dryRun) return fixtures.requested === false || queueRows.length < (fixtures.pollCount ?? 0) ? [] : [{ number: fixtures.prNumber ?? 1, url: `https://github.com/${input.repo}/pull/${fixtures.prNumber ?? 1}`, title: fixtures.title ?? "fixture PR" }];
     return requested(gh, input.repo, input.captainLogin);
@@ -59,7 +61,7 @@ export default smithers((ctx) => {
     const question = (ctx.outputs.captainQuestion ?? []) as Array<any>;
     return <Loop id={`gate-loop-${pr.number}`} until={latest?.approvable === true && checked?.mergeable === true && checked?.ciGreen === true} maxIterations={rounds} onMaxReached="return-last"><Sequence>
       <Task id={`gate-review-${pr.number}`} output={outputs.review} agent={dryRun ? undefined : reviewModel} retries={1}>{dryRun ? () => { const blockers = fixtures.blockers ?? []; return { round: reviews.filter((x) => x.prNumber === pr.number).length, prNumber: pr.number, approvable: blockers.length === 0, blockers, findings: blockers, summary: blockers.length ? "fixture blockers" : "fixture clean" }; } : reviewPrompt(pr, reviews.filter((x) => x.prNumber === pr.number).length)}</Task>
-      <Task id={`gate-state-${pr.number}`} output={outputs.state} retries={1}>{async () => { const result = dryRun ? { mergeable: (fixtures.blockers ?? []).length === 0, ciGreen: (fixtures.blockers ?? []).length === 0, summary: "fixture state" } : await state(gh, input.repo, pr.number); return { ...result, round: reviews.filter((x) => x.prNumber === pr.number).length, prNumber: pr.number }; }}</Task>
+      <Task id={`gate-state-${pr.number}`} output={outputs.state} retries={1}>{async () => { const result = dryRun ? { mergeable: (fixtures.blockers ?? []).length === 0, ciGreen: (fixtures.blockers ?? []).length === 0, headSha: "fixture-head", summary: "fixture state" } : await state(gh, input.repo, pr.number); return { ...result, headSha: result.headSha ?? "fixture-head", round: reviews.filter((x) => x.prNumber === pr.number).length, prNumber: pr.number }; }}</Task>
       {latest && (!latest.approvable || latest.blockers.length > 0) && (fixed === undefined || fixed.round < latest.round) ? <Task id={`gate-fix-${pr.number}`} output={outputs.fix} agent={dryRun ? undefined : fixModel} retries={1}>{dryRun ? () => ({ round: latest.round, prNumber: pr.number, dispatched: true, addressed: latest.blockers, summary: "fixture fix dispatched" }) : `Fix every finding from Sathira's Gate review for PR #${pr.number} (${pr.url}) in ${input.worktree}. Make the smallest safe changes, run targeted tests, and push the branch. Return JSON {"round":${latest.round},"prNumber":${pr.number},"dispatched":true,"addressed":string[],"summary":string}. Do not approve the PR.`}</Task> : null}
       {latest && checked && (!checked.mergeable || !checked.ciGreen) ? <Task id={`gate-rebase-${pr.number}`} output={outputs.rebase} agent={dryRun ? undefined : rebaseModel} retries={1}>{dryRun ? () => ({ round: latest.round, prNumber: pr.number, rebased: true, summary: "fixture rebase checked" }) : `Inspect PR #${pr.number} (${pr.url}) in ${input.worktree}. If it is behind or conflicting, rebase its branch onto the base branch and push the result. Otherwise do not change it. Return JSON {"round":${latest.round},"prNumber":${pr.number},"rebased":boolean,"summary":string}. Never approve the PR.`}</Task> : null}
     </Sequence></Loop>;
