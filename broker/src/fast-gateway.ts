@@ -25,10 +25,12 @@ export interface FastGatewayOptions {
 	resolveModel: ModelResolver;
 	listModels: () => Iterable<Model<Api>>;
 	storage: AuthStorage;
+	/** Optional upstream override for gateway-level tests. */
+	upstream?: { url: string; close(): Promise<void> };
 }
 
 export function startFastGateway(opts: FastGatewayOptions): { url: string; close(): Promise<void> } {
-	const upstream = startAuthGateway({
+	const upstream = opts.upstream ?? startAuthGateway({
 		storage: opts.storage,
 		bind: "127.0.0.1:0",
 		bearerTokens: opts.bearerTokens,
@@ -43,8 +45,11 @@ export function startFastGateway(opts: FastGatewayOptions): { url: string; close
 		async fetch(request) {
 			const url = new URL(request.url);
 			const init: RequestInit = { method: request.method, headers: request.headers };
-			if (request.method === "POST" && (url.pathname === "/v1/chat/completions" || url.pathname === "/v1/responses" || url.pathname === "/v1/messages")) {
-				const body = (await request.json()) as Record<string, unknown>;
+			if (request.method === "POST") {
+				const rawBody = await request.text();
+				init.body = rawBody;
+				if (url.pathname !== "/v1/chat/completions" && url.pathname !== "/v1/responses" && url.pathname !== "/v1/messages") return fetch(`${upstream.url}${url.pathname}${url.search}`, init);
+				const body = JSON.parse(rawBody) as Record<string, unknown>;
 				if (typeof body.model === "string") {
 					try {
 						const fast = parseFastModel(body.model, opts.resolveModel);
