@@ -1,17 +1,45 @@
-import { describe, expect, test } from "bun:test";
+import assert from "node:assert/strict";
+import { describe, test } from "node:test";
+
+const expect = <T>(value: T) => ({
+	toBe: (expected: T) => assert.strictEqual(value, expected),
+	toEqual: (expected: unknown) => assert.deepStrictEqual(value, expected),
+	toBeFalse: () => assert.strictEqual(value, false),
+	toBeTrue: () => assert.strictEqual(value, true),
+	toBeUndefined: () => assert.strictEqual(value, undefined),
+	toHaveLength: (length: number) => assert.strictEqual((value as { length: number }).length, length),
+	toMatchObject: (expected: Record<string, unknown>) => {
+		assert.deepStrictEqual(
+			Object.fromEntries(Object.keys(expected).map((key) => [key, (value as Record<string, unknown>)[key]])),
+			Object.fromEntries(Object.keys(expected).map((key) => [key, expected[key]])),
+		);
+	},
+	toContain: (expected: unknown) => assert.ok((value as string).includes(expected as string)),
+	toContainEqual: (expected: unknown) => {
+		assert.ok((value as unknown[]).some((item) => {
+			try {
+				assert.deepStrictEqual(item, expected);
+				return true;
+			} catch {
+				return false;
+			}
+		}));
+	},
+});
 import {
 	getContextMarker,
 	registerIdleCompaction,
 	type IdleCompactionExtensionApi,
 	type IdleCompactionRuntime,
-} from "../src/idle-compaction";
+} from "../src/idle-compaction.ts";
 import {
 	DEFAULT_IDLE_COMPACTION_CONFIG,
 	decideIdleCompaction,
 	idleThresholdMs,
 	parseIdleCompactionConfig,
 	selectIdleCompactionConfig,
-} from "../src/idle-compaction-policy";
+	hasProviderNativeCompaction,
+} from "../src/idle-compaction-policy.ts";
 
 class FakeRuntime implements IdleCompactionRuntime {
 	currentTime = 0;
@@ -87,7 +115,7 @@ class TestContext {
 	model = { provider: "deck", id: "glm-test", baseUrl: "http://deck.test/v1" };
 	idle = true;
 	pending = false;
-	tokens: number | null = 80_000;
+	tokens: number | null = 120_000;
 	contextWindow = 200_000;
 	entries: Array<{ type: string; id?: string; customType?: string; data?: unknown }> = [
 		{ type: "message", id: "message-1" },
@@ -158,6 +186,7 @@ describe("idle compaction policy", () => {
 	test("defaults to the warm-cache deadline and a 30% context floor", () => {
 		expect(idleThresholdMs({ ...DEFAULT_IDLE_COMPACTION_CONFIG })).toBe(240_000);
 		expect(DEFAULT_IDLE_COMPACTION_CONFIG.contextFloorPercent).toBe(30);
+		expect(DEFAULT_IDLE_COMPACTION_CONFIG.keepWarmContextPercent).toBe(50);
 		expect(DEFAULT_IDLE_COMPACTION_CONFIG.engine).toBe("client");
 	});
 
@@ -169,8 +198,9 @@ describe("idle compaction policy", () => {
 			isIdle: true,
 			hasPendingMessages: false,
 			inFlightToolCalls: 0,
-			contextTokens: 60_000,
+			contextTokens: 120_000,
 			contextWindow: 200_000,
+			providerNativeCompactionAvailable: true,
 			currentContextMarker: "message-2",
 			lastCompactedContextMarker: "message-1",
 			lastCompactedTokens: 20_000,
@@ -198,6 +228,33 @@ describe("idle compaction policy", () => {
 			compact: false,
 			reason: "below-context-floor",
 		});
+		expect(decideIdleCompaction({ ...base, providerNativeCompactionAvailable: false })).toEqual({
+			compact: false,
+			reason: "provider-native-unavailable",
+		});
+	});
+
+	test("uses keep-warm only when configured and identifies native routes", () => {
+		const base = {
+			config: { ...DEFAULT_IDLE_COMPACTION_CONFIG, keepWarm: true },
+			nowMs: 240_000,
+			lastCacheTouchMs: 0,
+			isIdle: true,
+			hasPendingMessages: false,
+			inFlightToolCalls: 0,
+			contextTokens: 40_000,
+			contextWindow: 200_000,
+			currentContextMarker: "message-2",
+			lastCompactedContextMarker: "message-1",
+			lastCompactedTokens: 20_000,
+			lastCompactedAtMs: null,
+			providerNativeCompactionAvailable: false,
+		};
+		expect(decideIdleCompaction(base)).toEqual({ compact: false, reason: "keep-warm" });
+		expect(hasProviderNativeCompaction({ provider: "xai", id: "grok-4" })).toBeFalse();
+		expect(hasProviderNativeCompaction({ provider: "deck", id: "grok-4" })).toBeFalse();
+		expect(hasProviderNativeCompaction({ provider: "unknown", id: "custom-model" })).toBeFalse();
+		expect(hasProviderNativeCompaction({ provider: "deck", id: "claude-sonnet-4-5" })).toBeTrue();
 	});
 
 	test("enforces cooldown and window-relative growth before re-compacting", () => {
@@ -210,6 +267,7 @@ describe("idle compaction policy", () => {
 			inFlightToolCalls: 0,
 			contextTokens: 25_000,
 			contextWindow: 200_000,
+			providerNativeCompactionAvailable: true,
 			currentContextMarker: "message-2",
 			lastCompactedContextMarker: "compaction-1",
 			lastCompactedTokens: 20_000,
@@ -223,8 +281,9 @@ describe("idle compaction policy", () => {
 			decideIdleCompaction({
 				...base,
 				lastCompactedAtMs: 0,
-				contextTokens: 65_000,
-				lastCompactedTokens: 58_000,
+				contextTokens: 120_000,
+				lastCompactedTokens: 118_000,
+				providerNativeCompactionAvailable: true,
 			}),
 		).toEqual({ compact: false, reason: "no-context-growth" });
 	});
@@ -495,6 +554,7 @@ describe("idle compaction extension", () => {
 			PI_IDLE_COMPACTION_ANTHROPIC_MARGIN_MS: "200",
 		});
 		context.model = { provider: "deck", id: "claude-sonnet-4-5", baseUrl: "http://deck.test/v1" };
+		context.tokens = 40_000;
 		await harness.emit("session_start", context);
 		await warmAndSettle(harness, context);
 		runtime.advance(800);
@@ -505,7 +565,7 @@ describe("idle compaction extension", () => {
 			content: "Reply with exactly idle. Do not call tools.",
 			display: false,
 		});
-		expect(harness.sentMessages[0]?.options).toEqual({ triggerTurn: true });
+		expect(harness.sentMessages[0]?.options).toEqual({ triggerTurn: true, deliverAs: "followUp" });
 	});
 
 	test("falls back to compaction for a long route with a large context", async () => {
@@ -641,6 +701,20 @@ describe("idle compaction extension", () => {
 		expect(context.compactCalls).toHaveLength(0);
 	});
 
+	test("re-arms the idle timer when a long tool ends after the deadline", async () => {
+		const { runtime, harness, context } = setup();
+		await harness.emit("session_start", context);
+		await warmAndSettle(harness, context);
+		runtime.advance(700);
+		await harness.emit("tool_execution_start", context);
+		context.idle = false;
+		runtime.advance(500);
+		context.idle = true;
+		await harness.emit("tool_execution_end", context);
+		runtime.advance(0);
+		expect(context.compactCalls).toHaveLength(1);
+	});
+
 	test("never compacts during streaming, pending messages, or in-flight tools", async () => {
 		const streaming = setup();
 		await streaming.harness.emit("session_start", streaming.context);
@@ -685,7 +759,7 @@ describe("idle compaction extension", () => {
 		expect(context.compactCalls).toHaveLength(1);
 
 		context.entries.push({ type: "message", id: "message-2" });
-		context.tokens = 80_000;
+		context.tokens = 120_000;
 		await warmAndSettle(harness, context);
 		runtime.advance(800);
 		expect(context.compactCalls).toHaveLength(2);
@@ -722,7 +796,7 @@ describe("idle compaction extension", () => {
 		expect(context.compactCalls).toHaveLength(0);
 		expect(runtime.firedTimers).toBe(3);
 
-		context.tokens = 80_000;
+		context.tokens = 120_000;
 		context.entries.push({ type: "message", id: "new-context" });
 		await warmAndSettle(harness, context);
 		runtime.advance(800);

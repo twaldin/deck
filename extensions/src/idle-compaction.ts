@@ -4,8 +4,9 @@ import {
 	MAX_TIMER_DELAY_MS,
 	parseIdleCompactionConfig,
 	selectIdleCompactionConfig,
+	hasProviderNativeCompaction,
 	type IdleCompactionConfig,
-} from "./idle-compaction-policy";
+} from "./idle-compaction-policy.ts";
 
 const STATE_ENTRY_TYPE = "deck.idle-compaction.v1";
 const KEEP_WARM_MESSAGE_TYPE = "deck.idle-keepwarm.v1";
@@ -82,7 +83,7 @@ export interface IdleCompactionExtensionApi {
 	appendEntry(customType: string, data?: unknown): void;
 	sendMessage(
 		message: { customType: string; content: string; display: boolean },
-		options: { triggerTurn: boolean },
+		options: { triggerTurn: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
 	): void;
 	registerFlag?(
 		name: string,
@@ -249,6 +250,7 @@ export function registerIdleCompaction(
 				lastCompactedContextMarker,
 				lastCompactedTokens,
 				lastCompactedAtMs,
+				providerNativeCompactionAvailable: hasProviderNativeCompaction(ctx.model),
 			});
 
 			if (!decision.compact) {
@@ -269,7 +271,7 @@ export function registerIdleCompaction(
 									content: KEEP_WARM_PROMPT,
 									display: false,
 								},
-								{ triggerTurn: true },
+								{ triggerTurn: true, deliverAs: "followUp" },
 							);
 						} catch (error) {
 							keepWarmRequested = false;
@@ -414,6 +416,9 @@ export function registerIdleCompaction(
 	pi.on("tool_execution_end", (_event, ctx) => {
 		latestContext = ctx;
 		inFlightToolCalls = Math.max(0, inFlightToolCalls - 1);
+		// A tool can outlive the cache deadline. Re-arm the deadline as soon as
+		// the last tool ends instead of waiting for agent_settled.
+		if (!compacting && inFlightToolCalls === 0 && hasCacheTouch && ctx.isIdle()) scheduleFromCacheTouch();
 	});
 	pi.on("agent_settled", (_event, ctx) => {
 		latestContext = ctx;
@@ -446,8 +451,8 @@ export function registerIdleCompaction(
 	});
 }
 
-export { DEFAULT_IDLE_COMPACTION_CONFIG } from "./idle-compaction-policy";
-export type { IdleCompactionConfig } from "./idle-compaction-policy";
+export { DEFAULT_IDLE_COMPACTION_CONFIG } from "./idle-compaction-policy.ts";
+export type { IdleCompactionConfig } from "./idle-compaction-policy.ts";
 
 export default function idleCompactionExtension(pi: IdleCompactionExtensionApi): void {
 	registerIdleCompaction(pi);
