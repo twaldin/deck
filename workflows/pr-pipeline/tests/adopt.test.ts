@@ -7,7 +7,7 @@
 
 import { describe, expect, test } from "bun:test";
 
-import { assertAdoptable, repoFromRemoteUrl, type PrOverview } from "../lib/adopt.ts";
+import { assertAdoptable, decideAdoptPush, repoFromRemoteUrl, type PrOverview } from "../lib/adopt.ts";
 import { fetchPrOverview, type ExecFn } from "../lib/gh.ts";
 
 const goodOverview: PrOverview = {
@@ -95,6 +95,26 @@ describe("assertAdoptable", () => {
 		).not.toThrow();
 	});
 
+	test("rejects an ahead flag without a proven descendant", () => {
+		expect(() =>
+			assertAdoptable(goodOverview, {
+				...goodExpectation,
+				worktreeHead: "rebased999",
+				allowWorktreeAhead: true,
+			}),
+		).toThrow(/worktree HEAD is rebased999/);
+	});
+
+	test("allows a verified descendant even when ahead worktrees are not generally allowed", () => {
+		expect(() =>
+			assertAdoptable(goodOverview, {
+				...goodExpectation,
+				worktreeHead: "fix456",
+				worktreeIsDescendant: true,
+			}),
+		).not.toThrow();
+	});
+
 	test("rejects a dirty worktree (modified files)", () => {
 		expect(() =>
 			assertAdoptable(goodOverview, { ...goodExpectation, worktreeStatus: " M src/app.ts\n" }),
@@ -139,6 +159,20 @@ describe("assertAdoptable", () => {
 				assertAdoptable(goodOverview, { ...goodExpectation, worktreeOriginUrl: url }),
 			).not.toThrow();
 		}
+	});
+});
+
+describe("adopt push decision", () => {
+	test("proceeds when heads match", () => {
+		expect(decideAdoptPush({ worktreeHead: "abc", prHead: "abc", isAncestor: false })).toBe("proceed");
+	});
+
+	test("pushes a proven descendant", () => {
+		expect(decideAdoptPush({ worktreeHead: "fix", prHead: "base", isAncestor: true })).toBe("push");
+	});
+
+	test("escalates a non-descendant", () => {
+		expect(decideAdoptPush({ worktreeHead: "other", prHead: "base", isAncestor: false })).toBe("escalate");
 	});
 });
 

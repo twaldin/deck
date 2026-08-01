@@ -20,7 +20,7 @@ import { lastEvent, openDecisions } from "./events";
 import { internalSummary } from "./backlog";
 import { stateDir, stateFiles } from "./home";
 import { readMeta } from "./meta";
-import { openQuestions, queueFile } from "./questions-store";
+import { ask, openQuestions, queueFile, readQuestions } from "./questions-store";
 import { pending } from "./queue";
 import { unresolvedReceipts } from "./side-effects";
 import { SMITHERS_SPEC } from "./smithers";
@@ -82,6 +82,24 @@ export type TaskRow = {
 	statusAgeMs: number | null;
 };
 
+export type AgentRow = {
+	id: string;
+	model: string | null;
+	status: string;
+	ageMs: number | null;
+};
+
+export type EffortRow = {
+	identity: string;
+	ticket: string | null;
+	prNumber: number | null;
+	prTitle: string | null;
+	runId: string;
+	state: string | null;
+	waitingFor: string | null;
+	failed: boolean;
+};
+
 export type WorkflowRow = {
 	runId: string;
 	workflow: string | null;
@@ -116,6 +134,8 @@ export type FleetFrame = {
 	generatedAt: string;
 	tasks: TaskRow[];
 	workflows: WorkflowRow[];
+	efforts?: EffortRow[];
+	agents?: AgentRow[];
 	counters: {
 		tasks: number;
 		running: number;
@@ -127,6 +147,9 @@ export type FleetFrame = {
 		openQuestions: number;
 		internalOpen: number;
 		internalCap: number;
+		efforts?: number;
+		agents?: number;
+		unhealedFailures?: number;
 	};
 	sources: SourceHealth[];
 };
@@ -150,6 +173,7 @@ type PsRun = {
 	step?: string;
 	rootDir?: string;
 	blockedNode?: string;
+	waitingFor?: WaitingFor;
 };
 type ShipInput = {
 	existingPr?: unknown;
@@ -306,7 +330,48 @@ export function normalizeStep(step: string | null | undefined): string | null {
 }
 
 /** Public read-only CLI only. Never the private db, never Gateway lifecycle. */
-async function collectRuns(
+/** One cheap ps poll for the observer. It must not enrich runs with output calls. */
+function isPsRun(value: unknown): value is PsRun {
+	if (typeof value !== "object" || value === null) return false;
+	const row = value as Record<string, unknown>;
+	return typeof row.id === "string" &&
+		(row.workflow === undefined || typeof row.workflow === "string") &&
+		(row.status === undefined || typeof row.status === "string") &&
+		(row.state === undefined || typeof row.state === "string") &&
+		(row.step === undefined || typeof row.step === "string") &&
+		(row.rootDir === undefined || typeof row.rootDir === "string");
+}
+
+export async function collectPsSnapshot(cwd: string): Promise<{ runs: PsRun[]; health: SourceHealth }> {
+	if (!fs.existsSync(cwd)) return { runs: [], health: { name: "smithers", state: "skipped", detail: `no workspace at ${cwd} (run v2/install.sh)` } };
+	try {
+		const { stdout } = await run("bunx", [SMITHERS_SPEC, "ps", "--json"], { cwd, timeout: 15_000, maxBuffer: 4_000_000 });
+		const parsed: unknown = JSON.parse(stdout);
+		const rows = Array.isArray(parsed) ? parsed : (parsed as { runs?: unknown })?.runs;
+		if (!Array.isArray(rows) || !rows.every(isPsRun)) throw new Error("invalid ps response");
+		return { runs: rows, health: { name: "smithers", state: "ok", detail: `${rows.length} run(s)` } };
+	} catch (error) {
+		return { runs: [], health: { name: "smithers", state: "missing", detail: error instanceof Error ? (error.message.split("\\n")[0] ?? "ps failed") : "ps failed" } };
+	}
+}
+
+const collectingRuns = new Map<string, Promise<{ runs: PsRun[]; health: SourceHealth }>>();
+
+export async function collectRuns(
+	cwd: string,
+): Promise<{ runs: PsRun[]; health: SourceHealth }> {
+	const active = collectingRuns.get(cwd);
+	if (active !== undefined) return active;
+	const collection = collectRunsOnce(cwd);
+	collectingRuns.set(cwd, collection);
+	try {
+		return await collection;
+	} finally {
+		if (collectingRuns.get(cwd) === collection) collectingRuns.delete(cwd);
+	}
+}
+
+async function collectRunsOnce(
 	cwd: string,
 ): Promise<{ runs: PsRun[]; health: SourceHealth }> {
 	// A home whose workflows link is not installed yet has no runs to miss:
@@ -322,15 +387,8 @@ async function collectRuns(
 		};
 	}
 	try {
-		const { stdout } = await run("bunx", [SMITHERS_SPEC, "ps", "--json"], {
-			cwd,
-			timeout: 15_000,
-			maxBuffer: 4_000_000,
-		});
-		const parsed: unknown = JSON.parse(stdout);
-		const runs = Array.isArray(parsed)
-			? (parsed as PsRun[])
-			: ((parsed as { runs?: PsRun[] }).runs ?? []);
+		const snapshot = await collectPsSnapshot(cwd);
+		const runs = snapshot.runs;
 		const enriched = await Promise.all(
 			runs.map(async (psRun) => {
 				const input = readShipInput(psRun.id);
@@ -431,11 +489,9 @@ async function collectRuns(
 		);
 		return {
 			runs: enriched,
-			health: {
-				name: "smithers",
-				state: "ok",
-				detail: `${enriched.length} run(s)`,
-			},
+			health: snapshot.health.state === "ok"
+				? { ...snapshot.health, detail: `${enriched.length} run(s)` }
+				: snapshot.health,
 		};
 	} catch (error) {
 		return {
@@ -504,6 +560,10 @@ async function collectPanes(): Promise<{
 	}
 }
 
+function readQuestionsForStamp(file: string, id: string): boolean {
+	return readQuestions(file).some((question) => question.id === `deck-fleet:${id}`);
+}
+
 function realpath(target: string): string {
 	try {
 		return fs.realpathSync(target);
@@ -513,7 +573,7 @@ function realpath(target: string): string {
 }
 
 export async function buildFrame(
-	options: { workflowCwd?: string } = {},
+	options: { workflowCwd?: string; psRuns?: PsRun[] } = {},
 ): Promise<FleetFrame> {
 	const ids = deckOwnedTasks();
 	const [{ runs, health: runHealth }, { byWorktree, health: paneHealth }] =
@@ -527,7 +587,15 @@ export async function buildFrame(
 							detail: "no workflow dir configured",
 						} as SourceHealth,
 					})
-				: collectRuns(options.workflowCwd),
+				: options.psRuns === undefined
+					? collectRuns(options.workflowCwd)
+					: Promise.resolve({
+							runs: options.psRuns.map((psRun) => {
+							const pendingNode = psRun.pendingApprovals?.find((approval) => approval.status === "requested")?.nodeId;
+							return pendingNode === undefined ? psRun : { ...psRun, blockedNode: pendingNode };
+						}),
+						health: { name: "smithers", state: "ok", detail: `${options.psRuns.length} run(s)` } as SourceHealth,
+					}),
 			collectPanes(),
 		]);
 
@@ -660,10 +728,54 @@ export async function buildFrame(
 	} catch {
 		// an unreadable queue must not take the fleet view down with it
 	}
+	const liveRuns = workflows.filter((wf) => !isTerminalWorkflow(wf) && !wf.superseded);
+	const readOpenQuestions = (): ReturnType<typeof openQuestions> => {
+		try {
+			return openQuestions(queueFile());
+		} catch {
+			// The queue is optional. A broken queue must not break the fleet view.
+			return [];
+		}
+	};
+	const effortMap = new Map<string, WorkflowRow>();
+	for (const wf of liveRuns) {
+		const repo = wf.rootDir ?? "unknown-repo";
+		const key = wf.prNumber !== null && wf.prNumber !== undefined
+			? `pr:${repo}:${wf.prNumber}`
+			: `ticket:${repo}:${wf.ticket ?? wf.runId}`;
+		const prior = effortMap.get(key);
+		if (prior === undefined || (wf.startedAt ?? "") > (prior.startedAt ?? "")) effortMap.set(key, wf);
+	}
+	const efforts: EffortRow[] = [...effortMap].map(([identity, wf]) => ({
+		identity, ticket: wf.ticket ?? null, prNumber: wf.prNumber ?? null, prTitle: wf.prTitle ?? null,
+		runId: wf.runId, state: wf.state ?? wf.status, waitingFor: wf.waitingFor === "stamp" ? "stamp-question" : (wf.waitingFor ?? null),
+		failed: wf.activity === "failed",
+	}));
+	for (const wf of liveRuns.filter((row) => row.waitingFor === "stamp")) {
+		// Include the run so a later generation of the same PR gets a fresh
+		// decision, while every render of this parked run uses one stable id.
+		const id = `stamp:${wf.rootDir ?? "unknown-repo"}:${wf.prNumber ?? "unknown-pr"}:${wf.runId}`;
+		try {
+			const existing = readQuestionsForStamp(queueFile(), id);
+			if (!existing) {
+				ask(queueFile(), { id, questionKind: "stamp", question: `Stamp PR #${wf.prNumber ?? "unknown"}?`, context: wf.rootDir ?? undefined, options: ["Stamp", "Do not stamp"], recommendation: "Do not stamp until reviewed.", urgency: "high", sessionId: "deck-fleet", cwd: wf.rootDir ?? process.cwd() });
+			}
+		} catch {
+			// Asking is best effort. A broken or unwritable queue must not break
+			// this hot read path.
+		}
+	}
+	questionsOpen = readOpenQuestions().length;
+	const agents: AgentRow[] = tasks.filter((task) => task.runState === "running").map((task) => ({
+			id: task.taskId, model: task.kind, status: `${task.lastVerb ?? "working"}: ${task.lastNote ?? ""}`.trim(), ageMs: task.statusAgeMs,
+		}));
+	const unhealedFailures = efforts.filter((effort) => effort.failed).length;
 	return {
 		generatedAt: new Date().toISOString(),
 		tasks,
 		workflows,
+		efforts,
+		agents,
 		counters: {
 			tasks: tasks.length,
 			running: tasks.filter((task) => task.runState === "running").length,
@@ -679,6 +791,9 @@ export async function buildFrame(
 			openQuestions: questionsOpen,
 			internalOpen: internal.open,
 			internalCap: internal.cap,
+			efforts: efforts.length,
+			agents: agents.length,
+			unhealedFailures,
 		},
 		sources: [
 			runHealth,
@@ -1086,8 +1201,9 @@ export function buildFleetView(
 	const activeTasks = sorted.filter((task) => attentionRank(task) < 7);
 	const doneTasks = sorted.filter((task) => attentionRank(task) >= 7);
 	const activeWorkflows = frame.workflows
-		.filter((wf) => !isTerminalWorkflow(wf))
+		.filter((wf) => !isTerminalWorkflow(wf) && !wf.superseded)
 		.sort((a, b) => workflowAttentionRank(a) - workflowAttentionRank(b));
+	const effortRows = frame.efforts ?? [];
 	const failedWorkflows = actionableWorkflowFailures(frame);
 	const doneWorkflows = frame.workflows.filter(
 		(wf) =>
@@ -1228,6 +1344,15 @@ export function buildFleetView(
 
 	if (frame.tasks.length === 0) lines.push(theme.fg("dim", "  (no tasks)"));
 	for (const task of activeTasks) renderTask(task);
+	if (effortRows.length > 0) {
+		lines.push("");
+		lines.push(theme.bold(theme.fg("toolTitle", "efforts")));
+		for (const effort of effortRows) {
+			const label = effort.prNumber === null ? effort.ticket ?? effort.identity : `PR #${effort.prNumber}`;
+			const blocker = effort.waitingFor === null ? "" : ` waitingFor=${effort.waitingFor}`;
+			lines.push(`  ${theme.fg(effort.failed ? "warning" : "accent", `[${effort.failed ? "failed" : "active"}]`)} ${theme.fg("text", truncate(`${label}${blocker}`, Math.max(1, noteMax)))}`);
+		}
+	}
 	if (
 		activeWorkflows.length > 0 ||
 		(!showAll && failedWorkflows.length > 0)
@@ -1417,13 +1542,11 @@ export function renderFooterLines(
 	theme: FleetTheme = PLAIN_FLEET_THEME,
 	width = 120,
 ): string[] {
-	const failures = frame.tasks.filter((task) => task.lastVerb === "failed").length + actionableWorkflowFailures(frame).length;
-	const counts = workflowCounts(frame);
 	const attention = [
-		counts.active > 0 ? `play ${counts.active}` : null,
-		counts.waiting > 0 ? `pause ${counts.waiting}` : null,
-		failures > 0 ? `fail ${failures}` : null,
-		frame.counters.openQuestions > 0 ? `ask ${frame.counters.openQuestions}` : null,
+		`Nq ${frame.counters.openQuestions}`,
+		`${frame.counters.efforts ?? (frame.efforts?.length ?? 0)} efforts`,
+		`${frame.counters.agents ?? (frame.agents?.length ?? 0)} agents`,
+		(frame.counters.unhealedFailures ?? (frame.efforts?.filter((effort) => effort.failed).length ?? 0)) > 0 ? `fail ${frame.counters.unhealedFailures ?? (frame.efforts?.filter((effort) => effort.failed).length ?? 0)}` : null,
 	].filter((value): value is string => value !== null);
 	const lines = [
 		footerIdentity(bits),

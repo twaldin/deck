@@ -262,6 +262,7 @@ function adapters(overrides: Partial<ReviewerRequestAdapters> = {}): ReviewerReq
 		fetchCodeowners: async () => null,
 		fetchRecentAuthors: async () => ["Swader", "Swader", "bgar324"],
 		resolveLogin: async (entry) => entry,
+		isCollaborator: async () => true,
 		requestReviewers: async () => {},
 		fetchRequestedReviewers: async () => ["Swader", "bgar324"],
 		...overrides,
@@ -289,6 +290,22 @@ describe("executeReviewerRequest", () => {
 		).rejects.toThrow(/\[escalate\] no reviewer candidates/);
 	});
 
+	test("filters non-collaborators and reports them without requesting them", async () => {
+		const requested: string[][] = [];
+		const result = await executeReviewerRequest(config, adapters({
+			isCollaborator: async (login) => login === "Swader",
+			requestReviewers: async (logins) => requested.push(logins),
+		}));
+		expect(requested).toEqual([["Swader"]]);
+		expect(result.skippedNonCollaborators).toEqual(["bgar324"]);
+	});
+
+	test("escalates when all selected reviewers are non-collaborators", async () => {
+		expect(executeReviewerRequest(config, adapters({ isCollaborator: async () => false }))).rejects.toThrow(
+			/no collaborator reviewer candidates.*Swader.*bgar324/,
+		);
+	});
+
 	test("escalates when GH silently drops a requested login", async () => {
 		expect(
 			executeReviewerRequest(
@@ -305,6 +322,16 @@ describe("executeReviewerRequest", () => {
 				adapters({ resolveLogin: async () => null }),
 			),
 		).rejects.toThrow(/Ghost Person/);
+	});
+
+	test("drops non-collaborators without requesting them", async () => {
+		const requested: string[][] = [];
+		await executeReviewerRequest(config, adapters({
+			isCollaborator: async (login) => login === "Swader",
+			requestReviewers: async (logins) => { requested.push(logins); },
+			fetchRequestedReviewers: async () => ["Swader"],
+		}));
+		expect(requested).toEqual([["Swader"]]);
 	});
 
 	test("never requests ali even when ali dominates recent authors", async () => {

@@ -21,6 +21,7 @@ import { appendStatus, readStatus } from "../events";
 import {
 	buildFleetView,
 	buildFrame,
+	collectPsSnapshot,
 	type FleetTheme,
 	PLAIN_FLEET_THEME,
 	renderFrame,
@@ -29,7 +30,9 @@ import {
 } from "../fleet";
 import { projectFleet } from "../herdr";
 import { deckV2Home, stateFiles } from "../home";
+import { standingRulesDigest } from "./standing-rules";
 import { readMeta } from "../meta";
+import { observePsSnapshot } from "../observer";
 import { registerQuestions } from "../questions";
 import { enqueue, pending } from "../queue";
 import { startShip } from "../ship";
@@ -94,8 +97,29 @@ export default function deckV2(pi: any): void {
 		sources: [],
 	} as Awaited<ReturnType<typeof buildFrame>>;
 
+	const injectedCompactions = new Set<string>();
+	let injectedSession = false;
+	let compactionSequence = 0;
+
 	function busy(ctx: any): boolean {
 		return agentBusy || ctx?.isIdle?.() === false || ctx?.hasPendingMessages?.() === true;
+	}
+
+	async function injectStandingRules(ctx: any, key: string): Promise<void> {
+		if (key === "session_start" ? injectedSession : injectedCompactions.has(key)) return;
+		if (key === "session_start") injectedSession = true;
+		else injectedCompactions.add(key);
+		try {
+			if (typeof pi.sendMessage !== "function") return;
+			const result = pi.sendMessage(
+				{ customType: "deck.standing-rules.v1", content: standingRulesDigest(), display: false },
+				{ deliverAs: key === "session_start" ? "nextTurn" : "steer", triggerTurn: false },
+			);
+			if (result instanceof Promise) await result;
+		} catch {
+			if (key === "session_start") injectedSession = false;
+			else injectedCompactions.delete(key);
+		}
 	}
 
 	// ---- tools --------------------------------------------------------------
@@ -614,7 +638,9 @@ export default function deckV2(pi: any): void {
 
 	async function refreshStatusline(ctx: any): Promise<void> {
 		try {
-			const frame = await buildFrame(workflowCwd === undefined ? {} : { workflowCwd });
+			const snapshot = workflowCwd === undefined ? { runs: [] as never[] } : await collectPsSnapshot(workflowCwd);
+			observePsSnapshot(snapshot.runs);
+			const frame = await buildFrame(workflowCwd === undefined ? {} : { workflowCwd, psRuns: snapshot.runs });
 			lastFooterFrame = frame;
 			ctx.ui?.setStatus?.("deck-usage", undefined);
 			// Herdr projection rides the same cadence: every reconcile cycle mirrors
@@ -627,6 +653,10 @@ export default function deckV2(pi: any): void {
 	}
 
 	pi.on("session_start", async (_event: unknown, ctx: any) => {
+		injectedSession = false;
+		injectedCompactions.clear();
+		compactionSequence = 0;
+		await injectStandingRules(ctx, "session_start");
 		workflowCwd = `${deckV2Home()}/workflows/.smithers`;
 		// The deck footer owns quota presentation. Block the legacy deck-usage
 		// status slot so its timer cannot paint a second chrome strip.
@@ -708,6 +738,11 @@ export default function deckV2(pi: any): void {
 	});
 	pi.on("agent_settled", async () => {
 		agentBusy = false;
+	});
+
+	pi.on("session_compact", async (event: any, ctx: any) => {
+		const key = String(event?.compactionEntry?.id ?? event?.id ?? `compaction-${compactionSequence++}`);
+		await injectStandingRules(ctx, key);
 	});
 
 	pi.on("session_shutdown", async () => {

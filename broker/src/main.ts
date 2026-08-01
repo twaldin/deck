@@ -14,7 +14,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import { AuthBrokerRefresher } from "@oh-my-pi/pi-ai/auth-broker";
-import { startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
+import { startFastGateway } from "./fast-gateway";
 import { startControlSocket } from "./control";
 import { buildModelIndex } from "./models";
 import {
@@ -46,7 +46,7 @@ async function main(): Promise<void> {
 	const controlCapability = ensureToken(CONTROL_TOKEN_FILE);
 
 	const models = buildModelIndex();
-	const gateway = startAuthGateway({
+	const gateway = startFastGateway({
 		storage,
 		bind: DEFAULT_GATEWAY_BIND,
 		bearerTokens: [gatewayToken],
