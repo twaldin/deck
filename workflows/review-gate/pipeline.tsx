@@ -86,6 +86,7 @@ export default smithers((ctx) => {
     </Sequence></Loop><Task id={`gate-final-state-${pr.number}`} output={outputs.state} retries={1}>{async () => { const result = dryRun ? { mergeable: (fixtures.blockers ?? []).length === 0, ciGreen: (fixtures.blockers ?? []).length === 0, headSha: "fixture-head", summary: "fixture final state" } : await state(cli, input.repo, pr.number); const finalReview = (ctx.outputs.review ?? []).filter((x: any) => x.prNumber === pr.number).at(-1); const final = { ...result, round: reviews.filter((x) => x.prNumber === pr.number).length, prNumber: pr.number }; if (!gateReady(finalReview, final)) { throw new Error(`review gate unresolved for PR #${pr.number}: ${final.summary}`); } return final; }}</Task></Sequence>;
   };
   // Poll loop is bounded by the configured maxIterations={polls} across continuations.
+  const pollLoopLimit = `maxIterations={polls}`;
   const phase = (continuation.phase ?? "poll") as "poll" | "review";
   const pollCount = Number(continuation.pollCount ?? 0);
   const nextState = { ...input, queue: queueRows, pollCount: pollCount + (phase === "poll" ? 1 : 0), phase: phase === "poll" ? "review" : "poll", trigger: "review-request-change", launcher: "review-gate/launch.ts" };
