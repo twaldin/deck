@@ -20,7 +20,7 @@ import { lastEvent, openDecisions } from "./events";
 import { internalSummary } from "./backlog";
 import { stateDir, stateFiles } from "./home";
 import { readMeta } from "./meta";
-import { ask, openQuestions, queueFile } from "./questions-store";
+import { ask, openQuestions, queueFile, readQuestions } from "./questions-store";
 import { pending } from "./queue";
 import { unresolvedReceipts } from "./side-effects";
 import { SMITHERS_SPEC } from "./smithers";
@@ -560,6 +560,10 @@ async function collectPanes(): Promise<{
 	}
 }
 
+function readQuestionsForStamp(file: string, id: string): boolean {
+	return readQuestions(file).some((question) => question.id === `deck-fleet:${id}`);
+}
+
 function realpath(target: string): string {
 	try {
 		return fs.realpathSync(target);
@@ -725,6 +729,14 @@ export async function buildFrame(
 		// an unreadable queue must not take the fleet view down with it
 	}
 	const liveRuns = workflows.filter((wf) => !isTerminalWorkflow(wf) && !wf.superseded);
+	const readOpenQuestions = (): ReturnType<typeof openQuestions> => {
+		try {
+			return openQuestions(queueFile());
+		} catch {
+			// The queue is optional. A broken queue must not break the fleet view.
+			return [];
+		}
+	};
 	const effortMap = new Map<string, WorkflowRow>();
 	for (const wf of liveRuns) {
 		const repo = wf.rootDir ?? "unknown-repo";
@@ -740,12 +752,20 @@ export async function buildFrame(
 		failed: wf.activity === "failed",
 	}));
 	for (const wf of liveRuns.filter((row) => row.waitingFor === "stamp")) {
-		const id = `stamp:${wf.rootDir ?? "unknown-repo"}:${wf.prNumber ?? wf.runId}`;
-		if (!openQuestions(queueFile()).some((question) => question.id.endsWith(`:${id}`) && question.status === "open")) {
-			ask(queueFile(), { id, questionKind: "stamp", question: `Stamp PR #${wf.prNumber ?? "unknown"}?`, context: wf.rootDir ?? undefined, options: ["Stamp", "Do not stamp"], recommendation: "Do not stamp until reviewed.", urgency: "high", sessionId: "deck-fleet", cwd: wf.rootDir ?? process.cwd() });
+		// Include the run so a later generation of the same PR gets a fresh
+		// decision, while every render of this parked run uses one stable id.
+		const id = `stamp:${wf.rootDir ?? "unknown-repo"}:${wf.prNumber ?? "unknown-pr"}:${wf.runId}`;
+		try {
+			const existing = readQuestionsForStamp(queueFile(), id);
+			if (!existing) {
+				ask(queueFile(), { id, questionKind: "stamp", question: `Stamp PR #${wf.prNumber ?? "unknown"}?`, context: wf.rootDir ?? undefined, options: ["Stamp", "Do not stamp"], recommendation: "Do not stamp until reviewed.", urgency: "high", sessionId: "deck-fleet", cwd: wf.rootDir ?? process.cwd() });
+			}
+		} catch {
+			// Asking is best effort. A broken or unwritable queue must not break
+			// this hot read path.
 		}
 	}
-		questionsOpen = openQuestions(queueFile()).length;
+	questionsOpen = readOpenQuestions().length;
 	const agents: AgentRow[] = tasks.filter((task) => task.runState === "running").map((task) => ({
 			id: task.taskId, model: task.kind, status: `${task.lastVerb ?? "working"}: ${task.lastNote ?? ""}`.trim(), ageMs: task.statusAgeMs,
 		}));
