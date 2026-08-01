@@ -22,7 +22,7 @@ bun install --cwd "$REPO/cli"
 bash "$REPO/v2/install.sh"
 # Install the durable review-gate poll with the same idempotent update path.
 if command -v smithers >/dev/null 2>&1; then
-  bun "$REPO/workflows/review-gate/launch.ts"
+  (cd "$REPO/workflows" && bun "review-gate/launch.ts")
 fi
 
 # Sync the machine's filtered home profile into the plain operator directory.

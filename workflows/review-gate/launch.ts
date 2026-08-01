@@ -9,9 +9,9 @@ export const reviewGateLauncher = {
 
 export function installReviewGateCron(): void {
   // Replace the known run instead of adding duplicate cron entries on every install.
-  spawnSync("smithers", ["cron", "remove", reviewGateLauncher.runId], { stdio: "ignore" });
-  const result = spawnSync("smithers", ["cron", "add", reviewGateLauncher.schedule, reviewGateLauncher.workflow, "--id", reviewGateLauncher.runId], {
-    stdio: "inherit",
+  spawnSync("smithers", ["cron", "rm", reviewGateLauncher.runId], { stdio: "ignore", cwd: new URL("..", import.meta.url).pathname });
+  const result = spawnSync("smithers", ["cron", "add", reviewGateLauncher.schedule, reviewGateLauncher.workflow], {
+    stdio: "inherit", cwd: new URL("..", import.meta.url).pathname,
   });
   if (result.status !== 0) throw new Error(`smithers cron registration failed: ${result.status ?? "unknown"}`);
 }
