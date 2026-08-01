@@ -1,5 +1,9 @@
 # Pi deck provider
 
+## Fast mode
+
+Append `:fast` to an OpenAI model, such as `deck/gpt-5.6-luna:fast`. The broker strips the suffix and sends `service_tier: "priority"` to OpenAI. Priority processing has a **2x cost multiplier** over standard processing. Non-OpenAI models with `:fast` are rejected.
+
 ## Installed wiring
 
 Pi 0.73.0 is installed at `~/.nvm/versions/node/v24.8.0/bin/pi`. Its installed source supports custom providers both in `~/.pi/agent/models.json` and through the extension API `pi.registerProvider(name, config)`. There is no custom base-URL CLI flag; `-e` only loads an extension for that invocation.

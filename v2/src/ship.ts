@@ -23,6 +23,7 @@ import { deckV2Home, stateDir } from "./home";
 import { readMeta, updateMeta } from "./meta";
 import { findProfile, type ProjectProfile } from "./projects";
 import { SMITHERS_SPEC } from "./smithers";
+import { pipelineHash } from "./recut";
 
 export type ShipRequest = {
 	/** Ticket / effort id; also seeds the smithers run id. */
@@ -85,11 +86,13 @@ export function buildPipelineInput(
 	profile: ProjectProfile,
 ): Record<string, unknown> {
 	const input: Record<string, unknown> = {
+		__smithersDurability: { entryWorkflowHash: pipelineHash(pipelineDir()) },
 		ticket: request.ticket,
 		repo: profile.repo,
 		worktree: request.worktree,
 		branch: request.branch,
 		profile: profile.id,
+		models: profile.models,
 		dryRun: request.dryRun === true,
 		brief: {
 			ticket: request.ticket,
