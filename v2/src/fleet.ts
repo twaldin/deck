@@ -883,7 +883,7 @@ export async function buildFrame(
 		// decision, while every render of this parked run uses one stable id.
 		const input = readShipInput(wf.runId);
 		const currentHead = efforts.find((item) => item.runId === wf.runId)?.headRefOid;
-		if (currentHead === undefined || currentHead === "") continue;
+		if (currentHead === undefined || currentHead === null || currentHead === "") continue;
 		const id = `stamp:${wf.repo ?? wf.rootDir ?? "unknown"}:${wf.prNumber ?? input.prNumber ?? "unknown"}:stamp:${wf.runId}:${wf.step ?? "r0-stamp"}`;
 		try {
 			const existing = readQuestionsForStamp(queueFile(), id);
