@@ -508,6 +508,8 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 						busy = false;
 					}
 				};
+				// Factory has its own live frame and is not the footer. Keep its
+				// independent safety refresh responsive while it is open.
 				const timer = setInterval(() => void refresh(), 5_000);
 				timer.unref?.();
 				return {
