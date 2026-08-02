@@ -36,6 +36,7 @@ import {
 	DEFAULT_IDLE_COMPACTION_CONFIG,
 	decideIdleCompaction,
 	idleThresholdMs,
+	toolHangCeilingMs,
 	parseIdleCompactionConfig,
 	selectIdleCompactionConfig,
 	hasProviderNativeCompaction,
@@ -210,14 +211,17 @@ describe("idle compaction policy", () => {
 		expect(decideIdleCompaction({ ...base, isIdle: false })).toEqual({
 			compact: false,
 			reason: "busy",
+			waitMs: DEFAULT_IDLE_COMPACTION_CONFIG.retryDelayMs,
 		});
 		expect(decideIdleCompaction({ ...base, inFlightToolCalls: 1 })).toEqual({
 			compact: false,
 			reason: "busy",
+			waitMs: DEFAULT_IDLE_COMPACTION_CONFIG.retryDelayMs,
 		});
 		expect(decideIdleCompaction({ ...base, hasPendingMessages: true })).toEqual({
 			compact: false,
 			reason: "busy",
+			waitMs: DEFAULT_IDLE_COMPACTION_CONFIG.retryDelayMs,
 		});
 		expect(decideIdleCompaction({ ...base, nowMs: 239_999 })).toEqual({
 			compact: false,
@@ -255,6 +259,49 @@ describe("idle compaction policy", () => {
 		expect(hasProviderNativeCompaction({ provider: "deck", id: "grok-4" })).toBeFalse();
 		expect(hasProviderNativeCompaction({ provider: "unknown", id: "custom-model" })).toBeFalse();
 		expect(hasProviderNativeCompaction({ provider: "deck", id: "claude-sonnet-4-5" })).toBeTrue();
+	});
+
+	test("treats a tool call past the hang ceiling as re-checkable, never compactable", () => {
+		const config = { ...DEFAULT_IDLE_COMPACTION_CONFIG, keepWarm: true };
+		expect(toolHangCeilingMs(config)).toBe(480_000);
+		const base = {
+			config,
+			nowMs: 240_000,
+			lastCacheTouchMs: 0,
+			isIdle: false,
+			hasPendingMessages: false,
+			inFlightToolCalls: 1,
+			toolsInFlightSinceMs: 0,
+			contextTokens: 160_000,
+			contextWindow: 200_000,
+			currentContextMarker: "message-2",
+			lastCompactedContextMarker: null,
+			lastCompactedTokens: null,
+			lastCompactedAtMs: null,
+			providerNativeCompactionAvailable: true,
+		};
+		// Below the ceiling the busy answer now carries the wait until the ceiling.
+		expect(decideIdleCompaction(base)).toEqual({
+			compact: false,
+			reason: "busy",
+			waitMs: 240_000,
+		});
+		// Past it, keep-warm is allowed and compaction still is not.
+		expect(decideIdleCompaction({ ...base, nowMs: 480_000 })).toEqual({
+			compact: false,
+			reason: "keep-warm",
+		});
+		expect(
+			decideIdleCompaction({ ...base, nowMs: 480_000, contextTokens: 40_000 }),
+		).toEqual({ compact: false, reason: "keep-warm" });
+		// Without keep-warm there is no cache action left, so re-check at the ceiling.
+		expect(
+			decideIdleCompaction({
+				...base,
+				config: { ...config, keepWarm: false },
+				nowMs: 480_000,
+			}),
+		).toEqual({ compact: false, reason: "busy", waitMs: config.retryDelayMs });
 	});
 
 	test("enforces cooldown and window-relative growth before re-compacting", () => {
@@ -712,6 +759,108 @@ describe("idle compaction extension", () => {
 		context.idle = true;
 		await harness.emit("tool_execution_end", context);
 		runtime.advance(0);
+		expect(context.compactCalls).toHaveLength(1);
+	});
+
+	test("keeps the cache warm when a tool call never ends", async () => {
+		for (const tokens of [40_000, 160_000]) {
+			const { runtime, harness, context } = setup({
+				PI_IDLE_COMPACTION_ANTHROPIC_TTL_MS: "1000",
+				PI_IDLE_COMPACTION_ANTHROPIC_MARGIN_MS: "200",
+			});
+			context.model = { provider: "deck", id: "claude-sonnet-4-5", baseUrl: "http://deck.test/v1" };
+			context.tokens = tokens;
+			await harness.emit("session_start", context);
+			await warmAndSettle(harness, context);
+			runtime.advance(700);
+			await harness.emit("tool_execution_start", context);
+			context.idle = false;
+			// No tool_execution_end and no agent_settled ever arrive: only the
+			// duration watchdog can re-arm the deadline (ceiling = 2 x 800ms).
+			runtime.advance(2_000);
+			expect(harness.sentMessages).toHaveLength(1);
+			expect(harness.sentMessages[0]?.message).toMatchObject({
+				customType: "deck.idle-keepwarm.v1",
+			});
+			expect(context.compactCalls).toHaveLength(0);
+			// A wedged agent loop may never run the injected turn, so the watchdog
+			// keeps re-checking but must not queue one ping per cadence.
+			runtime.advance(8_000);
+			expect(harness.sentMessages).toHaveLength(1);
+
+			// Once a keep-warm turn actually runs, the cadence resumes.
+			await harness.emit("before_agent_start", context);
+			await harness.emit("agent_start", context);
+			await warmAndSettle(harness, context);
+			runtime.advance(800);
+			expect(harness.sentMessages).toHaveLength(2);
+			expect(context.compactCalls).toHaveLength(0);
+		}
+	});
+
+	test("does not clear an unresolved tool on agent_settled", async () => {
+		const { runtime, harness, context } = setup({
+			PI_IDLE_COMPACTION_TTL_MS: "1000",
+			PI_IDLE_COMPACTION_MARGIN_MS: "200",
+		});
+		await harness.emit("session_start", context);
+		await warmAndSettle(harness, context);
+		runtime.advance(700);
+		await harness.emit("tool_execution_start", context);
+		context.idle = true;
+		await harness.emit("agent_settled", context);
+
+		// A settled agent turn does not prove that a tool without an end event
+		// stopped. The watchdog must keep compaction disabled until the end event.
+		runtime.advance(5_000);
+		expect(context.compactCalls).toHaveLength(0);
+
+		await harness.emit("tool_execution_end", context);
+		runtime.advance(800);
+		expect(context.compactCalls).toHaveLength(1);
+	});
+
+	test("a keep-warm turn during a hang does not license compacting over that tool", async () => {
+		const { runtime, harness, context } = setup({
+			PI_IDLE_COMPACTION_ANTHROPIC_TTL_MS: "1000",
+			PI_IDLE_COMPACTION_ANTHROPIC_MARGIN_MS: "200",
+		});
+		context.model = { provider: "deck", id: "claude-sonnet-4-5", baseUrl: "http://deck.test/v1" };
+		context.tokens = 160_000;
+		await harness.emit("session_start", context);
+		await warmAndSettle(harness, context);
+		runtime.advance(700);
+		await harness.emit("tool_execution_start", context);
+		context.idle = false;
+		runtime.advance(2_000);
+		expect(harness.sentMessages).toHaveLength(1);
+
+		// The injected keep-warm runs its own turn while the tool is STILL hung.
+		// Its lifecycle must not be read as proof that the tool ended.
+		await harness.emit("before_agent_start", context);
+		await harness.emit("agent_start", context);
+		context.idle = true;
+		await warmAndSettle(harness, context);
+		runtime.advance(10_000);
+		expect(context.compactCalls).toHaveLength(0);
+
+		// When the tool finally ends, normal compaction is available again.
+		await harness.emit("tool_execution_end", context);
+		await harness.emit("agent_settled", context);
+		runtime.advance(800);
+		expect(context.compactCalls).toHaveLength(1);
+	});
+
+	test("reschedules a busy deadline instead of dropping it", async () => {
+		const { runtime, harness, context } = setup();
+		await harness.emit("session_start", context);
+		await warmAndSettle(harness, context);
+		context.idle = false;
+		runtime.advance(800);
+		expect(context.compactCalls).toHaveLength(0);
+		context.idle = true;
+		// The busy decision carried a waitMs, so the deadline survives to retry.
+		runtime.advance(100);
 		expect(context.compactCalls).toHaveLength(1);
 	});
 

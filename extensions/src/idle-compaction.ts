@@ -1,6 +1,8 @@
 import {
+	areToolsHung,
 	decideIdleCompaction,
 	idleThresholdMs,
+	toolHangCeilingMs,
 	MAX_TIMER_DELAY_MS,
 	parseIdleCompactionConfig,
 	selectIdleCompactionConfig,
@@ -164,6 +166,8 @@ export function registerIdleCompaction(
 	let idleCompactionRequested = false;
 	let keepWarmRequested = false;
 	let inFlightToolCalls = 0;
+	let toolsInFlightSinceMs: number | null = null;
+	let keepWarmSentAtMs: number | null = null;
 	let lastCompactedContextMarker: string | null = null;
 	let lastCompactedTokens: number | null = null;
 	let lastCompactedAtMs: number | null = null;
@@ -237,6 +241,12 @@ export function registerIdleCompaction(
 			} else if (failuresForContext > currentConfig.maxRetriesPerContext) {
 				return;
 			}
+			const toolsHung = areToolsHung({
+				config: currentConfig,
+				nowMs: runtime.now(),
+				inFlightToolCalls,
+				toolsInFlightSinceMs,
+			});
 			const decision = decideIdleCompaction({
 				config: { ...currentConfig, enabled: enabledForSession },
 				nowMs: runtime.now(),
@@ -244,6 +254,7 @@ export function registerIdleCompaction(
 				isIdle: ctx.isIdle(),
 				hasPendingMessages: ctx.hasPendingMessages(),
 				inFlightToolCalls,
+				toolsInFlightSinceMs,
 				contextTokens: usage?.tokens ?? null,
 				contextWindow: usage?.contextWindow ?? 0,
 				currentContextMarker,
@@ -255,14 +266,19 @@ export function registerIdleCompaction(
 
 			if (!decision.compact) {
 				if (decision.reason === "keep-warm") {
-					if (
-						!keepWarmRequested &&
-						ctx.isIdle() &&
-						!ctx.hasPendingMessages() &&
-						inFlightToolCalls === 0 &&
-						modelIdentity(ctx) === cacheTouchModelIdentity
-					) {
+					// A hung tool call is exactly the case keep-warm must survive: the
+					// session is not idle and no tool end will re-arm the deadline. A
+					// wedged agent loop may never run the injected turn, so require the
+					// previous ping to have landed instead of queueing one per cadence.
+					const mayKeepWarm = toolsHung
+						? keepWarmSentAtMs === null || lastCacheTouchMs > keepWarmSentAtMs
+						: !keepWarmRequested &&
+							ctx.isIdle() &&
+							!ctx.hasPendingMessages() &&
+							inFlightToolCalls === 0;
+					if (mayKeepWarm && modelIdentity(ctx) === cacheTouchModelIdentity) {
 						keepWarmRequested = true;
+						keepWarmSentAtMs = runtime.now();
 						notify(ctx, "Idle keep-warm request started");
 						try {
 							pi.sendMessage(
@@ -275,12 +291,21 @@ export function registerIdleCompaction(
 							);
 						} catch (error) {
 							keepWarmRequested = false;
+							keepWarmSentAtMs = null;
 							notify(ctx, `Idle keep-warm failed: ${error instanceof Error ? error.message : String(error)}`, "warning");
 						}
 					}
+					// A wedged tool produces no lifecycle event to re-arm from, and a
+					// single ping cannot outlive the cache. Hold the keep-warm cadence
+					// for as long as the tool stays hung.
+					if (toolsHung) scheduleAfter(idleThresholdMs(currentConfig));
 					return;
 				}
-				if (decision.reason === "cache-still-fresh" || decision.reason === "cooldown") {
+				if (
+					decision.reason === "cache-still-fresh" ||
+					decision.reason === "cooldown" ||
+					decision.reason === "busy"
+				) {
 					scheduleAfter(decision.waitMs ?? currentConfig.retryDelayMs);
 				} else if (decision.reason === "usage-unknown") {
 					failedContextMarker = currentContextMarker;
@@ -341,6 +366,17 @@ export function registerIdleCompaction(
 		scheduleAfter(Math.max(0, lastCacheTouchMs + idleThresholdMs(config) - runtime.now()));
 	};
 
+	/**
+	 * Watchdog: a tool call that never ends must not disable cache protection for
+	 * the rest of the run. Arm a re-evaluation at the hang ceiling instead of
+	 * leaving the session with no timer at all.
+	 */
+	const scheduleToolWatchdog = (): void => {
+		if (latestContext === undefined || toolsInFlightSinceMs === null) return;
+		const config = configFor(latestContext);
+		scheduleAfter(Math.max(0, toolsInFlightSinceMs + toolHangCeilingMs(config) - runtime.now()));
+	};
+
 	pi.on("session_start", (_event, ctx) => {
 		active = true;
 		enabledForSession = parsed.config.enabled && pi.getFlag?.("no-idle-compaction") !== true;
@@ -348,7 +384,9 @@ export function registerIdleCompaction(
 		compacting = false;
 		idleCompactionRequested = false;
 		keepWarmRequested = false;
+		keepWarmSentAtMs = null;
 		inFlightToolCalls = 0;
+		toolsInFlightSinceMs = null;
 		lastCacheTouchMs = runtime.now();
 		hasCacheTouch = false;
 		providerResponseThisTurn = false;
@@ -379,8 +417,8 @@ export function registerIdleCompaction(
 		keepWarmRequested = false;
 		providerResponseThisTurn = false;
 		successfulResponseThisRun = false;
-		inFlightToolCalls = 0;
 		clearScheduled();
+		if (inFlightToolCalls > 0) scheduleToolWatchdog();
 	});
 	pi.on("before_provider_request", (_event, ctx) => {
 		latestContext = ctx;
@@ -406,29 +444,41 @@ export function registerIdleCompaction(
 		providerResponseThisTurn = false;
 		successfulResponseThisRun = false;
 		cacheTouchModelIdentity = null;
+		if (inFlightToolCalls === 0) {
+			toolsInFlightSinceMs = null;
+			keepWarmSentAtMs = null;
+		}
 		clearScheduled();
+		if (inFlightToolCalls > 0) scheduleToolWatchdog();
 	});
 	pi.on("tool_execution_start", (_event, ctx) => {
 		latestContext = ctx;
+		if (inFlightToolCalls === 0) toolsInFlightSinceMs = runtime.now();
 		inFlightToolCalls += 1;
-		clearScheduled();
+		if (!compacting) scheduleToolWatchdog();
+		else clearScheduled();
 	});
 	pi.on("tool_execution_end", (_event, ctx) => {
 		latestContext = ctx;
 		inFlightToolCalls = Math.max(0, inFlightToolCalls - 1);
+		if (inFlightToolCalls === 0) {
+			toolsInFlightSinceMs = null;
+			keepWarmSentAtMs = null;
+		}
 		// A tool can outlive the cache deadline. Re-arm the deadline as soon as
 		// the last tool ends instead of waiting for agent_settled.
 		if (!compacting && inFlightToolCalls === 0 && hasCacheTouch && ctx.isIdle()) scheduleFromCacheTouch();
 	});
 	pi.on("agent_settled", (_event, ctx) => {
 		latestContext = ctx;
-		// Fully settled is the lifecycle authority that no tool can remain active;
-		// clear a defensive leak if an aborted tool omitted its end event. Cache
-		// warmth is per run: a failed/aborted run with no provider response must
+		// Do not clear tool state here. A tool can outlive the agent turn and omit
+		// its end event; only tool_execution_end proves that it is no longer live.
+		// Cache warmth is per run: a failed/aborted run with no provider response must
 		// not reuse an older run's warm-cache deadline for its changed context.
-		inFlightToolCalls = 0;
+		// its end event; only tool_execution_end proves that it is no longer live.
 		hasCacheTouch = successfulResponseThisRun;
 		if (!compacting && hasCacheTouch) scheduleFromCacheTouch();
+		if (!compacting && inFlightToolCalls > 0) scheduleToolWatchdog();
 	});
 	pi.on("session_before_compact", (_event, ctx) => {
 		latestContext = ctx;
@@ -446,6 +496,7 @@ export function registerIdleCompaction(
 	pi.on("session_shutdown", () => {
 		active = false;
 		keepWarmRequested = false;
+		keepWarmSentAtMs = null;
 		latestContext = undefined;
 		clearScheduled();
 	});

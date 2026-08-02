@@ -158,6 +158,8 @@ export interface IdleCompactionInput {
 	isIdle: boolean;
 	hasPendingMessages: boolean;
 	inFlightToolCalls: number;
+	/** When the current tool burst started; null when no tool is in flight. */
+	toolsInFlightSinceMs?: number | null;
 	contextTokens: number | null;
 	contextWindow: number;
 	currentContextMarker: string | null;
@@ -172,18 +174,54 @@ export function idleThresholdMs(config: IdleCompactionConfig): number {
 	return config.cacheTtlMs - config.marginMs;
 }
 
+/**
+ * A tool call still in flight past this ceiling counts as hung. Past it the
+ * cache deadline is re-evaluated without waiting for a `tool_execution_end`
+ * that may never arrive; a wedged tool must not starve keep-warm for the run.
+ */
+export function toolHangCeilingMs(config: IdleCompactionConfig): number {
+	return 2 * idleThresholdMs(config);
+}
+
+export function areToolsHung(
+	input: Pick<
+		IdleCompactionInput,
+		"config" | "nowMs" | "inFlightToolCalls" | "toolsInFlightSinceMs"
+	>,
+): boolean {
+	const since = input.toolsInFlightSinceMs;
+	if (input.inFlightToolCalls <= 0 || since === null || since === undefined) return false;
+	return input.nowMs - since >= toolHangCeilingMs(input.config);
+}
+
+/** How long the caller should wait before re-checking a busy session. */
+function busyWaitMs(input: IdleCompactionInput): number {
+	const since = input.toolsInFlightSinceMs;
+	if (input.inFlightToolCalls > 0 && since !== null && since !== undefined) {
+		return Math.max(1, since + toolHangCeilingMs(input.config) - input.nowMs);
+	}
+	return input.config.retryDelayMs;
+}
+
 export function decideIdleCompaction(input: IdleCompactionInput): IdleCompactionDecision {
 	const { config } = input;
 	if (!config.enabled) return { compact: false, reason: "disabled" };
 	if (config.engine !== "client") return { compact: false, reason: "unsupported-engine" };
-	if (!input.isIdle || input.hasPendingMessages || input.inFlightToolCalls > 0) {
-		return { compact: false, reason: "busy" };
+	const toolsHung = areToolsHung(input);
+	if (!toolsHung && (!input.isIdle || input.hasPendingMessages || input.inFlightToolCalls > 0)) {
+		return { compact: false, reason: "busy", waitMs: busyWaitMs(input) };
 	}
 
 	const idleForMs = Math.max(0, input.nowMs - input.lastCacheTouchMs);
 	const waitMs = idleThresholdMs(config) - idleForMs;
 	if (waitMs > 0) {
 		return { compact: false, reason: "cache-still-fresh", waitMs };
+	}
+
+	if (toolsHung) {
+		return config.keepWarm
+			? { compact: false, reason: "keep-warm" }
+			: { compact: false, reason: "busy", waitMs: config.retryDelayMs };
 	}
 
 	if (
