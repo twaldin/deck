@@ -30,6 +30,12 @@ import { evaluateTeardown, formatVerdict } from "./teardown";
 import { detectStale, foldBatched, reconcile } from "./wake";
 import { smithersWorkspaceRoot } from "./workspace";
 
+const REASONING_LEVELS = new Set(["low", "medium", "high", "xhigh", "max"]);
+function parseReasoning(value: string): "low" | "medium" | "high" | "xhigh" | "max" {
+	if (!REASONING_LEVELS.has(value)) throw new Error(`reasoning must be low, medium, high, xhigh, or max; received ${value}`);
+	return value as "low" | "medium" | "high" | "xhigh" | "max";
+}
+
 const USAGE = `deck-v2 — fleet primitives
 
   bootstrap                        create the orchestrator home (not a checkout)
@@ -47,6 +53,7 @@ const USAGE = `deck-v2 — fleet primitives
   spawn <id> --task <text> --accept <text> (--repo <path|alias> | --worktree <path>)
              [--kind ship|scout] [--base <branch>] [--desc <text>]
              [--project <name>] [--branch <name>] [--model <deck/model>]
+             [--reasoning low|medium|high|xhigh|max]
              [--no-pipeline]     workers inside a pipeline stage, scouts; bare
                                  ship on a profiled project is refused without
                                  --no-pipeline
@@ -199,6 +206,9 @@ export async function runCli(argv: string[]): Promise<number> {
 				if (id === undefined) throw new Error("spawn needs a task id");
 				const accept = str(args.flags, "accept");
 				const worktreeFlag = str(args.flags, "worktree");
+				// Validate before allocation so malformed reasoning cannot produce a
+				// worktree-side error and the CLI reports the actual argument failure.
+				const reasoning = str(args.flags, "reasoning") === undefined ? undefined : parseReasoning(need(args.flags, "reasoning"));
 				const result = startRun(
 					{
 						taskId: id,
@@ -219,6 +229,7 @@ export async function runCli(argv: string[]): Promise<number> {
 						...(str(args.flags, "model") === undefined
 							? {}
 							: { model: need(args.flags, "model") }),
+						...(reasoning === undefined ? {} : { reasoning }),
 					},
 					deckV2Home(),
 				);

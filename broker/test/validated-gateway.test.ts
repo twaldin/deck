@@ -50,15 +50,37 @@ describe("validated gateway outbound requests", () => {
 		expect(forwarded[0]?.body).toEqual({ model: "xai/grok-4.5", reasoning_effort: "high" });
 	});
 
-	test("forwards Anthropic thinking payloads", async () => {
+	test("converts Anthropic named levels to native token budgets", async () => {
 		const { gateway, forwarded } = await withFakeUpstream();
 		const response = await fetch(`${gateway.url}/v1/messages`, {
 			method: "POST",
 			headers: { "content-type": "application/json" },
-			body: JSON.stringify({ model: "anthropic/claude-sonnet-4-5", thinking: { type: "enabled", budget_tokens: 32768 } }),
+			body: JSON.stringify({ model: "anthropic/claude-sonnet-4-5", reasoning_effort: "high" }),
 		});
 		expect(response.status).toBe(200);
-		expect(forwarded[0]?.body).toEqual({ model: "anthropic/claude-sonnet-4-5", thinking: { type: "enabled", budget_tokens: 32768 } });
+		expect(forwarded[0]?.body).toEqual({ model: "anthropic/claude-sonnet-4-5", thinking: { type: "enabled", budget_tokens: 16384 } });
+	});
+
+	test("clamps named levels per model before forwarding", async () => {
+		const { gateway, forwarded } = await withFakeUpstream();
+		const response = await fetch(`${gateway.url}/v1/chat/completions`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ model: "xai/grok-4.5", reasoning_effort: "medium" }),
+		});
+		expect(response.status).toBe(200);
+		expect(forwarded[0]?.body).toEqual({ model: "xai/grok-4.5", reasoning_effort: "medium" });
+	});
+
+	test("keeps Deck Claude models on OpenAI-compatible routing", async () => {
+		const { gateway, forwarded } = await withFakeUpstream();
+		const response = await fetch(`${gateway.url}/v1/chat/completions`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ model: "deck/claude-sonnet-4-5", reasoning_effort: "high" }),
+		});
+		expect(response.status).toBe(200);
+		expect(forwarded[0]?.body).toEqual({ model: "deck/claude-sonnet-4-5", reasoning_effort: "high" });
 	});
 
 	test("skips cooling accounts, pins the selected credential, and forwards fallback model", async () => {
@@ -117,7 +139,7 @@ describe("validated gateway outbound requests", () => {
 		const response = await fetch(`${gateway.url}/v1/chat/completions`, {
 			method: "POST",
 			headers: { "content-type": "application/json" },
-			body: JSON.stringify({ model: "xai/grok-4.5", reasoning_effort: "xhigh" }),
+			body: JSON.stringify({ model: "xai/grok-4.5", reasoning_effort: "turbo" }),
 		});
 		expect(response.status).toBe(400);
 		expect(forwarded).toEqual([]);

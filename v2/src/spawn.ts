@@ -80,6 +80,7 @@ export type SpawnRequest = {
 	 * `low`, `medium`, `high`, `xhigh`, or `max`) or an Anthropic budget as
 	 * `budget:<tokens>`; Pi sends the provider-native value without remapping.
 	 */
+	reasoning?: "low" | "medium" | "high" | "xhigh" | "max";
 	thinking?: string;
 };
 
@@ -164,7 +165,7 @@ export function workerModelFor(request: SpawnRequest): string {
 }
 
 export function workerReasoningFor(request: SpawnRequest): string | undefined {
-	return request.thinking ?? seatModel(shipProfileFor(request)?.models?.implementer).reasoning;
+	return request.reasoning ?? request.thinking ?? seatModel(shipProfileFor(request)?.models?.implementer).reasoning;
 }
 
 export function shipProfileFor(request: SpawnRequest): ProjectProfile | null {

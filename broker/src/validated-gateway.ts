@@ -1,6 +1,7 @@
 import { startFastGateway, type FastGatewayOptions } from "./fast-gateway";
 import { DEFAULT_GATEWAY_BIND } from "./paths";
-import { nativeReasoning } from "./reasoning";
+import { buildModelIndex } from "./models";
+import { clampReasoning, nativeReasoning, supportedReasoning, type ReasoningEffort } from "./reasoning";
 import { routeModel, NoQuotaError, routingProvider, type QuotaModel } from "./quota";
 
 type GatewayUpstream = { url: string; close(): Promise<void> };
@@ -18,6 +19,7 @@ export function startValidatedGateway(
 ) {
 	const upstream = startUpstream({ ...options, bind: "127.0.0.1:0" });
 	const quotaAccounts = options.quotaAccounts;
+	const modelIndex = buildModelIndex();
 	const { hostname, port } = gatewayBind(options.bind ?? DEFAULT_GATEWAY_BIND);
 	const server = Bun.serve({
 		hostname,
@@ -30,8 +32,8 @@ export function startValidatedGateway(
 				let body: { model?: string; reasoning_effort?: string; reasoning?: { effort?: string }; thinking?: { type?: string; budget_tokens?: number }; prompt_cache_key?: string };
 				try {
 					body = await request.json() as typeof body;
-					requestBody = body;
 					const modelParts = body.model?.split("/") ?? [];
+					requestBody = body;
 					if (body.model !== undefined && quotaAccounts !== undefined) {
 						const providerName = modelParts.at(-2);
 						const provider = providerName ?? (modelParts.at(-1)?.startsWith("claude-") ? "anthropic" : modelParts.at(-1)?.startsWith("grok-") ? "xai" : "openai-codex");
@@ -51,22 +53,31 @@ export function startValidatedGateway(
 							throw error;
 						}
 					}
-					const modelId = modelParts.at(-1) ?? "";
-					const providerName = modelParts.at(-2);
-					const provider = providerName === "openai-codex" ? "openai" : (providerName ?? (modelId.startsWith("claude-") ? "anthropic" : modelId.startsWith("grok-") ? "xai" : "openai"));
-					let effort = body.reasoning_effort ?? body.reasoning?.effort;
-					if (provider === "anthropic" && effort !== undefined && !effort.startsWith("budget:")) {
-						const budgets: Record<string, number> = { minimal: 1024, low: 4096, medium: 16384, high: 32768, xhigh: 65536, max: 65536 };
-						const budget = budgets[effort];
-						if (budget === undefined) throw new Error(`Unsupported anthropic reasoning effort: ${effort}`);
-						effort = `budget:${budget}`;
-					}
+					const reasoningParts = body.model?.split("/") ?? [];
+					const modelId = reasoningParts.at(-1) ?? "";
+					const providerName = reasoningParts.at(-2);
+					const provider = providerName === "anthropic"
+						? "anthropic"
+						: providerName === "xai" || providerName === "xai-oauth" || modelId.startsWith("grok-")
+							? "xai"
+							: "openai";
+					const effort = body.reasoning_effort ?? body.reasoning?.effort;
 					if (effort !== undefined) {
-						const native = nativeReasoning(provider as "anthropic" | "openai" | "xai", effort);
-						if (native.provider === "anthropic" && body.thinking === undefined) body.thinking = native.thinking;
-						if (native.provider === "openai" && body.reasoning === undefined) body.reasoning = { effort: native.reasoning };
+						const resolved = modelIndex.resolve(body.model ?? modelId) ?? modelIndex.resolve(modelId);
+						const capabilities = resolved?.thinking?.efforts as readonly ReasoningEffort[] | undefined;
+						const selector = provider === "anthropic" && effort.startsWith("budget:") ? effort : clampReasoning(effort, supportedReasoning(modelId, provider, capabilities));
+						const native = nativeReasoning(provider, selector);
+						delete body.reasoning;
+						delete body.reasoning_effort;
+						if ("reasoning_effort" in native) {
+							body.reasoning_effort = native.reasoning_effort;
+							if (provider === "openai" && providerName !== "deck") body.reasoning = { effort: native.reasoning_effort };
+						} else if ("thinking" in native) body.thinking = native.thinking;
 					}
-					if (body.thinking?.type === "enabled") nativeReasoning("anthropic", `budget:${body.thinking.budget_tokens ?? ""}`);
+					if (body.thinking?.type === "enabled") {
+						const nativeThinking = nativeReasoning("anthropic", `budget:${body.thinking.budget_tokens ?? ""}`);
+						if ("thinking" in nativeThinking) body.thinking = nativeThinking.thinking;
+					}
 				} catch (error) {
 					return Response.json({ error: { type: "invalid_request_error", message: error instanceof Error ? error.message : String(error) } }, { status: 400 });
 				}

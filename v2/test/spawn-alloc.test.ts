@@ -9,9 +9,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { readMeta } from "../src/meta";
 import { profilesFile, seedProfiles } from "../src/projects";
+import { runCli } from "../src/cli";
 import { DEFAULT_WORKER_MODEL, piArgs, resolveRepo, startRun } from "../src/spawn";
 
 const DECK_BIN = path.resolve(import.meta.dir, "../../cli/bin/deck");
+const V2_BIN = path.resolve(import.meta.dir, "../bin/deck-v2");
 
 let root: string;
 const savedEnv: Record<string, string | undefined> = {};
@@ -32,7 +34,7 @@ async function git(repo: string, args: string[]): Promise<void> {
 
 beforeEach(async () => {
 	root = fs.mkdtempSync(path.join(os.tmpdir(), "deck-spawn-alloc-"));
-	for (const key of ["DECK_HOME", "DECK_V2_HOME", "DECK_CLI_BIN", "PATH"]) {
+	for (const key of ["DECK_HOME", "DECK_V2_HOME", "DECK_CLI_BIN", "DECK_TEST_PI_ARGS", "PATH"]) {
 		savedEnv[key] = process.env[key];
 	}
 	process.env.DECK_HOME = path.join(root, "deck-home");
@@ -43,7 +45,8 @@ beforeEach(async () => {
 	// A fake `pi` so startRun launches nothing real.
 	const fakeBin = path.join(root, "fakebin");
 	fs.mkdirSync(fakeBin);
-	fs.writeFileSync(path.join(fakeBin, "pi"), "#!/bin/sh\ncat > /dev/null\nexit 0\n", { mode: 0o755 });
+	fs.writeFileSync(path.join(fakeBin, "pi"), "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$DECK_TEST_PI_ARGS\"\ncat > /dev/null\nexit 0\n", { mode: 0o755 });
+	process.env.DECK_TEST_PI_ARGS = path.join(root, "pi-args.txt");
 	process.env.PATH = `${fakeBin}:${process.env.PATH}`;
 
 	const repo = path.join(root, "repo");
@@ -74,8 +77,35 @@ const baseRequest = () => ({
 });
 
 describe("spawn worktree allocation", () => {
-	test("passes the per-seat model string unchanged to pi", () => {
-		expect(piArgs("session", `${DEFAULT_WORKER_MODEL}:fast`, undefined, false)).toContain(`${DEFAULT_WORKER_MODEL}:fast`);
+	test("passes the requested reasoning level to Pi as --thinking", () => {
+		expect(piArgs("session", `${DEFAULT_WORKER_MODEL}:fast`, "high", false)).toEqual([
+			"-p", "--session-dir", "session", "--model", `${DEFAULT_WORKER_MODEL}:fast`, "--thinking", "high", "--exclude-tools", "ask_captain,web_search",
+		]);
+	});
+
+	test("legacy thinking remains the fallback when reasoning is absent", () => {
+		expect(piArgs("session", `${DEFAULT_WORKER_MODEL}:fast`, "legacy", false)).toContain("legacy");
+	});
+
+	test("CLI validates reasoning and the launched Pi receives the explicit value over profile defaults", async () => {
+		const invalid = await run([Bun.which("bun") as string, V2_BIN, "spawn", "bad", "--task", "x", "--accept", "ok", "--repo", path.join(root, "repo"), "--reasoning", "turbo", "--no-pipeline"], root);
+		expect(invalid.exitCode).toBe(1);
+		expect(invalid.stderr).toContain("reasoning must be");
+
+		const escape = path.join(root, "cli-escape-wt");
+		await git(path.join(root, "repo"), ["worktree", "add", escape, "-b", "cli-escape", "main"]);
+		const profilePath = profilesFile(process.env.DECK_V2_HOME as string);
+		fs.mkdirSync(path.dirname(profilePath), { recursive: true });
+		fs.writeFileSync(profilePath, JSON.stringify([{
+			id: "fixture", repo: "fixture/repo", primary: path.join(root, "repo"), pipeline: "yolo-ship",
+			yolo: true, stamp: false, knowledge: [], depsWarm: false, models: { reasoning: "low" },
+		}]));
+		const exitCode = await runCli(["spawn", "cli-proof", "--task", "x", "--accept", "ok", "--kind", "scout", "--worktree", escape, "--project", "fixture", "--reasoning", "high"]);
+		expect(exitCode).toBe(0);
+		for (let attempt = 0; attempt < 20 && !fs.existsSync(process.env.DECK_TEST_PI_ARGS as string); attempt++) {
+			await new Promise((resolve) => setTimeout(resolve, 50));
+		}
+		expect(fs.readFileSync(process.env.DECK_TEST_PI_ARGS as string, "utf8").split("\n")).toContain("high");
 	});
 	test("repo-only spawn allocates an isolated worktree under DECK_HOME/wt and records it", () => {
 		const result = startRun(

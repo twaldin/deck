@@ -19,6 +19,7 @@ import * as path from "node:path";
 import { renderWorkflow, simulate } from "smithers-orchestrator/testing";
 
 import pipeline, { buildModelPolicy, DEFAULT_GITHUB } from "../pipeline.tsx";
+import type { ProjectProfile } from "../lib/profiles.ts";
 import { falloutPrompt, localFixPrompt, localReviewPrompt, reviewersDecisionPrompt } from "../lib/prompts.ts";
 import { resolveAdversary } from "../lib/models.ts";
 
@@ -30,6 +31,14 @@ const validBrief = {
 	decisionLedger: [{ question: "Which store?", decision: "redis", open: false }],
 	killSwitch: { kind: "named", name: "RATE_LIMIT_ENABLED flag" },
 	breakSignal: "sentry:lindy-api #on-call-issues",
+};
+
+const seatModels = {
+	implementer: "deck/claude-fable-5",
+	watcher: "deck/gpt-5.6-luna",
+	fallout: "deck/gpt-5.6-sol",
+	familyOpposition: true,
+	oppositionDefaults: { anthropic: "deck/gpt-5.6-luna" },
 };
 
 const baseInput = {
@@ -53,7 +62,7 @@ async function run(input: Record<string, unknown>) {
 }
 
 describe("workflow rendering contracts", () => {
-	const profileBase = {
+	const profileBase: ProjectProfile = {
 		id: "test",
 		repo: "example/test",
 		primary: "/tmp/test",
@@ -63,19 +72,13 @@ describe("workflow rendering contracts", () => {
 		knowledge: [],
 		depsWarm: true,
 	};
-	const fullModels = {
-		implementer: "deck/claude-fable-5",
-		watcher: "deck/gpt-5.6-luna",
-		fallout: "deck/gpt-5.6-sol",
-		familyOpposition: true,
-		oppositionDefaults: { anthropic: "deck/gpt-5.6-luna" },
-	};
+	const fullModels = seatModels;
 
 	async function renderWithProfile(
 		profile: Record<string, unknown>,
 		inputModels: Record<string, unknown> | null | undefined,
 		repo: string,
-	): Promise<string> {
+	): Promise<{ seats: Record<string, { model: string; thinking: string }>; model: string; thinking: string }> {
 		const savedHome = process.env.DECK_V2_HOME;
 		const home = fs.mkdtempSync(path.join(os.tmpdir(), "deck-pipeline-models-"));
 		try {
@@ -97,12 +100,20 @@ describe("workflow rendering contracts", () => {
 				},
 				workflowPath: path.join(import.meta.dir, "..", "pipeline.tsx"),
 			});
-			const implementer = rendered.tasks.find((task) => task.nodeId === "implement");
-			expect(implementer).toBeDefined();
-			const agent = implementer?.agent;
-			expect(agent).toBeDefined();
-			expect(Array.isArray(agent)).toBe(false);
-			return String((agent as { model: string }).model);
+			const seats: Record<string, { model: string; thinking: string }> = {};
+			for (const task of rendered.tasks) {
+				const agent = task.agent;
+				if (agent !== undefined) {
+					expect(Array.isArray(agent)).toBe(false);
+					if (task.nodeId === "local-review") console.log("AGENT", agent);
+					seats[task.nodeId] = {
+						model: String((agent as unknown as { model: string }).model),
+						thinking: String((agent as { opts?: { thinking?: string }; thinking?: string }).opts?.thinking ?? (agent as { thinking?: string }).thinking ?? ""),
+					};
+				}
+			}
+			const implementer = seats.implement;
+			return { seats, model: implementer.model, thinking: implementer.thinking };
 		} finally {
 			if (savedHome === undefined) delete process.env.DECK_V2_HOME;
 			else process.env.DECK_V2_HOME = savedHome;
@@ -111,7 +122,29 @@ describe("workflow rendering contracts", () => {
 	}
 
 	test("input schema accepts null models", () => {
-		expect(pipeline.inputSchema.safeParse({ ...baseInput, models: null }).success).toBe(true);
+		expect((pipeline as typeof pipeline & { inputSchema: { safeParse: (value: unknown) => { success: boolean } } }).inputSchema.safeParse({ ...baseInput, models: null }).success).toBe(true);
+	});
+
+	test("profile reasoning flows to each seat, with explicit seat overrides", () => {
+		const policy = buildModelPolicy({
+			...profileBase,
+			pipeline: "lindy-full",
+			models: { reasoning: "high", reasoningReviewer: "xhigh" },
+		} as ProjectProfile, false, undefined);
+		expect(policy.reasoningImplementer).toBe("high");
+		expect(policy.reasoningReviewer).toBe("xhigh");
+		expect(policy.reasoningWatcher).toBe("high");
+		expect(policy.reasoningFallout).toBe("high");
+	});
+
+	test("profile reasoning reaches the rendered PiAgent seat", async () => {
+		const rendered = await renderWithProfile({ ...profileBase, models: { ...fullModels, reasoning: "max" } }, undefined, "example/test");
+		expect(rendered.model).toBe("claude-fable-5");
+		expect(rendered.thinking).toBe("max");
+		expect(rendered.seats["local-review"]?.thinking).toBeUndefined();
+		expect(rendered.seats["r0-watch-poll"]).toBeUndefined();
+		expect(rendered.seats["fallout-watch"]).toBeUndefined();
+		expect(rendered.seats["implement"]?.model).toBe("claude-fable-5");
 	});
 
 	test.each([
@@ -121,7 +154,7 @@ describe("workflow rendering contracts", () => {
 		["partial profile models with input models", { ...profileBase, models: { implementer: "deck/claude-fable-5" } }, { watcher: "deck/gpt-5.6-sol" }, "example/test", "claude-fable-5"],
 		["repo-mismatched profile", { ...profileBase, models: fullModels }, { implementer: "deck/claude-sonnet-5" }, "other/repo", "gpt-5.6-luna"],
 	] as const)("renders with %s", async (_name, profile, inputModels, repo, expectedImplementer) => {
-		expect(await renderWithProfile(profile, inputModels, repo)).toBe(expectedImplementer);
+		expect((await renderWithProfile(profile, inputModels, repo)).model).toBe(expectedImplementer);
 	});
 });
 
@@ -143,20 +176,21 @@ describe("fallout prompt rendering contracts", () => {
 		expect(prompt).not.toContain("[object Object]");
 	});
 
-	test("renders the production fallout task with object-valued inputs", async () => {
+	test("renders every configured PiAgent seat with its profile reasoning", async () => {
 		const rendered = await renderWorkflow(pipeline, {
 			input: {
 				...baseInput,
 				dryRun: false,
 				profile: "test",
-				models: { implementer: "deck/claude-fable-5", watcher: "deck/gpt-5.6-luna", fallout: "deck/gpt-5.6-sol", familyOpposition: true, oppositionDefaults: { anthropic: "deck/gpt-5.6-luna" } },
+				models: { implementer: "deck/claude-fable-5", watcher: "deck/gpt-5.6-luna", fallout: "deck/gpt-5.6-sol", familyOpposition: true, oppositionDefaults: { anthropic: "deck/gpt-5.6-luna" }, reasoning: "high", reasoningReviewer: "xhigh", reasoningWatcher: "low", reasoningFallout: "max" },
 			},
 			outputs: {
 				preflight: [{ nodeId: "preflight", ok: true, openQuestions: [], briefDigest: "", resolvedReviewerModel: "deck/claude-fable-5" }],
 				implementation: [{ nodeId: "implement", commits: ["fix"], summary: "fixed", testEvidence: "green" }],
 				localReview: [{ nodeId: "local-review", round: 0, approved: true, blockingFindings: [], nits: [] }],
 				prRecord: [{ nodeId: "push-pr", prNumber: 80, url: "https://github.com/lindy-ai/lindy/pull/80", headSha: "abc123", watchSetRegistered: true, watchSetPath: "", receipt: "", createdAt: "2026-08-01T00:00:00.000Z" }],
-				watchPoll: [{ nodeId: "r0-watch-poll", round: 0, poll: 0, headSha: "abc123", exitOk: true, disposition: "complete", actionable: false, ci: "green", unresolvedThreads: 0, unansweredComments: 0, reviewersToReRequest: [], reasons: [] }],
+				reviewerRequest: [{ nodeId: "request-reviewers", skipped: false, requested: ["reviewer"], verified: ["reviewer"], source: "test", at: "2026-08-01T00:00:00.000Z", reviewerPrompt: "" }],
+				watchPoll: [{ nodeId: "r0-watch-poll", round: 0, poll: 0, headSha: "abc123", exitOk: false, disposition: "fix", actionable: true, ci: "red", unresolvedThreads: 1, unansweredComments: 1, reviewersToReRequest: ["reviewer"], reasons: ["unresolved thread"] }],
 				readyPoll: [{ nodeId: "r0-ready-poll", round: 0, poll: 0, ready: true, regressed: false, approvedBy: "reviewer", ci: "green", headSha: "abc123", reasons: [], migrationDetected: false, migrationFiles: [], at: "2026-08-01T00:00:00.000Z" }],
 				approvals: [{ nodeId: "r0-stamp", approved: true, note: "ok", decidedBy: "test", decidedAt: "2026-08-01T00:00:00.000Z" }],
 				stampValidity: [{ nodeId: "r0-stamp-validity", round: 0, stampedHead: "abc123", currentHead: "abc123", valid: true, checkedAt: "2026-08-01T00:00:00.000Z" }],
@@ -172,10 +206,33 @@ describe("fallout prompt rendering contracts", () => {
 		});
 		const falloutTask = rendered.tasks.find((task) => task.nodeId === "fallout-watch");
 		expect(falloutTask).toBeDefined();
+		const agentsByNode = new Map(
+			rendered.tasks
+				.filter((task) => task.agent !== undefined)
+				.map((task) => [task.nodeId, task.agent as { opts?: { model?: string; thinking?: string } }]),
+		);
+		expect(agentsByNode.get("implement")?.opts).toMatchObject({ model: "claude-fable-5", thinking: "high" });
+		expect(agentsByNode.get("local-review")?.opts).toMatchObject({ model: "claude-fable-5", thinking: "xhigh" });
+		expect(agentsByNode.get("r0-watch-fix")?.opts).toMatchObject({ model: "gpt-5.6-luna", thinking: "low" });
+		expect(agentsByNode.get("fallout-watch")?.opts).toMatchObject({ model: "gpt-5.6-sol", thinking: "max" });
+		expect(agentsByNode.size).toBeGreaterThanOrEqual(4);
+		// Seat-level reasoning threading is a pipeline concern: prove each seat carries
+		// --provider/--model/--thinking into the pi args. The wire mapping of reasoning_effort
+		// to each provider's native field is broker's own concern, proven in
+		// broker/test/validated-gateway.test.ts — do not import broker src here (CI has no broker deps).
+		const expectedThinking: Record<string, string> = { implement: "high", "local-review": "xhigh", "r0-watch-fix": "low", "fallout-watch": "max" };
+		for (const nodeId of ["implement", "local-review", "r0-watch-fix", "fallout-watch"]) {
+			const agent = agentsByNode.get(nodeId) as { opts: { provider: string; model: string; thinking: string }; buildArgs: (input: { prompt: string; cwd: string; mode: string }) => string[] };
+			const args = agent.buildArgs({ prompt: "broker-seat-probe", cwd: "/tmp/lindy-wt", mode: "text" });
+			expect(agent.opts.provider).toBe("deck");
+			expect(agent.opts.thinking).toBe(expectedThinking[nodeId]);
+			expect(args).toEqual(expect.arrayContaining(["--provider", "deck", "--model", agent.opts.model, "--thinking", agent.opts.thinking]));
+		}
 		expect(rendered.toXml()).toContain("RATE_LIMIT_ENABLED flag");
 		expect(rendered.toXml()).toContain('{\\"verdict\\":\\"clean|regression\\"');
 		expect(rendered.toXml()).not.toContain("[object Object]");
 	});
+
 });
 
 describe("reviewer selection contracts", () => {
