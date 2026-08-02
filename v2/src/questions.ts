@@ -32,6 +32,7 @@ import {
 // every 15s (4/min): 18 periodic wake checks/min across these surfaces. The
 // overlay and reconciler polls are now event-driven, leaving one queue poll at
 // 4/min. This coalesces redundant periodic checks without changing delivery.
+export const QUESTIONS_POLL_INTERVAL_MS = 15_000;
 
 interface Ui {
 	notify(message: string, level?: "info" | "warning" | "error"): void;
