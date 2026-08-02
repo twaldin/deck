@@ -100,6 +100,8 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 	registerQuestions(pi);
 
 	let unwatch: (() => void) | undefined;
+	let reconcileFallback: ReturnType<typeof setInterval> | undefined;
+	const RECONCILE_FALLBACK_MS = 60_000;
 	let workflowCwd: string | undefined;
 	let workflowWorkspaces: string[] = [];
 	// Send-failure backoff protects against real queue transport errors. Wakes
@@ -855,6 +857,10 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 		if (ctx.mode === "tui") {
 			void deliver(ctx);
 			unwatch = (await import("../wake")).watchStatusDir(() => void deliver(ctx));
+			// The watcher is the primary trigger. This low-rate fallback protects
+			// delivery when fs.watch is unavailable or drops an event.
+			reconcileFallback = setInterval(() => void deliver(ctx), RECONCILE_FALLBACK_MS);
+			reconcileFallback.unref?.();
 		}
 	});
 
@@ -881,6 +887,7 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 
 	pi.on("session_shutdown", async () => {
 		unwatch?.();
+		if (reconcileFallback !== undefined) clearInterval(reconcileFallback);
 		unwatch = undefined;
 		// Queue acceptance is not delivery. If shutdown happens before the
 		// queued turn starts, leave the outbox entries owed and drop only the
