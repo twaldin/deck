@@ -71,9 +71,6 @@ const text = (body: string): ToolResult => ({
 	details: {},
 });
 
-/** Poll cadence for the reconcile pass. A nudge shortens latency, never truth. */
-const RECONCILE_MS = 30_000;
-
 type DeckV2Dependencies = {
 	/** Test seam for the raw ps command. Production uses the enriched collector below. */
 	collectPsSnapshot?: typeof collectPsSnapshot;
@@ -100,8 +97,10 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 	// never register a competing question surface. See ../questions.ts.
 	registerQuestions(pi);
 
-	let timer: ReturnType<typeof setInterval> | undefined;
 	let unwatch: (() => void) | undefined;
+	let refreshFactoryOverlay: (() => void) | undefined;
+	let reconcileFallback: ReturnType<typeof setInterval> | undefined;
+	const RECONCILE_FALLBACK_MS = 60_000;
 	let workflowCwd: string | undefined;
 	let workflowWorkspaces: string[] = [];
 	// Send-failure backoff protects against real queue transport errors. Wakes
@@ -110,13 +109,13 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 	let sendRetryAt = 0;
 	const SEND_BACKOFF_BASE_MS = 60_000;
 	const SEND_BACKOFF_MAX_MS = 15 * 60_000;
-	// Busy fence prevents each timer/watch cycle from queueing another follow-up
+	// Busy fence prevents each watcher cycle from queueing another follow-up
 	// during one turn. Events remain in the durable outbox until the turn settles.
 	// This is intentional: follow-ups are queued only when pi is idle, then
 	// acknowledged when the queued turn actually starts.
 	let agentBusy = false;
 	let pendingAckIds: string[] = [];
-	// Re-entrancy lock: deliver() fires from the interval AND every fs.watch
+	// Re-entrancy lock: deliver() fires from the watcher and other lifecycle hooks
 	// nudge; two overlapping async passes would drain the same outbox twice.
 	let delivering = false;
 	const warnedShadowFingerprints = new Set<string>();
@@ -508,14 +507,12 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 						busy = false;
 					}
 				};
-				const timer = setInterval(() => void refresh(), 5_000);
-				timer.unref?.();
+				refreshFactoryOverlay = () => void refresh();
 				return {
 					render: (width: number) => box.render(width),
 					invalidate: () => box.invalidate(),
 					handleInput: (data: string) => {
 						if (data === "q" || data === "\u001b" || data === "\u0003") {
-							clearInterval(timer);
 							done(undefined);
 							return;
 						}
@@ -539,6 +536,7 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 			},
 			{ overlay: true, overlayOptions: { anchor: "center", width: "90%", minWidth: 80, margin: 1, maxHeight: "100%" } },
 		);
+		refreshFactoryOverlay = undefined;
 	};
 
 	pi.registerCommand("factory", {
@@ -852,16 +850,19 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 				},
 			};
 		});
-		// The durable outbox is the delivery contract. A TUI is only one consumer;
-		// print/RPC sessions must still reconcile and expose owed wakes, otherwise
-		// blocked workflow runs silently stall when no interactive session exists.
-		// The durable outbox is the delivery contract for both TUI and headless
-		// sessions. Keep reconciliation alive after startup: a workflow can publish
-		// a wake after a print/RPC command has started, and no TUI may be present.
+		// The durable outbox is the delivery contract. The status directory watcher
+		// wakes delivery when a workflow publishes a new item. A startup pass covers
+		// items that arrived before the watcher was installed.
 		if (ctx.mode === "tui") {
 			void deliver(ctx);
-			timer = setInterval(() => void deliver(ctx), RECONCILE_MS);
-			unwatch = (await import("../wake")).watchStatusDir(() => void deliver(ctx));
+			unwatch = (await import("../wake")).watchStatusDir(() => {
+				void deliver(ctx);
+				refreshFactoryOverlay?.();
+			});
+			// The watcher is the primary trigger. This low-rate fallback protects
+			// delivery when fs.watch is unavailable or drops an event.
+			reconcileFallback = setInterval(() => void deliver(ctx), RECONCILE_FALLBACK_MS);
+			reconcileFallback.unref?.();
 		}
 	});
 
@@ -887,10 +888,13 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 	});
 
 	pi.on("session_shutdown", async () => {
-		if (timer !== undefined) clearInterval(timer);
-		unwatch?.();
-		timer = undefined;
+		try {
+			unwatch?.();
+		} finally {
+			if (reconcileFallback !== undefined) clearInterval(reconcileFallback);
+		}
 		unwatch = undefined;
+		refreshFactoryOverlay = undefined;
 		// Queue acceptance is not delivery. If shutdown happens before the
 		// queued turn starts, leave the outbox entries owed and drop only the
 		// in-memory fence so a later session can retry them.

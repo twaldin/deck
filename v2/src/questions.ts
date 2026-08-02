@@ -7,6 +7,7 @@
  * with `ask_captain`, and the captain clears the backlog with `/questions`.
  */
 import { Type } from "typebox";
+import { Box, SelectList, Text } from "@earendil-works/pi-tui";
 import { pipelineDir } from "./ship";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -26,11 +27,17 @@ import {
 	type Question,
 } from "./questions-store";
 
-const POLL_INTERVAL_MS = 15_000;
+// Polling audit: before this change the fleet overlay polled every 5s (12/min)
+// and the wake reconciler every 30s (2/min), in addition to this queue poll
+// every 15s (4/min): 18 periodic wake checks/min across these surfaces. The
+// overlay and reconciler polls are now event-driven, leaving one queue poll at
+// 4/min. This coalesces redundant periodic checks without changing delivery.
+export const QUESTIONS_POLL_INTERVAL_MS = 15_000;
 
 interface Ui {
 	notify(message: string, level?: "info" | "warning" | "error"): void;
 	select(title: string, options: string[]): Promise<string | undefined>;
+	custom?<T>(factory: (tui: any, theme: any, keybindings: any, done: (value: T) => void) => any, options?: { overlay?: boolean; overlayOptions?: { maxHeight?: string } }): Promise<T>;
 	editor(title: string, prefill?: string): Promise<string | undefined>;
 }
 
@@ -247,10 +254,51 @@ export function registerQuestions(
 					...options.map((option, position) => `${position + 1}. ${option}`),
 					...CONTROLS,
 				];
-				const picked = await ctx.ui.select(
-					`(${index + 1}/${open.length}) ${describe(entry, runtime.now())}`,
-					choices,
-				);
+				const title = `(${index + 1}/${open.length}) ${describe(entry, runtime.now())}`;
+				const picked = ctx.ui.custom === undefined
+					? await ctx.ui.select(title, choices)
+					: await ctx.ui.custom<string | undefined>((tui, rawTheme, _keybindings, done) => {
+						const theme = rawTheme as { fg?: (name: string, value: string) => string };
+						const selectTheme = {
+							selectedPrefix: (value: string) => theme.fg?.("accent", value) ?? value,
+							selectedText: (value: string) => theme.fg?.("accent", value) ?? value,
+							description: (value: string) => theme.fg?.("muted", value) ?? value,
+							scrollInfo: (value: string) => theme.fg?.("dim", value) ?? value,
+							noMatch: (value: string) => theme.fg?.("warning", value) ?? value,
+						};
+						const list = new SelectList(
+							choices.map((value) => ({ value, label: value })),
+							Math.min(choices.length, Math.max(1, (tui.terminal?.rows ?? 40) - 10)),
+							selectTheme,
+						);
+						list.onSelect = (item) => done(item.value);
+						list.onCancel = () => done(undefined);
+						const box = new Box(1, 1);
+						box.addChild(new Text(title, 0, 0));
+						box.addChild(list);
+						return {
+							render: (width: number) => box.render(width),
+							invalidate: () => box.invalidate(),
+							handleInput: (data: string) => {
+								// Preserve the selector's vi navigation in the custom component.
+								// SelectList handles the configured arrows; these aliases are
+								// translated to the same terminal sequences.
+								// The built-in selector accepts both the configured confirm key and a
+								// literal newline from pasted or line-oriented terminal input.
+								// Keep that compatibility in the overlay component.
+								const normalized = data === "\n" ? "enter" : data;
+								if (normalized === "enter") {
+									done(list.getSelectedItem()?.value);
+									return;
+								}
+								// Keep the built-in selector's tool-expansion binding from
+								// becoming an accidental selection or answer.
+								if (data === "\u000f") return;
+								list.handleInput(data === "j" ? "\u001b[B" : data === "k" ? "\u001b[A" : data);
+								tui.requestRender();
+							},
+						};
+					}, { overlay: true, overlayOptions: { maxHeight: "90%" } });
 				if (picked === undefined) break;
 				const choice = choices.indexOf(picked);
 				if (choice < 0) break;
@@ -354,7 +402,7 @@ export function registerQuestions(
 			// triggerTurn wakes a parked agent: without it, an agent that queued a
 			// question and stopped would never learn the answer arrived.
 			deliverAnswers({ sessionId: latestSessionId }, true);
-		}, POLL_INTERVAL_MS);
+		}, QUESTIONS_POLL_INTERVAL_MS);
 	};
 
 	pi.on("session_start", (_event, ctx) => {
