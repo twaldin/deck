@@ -46,6 +46,9 @@ export function startFastGateway(opts: FastGatewayOptions): { url: string; close
 	const server = Bun.serve({
 		port: Number(portText),
 		hostname,
+		// Long reasoning pauses exceed Bun's 10s default idle timeout and killed
+		// in-flight worker streams with ECONNRESET. 255s is Bun's maximum.
+		idleTimeout: 255,
 		async fetch(request) {
 			const url = new URL(request.url);
 			const init: RequestInit = { method: request.method, headers: request.headers };
