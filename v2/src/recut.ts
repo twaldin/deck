@@ -3,7 +3,8 @@ import * as path from "node:path";
 import { createHash } from "node:crypto";
 import { execFile as execFileCallback, spawn } from "node:child_process";
 import { promisify } from "node:util";
-import { stateDir } from "./home";
+import { stateDir, deckV2Home } from "./home";
+import { smithersWorkspaceCwd } from "./workspace";
 import { appendStatus } from "./events";
 import { SMITHERS_SPEC } from "./smithers";
 
@@ -186,7 +187,7 @@ export async function reconcileRecuts(workspace: string, pipeline: string, runs:
 		start: async (runId, input) => {
 			await new Promise<void>((resolve, reject) => {
 				const log = fs.openSync(path.join(shipDir, `${runId}.log`), "a");
-				const child = spawn("bunx", [SMITHERS_SPEC, "up", "pipeline.tsx", "--input", JSON.stringify(input), "--run-id", runId], { cwd: pipeline, detached: true, stdio: ["ignore", log, log] });
+				const child = spawn("bunx", [SMITHERS_SPEC, "up", "pipeline.tsx", "--input", JSON.stringify(input), "--run-id", runId], { cwd: smithersWorkspaceCwd(deckV2Home()), detached: true, stdio: ["ignore", log, log] });
 				child.once("spawn", () => { child.unref(); resolve(); });
 				child.once("error", (error) => { fs.closeSync(log); reject(error); });
 			});

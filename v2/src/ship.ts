@@ -97,6 +97,7 @@ export function buildPipelineInput(
 		branch: request.branch,
 		profile: profile.id,
 		models: profile.models,
+		commands: { test: profile.testCommand ?? "bun test" },
 		dryRun: request.dryRun === true,
 		brief: {
 			ticket: request.ticket,

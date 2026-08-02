@@ -52,6 +52,10 @@ export function claimMainFailure(root: string, fingerprint: string, owner: strin
 	const lock = `${file}.lock`;
 	let acquired = false;
 	try {
+		try {
+			const stat = fs.statSync(lock);
+			if (Date.now() - stat.mtimeMs > 5 * 60_000) fs.rmSync(lock, { recursive: true, force: true });
+		} catch { /* lock is absent */ }
 		fs.mkdirSync(lock, { recursive: false, mode: 0o700 });
 		acquired = true;
 		const claim = JSON.stringify({ fingerprint, owner, state: "diagnosing" }) + "\n";

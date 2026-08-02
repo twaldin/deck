@@ -58,6 +58,8 @@ export type ProjectProfile = {
 	models?: ModelSeats;
 	/** Dependency install command for allocated worktrees. */
 	installCommand?: string;
+	/** Project command used to validate an automatic rebase. */
+	testCommand?: string;
 	/** Whether allocation should warm dependencies in the background. */
 	depsWarm: boolean;
 	/** Optional post-landing fallout probe. */
@@ -248,6 +250,9 @@ export function validateProfiles(parsed: unknown, source: string): ProjectProfil
 				})(),
 			};
 		}
+		if (p.testCommand !== undefined && typeof p.testCommand !== "string") {
+			throw new Error(`${where} (${p.id}): testCommand must be a string`);
+		}
 		if (p.installCommand !== undefined && typeof p.installCommand !== "string") {
 			throw new Error(`${where} (${p.id}): installCommand must be a string`);
 		}
@@ -264,6 +269,7 @@ export function validateProfiles(parsed: unknown, source: string): ProjectProfil
 			knowledge: knowledge as string[],
 			...(p.doctrine === undefined ? {} : { doctrine: p.doctrine }),
 			...(models === undefined ? {} : { models }),
+			...(p.testCommand === undefined ? {} : { testCommand: p.testCommand }),
 			...(p.installCommand === undefined ? {} : { installCommand: p.installCommand }),
 			depsWarm: p.depsWarm ?? true
 		};

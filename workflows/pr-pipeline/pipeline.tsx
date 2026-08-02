@@ -50,6 +50,7 @@ import {
 	fetchCodeowners,
 	fetchHeadSha,
 	fetchMainCommitSubjects,
+	fetchBranchCheckRuns,
 	fetchPrLifecycle,
 	fetchPrApprovalsAndCi,
 	fetchPrOverview,
@@ -711,14 +712,22 @@ export default smithers((ctx) => {
 		localReviewRows.length >= limits.localReviewRounds && !reviewApproved;
 	const pushAllowed = reviewApproved || reviewEscalation?.approved === true;
 	const producerWatch = ctx.latest(outputs.watchPoll, `r${currentRound}-watch-poll`);
-	if (producerWatch?.ci === "red") claimMainFailure(path.join(process.cwd(), ".deck-coordination"), `${input.repo}:${producerWatch.headSha}`, input.ticket);
+	const coordinationRoot = path.join(process.cwd(), ".deck-coordination");
+	const mainFailureClaimed = producerWatch?.ci === "red"
+		? claimMainFailure(coordinationRoot, `${input.repo}:${baseBranch}`, input.ticket)
+		: false;
 	publishWakeProducer({
 		taskId: input.ticket,
 		maxAdversarial: reviewExhausted && !pushAllowed,
-		reviewerSilent: producerWatch?.disposition === "wait" && producerWatch?.poll >= 3,
-		mainRed: producerWatch?.ci === "red",
+		reviewerSilent: producerWatch?.disposition === "wait" && producerWatch?.poll >= 3 && producerWatch.unresolvedThreads > 0,
+		mainRed: producerWatch?.ci === "red" && mainFailureClaimed,
 		migrationBlocked: migRequired && anyWatchSettled && migGate === undefined,
-		brokerNoQuota: process.env.DECK_BROKER_NO_QUOTA === "1",
+		brokerNoQuota: process.env.DECK_BROKER_NO_QUOTA === "1" || (() => {
+			try {
+				const roster = JSON.parse(fs.readFileSync(path.join(process.env.HOME ?? "", ".deck", "broker", "usage.json"), "utf8")) as { reports?: Array<{ limits?: Array<{ amount?: { remainingFraction?: number } }> }> };
+				return (roster.reports ?? []).some((report) => (report.limits ?? []).some((limit) => limit.amount?.remainingFraction === 0));
+			} catch { return false; }
+		})(),
 	});
 
 	// ===========================================================================
@@ -1337,7 +1346,17 @@ export default smithers((ctx) => {
 																pr.prNumber,
 																github.selfLogins,
 															);
-															const verdict = evaluateWatchExit(snapshot, {
+															const mainCi = assessCi(await fetchBranchCheckRuns(ghCtx, baseBranch));
+										if (mainCi === "red") {
+											return {
+												round: k, poll: pollNo, headSha: snapshot.headSha,
+												exitOk: false, disposition: "wait", actionable: false, ci: "red",
+												unresolvedThreads: 0, unansweredComments: 0, reviewersToReRequest: [],
+												reasons: [`base branch ${baseBranch} has failing checks; CI watch is paused until it is green.`],
+												rebaseRequired: false,
+											};
+										}
+										const verdict = evaluateWatchExit(snapshot, {
 																selfLogins: github.selfLogins,
 															});
 															return {

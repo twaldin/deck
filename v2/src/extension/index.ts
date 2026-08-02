@@ -818,18 +818,9 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 		// The durable outbox is the delivery contract. A TUI is only one consumer;
 		// print/RPC sessions must still reconcile and expose owed wakes, otherwise
 		// blocked workflow runs silently stall when no interactive session exists.
-		if (ctx?.mode !== "tui") {
-			// Headless sessions still use the same durable outbox. Keep a small
-			// reconciler alive because workflow producers can publish after startup;
-			// the durable outbox remains the source of truth if this process exits.
-			void deliver(ctx);
-			timer = setInterval(() => void deliver(ctx), RECONCILE_MS);
-			unwatch = (await import("../wake")).watchStatusDir(() => void deliver(ctx));
-			return;
-		}
-
-		// Reconcile at start: the durable baseline means this reports only what is
-		// genuinely new, so a restart is quiet rather than a flood.
+		// The durable outbox is the delivery contract for both TUI and headless
+		// sessions. Keep reconciliation alive after startup: a workflow can publish
+		// a wake after a print/RPC command has started, and no TUI may be present.
 		void deliver(ctx);
 		timer = setInterval(() => void deliver(ctx), RECONCILE_MS);
 		unwatch = (await import("../wake")).watchStatusDir(() => void deliver(ctx));
