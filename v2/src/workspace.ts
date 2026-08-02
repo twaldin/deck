@@ -139,7 +139,7 @@ function isTerminalExecution(executions: string, id: string): boolean {
 			const kind = [event.type, event.event, event.kind, event.name, payload?.type, frame?.event, framePayload?.type].find((value) => typeof value === "string");
 			const status = [event.status, payload?.status, frame?.status, framePayload?.status].find((value) => typeof value === "string");
 			if (typeof status === "string" && /^(completed|succeeded|failed|cancelled|finished)$/i.test(status)) return true;
-			if (typeof kind === "string" && /^(?:run[._-])?(completed|succeeded|failed|cancelled|finished)$/i.test(kind)) return true;
+			if (typeof kind === "string" && (/^(?:run[._-])?(completed|succeeded|failed|cancelled|finished)$/i.test(kind) || /^Run(?:Completed|Succeeded|Failed|Cancelled|Finished)$/i.test(kind))) return true;
 			if (typeof kind === "string" && /^(?:run[._-])?(started|resumed|paused)$/i.test(kind)) break;
 		}
 	} catch {

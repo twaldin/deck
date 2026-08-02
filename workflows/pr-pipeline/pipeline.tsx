@@ -86,7 +86,7 @@ import { executeReviewerRequest } from "./lib/reviewers.ts";
 import { assessCi, evaluateWatchExit } from "./lib/watch.ts";
 import { rebaseAndPush } from "./lib/rebase.ts";
 import type { Brief, MigrationEvidenceEntry } from "./lib/types.ts";
-import { claimMainFailure } from "../../v2/src/wake-producers.ts";
+import { claimMainFailure, produceWakeConditions } from "../../v2/src/wake-producers.ts";
 
 // ---------------------------------------------------------------------------
 // Defaults (normalized in code, not via zod .default(), to keep semantics
@@ -441,6 +441,14 @@ function publishWakeProducer(input: { taskId: string; maxAdversarial?: boolean; 
 		const tmp = `${file}.${process.pid}.tmp`;
 		fs.writeFileSync(tmp, `${JSON.stringify(records)}\n`, { mode: 0o600 });
 		fs.renameSync(tmp, file);
+		produceWakeConditions({
+			taskId: input.taskId,
+			maxAdversarial: input.maxAdversarial,
+			reviewerSilent: input.reviewerSilent,
+			mainRed: input.mainRed,
+			migrationBlocked: input.migrationBlocked,
+			brokerNoQuota: input.brokerNoQuota,
+		});
 	} finally {
 		fs.rmSync(lock, { recursive: true, force: true });
 	}
@@ -719,7 +727,7 @@ export default smithers((ctx) => {
 	publishWakeProducer({
 		taskId: input.ticket,
 		maxAdversarial: reviewExhausted && !pushAllowed,
-		reviewerSilent: producerWatch?.disposition === "wait" && producerWatch?.poll >= 3 && producerWatch.unresolvedThreads > 0,
+		reviewerSilent: producerWatch?.disposition === "wait" && producerWatch?.poll >= 3,
 		mainRed: producerWatch?.ci === "red" && mainFailureClaimed,
 		migrationBlocked: migRequired && anyWatchSettled && migGate === undefined,
 		brokerNoQuota: process.env.DECK_BROKER_NO_QUOTA === "1" || (() => {
@@ -1333,6 +1341,7 @@ export default smithers((ctx) => {
 																	unresolvedThreads: actionable ? 1 : 0,
 																	unansweredComments: actionable ? 1 : 0,
 																	reviewersToReRequest: actionable ? ["dry-reviewer"] : [],
+														rebaseRequired: false,
 																	reasons: exitOk
 																		? []
 																		: waiting

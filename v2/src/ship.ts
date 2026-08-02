@@ -97,7 +97,6 @@ export function buildPipelineInput(
 		branch: request.branch,
 		profile: profile.id,
 		models: profile.models,
-		commands: { test: profile.testCommand ?? "bun test" },
 		dryRun: request.dryRun === true,
 		brief: {
 			ticket: request.ticket,
@@ -135,16 +134,21 @@ export function buildPipelineInput(
 	// the base branch IS the deploy, so a git-log probe is honest evidence.
 	// A stamp profile (lindy) has REAL deploys: no weak default there — the
 	// pipeline's preflight fails closed until explicit evidence is configured.
-	if (request.deployEvidence !== undefined) {
-		input.commands = { deployEvidence: request.deployEvidence };
-	} else if (request.existingPr !== undefined && request.dryRun !== true) {
+	if (request.dryRun !== true && profile.yolo) {
+		const commands: Record<string, string> = { test: profile.testCommand ?? "bun test" };
+		if (request.deployEvidence !== undefined) {
+			commands.deployEvidence = request.deployEvidence;
+		} else if (request.existingPr !== undefined) {
+			commands.deployEvidence = "printf 'adopted existing PR landing is the deploy evidence\\n'";
+		} else {
+			const base = request.baseBranch ?? "main";
+			commands.deployEvidence = `git fetch origin ${base} && git log -1 --oneline origin/${base}`;
+		}
+		input.commands = commands;
+	} else if (request.dryRun !== true && (request.deployEvidence !== undefined || request.existingPr !== undefined)) {
 		input.commands = {
-			deployEvidence: "printf 'adopted existing PR landing is the deploy evidence\\n'",
-		};
-	} else if (request.dryRun !== true && profile.yolo) {
-		const base = request.baseBranch ?? "main";
-		input.commands = {
-			deployEvidence: `git fetch origin ${base} && git log -1 --oneline origin/${base}`,
+			test: profile.testCommand ?? "bun test",
+			deployEvidence: request.deployEvidence ?? "printf 'adopted existing PR landing is the deploy evidence\\n'",
 		};
 	}
 	return input;

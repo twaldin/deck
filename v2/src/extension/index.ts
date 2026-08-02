@@ -821,9 +821,11 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 		// The durable outbox is the delivery contract for both TUI and headless
 		// sessions. Keep reconciliation alive after startup: a workflow can publish
 		// a wake after a print/RPC command has started, and no TUI may be present.
-		void deliver(ctx);
-		timer = setInterval(() => void deliver(ctx), RECONCILE_MS);
-		unwatch = (await import("../wake")).watchStatusDir(() => void deliver(ctx));
+		if (ctx.mode === "tui") {
+			void deliver(ctx);
+			timer = setInterval(() => void deliver(ctx), RECONCILE_MS);
+			unwatch = (await import("../wake")).watchStatusDir(() => void deliver(ctx));
+		}
 	});
 
 	// A queued follow-up is durable until the next turn starts. This avoids
