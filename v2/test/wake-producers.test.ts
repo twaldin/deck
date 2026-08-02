@@ -4,10 +4,24 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 let root: string;
-beforeEach(() => { root = fs.mkdtempSync(path.join(os.tmpdir(), "deck-wake-producers-")); });
-afterEach(() => { fs.rmSync(root, { recursive: true, force: true }); });
+beforeEach(() => {
+	root = fs.mkdtempSync(path.join(os.tmpdir(), "deck-wake-producers-"));
+	process.env.DECK_V2_HOME = root;
+	fs.mkdirSync(path.join(root, "state"), { recursive: true });
+});
+afterEach(() => {
+	fs.rmSync(root, { recursive: true, force: true });
+	delete process.env.DECK_V2_HOME;
+});
 
-describe("main failure coordination", () => {
+describe("wake producers", () => {
+	test("publishes every required condition to the durable outbox", async () => {
+		const { produceWakeConditions } = await import("../src/wake-producers");
+		produceWakeConditions({ taskId: "ticket", maxAdversarial: true, reviewerSilent: true, mainRed: true, migrationBlocked: true, brokerNoQuota: true });
+		const queue = fs.readFileSync(path.join(root, "state", ".wake-queue.jsonl"), "utf8");
+		for (const key of ["max-adversarial", "reviewer-silent", "main-red", "migration-gate", "broker-no-quota"]) expect(queue).toContain(key);
+	});
+
 	test("releases a recovered incident so a later failure can claim it", async () => {
 		const { claimMainFailure, releaseMainFailure } = await import("../src/wake-producers");
 		const fingerprint = "repo:main";
