@@ -928,6 +928,7 @@ export default smithers((ctx) => {
 											watchSetPath: "(dry-run: not written)",
 											receipt: `dry-run: adopted existing PR #${prNumber}`,
 											createdAt: nowIso(),
+											runId: ctx.runId,
 										};
 									}
 									let overview = await fetchPrOverview(ghCtx, prNumber);
@@ -1034,6 +1035,7 @@ export default smithers((ctx) => {
 										watchSetPath,
 										receipt: `adopted existing PR #${prNumber} (head ${overview.headSha})`,
 										createdAt: nowIso(),
+										runId: ctx.runId,
 									};
 								}
 								if (dryRun) {
