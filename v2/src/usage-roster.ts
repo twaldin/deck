@@ -89,11 +89,17 @@ export async function readLiveControlAccounts(home = homedir()): Promise<UsageAc
 			socket.on("connect", () => socket.write(`${JSON.stringify({ id: "deck-usage", cap, op: "status" })}\n`));
 			socket.on("data", chunk => {
 				buffer += chunk.toString();
-				const line = buffer.split("\n")[0];
+				const newlineAt = buffer.indexOf("\n");
+				if (newlineAt === -1) return; // response is chunked; wait for the full line
+				const line = buffer.slice(0, newlineAt);
 				if (!line) return;
 				clearTimeout(timer); socket.destroy();
-				const response = JSON.parse(line) as { ok?: boolean; data?: { accounts?: UsageAccount[] } };
-				if (!response.ok) reject(new Error("broker status failed")); else resolve(response.data?.accounts ?? []);
+				try {
+					const response = JSON.parse(line) as { ok?: boolean; data?: { accounts?: UsageAccount[] } };
+					if (!response.ok) reject(new Error("broker status failed")); else resolve(response.data?.accounts ?? []);
+				} catch (error) {
+					reject(error instanceof Error ? error : new Error("broker status parse failed"));
+				}
 			});
 			socket.on("error", error => { clearTimeout(timer); reject(error); });
 		});
