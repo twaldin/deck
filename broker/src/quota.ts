@@ -67,6 +67,31 @@ export function routeModel(requested: QuotaModel, accounts: readonly AccountQuot
 	}
 }
 
+/**
+ * Project the live credential snapshot into routable accounts.
+ *
+ * The snapshot holds ACTIVE rows only: a credential pi-ai soft-disabled after a
+ * definitive OAuth refresh failure is already gone from it, so an auth-dead
+ * account can never be routed to. This is the one seam where that holds, so it
+ * is a function with a test rather than an inline map in the daemon.
+ */
+export function snapshotQuotaAccounts(
+	snapshot: { credentials: readonly { id: number; provider: string }[] },
+	listBlocks: (ids: readonly number[]) => readonly { credentialId: number; blockScope: string; blockedUntilMs: number }[],
+	now = Date.now(),
+): AccountQuota[] {
+	const ids = snapshot.credentials.map(entry => entry.id);
+	const blocks = listBlocks(ids).filter(block => block.blockedUntilMs > now);
+	return snapshot.credentials.map(entry => ({
+		credentialId: entry.id,
+		provider: routingProvider(entry.provider),
+		authProvider: entry.provider,
+		blocked: blocks
+			.filter(block => block.credentialId === entry.id)
+			.flatMap(block => normalizeBlockScopes(block.blockScope, entry.provider)),
+	}));
+}
+
 /** Convert pi-ai usage-limit block scopes into the normalized tier names. */
 export function normalizeTier(scope: string): QuotaTier | undefined {
 	const value = scope.toLowerCase().replace(/^tier:/, "");

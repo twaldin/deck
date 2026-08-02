@@ -1738,6 +1738,13 @@ export function buildUsageText(roster: import("./usage-roster").UsageRoster | nu
 			lines.push(`  ${limit.window?.id ?? limit.label ?? limit.id ?? "limit"}${tier}: ${value}${temperature}`);
 		}
 	}
+	// Dead accounts have no usage report at all — without this block they simply
+	// disappear from the roster and their missing quota looks like bad luck.
+	for (const dead of roster.dead ?? []) {
+		const label = dead.email ?? dead.accountId ?? `credential ${dead.id ?? "?"}`;
+		lines.push("", theme.fg("error", `REAUTH NEEDED: ${label} · ${dead.provider ?? "?"}`));
+		lines.push(`  auth dead: ${dead.cause ?? "oauth refresh failed"}`);
+	}
 	return lines.join("\n");
 }
 

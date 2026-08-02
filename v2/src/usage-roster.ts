@@ -6,9 +6,12 @@ import { createConnection } from "node:net";
 
 export type UsageTheme = { fg: (key: string, text: string) => string; bold: (text: string) => string };
 export type UsageAccount = { provider?: string; email?: string | null; accountId?: string | null; id?: number; blocks?: Array<{ blockedUntilMs?: number }> };
+/** An account the broker tore down: its OAuth grant is gone until the captain logs in again. */
+export type DeadAccount = { id?: number; provider?: string; email?: string | null; accountId?: string | null; cause?: string; disabledAtMs?: number | null };
 export type UsageRoster = {
 	generatedAt?: string;
 	accounts?: UsageAccount[];
+	dead?: DeadAccount[];
 	reports?: Array<{
 		provider?: string;
 		metadata?: { email?: string; accountId?: string; account?: string; cooling?: boolean; blocked?: boolean };
@@ -119,13 +122,37 @@ export function readUsageRoster(home = homedir()): UsageRoster | null {
 	}
 }
 
+/** Provider label used on every deck surface: the captain says claude and codex. */
+export function providerLabel(provider: string): string {
+	return provider === "anthropic" ? "claude" : provider === "openai-codex" ? "codex" : provider;
+}
+
+/** Stable identity for one dead account, so a question about it is asked once. */
+export function deadAccountKey(dead: DeadAccount): string {
+	return `${dead.provider ?? "unknown"}:${dead.email ?? dead.accountId ?? dead.id ?? "unknown"}`;
+}
+
+/**
+ * Login-needed segment. A dead grant silently removes an account from routing,
+ * so it must be visible without opening anything.
+ */
+export function authDeadStatusLine(roster: UsageRoster | null, theme: UsageTheme = PLAIN): string {
+	const dead = roster?.dead ?? [];
+	if (dead.length === 0) return "";
+	const names = dead.map(entry => entry.email ?? entry.accountId ?? `credential ${entry.id ?? "?"}`);
+	return theme.bold(theme.fg("error", `REAUTH NEEDED: ${names.join(", ")}`));
+}
+
 export function usageStatusLine(roster: UsageRoster | null, theme: UsageTheme = PLAIN): string {
 	if (roster === null) return "";
 	const byProvider = new Map<string, string[]>();
 	for (const row of aggregate(roster)) {
-		const provider = row.provider === "anthropic" ? "claude" : row.provider === "openai-codex" ? "codex" : row.provider;
+		const provider = providerLabel(row.provider);
 		const cell = `${theme.fg("dim", row.tag)} ${bar(row.free, theme)} ${theme.fg(severity(row.free), `${Math.round(row.free * 100)}%`)}`;
 		(byProvider.get(provider) ?? (byProvider.set(provider, []), byProvider.get(provider)!)).push(cell);
 	}
-	return [...byProvider.entries()].map(([provider, cells]) => `${theme.bold(theme.fg("accent", provider))} ${cells.join("  ")}`).join(theme.fg("dim", "  ·  "));
+	const cells = [...byProvider.entries()].map(([provider, entries]) => `${theme.bold(theme.fg("accent", provider))} ${entries.join("  ")}`);
+	const warning = authDeadStatusLine(roster, theme);
+	if (warning !== "") cells.unshift(warning);
+	return cells.join(theme.fg("dim", "  ·  "));
 }

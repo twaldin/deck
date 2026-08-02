@@ -48,6 +48,8 @@ import { pipelineDir, startShip } from "../ship";
 import { reconcileRecuts } from "../recut";
 import { peekSession, startRun } from "../spawn";
 import { STATUS_VERBS, type StatusVerb } from "../status";
+import { syncAuthDeadQuestions } from "../auth-dead";
+import { queueFile } from "../questions-store";
 import { mergeLiveAccounts, readLiveControlAccounts, readUsageRoster, usageStatusLine } from "../usage-roster";
 import { discoverSmithersWorkspaces, smithersWorkspaceCwd, uiWarn, warnOnShadowWorkspace } from "../workspace";
 import { evaluateTeardown, formatVerdict } from "../teardown";
@@ -620,6 +622,17 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 		// threw, the event was gone for good, and a lost `blocked:` is the worst
 		// failure this system has.
 		reconcile();
+		// A dead OAuth grant needs the captain, so it becomes a durable question
+		// rather than a chat line he can scroll past. Idempotent: one question per
+		// account, auto-dismissed once the account authenticates again.
+		try {
+			syncAuthDeadQuestions(queueFile(), readUsageRoster(), {
+				sessionId: ctx?.sessionManager?.getSessionId?.() ?? "deck-orchestrator",
+				cwd: ctx?.sessionManager?.getCwd?.() ?? process.cwd(),
+			});
+		} catch {
+			// The queue is best-effort here; never let it block wake delivery.
+		}
 		let attempted = 0;
 		let sent = 0;
 		for (const verdict of detectStale()) {

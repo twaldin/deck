@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { z } from "zod";
-import { controlRequest, gatewayPost } from "./harness";
+import { controlRequest, gatewayPost, hasLiveBroker } from "./harness";
 
 const ACCOUNT_ID = "879eaffd-053c-424b-9782-dd76aa8bad3b";
 const RESET_TOLERANCE_MS = 120_000;
@@ -146,7 +146,10 @@ if (!BURN_ENABLED) {
 	);
 }
 
-describe("SPEC 6.5 quota attribution", () => {
+// The battery burns real tokens against a running deck-broker. It skips when
+// none is reachable, which is also the case when a unit-test file in the same
+// `bun test` process has repointed DECK_HOME at a throwaway home.
+describe.skipIf(!hasLiveBroker())("SPEC 6.5 quota attribution", () => {
 	test.skipIf(!ompCachePreflight)(
 		"(1) reports the same Anthropic windows and usage as omp for account 1",
 		async () => {

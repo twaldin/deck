@@ -5,7 +5,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { z } from "zod";
-import { CHEAP_MODEL, gatewayPost, readSse } from "./harness";
+import { CHEAP_MODEL, gatewayPost, hasLiveBroker, readSse } from "./harness";
 
 const sseEvent = z.looseObject({ type: z.string() });
 const contentDelta = z.looseObject({
@@ -13,7 +13,10 @@ const contentDelta = z.looseObject({
 	delta: z.looseObject({ text: z.string().optional() }),
 });
 
-describe("SPEC 6.5 conformance", () => {
+// The battery burns real tokens against a running deck-broker. It skips when
+// none is reachable, which is also the case when a unit-test file in the same
+// `bun test` process has repointed DECK_HOME at a throwaway home.
+describe.skipIf(!hasLiveBroker())("SPEC 6.5 conformance", () => {
 	test("(2) streaming: /v1/messages stream=true delivers SSE deltas and final usage", async () => {
 		const response = await gatewayPost("/v1/messages", {
 			model: CHEAP_MODEL,
