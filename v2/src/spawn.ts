@@ -165,7 +165,15 @@ export function workerModelFor(request: SpawnRequest): string {
 }
 
 export function workerReasoningFor(request: SpawnRequest): string | undefined {
-	return request.reasoning ?? request.thinking ?? seatModel(shipProfileFor(request)?.models?.implementer).reasoning;
+	const profile = shipProfileFor(request);
+	const implementer = profile?.models?.implementer;
+	const embeddedReasoning = typeof implementer === "object" ? implementer.reasoning : undefined;
+	return request.reasoning
+		?? request.thinking
+		?? embeddedReasoning
+		?? profile?.models?.reasoningImplementer
+		?? profile?.models?.reasoning
+		?? seatModel(implementer).reasoning;
 }
 
 export function shipProfileFor(request: SpawnRequest): ProjectProfile | null {

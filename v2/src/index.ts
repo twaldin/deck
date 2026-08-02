@@ -9,6 +9,7 @@
 export * from "./home";
 export * from "./home-sync";
 export * from "./projects";
+export * from "./reasoning";
 export * from "./status";
 export * from "./meta";
 export * from "./events";
