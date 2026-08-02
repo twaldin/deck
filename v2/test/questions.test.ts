@@ -409,20 +409,30 @@ class Harness {
 	}
 }
 
-function fakeContext(sessionId: string, selections: string[] = [], written?: string) {
+function fakeContext(sessionId: string, selections: string[] = [], written?: string, customInput?: string) {
 	const notices: string[] = [];
 	const prompts: string[] = [];
+	const customRenders: { count: number } = { count: 0 };
 	return {
 		hasUI: true,
 		cwd: "/work/deck",
 		notices,
 		prompts,
 		sessionManager: { getSessionId: () => sessionId },
+		customRenders,
 		ui: {
 			notify: (message: string) => notices.push(message),
 			select: async (title: string) => {
 				prompts.push(title);
 				return selections.shift();
+			},
+			custom: customInput === undefined ? undefined : async (factory: any) => {
+				let result: string | undefined;
+				const component = factory({ terminal: { rows: 40 }, requestRender() {} }, { fg: (_: string, value: string) => value }, {}, (value: string | undefined) => { result = value; });
+				customRenders.count += 1;
+				component.render(80);
+				component.handleInput(customInput);
+				return result;
 			},
 			editor: async () => written,
 		},
@@ -447,6 +457,18 @@ describe("questions extension", () => {
 		expect(result.content[0].text).toContain("1 open");
 		expect(openQuestions(file)).toHaveLength(1);
 		expect(ctx.notices[0]).toContain("Queued question");
+	});
+
+	test("/questions custom overlay confirms newline without scrollback rerenders", async () => {
+		const file = freshFile();
+		const pi = new Harness();
+		registerQuestions(pi as any, envFor(file), pi.runtime);
+		const asker = fakeContext("session-a");
+		await pi.tools.get("ask_captain")!.execute("c1", { question: "Choose", options: ["yes"] }, undefined, undefined, asker);
+		const captain = fakeContext("session-captain", [], undefined, "\n");
+		await pi.commands.get("questions")!.handler("", captain);
+		expect(openQuestions(file)).toHaveLength(0);
+		expect(captain.customRenders.count).toBe(1);
 	});
 
 	test("/questions answers with a listed option and delivers to the asker", async () => {

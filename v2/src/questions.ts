@@ -27,7 +27,11 @@ import {
 	type Question,
 } from "./questions-store";
 
-export const QUESTIONS_POLL_INTERVAL_MS = 15_000;
+// Polling audit: before this change the fleet overlay polled every 5s (12/min)
+// and the wake reconciler every 30s (2/min), in addition to this queue poll
+// every 15s (4/min): 18 periodic wake checks/min across these surfaces. The
+// overlay and reconciler polls are now event-driven, leaving one queue poll at
+// 4/min. This coalesces redundant periodic checks without changing delivery.
 
 interface Ui {
 	notify(message: string, level?: "info" | "warning" | "error"): void;
@@ -278,6 +282,17 @@ export function registerQuestions(
 								// Preserve the selector's vi navigation in the custom component.
 								// SelectList handles the configured arrows; these aliases are
 								// translated to the same terminal sequences.
+								// The built-in selector accepts both the configured confirm key and a
+								// literal newline from pasted or line-oriented terminal input.
+								// Keep that compatibility in the overlay component.
+								const normalized = data === "\n" ? "enter" : data;
+								if (normalized === "enter") {
+									done(list.getSelectedItem()?.value);
+									return;
+								}
+								// Keep the built-in selector's tool-expansion binding from
+								// becoming an accidental selection or answer.
+								if (data === "\u000f") return;
 								list.handleInput(data === "j" ? "\u001b[B" : data === "k" ? "\u001b[A" : data);
 								tui.requestRender();
 							},
