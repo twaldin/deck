@@ -460,6 +460,31 @@ describe("project profiles (yolo vs stamp is data, not a fork)", () => {
 });
 
 describe("adopt existing PR (input.existingPr)", () => {
+	test("REGRESSION: adopt push-pr output includes its run id and satisfies its schema", async () => {
+		const runId = "adopt-schema-test";
+		const rendered = await renderWorkflow(pipeline, {
+			input: {
+				...baseInput,
+				existingPr: 777,
+			},
+			runId,
+			outputs: {
+				preflight: [{ nodeId: "preflight", ok: true, openQuestions: [], briefDigest: "", resolvedReviewerModel: "deck/claude-fable-5" }],
+				implementation: [{ nodeId: "implement", commits: [], summary: "adopted existing PR #777", testEvidence: "dry-run" }],
+				localReview: [{ nodeId: "local-review", round: 0, approved: true, blockingFindings: [], nits: [], summary: "approved" }],
+			},
+		});
+		const pushTask = rendered.tasks.find((task) => task.nodeId === "push-pr");
+		expect(pushTask).toBeDefined();
+		const output = await pushTask!.computeFn!();
+		expect(output).toMatchObject({ runId });
+		const schema = pushTask!.outputSchema!;
+		expect(schema.safeParse(output).success).toBe(true);
+		const missingRequiredField = { ...output } as Record<string, unknown>;
+		delete missingRequiredField.createdAt;
+		expect(schema.safeParse(missingRequiredField).success).toBe(false);
+	});
+
 	test("implement is stubbed, local adversarial review runs, prRecord seeded, and the SAME watch loop reaches done", async () => {
 		const { sim, error } = await run({
 			...baseInput,
