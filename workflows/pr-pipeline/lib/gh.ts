@@ -239,6 +239,12 @@ query($owner: String!, $name: String!, $number: Int!) {
   }
 }`;
 
+export async function fetchBranchCheckRuns(ctx: GhContext, branch: string): Promise<CheckRun[]> {
+	const exec = ctx.exec ?? bunExec;
+	const out = await execOrThrow(exec, [ctx.gh, "api", `repos/${ctx.repo}/commits/${encodeURIComponent(branch)}/check-runs?per_page=100`]);
+	return parseCheckRuns(JSON.parse(out));
+}
+
 export async function fetchWatchSnapshot(ctx: GhContext, prNumber: number, selfLogins: string[]): Promise<WatchSnapshot> {
 	const exec = ctx.exec ?? bunExec;
 	const [owner, name] = ctx.repo.split("/");

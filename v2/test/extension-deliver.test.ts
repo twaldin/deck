@@ -55,6 +55,24 @@ describe("fleet workspace safeguards", () => {
 		expect(warnings[0]).not.toContain("lib");
 	});
 
+	test("REGRESSION: terminal markers in attempt payloads do not hide a live run", () => {
+		const shadow = path.join(home, "workflows", "pr-pipeline", ".smithers");
+		const run = path.join(shadow, "executions", "run-live");
+		fs.mkdirSync(run, { recursive: true });
+		fs.writeFileSync(path.join(run, "attempt.json"), JSON.stringify({ payload: "RunFailed", status: "failed" }));
+		const warnings: string[] = [];
+		expect(warnOnShadowWorkspace(home, (message) => warnings.push(message))).toEqual(["run-live"]);
+		expect(warnings).toHaveLength(1);
+	});
+
+	test("REGRESSION: canonical terminal state is excluded", () => {
+		const shadow = path.join(home, "workflows", "pr-pipeline", ".smithers");
+		const run = path.join(shadow, "executions", "run-done");
+		fs.mkdirSync(run, { recursive: true });
+		fs.writeFileSync(path.join(run, "run.json"), JSON.stringify({ status: "completed" }));
+		expect(warnOnShadowWorkspace(home, () => {})).toEqual([]);
+	});
+
 	test("REGRESSION: identical orphan sets warn once per session", () => {
 		const shadow = path.join(home, "workflows", "pr-pipeline", ".smithers");
 		fs.mkdirSync(path.join(shadow, "executions", "run-123"), { recursive: true });

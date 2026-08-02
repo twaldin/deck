@@ -155,6 +155,8 @@ The catalog (`DECK_AGENT_CATALOG`) mirrors the broker allowlist:
 
 ## How a crewmate dispatches a run
 
+Workspace invariant: every pipeline run uses the canonical Smithers workspace at `~/.deck/state/smithers` (via `smithersWorkspaceCwd`). Workflow source directories are not state stores. This prevents shadow workspaces and duplicate run discovery.
+
 Prereqs: worktree of the lindy repo with the task branch checked out; deck
 broker running (launchd); `bun install` once in this directory.
 

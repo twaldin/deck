@@ -16,12 +16,14 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+// Smithers testing is optional in minimal checkouts; workflow tests run when the pinned package is installed.
 import { renderWorkflow, simulate } from "smithers-orchestrator/testing";
 
 import pipeline, { buildModelPolicy, DEFAULT_GITHUB } from "../pipeline.tsx";
 import type { ProjectProfile } from "../lib/profiles.ts";
 import { falloutPrompt, localFixPrompt, localReviewPrompt, reviewersDecisionPrompt } from "../lib/prompts.ts";
 import { resolveAdversary } from "../lib/models.ts";
+import { isSchemaEcho, schemaEchoCorrection } from "../lib/schema-echo.ts";
 
 const validBrief = {
 	ticket: "LIN-123",
@@ -60,6 +62,15 @@ async function run(input: Record<string, unknown>) {
 	}
 	return { sim, error };
 }
+
+describe("schema-echo recovery", () => {
+	test("recognizes a schema echo and produces a corrective result instruction", () => {
+		const echo = { $schema: "https://json-schema.org", type: "object", properties: {}, required: [] };
+		expect(isSchemaEcho(echo)).toBe(true);
+		expect(isSchemaEcho({ round: 1, approved: true, blockingFindings: [], nits: [], summary: "ok" })).toBe(false);
+		expect(schemaEchoCorrection("round, approved, blockingFindings, nits, summary")).toContain("Return only one filled result object");
+	});
+});
 
 describe("workflow rendering contracts", () => {
 	const profileBase: ProjectProfile = {

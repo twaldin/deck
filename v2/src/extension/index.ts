@@ -52,6 +52,7 @@ import { mergeLiveAccounts, readLiveControlAccounts, readUsageRoster, usageStatu
 import { discoverSmithersWorkspaces, smithersWorkspaceCwd, uiWarn, warnOnShadowWorkspace } from "../workspace";
 import { evaluateTeardown, formatVerdict } from "../teardown";
 import { ackWakes, detectStale, foldBatched, pendingWakes, reconcile } from "../wake";
+import { reconcileWakeProducers } from "../wake-producers";
 import {
 	assertDispatchable,
 	closeInternal,
@@ -619,6 +620,7 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 		// cursor advance the acknowledgement: if sendUserMessage was missing or
 		// threw, the event was gone for good, and a lost `blocked:` is the worst
 		// failure this system has.
+		for (const workspace of workflowWorkspaces) reconcileWakeProducers(path.join(workspace, "wake-producers.json"));
 		reconcile();
 		let attempted = 0;
 		let sent = 0;
@@ -757,6 +759,7 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 		await injectStandingRules(ctx, "session_start");
 		workflowCwd = smithersWorkspaceCwd();
 		workflowWorkspaces = discoverSmithersWorkspaces();
+		for (const workspace of workflowWorkspaces) reconcileWakeProducers(path.join(workspace, "wake-producers.json"));
 		// Automatic wake is TUI-only by design. A future deck-notifier projection
 		// can consume this same multi-workspace observation for no-TUI sessions.
 		warnOnShadowWorkspace(
@@ -812,21 +815,17 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 				},
 			};
 		});
-		// The wake loop only runs for an interactive orchestrator.
-		//
-		// Waking needs a live session with a captain reading it. In print mode there
-		// is a single prompt and no one to wake, so automatic waking is gated.
-		// RPC has a caller driving the conversation, so unsolicited turns are the
-		// caller's business, not ours.
-		//
-		// The tools still work in every mode; only the automatic waking is gated.
-		if (ctx?.mode !== "tui") return;
-
-		// Reconcile at start: the durable baseline means this reports only what is
-		// genuinely new, so a restart is quiet rather than a flood.
-		void deliver(ctx);
-		timer = setInterval(() => void deliver(ctx), RECONCILE_MS);
-		unwatch = (await import("../wake")).watchStatusDir(() => void deliver(ctx));
+		// The durable outbox is the delivery contract. A TUI is only one consumer;
+		// print/RPC sessions must still reconcile and expose owed wakes, otherwise
+		// blocked workflow runs silently stall when no interactive session exists.
+		// The durable outbox is the delivery contract for both TUI and headless
+		// sessions. Keep reconciliation alive after startup: a workflow can publish
+		// a wake after a print/RPC command has started, and no TUI may be present.
+		if (ctx.mode === "tui") {
+			void deliver(ctx);
+			timer = setInterval(() => void deliver(ctx), RECONCILE_MS);
+			unwatch = (await import("../wake")).watchStatusDir(() => void deliver(ctx));
+		}
 	});
 
 	// A queued follow-up is durable until the next turn starts. This avoids

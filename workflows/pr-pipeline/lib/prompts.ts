@@ -78,13 +78,15 @@ export function localReviewPrompt(
 			]
 			: []),
 		"Classify every item as blocking or a nit.",
+		"IMPORTANT: The JSON Schema shown by the runner is an instruction, not an answer. A schema echo is invalid, even if it is valid JSON. Never copy or return schema keywords such as $schema, type, properties, required, or additionalProperties. Return one filled RESULT object with the review values.",
+		"If your previous response was the schema, discard it now and answer the review. Do not explain the correction.",
 		"Blocking findings are correctness, security, data loss, broken tests, contract breaks, or missing required behavior from the brief.",
 		"Naming preferences, optional polish, pre-existing style outside the diff, and 'consider later' items are nits, never blockers.",
 		"From review round 4 onward, actively reclassify remaining items. If only nits remain, approve. Do not keep the loop alive on taste.",
 		"",
 		`Result fields: {"round": number, "approved": boolean, "blockingFindings": string[], "nits": string[], "summary": string}.`,
 		...resultContract(`{"round":${round},"approved":true,"blockingFindings":[],"nits":[],"summary":"No blocking findings."}`),
-		`The result "round" MUST be exactly ${round}. Set approved=true IFF "blockingFindings" is empty.`,
+		`The result "round" MUST be exactly ${round}. Set approved=true IFF "blockingFindings" is empty. If you see a schema-echo correction, discard it and return the filled result object again.`,
 	].join("\n");
 }
 
@@ -124,7 +126,7 @@ export function watchFixPrompt(args: {
 		args.pollJson,
 		"",
 		"Do, in order:",
-		`1. If mergeability is CONFLICTING, or mergeStateStatus is DIRTY or BEHIND, fetch origin/${args.baseBranch}, then rebase THIS PR branch onto origin/${args.baseBranch}.`,
+		`1. If mergeability is CONFLICTING, or mergeStateStatus is DIRTY or BEHIND, run the deterministic rebase helper: fetch origin/${args.baseBranch}, rebase THIS PR branch onto origin/${args.baseBranch}, run relevant tests, then force-with-lease push. If the helper is unavailable, run exactly those git commands yourself.`,
 		"   Resolve conflicts, run relevant tests, then force-with-lease push the existing PR branch. Do not merge.",
 		"2. Every unresolved review thread: fix the code if warranted (plain commits on THIS branch),",
 		"   reply in the thread, and resolve it (or reply why not, and resolve after agreement).",
@@ -141,6 +143,7 @@ export function watchFixPrompt(args: {
 		"never run gh pr create - that creates an accidental child PR.",
 		"Never merge anything. After a rerun or push, return the receipt and exit immediately.",
 		"Never sleep-poll CI or review state. The next persisted Smithers poll owns the wait.",
+		"The JSON Schema is not a response. Never return $schema, type, properties, required, or additionalProperties. Return one filled RESULT object only.",
 		`Result fields: {"round": number, "afterPoll": number, "actions": string[], "pushed": boolean, "reRequested": string[], "summary": string}.`,
 		...resultContract(`{"round":${args.round},"afterPoll":${args.afterPoll},"actions":[],"pushed":false,"reRequested":[],"summary":"No action required."}`),
 		`The result "round" MUST be exactly ${args.round} and "afterPoll" MUST be exactly ${args.afterPoll}.`,

@@ -21,7 +21,9 @@ export function smithersWorkspaceCwd(home = deckV2Home()): string {
  * Find Smithers state directories under the configured roots.
  *
  * This remains available to callers that need discovery. Deck-v2's live frame
- * uses the single shared workspace returned by smithersWorkspaceCwd().
+ * uses the single shared workspace returned by smithersWorkspaceCwd(). Every
+ * pipeline launch must use that directory as its Smithers cwd; workflow trees
+ * are source locations, not separate state stores.
  */
 let discoveryCache: { key: string; expiresAt: number; workspaces: string[] } | undefined;
 const DISCOVERY_CACHE_MS = 30_000;
@@ -48,14 +50,20 @@ export function discoverSmithersWorkspaces(home = deckV2Home()): string[] {
 			if (!entry.isDirectory() || entry.name === "node_modules" || entry.name === ".git") continue;
 			const child = path.join(directory, entry.name);
 			if (entry.name === ".smithers") {
-				found.add(path.dirname(child));
+				// Store one physical workspace per state directory. The live
+				// ~/.deck/workflows tree is commonly a symlink to this location.
+				found.add(path.resolve(path.dirname(child)));
 				continue;
 			}
 			visit(child, depth + 1);
 		}
 	};
 	for (const root of roots) visit(path.resolve(root), 0);
-	found.add(smithersWorkspaceCwd(home));
+	try {
+		found.add(fs.realpathSync(smithersWorkspaceCwd(home)));
+	} catch {
+		found.add(path.resolve(smithersWorkspaceCwd(home)));
+	}
 	const workspaces = [...found].sort();
 	discoveryCache = { key, expiresAt: Date.now() + DISCOVERY_CACHE_MS, workspaces };
 	return [...workspaces];
@@ -74,15 +82,33 @@ export function uiWarn(ctx: { ui?: { notify?: (message: string, type?: "warning"
 	process.stderr.write(`${message}\n`);
 }
 
-/** Report the old per-workflow workspace without deleting operator-owned runs. */
+/**
+ * Report old per-workflow state without warning for the canonical workspace.
+ * Smithers may expose the same directory through ~/.deck/workflows symlinks.
+ */
 export function warnOnShadowWorkspace(
 	home = deckV2Home(),
 	log: (message: string) => void = (message) => uiWarn(undefined, message),
 	warnedFingerprints = new Set<string>(),
 ): string[] {
-	const shadow = path.join(home, "workflows", "pr-pipeline", ".smithers");
-	const legacy = path.join(home, "workflows", ".smithers");
-	const workspaces = [shadow, legacy].filter((workspace) => fs.existsSync(workspace));
+	const canonicalRoots = new Set<string>();
+	for (const candidate of [smithersWorkspaceRoot(home), path.join(smithersWorkspaceRoot(home), ".smithers")]) {
+		try { canonicalRoots.add(fs.realpathSync(candidate)); }
+		catch { canonicalRoots.add(path.resolve(candidate)); }
+	}
+	const candidates = [
+		path.join(home, "workflows", "pr-pipeline", ".smithers"),
+		path.join(home, "workflows", ".smithers"),
+	];
+	const workspaces = candidates.filter((workspace) => {
+		if (!fs.existsSync(workspace)) return false;
+		try {
+			const resolved = fs.realpathSync(workspace);
+			return ![...canonicalRoots].some((root) => resolved === root || resolved.startsWith(`${root}${path.sep}`));
+		} catch {
+			return false;
+		}
+	});
 	if (workspaces.length === 0) return [];
 	const ids = workspaces.flatMap(shadowRunIds);
 	if (ids.length > 0) {
@@ -95,12 +121,48 @@ export function warnOnShadowWorkspace(
 	return ids;
 }
 
+function isTerminalExecution(executions: string, id: string): boolean {
+	// Smithers 0.30 stores the authoritative terminal transition in the
+	// append-only stream. State files are optional and are not present in many
+	// real execution directories.
+	const runDir = path.join(executions, id);
+	const stream = path.join(runDir, "logs", "stream.ndjson");
+	try {
+		const lines = fs.readFileSync(stream, "utf8").split("\n").filter(Boolean);
+		for (const line of lines.reverse()) {
+			const event = JSON.parse(line) as Record<string, unknown>;
+			// Only the envelope's event name and status are authoritative. Do not
+			// search payload text: a review body can contain "RunFailed".
+			const payload = event.payload && typeof event.payload === "object" ? event.payload as Record<string, unknown> : undefined;
+			const frame = event.frame && typeof event.frame === "object" ? event.frame as Record<string, unknown> : undefined;
+			const framePayload = frame?.payload && typeof frame.payload === "object" ? frame.payload as Record<string, unknown> : undefined;
+			const kind = [event.type, event.event, event.kind, event.name, payload?.type, frame?.event, framePayload?.type].find((value) => typeof value === "string");
+			const status = [event.status, payload?.status, frame?.status, framePayload?.status].find((value) => typeof value === "string");
+			if (typeof status === "string" && /^(completed|succeeded|failed|cancelled|finished)$/i.test(status)) return true;
+			if (typeof kind === "string" && (/^(?:run[._-])?(completed|succeeded|failed|cancelled|finished)$/i.test(kind) || /^Run(?:Completed|Succeeded|Failed|Cancelled|Finished)$/i.test(kind))) return true;
+			if (typeof kind === "string" && /^(?:run[._-])?(started|resumed|paused)$/i.test(kind)) break;
+		}
+	} catch {
+		// Fall through to optional state files.
+	}
+	for (const name of ["run.json", "state.json", "status.json"]) {
+		try {
+			const value: unknown = JSON.parse(fs.readFileSync(path.join(runDir, name), "utf8"));
+			const status = value && typeof value === "object" ? (value as { status?: unknown; state?: unknown }).status ?? (value as { state?: unknown }).state : undefined;
+			if (typeof status === "string" && /^(completed|failed|cancelled|succeeded|finished)$/i.test(status)) return true;
+		} catch {
+			// Missing or malformed canonical state means the run is still worth warning about.
+		}
+	}
+	return false;
+}
+
 function shadowRunIds(workspace: string): string[] {
 	try {
 		const executions = path.join(workspace, "executions");
 		return fs
 			.readdirSync(executions, { withFileTypes: true })
-			.filter((entry) => entry.isDirectory() && entry.name.length > 0)
+			.filter((entry) => entry.isDirectory() && entry.name.length > 0 && !isTerminalExecution(executions, entry.name))
 			.map((entry) => entry.name)
 			.sort();
 	} catch {

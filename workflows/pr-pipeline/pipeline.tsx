@@ -37,6 +37,8 @@ import {
 	createSmithers,
 } from "smithers-orchestrator";
 import { z } from "zod";
+import * as fs from "node:fs";
+import * as path from "node:path";
 
 import { assertAdoptable, decideAdoptPush } from "./lib/adopt.ts";
 import { validateBrief } from "./lib/brief.ts";
@@ -48,6 +50,7 @@ import {
 	fetchCodeowners,
 	fetchHeadSha,
 	fetchMainCommitSubjects,
+	fetchBranchCheckRuns,
 	fetchPrLifecycle,
 	fetchPrApprovalsAndCi,
 	fetchPrOverview,
@@ -81,7 +84,10 @@ import {
 import { evaluateReadyForStamp } from "./lib/ready.ts";
 import { executeReviewerRequest } from "./lib/reviewers.ts";
 import { assessCi, evaluateWatchExit } from "./lib/watch.ts";
+import { rebaseAndPush } from "./lib/rebase.ts";
 import type { Brief, MigrationEvidenceEntry } from "./lib/types.ts";
+import { claimMainFailure, produceWakeConditions, releaseMainFailure } from "../../v2/src/wake-producers.ts";
+import { smithersWorkspaceCwd } from "../../v2/src/workspace.ts";
 
 // ---------------------------------------------------------------------------
 // Defaults (normalized in code, not via zod .default(), to keep semantics
@@ -132,6 +138,7 @@ const DEFAULT_COMMANDS = {
 	migrationProdRun: undefined as string | undefined,
 	migrationProdVerify: undefined as string | undefined,
 	falloutProbes: [] as string[],
+	test: "bun test",
 };
 
 // ---------------------------------------------------------------------------
@@ -217,6 +224,7 @@ export const inputSchema = z.object({
 			migrationProdRun: z.string().optional(),
 			migrationProdVerify: z.string().optional(),
 			falloutProbes: z.array(z.string()).optional(),
+			test: z.string().optional(),
 		})
 		.optional(),
 	watchSetPath: z.string().optional(),
@@ -294,6 +302,7 @@ const schemas = {
 		unansweredComments: z.number().int(),
 		reviewersToReRequest: z.array(z.string()),
 		reasons: z.array(z.string()),
+		rebaseRequired: z.boolean(),
 	}),
 	watchFix: z.object({
 		round: z.number().int(),
@@ -414,6 +423,38 @@ function nowIso(): string {
 	return new Date().toISOString();
 }
 
+/** Publish durable wake inputs for the deck extension. The extension reads this
+ * record from the canonical Smithers workspace even without a TUI session. */
+export function publishWakeProducer(input: { taskId: string; maxAdversarial?: boolean; reviewerSilent?: boolean; mainRed?: boolean; migrationBlocked?: boolean; brokerNoQuota?: boolean }): void {
+	if (input.taskId.length === 0) return;
+	const file = path.join(smithersWorkspaceCwd(), "wake-producers.json");
+	fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+	const lock = `${file}.lock`;
+	try { fs.mkdirSync(lock, { mode: 0o700 }); } catch { return; }
+	try {
+		let records: Array<typeof input> = [];
+		try {
+			const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as typeof input | Array<typeof input>;
+			records = Array.isArray(parsed) ? parsed : [parsed];
+		} catch { /* create the producer log on first publish */ }
+		records = records.filter((record) => record.taskId !== input.taskId);
+		records.push(input);
+		const tmp = `${file}.${process.pid}.tmp`;
+		fs.writeFileSync(tmp, `${JSON.stringify(records)}\n`, { mode: 0o600 });
+		fs.renameSync(tmp, file);
+		produceWakeConditions({
+			taskId: input.taskId,
+			maxAdversarial: input.maxAdversarial,
+			reviewerSilent: input.reviewerSilent,
+			mainRed: input.mainRed,
+			migrationBlocked: input.migrationBlocked,
+			brokerNoQuota: input.brokerNoQuota,
+		});
+	} finally {
+		fs.rmSync(lock, { recursive: true, force: true });
+	}
+}
+
 function seat(ref: ModelSeat): { ref: string; reasoning?: string } {
 	return typeof ref === "string" ? { ref } : { ref: ref.model, reasoning: ref.reasoning };
 }
@@ -425,6 +466,7 @@ function makeAgent(ref: ModelSeat, cwd: string, timeoutMs: number, reasoning = "
 	// Preserve the provider-native selector. If an older Smithers type does not
 	// yet include `max`, the compatibility cast is local and does not rewrite the
 	// value sent to Pi.
+
 	return new PiAgent({
 		provider,
 		model,
@@ -510,7 +552,7 @@ export default smithers((ctx) => {
 
 	const policy = buildModelPolicy(profile, profileRepoMismatch, input.models);
 
-	const ghCtx = { gh: github.gh, repo: input.repo };
+	const ghCtx = { gh: github.gh, repo: input.repo, exec: bunExec };
 	const project = input.profile ?? input.repo.split("/").at(-1);
 
 	// -- persisted state reads ------------------------------------------------
@@ -678,6 +720,25 @@ export default smithers((ctx) => {
 	const reviewExhausted =
 		localReviewRows.length >= limits.localReviewRounds && !reviewApproved;
 	const pushAllowed = reviewApproved || reviewEscalation?.approved === true;
+	const producerWatch = ctx.latest(outputs.watchPoll, `r${currentRound}-watch-poll`);
+	const coordinationRoot = path.join(smithersWorkspaceCwd(), ".deck-coordination");
+	const mainFingerprint = `${input.repo}:${baseBranch}`;
+	const mainFailureClaimed = producerWatch?.ci === "red"
+		? claimMainFailure(coordinationRoot, mainFingerprint, input.ticket)
+		: (releaseMainFailure(coordinationRoot, mainFingerprint), false);
+	publishWakeProducer({
+		taskId: input.ticket,
+		maxAdversarial: reviewExhausted && !pushAllowed,
+		reviewerSilent: producerWatch?.disposition === "wait" && producerWatch?.poll >= 3,
+		mainRed: producerWatch?.ci === "red" && mainFailureClaimed,
+		migrationBlocked: migRequired && anyWatchSettled && migGate === undefined,
+		brokerNoQuota: process.env.DECK_BROKER_NO_QUOTA === "1" || (() => {
+			try {
+				const roster = JSON.parse(fs.readFileSync(path.join(process.env.HOME ?? "", ".deck", "broker", "usage.json"), "utf8")) as { reports?: Array<{ limits?: Array<{ amount?: { remainingFraction?: number } }> }> };
+				return (roster.reports ?? []).some((report) => (report.limits ?? []).some((limit) => limit.amount?.remainingFraction === 0));
+			} catch { return false; }
+		})(),
+	});
 
 	// ===========================================================================
 	// Render
@@ -787,6 +848,7 @@ export default smithers((ctx) => {
 								id="local-review"
 								output={outputs.localReview}
 								agent={dryRun ? undefined : agents?.reviewer}
+								maxSchemaRetries={5}
 								retries={1}
 							>
 								{dryRun
@@ -1281,6 +1343,7 @@ export default smithers((ctx) => {
 																	unresolvedThreads: actionable ? 1 : 0,
 																	unansweredComments: actionable ? 1 : 0,
 																	reviewersToReRequest: actionable ? ["dry-reviewer"] : [],
+														rebaseRequired: false,
 																	reasons: exitOk
 																		? []
 																		: waiting
@@ -1294,7 +1357,17 @@ export default smithers((ctx) => {
 																pr.prNumber,
 																github.selfLogins,
 															);
-															const verdict = evaluateWatchExit(snapshot, {
+															const mainCi = assessCi(await fetchBranchCheckRuns(ghCtx, baseBranch));
+										if (mainCi === "red") {
+											return {
+												round: k, poll: pollNo, headSha: snapshot.headSha,
+												exitOk: false, disposition: "wait", actionable: false, ci: "red",
+												unresolvedThreads: 0, unansweredComments: 0, reviewersToReRequest: [],
+												reasons: [`base branch ${baseBranch} has failing checks; CI watch is paused until it is green.`],
+												rebaseRequired: false,
+											};
+										}
+										const verdict = evaluateWatchExit(snapshot, {
 																selfLogins: github.selfLogins,
 															});
 															return {
@@ -1309,6 +1382,7 @@ export default smithers((ctx) => {
 																unansweredComments: verdict.unansweredComments,
 																reviewersToReRequest: verdict.reviewersNeedingReRequest,
 																reasons: verdict.reasons,
+																		rebaseRequired: verdict.rebaseRequired,
 															};
 														})()
 													}
@@ -1335,6 +1409,13 @@ export default smithers((ctx) => {
 																	reRequested: ["dry-reviewer"],
 																	summary: "dry-run: feedback addressed",
 																})
+															: latestWatch.rebaseRequired
+															? async () => {
+																	const actions = await rebaseAndPush(bunExec, { git: github.git, worktree: input.worktree, branch: input.branch, baseBranch, testCommand: commands.test });
+																	const reviewers = latestWatch.reviewersToReRequest;
+																			if (reviewers.length > 0) await requestReviewers(ghCtx, pr.prNumber, reviewers);
+																			return { round: k, afterPoll: latestWatch.poll, actions: [...actions, "answered review feedback", ...reviewers.map((reviewer) => `re-requested ${reviewer}`)], pushed: true, reRequested: reviewers, summary: "Rebased, addressed review feedback, tested, pushed, and re-requested review." };
+																}
 															: watchFixPrompt({
 																	worktree: input.worktree,
 																	branch: input.branch,
@@ -1826,6 +1907,7 @@ prNumber: pr.prNumber,
 						id="fallout-watch"
 						output={outputs.fallout}
 						agent={dryRun ? undefined : agents?.fallout}
+						maxSchemaRetries={5}
 						retries={1}
 					>
 						{dryRun || deploy?.evidence.startsWith("PARK:")

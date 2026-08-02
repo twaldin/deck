@@ -67,6 +67,35 @@ export type ReconcileResult = {
 
 type Baseline = Record<string, { lastTier: WakeTier; lastRaw: string; count: number }>;
 
+/** Durable, edge-triggered conditions that do not have a .status producer. */
+export type WakeCondition = {
+	key: "max-adversarial" | "reviewer-silent" | "main-red" | "migration-gate" | "broker-no-quota";
+	taskId: string;
+	note: string;
+	/** T0 is used for failures and gates; reviewer silence is batched. */
+	tier?: WakeTier;
+};
+
+/** Record external workflow conditions in the same durable outbox as status events. */
+export function enqueueWakeConditions(conditions: WakeCondition[]): void {
+	const items: WakeItem[] = conditions.map((condition) => ({
+		taskId: condition.taskId,
+		tier: condition.tier ?? (condition.key === "reviewer-silent" ? "T1" : "T0"),
+		event: { verb: condition.key, key: condition.key, note: condition.note, raw: `${condition.key}:${condition.note}` },
+	}));
+	if (items.length === 0) return;
+	// Conditions use the same baseline, so a persistent gate creates one wake.
+	const baseline = loadBaseline();
+	const fresh = items.filter((item) => {
+		const previous = baseline[`${item.taskId}:${item.event.key}`];
+		if (previous?.lastRaw === item.event.raw) return false;
+		baseline[`${item.taskId}:${item.event.key}`] = { lastTier: item.tier, lastRaw: item.event.raw, count: (previous?.count ?? 0) + 1 };
+		return true;
+	});
+	saveBaseline(baseline);
+	enqueue(fresh);
+}
+
 function loadBaseline(): Baseline {
 	try {
 		const parsed: unknown = JSON.parse(fs.readFileSync(wakeFiles().baseline, "utf8"));
@@ -79,10 +108,17 @@ function loadBaseline(): Baseline {
 
 function saveBaseline(baseline: Baseline): void {
 	const file = wakeFiles().baseline;
-	const tmp = `${file}.tmp`;
+	const tmp = `${file}.${process.pid}.tmp`;
 	fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
 	fs.writeFileSync(tmp, `${JSON.stringify(baseline, null, 2)}\n`, { mode: 0o600 });
 	fs.renameSync(tmp, file);
+}
+
+/** Clear resolved external conditions so a later recurrence is a new edge. */
+export function clearWakeConditions(taskId: string, keys: WakeCondition["key"][]): void {
+	const baseline = loadBaseline();
+	for (const key of keys) delete baseline[`${taskId}:${key}`];
+	saveBaseline(baseline);
 }
 
 /** Tasks deck owns. An fm2-owned task is skipped during the parallel run. */
