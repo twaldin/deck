@@ -12,7 +12,7 @@
  * a queue there collected ghost questions from long-dead worker sessions that
  * nobody would ever deliver answers to.
  */
-import { appendFileSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import * as path from "node:path";
 import { deckV2Home } from "./home";
@@ -192,6 +192,8 @@ export function ask(
 		urgency?: string;
 		sessionId: string;
 		cwd: string;
+		/** Use a shared durable key when the decision is global across runs. */
+		idScope?: "session" | "global";
 		now?: number;
 	},
 ): AskEvent {
@@ -209,7 +211,9 @@ export function ask(
 		id:
 			supplied === undefined || supplied === ""
 				? `q-${randomSuffix()}`
-				: `${input.sessionId}:${supplied}`,
+				: input.idScope === "global"
+					? supplied
+					: `${input.sessionId}:${supplied}`, 
 		...(input.questionKind === undefined ? {} : { questionKind: input.questionKind }),
 		question,
 		...(input.context === undefined ? {} : { context: input.context }),
@@ -239,6 +243,31 @@ const MAX_ANSWER_BYTES = MAX_EVENT_BYTES - 1024;
  * a pre-append read: two captains can both observe `open` before either writes,
  * and a pre-append read would then tell both of them they won.
  */
+/** Atomically create one global ask. The lock is a directory because mkdir is exclusive on
+ * every filesystem used by Deck. The check and append happen while holding it. */
+export function askIfAbsent(file: string, input: Parameters<typeof ask>[1]): AskEvent {
+	const id = input.id?.trim();
+	if (!id || input.idScope !== "global") return ask(file, input);
+	const lock = `${file}.${id.replace(/[^a-zA-Z0-9_.-]/g, "_")}.lock`;
+	mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+	for (let attempt = 0; ; attempt++) {
+		try {
+			mkdirSync(lock, { mode: 0o700 });
+			break;
+		} catch (error: any) {
+			if (error?.code !== "EEXIST" || attempt >= 500) throw error;
+			Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+		}
+	}
+	try {
+		const existing = openQuestions(file).find((question) => question.id === id);
+		if (existing) return existing;
+		return ask(file, input);
+	} finally {
+		rmSync(lock, { recursive: true, force: true });
+	}
+}
+
 export function answer(
 	file: string,
 	id: string,
