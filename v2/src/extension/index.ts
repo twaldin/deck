@@ -41,6 +41,8 @@ import { projectFleet } from "../herdr";
 import { deckV2Home, stateFiles } from "../home";
 import { standingRulesDigest } from "./standing-rules";
 import { readMeta } from "../meta";
+import { loadProfiles } from "../projects";
+import { renderReasoning, setSeatReasoning, assertReasoningLevel } from "../reasoning";
 import { observePsSnapshotWithInspect, type PsSnapshotRow } from "../observer";
 import { registerQuestions } from "../questions";
 import { enqueue, pending } from "../queue";
@@ -557,6 +559,41 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 			const roster = readUsageRoster();
 			const accounts = await readLiveControlAccounts();
 			ctx.ui?.notify?.(buildUsageText(roster === null ? null : mergeLiveAccounts(roster, accounts), asFleetTheme(ctx.ui?.theme ?? PLAIN_FLEET_THEME)), "info");
+		},
+	});
+
+	pi.registerCommand("reasoning", {
+		description: "Show or set captain and worker reasoning levels",
+		handler: async (rawArgs: string, ctx: any) => {
+			const args = rawArgs.trim().split(/\s+/).filter(Boolean);
+			try {
+				const model = ctx.model as { id?: string; provider?: string } | undefined;
+				const selfModel = model?.id === undefined
+					? null
+					: model.id.includes("/")
+						? model.id
+						: `${model.provider ?? "deck"}/${model.id}`;
+				if (args.length === 0) {
+					const selfLevel = typeof pi.getThinkingLevel === "function" ? pi.getThinkingLevel() : "unknown";
+					ctx.ui?.notify?.(renderReasoning(String(selfLevel), loadProfiles(), asFleetTheme(ctx.ui?.theme ?? PLAIN_FLEET_THEME), selfModel), "info");
+					return;
+				}
+				if (args.length !== 2) throw new Error("usage: /reasoning [self|implementer|reviewer|watcher|fallout] <low|medium|high|xhigh|max>");
+				const [target, requested] = args;
+				const level = assertReasoningLevel(requested!);
+				if (target === "self") {
+					if (typeof pi.setThinkingLevel !== "function") throw new Error("pi thinking control is unavailable");
+					pi.setThinkingLevel(level);
+					const effective = typeof pi.getThinkingLevel === "function" ? pi.getThinkingLevel() : level;
+					ctx.ui?.notify?.(`deck reasoning\n  self  ${effective}`, "info");
+					return;
+				}
+				const update = setSeatReasoning(target!, level);
+				const lines = update.rows.map((row) => `  ${row.profile}/${row.seat}  ${row.level} · ${row.model}`);
+				ctx.ui?.notify?.(["deck reasoning", ...update.warnings.map((warning) => `warning: ${warning}`), ...lines].join("\n"), update.warnings.length > 0 ? "warning" : "info");
+			} catch (error) {
+				ctx.ui?.notify?.(error instanceof Error ? error.message : String(error), "error");
+			}
 		},
 	});
 
