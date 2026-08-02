@@ -42,12 +42,21 @@ export function reconcileWakeProducers(file: string): void {
 }
 
 /** Single-owner coordination for a main-branch failure. */
+export function releaseMainFailure(root: string, fingerprint: string): void {
+	const file = path.join(root, "main-failure.json");
+	try {
+		const current = JSON.parse(fs.readFileSync(file, "utf8")) as { fingerprint?: string };
+		if (current.fingerprint === fingerprint) fs.rmSync(file, { force: true });
+	} catch { /* no active incident */ }
+}
+
 export function claimMainFailure(root: string, fingerprint: string, owner: string): boolean {
 	const file = path.join(root, "main-failure.json");
 	fs.mkdirSync(root, { recursive: true, mode: 0o700 });
 	try {
-		const current = JSON.parse(fs.readFileSync(file, "utf8")) as { fingerprint?: string; owner?: string };
-		if (current.fingerprint === fingerprint) return current.owner === owner;
+		const current = JSON.parse(fs.readFileSync(file, "utf8")) as { fingerprint?: string; owner?: string; claimedAt?: number };
+		if (current.fingerprint === fingerprint && (!current.claimedAt || Date.now() - current.claimedAt < 30 * 60_000)) return current.owner === owner;
+		if (current.fingerprint === fingerprint) fs.rmSync(file, { force: true });
 	} catch { /* no record */ }
 	const lock = `${file}.lock`;
 	let acquired = false;
@@ -58,7 +67,7 @@ export function claimMainFailure(root: string, fingerprint: string, owner: strin
 		} catch { /* lock is absent */ }
 		fs.mkdirSync(lock, { recursive: false, mode: 0o700 });
 		acquired = true;
-		const claim = JSON.stringify({ fingerprint, owner, state: "diagnosing" }) + "\n";
+		const claim = JSON.stringify({ fingerprint, owner, state: "diagnosing", claimedAt: Date.now() }) + "\n";
 		fs.writeFileSync(path.join(lock, "claim.json"), claim, { mode: 0o600 });
 		fs.writeFileSync(`${file}.new`, claim, { mode: 0o600 });
 		fs.renameSync(`${file}.new`, file);

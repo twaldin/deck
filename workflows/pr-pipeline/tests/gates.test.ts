@@ -317,14 +317,14 @@ describe("evaluateWatchExit", () => {
 		expect(verdict.reviewersNeedingReRequest).toEqual(["rev"]);
 	});
 
-	test("CHANGES_REQUESTED with a current-head request waits for the re-review", () => {
+	test("stale CHANGES_REQUESTED enters the response loop even when re-requested", () => {
 		const verdict = evaluateWatchExit(snapshot({
 			reviewers: [{ login: "rev", isBot: false, lastActivityAt: "2026-07-27T09:00:00Z", lastReviewState: "CHANGES_REQUESTED" }],
 			requestedReviewers: ["rev"],
 		}), { selfLogins: ["twaldin"] });
-		expect(verdict.reviewersNeedingReRequest).toEqual([]);
+		expect(verdict.reviewersNeedingReRequest).toEqual(["rev"]);
 		expect(verdict.exitOk).toBe(false);
-		expect(verdict.disposition).toBe("wait");
+		expect(verdict.disposition).toBe("fix");
 	});
 
 	test("re-requested reviewer (verified via requested_reviewers) passes", () => {

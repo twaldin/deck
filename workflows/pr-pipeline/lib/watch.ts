@@ -60,10 +60,10 @@ export function reviewersNeedingReRequest(
 		// CHANGES_REQUESTED must enter the response loop immediately; approval
 		// polling here was the cause of PRs being parked while blockers remained.
 		if (reviewer.lastReviewState === "CHANGES_REQUESTED") {
-			// A current-head request is a blocker. After we push, the old request
-			// remains visible while GitHub processes the re-review; wait only when
-			// that request predates the current head and is already re-requested.
-			if (reviewer.lastActivityAt >= lastPushAt || !requested.has(login)) out.push(reviewer.login);
+			// A stale changes request is still a blocker, even when the reviewer
+			// already appears in requested_reviewers. Enter the response loop;
+			// waiting here can park the run without answering the finding.
+			if (reviewer.lastActivityAt < lastPushAt || !requested.has(login)) out.push(reviewer.login);
 			continue;
 		}
 		if (requested.has(login)) continue;
@@ -134,7 +134,7 @@ export function evaluateWatchExit(snapshot: WatchSnapshot, options: WatchExitOpt
 		.filter((reviewer) => !reviewer.isBot && !options.selfLogins.some((login) => login.toLowerCase() === reviewer.login.toLowerCase()) && reviewer.lastReviewState === "CHANGES_REQUESTED")
 		.map((reviewer) => reviewer.login);
 	const awaitingReview = snapshot.reviewers
-		.filter((reviewer) => changesRequested.includes(reviewer.login) && reviewer.lastActivityAt < snapshot.lastPushAt && snapshot.requestedReviewers.some((login) => login.toLowerCase() === reviewer.login.toLowerCase()))
+		.filter((reviewer) => changesRequested.includes(reviewer.login) && reviewer.lastActivityAt >= snapshot.lastPushAt && snapshot.requestedReviewers.some((login) => login.toLowerCase() === reviewer.login.toLowerCase()))
 		.map((reviewer) => reviewer.login);
 	if (needReRequest.length > 0) {
 		reasons.push(

@@ -86,7 +86,8 @@ import { executeReviewerRequest } from "./lib/reviewers.ts";
 import { assessCi, evaluateWatchExit } from "./lib/watch.ts";
 import { rebaseAndPush } from "./lib/rebase.ts";
 import type { Brief, MigrationEvidenceEntry } from "./lib/types.ts";
-import { claimMainFailure, produceWakeConditions } from "../../v2/src/wake-producers.ts";
+import { claimMainFailure, produceWakeConditions, releaseMainFailure } from "../../v2/src/wake-producers.ts";
+import { smithersWorkspaceCwd } from "../../v2/src/workspace.ts";
 
 // ---------------------------------------------------------------------------
 // Defaults (normalized in code, not via zod .default(), to keep semantics
@@ -424,9 +425,9 @@ function nowIso(): string {
 
 /** Publish durable wake inputs for the deck extension. The extension reads this
  * record from the canonical Smithers workspace even without a TUI session. */
-function publishWakeProducer(input: { taskId: string; maxAdversarial?: boolean; reviewerSilent?: boolean; mainRed?: boolean; migrationBlocked?: boolean; brokerNoQuota?: boolean }): void {
+export function publishWakeProducer(input: { taskId: string; maxAdversarial?: boolean; reviewerSilent?: boolean; mainRed?: boolean; migrationBlocked?: boolean; brokerNoQuota?: boolean }): void {
 	if (input.taskId.length === 0) return;
-	const file = path.join(process.cwd(), "wake-producers.json");
+	const file = path.join(smithersWorkspaceCwd(), "wake-producers.json");
 	fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
 	const lock = `${file}.lock`;
 	try { fs.mkdirSync(lock, { mode: 0o700 }); } catch { return; }
@@ -720,10 +721,11 @@ export default smithers((ctx) => {
 		localReviewRows.length >= limits.localReviewRounds && !reviewApproved;
 	const pushAllowed = reviewApproved || reviewEscalation?.approved === true;
 	const producerWatch = ctx.latest(outputs.watchPoll, `r${currentRound}-watch-poll`);
-	const coordinationRoot = path.join(process.cwd(), ".deck-coordination");
+	const coordinationRoot = path.join(smithersWorkspaceCwd(), ".deck-coordination");
+	const mainFingerprint = `${input.repo}:${baseBranch}`;
 	const mainFailureClaimed = producerWatch?.ci === "red"
-		? claimMainFailure(coordinationRoot, `${input.repo}:${baseBranch}`, input.ticket)
-		: false;
+		? claimMainFailure(coordinationRoot, mainFingerprint, input.ticket)
+		: (releaseMainFailure(coordinationRoot, mainFingerprint), false);
 	publishWakeProducer({
 		taskId: input.ticket,
 		maxAdversarial: reviewExhausted && !pushAllowed,
