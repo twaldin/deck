@@ -102,6 +102,8 @@ export type EffortRow = {
 	step?: string | null;
 	runtimeMs?: number | null;
 	ciState?: string | null;
+	mergeStateStatus?: string | null;
+	headRefOid?: string | null;
 	reviewState?: string | null;
 	model?: string | null;
 	prUrl?: string | null;
@@ -175,6 +177,8 @@ export type PsRun = {
 	id: string;
 	/** Optional live external truth supplied by the workflow watcher. */
 	ciState?: string;
+	mergeStateStatus?: string;
+	headRefOid?: string;
 	reviewState?: string;
 	ticket?: string;
 	worktree?: string;
@@ -484,6 +488,8 @@ async function collectRunsOnce(
 					}
 				}
 				let ciState = psRun.ciState;
+				let mergeStateStatus = psRun.mergeStateStatus;
+				let headRefOid = psRun.headRefOid;
 				let reviewState = psRun.reviewState;
 				if (prNumber !== undefined && input.repo !== null) {
 					try {
@@ -492,7 +498,7 @@ async function collectRunsOnce(
 						ciState = states.length === 0 ? "no checks" : states.every((state) => state === "SUCCESS") ? "passing" : states.some((state) => ["FAILURE", "CANCELLED", "ERROR"].includes(state)) ? "failing" : "pending";
 					} catch { ciState = "unavailable"; }
 					try {
-						const review = await run("gh", ["pr", "view", String(prNumber), "--repo", input.repo, "--json", "reviewDecision,reviews"], { cwd, timeout: 15_000, maxBuffer: 1_000_000 });
+						const review = await run("gh", ["pr", "view", String(prNumber), "--repo", input.repo, "--json", "reviewDecision,reviews,mergeStateStatus,headRefOid"], { cwd, timeout: 15_000, maxBuffer: 1_000_000 });
 						const [owner, name] = input.repo.split("/");
 						const threadNodes: Array<{ isResolved?: boolean }> = [];
 						let cursor: string | null = null;
@@ -506,7 +512,9 @@ async function collectRunsOnce(
 							threadNodes.push(...(threadsPage?.nodes ?? []));
 							cursor = threadsPage?.pageInfo?.hasNextPage ? (threadsPage.pageInfo.endCursor ?? null) : null;
 						} while (cursor !== null);
-						const value = JSON.parse(review.stdout) as { reviewDecision?: string; reviews?: Array<{ author?: { login?: string }; state?: string; submittedAt?: string }> };
+						const value = JSON.parse(review.stdout) as { reviewDecision?: string; mergeStateStatus?: string; headRefOid?: string; reviews?: Array<{ author?: { login?: string }; state?: string; submittedAt?: string }> };
+						mergeStateStatus = value.mergeStateStatus ?? "unknown";
+						headRefOid = value.headRefOid;
 						const threadValue = { data: { repository: { pullRequest: { reviewThreads: { nodes: threadNodes } } } } };
 						const latest = new Map<string, { state?: string }>();
 						for (const item of [...(value.reviews ?? [])].sort((a, b) => (Date.parse(a.submittedAt ?? "") || 0) - (Date.parse(b.submittedAt ?? "") || 0))) {
@@ -553,12 +561,12 @@ async function collectRunsOnce(
 					(approval) => approval.status === "requested",
 				)?.nodeId;
 				if (pendingNode !== undefined)
-					return { ...psRun, blockedNode: pendingNode, prNumber, landed, pushPrNull, ciState, reviewState };
+					return { ...psRun, blockedNode: pendingNode, prNumber, landed, pushPrNull, ciState, mergeStateStatus, headRefOid, reviewState };
 				if (
 					psRun.status !== "waiting-approval" &&
 					psRun.state !== "waiting-approval"
 				)
-					return { ...psRun, prNumber, landed, pushPrNull, ciState, reviewState };
+					return { ...psRun, prNumber, landed, pushPrNull, ciState, mergeStateStatus, headRefOid, reviewState };
 				try {
 					const inspected = await run(
 						"bunx",
@@ -581,10 +589,12 @@ async function collectRunsOnce(
 						landed,
 						pushPrNull,
 						ciState,
+						mergeStateStatus,
+						headRefOid,
 						reviewState,
 					};
 				} catch {
-					return { ...psRun, prNumber, landed, pushPrNull, ciState, reviewState };
+					return { ...psRun, prNumber, landed, pushPrNull, ciState, mergeStateStatus, headRefOid, reviewState };
 				}
 			}),
 		);
@@ -858,6 +868,8 @@ export async function buildFrame(
 		return {
 		identity, workflow: wf.workflow, step: wf.step, runtimeMs: wf.startedAt ? ageMs(wf.startedAt) : null,
 			ciState: wfRunState(wf, runs)?.ciState ?? null,
+		mergeStateStatus: wfRunState(wf, runs)?.mergeStateStatus ?? null,
+		headRefOid: wfRunState(wf, runs)?.headRefOid ?? null,
 		reviewState: wfRunState(wf, runs)?.reviewState ?? null,
 		model: input.modelSeats ?? (wf.taskId ? frameModelForTask(wf.taskId, tasks) : null),
 		prUrl: wf.repo && wf.prNumber ? `https://github.com/${wf.repo}/pull/${wf.prNumber}` : null,
@@ -866,34 +878,46 @@ export async function buildFrame(
 		failed: wf.activity === "failed",
 	};
 	});
-	const stampQuestion = (wf: WorkflowRow): string => {
-		const input = readShipInput(wf.runId);
-		const repo = input.repo ?? workflowIdentity(wf);
-		const historyRepo = workflowIdentity(wf);
-		const pr = wf.prNumber ?? input.prNumber;
-		const url = pr === null ? "unknown URL" : `https://github.com/${repo}/pull/${pr}`;
-		const title = wf.prTitle ?? input.prTitle ?? "untitled PR";
-		const why = input.why ?? "No ship brief summary was recorded.";
-		const generations = pr === null ? 0 : workflows.filter((candidate) =>
-			candidate !== wf &&
-			workflowIdentity(candidate) === historyRepo &&
-			(candidate.prNumber ?? null) === pr,
-		).length;
-		const history = generations === 0
-			? "No prior pipeline generations are recorded. Implementation, adversarial review rounds, fixes, and re-cuts are recorded in the pipeline run history."
-			: `${generations} prior pipeline generation(s) are recorded. Implementation, adversarial review rounds, fixes, and re-cuts are recorded in the pipeline run history.`;
-		const effort = efforts.find((item) => item.runId === wf.runId);
-		const review = `CI: ${effort?.ciState ?? "unknown"}; review: ${effort?.reviewState ?? "unknown"}. These are live GitHub values.`;
-		return `Stamp PR #${pr ?? "unknown"}: ${title} · URL: ${url} · Why: ${why} · History: ${history} · ${review} · choose Stamp only if CI passes and the named human approvals and bot findings are acceptable · merge or no?`;
-	};
 	for (const wf of liveRuns.filter((row) => row.waitingFor === "stamp")) {
 		// Include the run so a later generation of the same PR gets a fresh
 		// decision, while every render of this parked run uses one stable id.
-		const id = `stamp:${wf.repo ?? wf.rootDir ?? "unknown"}:${wf.prNumber ?? "unknown"}:stamp:${wf.runId}:${wf.step ?? "r0-stamp"}`;
+		const input = readShipInput(wf.runId);
+		const currentHead = efforts.find((item) => item.runId === wf.runId)?.headRefOid;
+		if (currentHead === undefined || currentHead === "") continue;
+		const id = `stamp:${wf.repo ?? wf.rootDir ?? "unknown"}:${wf.prNumber ?? input.prNumber ?? "unknown"}:stamp:${wf.runId}:${wf.step ?? "r0-stamp"}`;
 		try {
 			const existing = readQuestionsForStamp(queueFile(), id);
 			if (!existing) {
-				ask(queueFile(), { id, questionKind: "stamp", question: stampQuestion(wf), context: wf.repo ?? wf.rootDir ?? undefined, options: ["Stamp", "Do not stamp"], recommendation: "Do not stamp until reviewed.", urgency: "high", sessionId: "deck-fleet", cwd: wf.rootDir ?? process.cwd() });
+				const effort = efforts.find((item) => item.runId === wf.runId);
+				const repo = input.repo ?? workflowIdentity(wf);
+				const pr = wf.prNumber ?? input.prNumber;
+				const title = wf.prTitle ?? input.prTitle ?? "untitled PR";
+				const prUrl = pr === null ? undefined : `https://github.com/${repo}/pull/${pr}`;
+				const originalIssue = input.why ?? "No ship brief summary was recorded.";
+				const reviewEvidence = `CI: ${effort?.ciState ?? "unknown"}; mergeStateStatus: ${effort?.mergeStateStatus ?? "unknown"}; review: ${effort?.reviewState ?? "unknown"}.`;
+				ask(queueFile(), {
+					id,
+					questionKind: "stamp",
+					question: `Stamp PR #${pr ?? "unknown"}: ${title}?`,
+					context: wf.repo ?? wf.rootDir ?? undefined,
+					prContext: {
+						prUrl,
+						prRepo: repo,
+						prNumber: pr ?? undefined,
+						headSha: currentHead ?? undefined,
+						prTitle: title,
+						originalIssue,
+						ourFix: "The pipeline implemented the brief, ran adversarial review, and reached the stamp gate.",
+						whyCorrect: `${reviewEvidence} Review history is recorded in the pipeline run history.`,
+						ciState: effort?.ciState ?? "unknown",
+						mergeStateStatus: effort?.mergeStateStatus ?? "unknown",
+					},
+					options: ["Stamp", "Hold", "Close"],
+					recommendation: "Hold until reviewed.",
+					urgency: "high",
+					sessionId: "deck-fleet",
+					cwd: wf.rootDir ?? process.cwd(),
+				});
 			}
 		} catch {
 			// Asking is best effort. A broken or unwritable queue must not break

@@ -634,6 +634,113 @@ describe("questions extension", () => {
 		expect(openQuestions(file)).toHaveLength(0);
 	});
 
+	test("approve question runs the captain's gh approval and resolves only after success", async () => {
+		const file = freshFile();
+		const pi = new Harness();
+		const commands: Array<{ command: string; args: string[] }> = [];
+		registerQuestions(pi as any, envFor(file), pi.runtime, async (command, args) => {
+			commands.push({ command, args });
+			return command === "gh" && args[1] === "view" ? { stdout: JSON.stringify({ headRefOid: "head-12" }) } : {};
+		});
+		ask(file, {
+			id: "review-gate-pr-12-head",
+			question: "Captain approval needed",
+			questionKind: "approve",
+			prContext: { prRepo: "owner/repo", prNumber: 12, headSha: "head-12", prUrl: "https://github.com/owner/repo/pull/12", prTitle: "Fix gate" },
+			options: ["Approve", "Hold"], sessionId: "s", cwd: "/work/deck",
+		});
+		await pi.commands.get("questions")!.handler("", fakeContext("captain", ["1. Approve"]));
+		expect(commands).toEqual([
+			{ command: "gh", args: ["pr", "view", "12", "--repo", "owner/repo", "--json", "headRefOid"] },
+			{ command: "gh", args: ["pr", "review", "12", "--repo", "owner/repo", "--approve"] },
+		]);
+		expect(openQuestions(file)).toHaveLength(0);
+	});
+
+	test("approve question refuses a changed PR head", async () => {
+		const file = freshFile();
+		const pi = new Harness();
+		const commands: string[][] = [];
+		registerQuestions(pi as any, envFor(file), pi.runtime, async (_command, args) => { commands.push(args); return { stdout: JSON.stringify({ headRefOid: "new-head" }) }; });
+		ask(file, { id: "review-gate-pr-12-head", question: "Captain approval needed", questionKind: "approve", prContext: { prRepo: "owner/repo", prNumber: 12, headSha: "old-head" }, options: ["Approve", "Hold"], sessionId: "s", cwd: "/" });
+		await pi.commands.get("questions")!.handler("", fakeContext("captain", ["1. Approve"]));
+		expect(commands).toHaveLength(1);
+		expect(openQuestions(file)).toHaveLength(1);
+	});
+
+	test("Close option closes the reviewed PR", async () => {
+		const file = freshFile();
+		const pi = new Harness();
+		const commands: string[][] = [];
+		registerQuestions(pi as any, envFor(file), pi.runtime, async (_command, args) => { commands.push(args); return { stdout: JSON.stringify({ headRefOid: "head-12" }) }; });
+		ask(file, { id: "review-gate-pr-12-head", question: "Captain decision needed", questionKind: "agent", prContext: { prRepo: "owner/repo", prNumber: 12, headSha: "head-12" }, options: ["Hold", "Close"], sessionId: "s", cwd: "/" });
+		await pi.commands.get("questions")!.handler("", fakeContext("captain", ["2. Close"]));
+		expect(commands).toEqual([
+			["pr", "view", "12", "--repo", "owner/repo", "--json", "headRefOid"],
+			["pr", "close", "12", "--repo", "owner/repo"],
+		]);
+		expect(openQuestions(file)).toHaveLength(0);
+	});
+
+	test("approve question stays open when gh rejects the captain approval", async () => {
+		const file = freshFile();
+		const pi = new Harness();
+		registerQuestions(pi as any, envFor(file), pi.runtime, async (command, args) => {
+			if (command === "gh" && args[1] === "view") return { stdout: JSON.stringify({ headRefOid: "head-12" }) };
+			throw new Error("permission denied");
+		});
+		ask(file, { id: "review-gate-pr-12-head", question: "Captain approval needed", questionKind: "approve", prContext: { prRepo: "owner/repo", prNumber: 12, headSha: "head-12" }, options: ["Approve", "Hold"], sessionId: "s", cwd: "/" });
+		await pi.commands.get("questions")!.handler("", fakeContext("captain", ["1. Approve"]));
+		expect(openQuestions(file)).toHaveLength(1);
+	});
+
+	test("PR context is bounded before it enters the durable queue", () => {
+		const file = freshFile();
+		ask(file, { question: "Q", sessionId: "s", cwd: "/", prContext: { originalIssue: "x".repeat(5000), ourFix: "y".repeat(5000), whyCorrect: "z".repeat(5000) } });
+		const entry = readQuestions(file)[0]!;
+		expect(entry.prContext?.originalIssue?.length).toBeLessThanOrEqual(800);
+		expect(entry.prContext?.ourFix?.length).toBeLessThanOrEqual(800);
+		expect(entry.prContext?.whyCorrect?.length).toBeLessThanOrEqual(1400);
+	});
+
+	test("rich PR context is rendered as a self-contained decision", () => {
+		const file = freshFile();
+		const asked = ask(file, { question: "Stamp this PR?", questionKind: "stamp", prContext: {
+			prUrl: "https://github.com/owner/repo/pull/12", prRepo: "owner/repo", prNumber: 12, prTitle: "Fix gate",
+			originalIssue: "The gate did not notify the captain.", ourFix: "The gate posts findings and queues approval.",
+			whyCorrect: "43 tests pass. Adversarial review found no blockers. Blast radius is limited to gate decisions.", ciState: "green", mergeStateStatus: "CLEAN",
+		}, options: ["Stamp", "Hold", "Close"], sessionId: "s", cwd: "/", now: 0 });
+		const rendered = describeQuestion({ ...asked, status: "open", delivered: false }, 0);
+		expect(rendered).toContain("https://github.com/owner/repo/pull/12");
+		expect(rendered).toContain("THE ORIGINAL ISSUE: The gate did not notify the captain.");
+		expect(rendered).toContain("OUR FIX: The gate posts findings and queues approval.");
+		expect(rendered).toContain("WHY IT IS CORRECT: 43 tests pass.");
+		expect(rendered).toContain("CI: green");
+		expect(rendered).toContain("mergeStateStatus: CLEAN");
+	});
+
+	test("stamp refuses when the reviewed PR head changed", async () => {
+		const file = freshFile();
+		const pi = new Harness();
+		const commands: string[][] = [];
+		registerQuestions(pi as any, envFor(file), pi.runtime, async (_command, args) => { commands.push(args); return { stdout: JSON.stringify({ headRefOid: "new-head" }) }; });
+		ask(file, { id: "deck-fleet:stamp:owner/repo:12:stamp:run-7:gate", question: "Stamp?", questionKind: "stamp", prContext: { prRepo: "owner/repo", prNumber: 12, headSha: "old-head" }, options: ["Stamp"], sessionId: "s", cwd: "/" });
+		await pi.commands.get("questions")!.handler("", fakeContext("captain", ["1. Stamp"]));
+		expect(commands).toHaveLength(1);
+		expect(openQuestions(file)).toHaveLength(1);
+	});
+
+	test("stamp Close denies the exact gate", async () => {
+		const file = freshFile();
+		const pi = new Harness();
+		const commands: string[][] = [];
+		registerQuestions(pi as any, envFor(file), pi.runtime, async (_command, args) => { commands.push(args); return {}; });
+		ask(file, { id: "deck-fleet:stamp:owner/repo:12:stamp:run-7:gate", question: "Stamp?", questionKind: "stamp", options: ["Stamp", "Hold", "Close"], sessionId: "s", cwd: "/" });
+		await pi.commands.get("questions")!.handler("", fakeContext("captain", ["3. Close"]));
+		expect(commands).toEqual([["deny", "run-7", "--node", "gate", "--by", "captain"]]);
+		expect(openQuestions(file)).toHaveLength(0);
+	});
+
 	test("stamp approval failure does not resume or resolve", async () => {
 		const file = freshFile();
 		const pi = new Harness();

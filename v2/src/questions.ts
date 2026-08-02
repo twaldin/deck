@@ -23,6 +23,7 @@ import {
 	queueFile,
 	queueMtimeMs,
 	readQuestions,
+	readQuestionHistory,
 	type Question,
 } from "./questions-store";
 
@@ -81,6 +82,14 @@ const defaultRuntime: QuestionsRuntime = {
 };
 
 const DISMISSED = "(dismissed by the captain without an answer)";
+function parseStampGateId(id: string): { runId?: string; node: string } {
+	const scoped = id.includes("deck-fleet:") ? id.slice(id.indexOf("deck-fleet:") + "deck-fleet:".length) : id;
+	const raw = scoped.startsWith("stamp:") ? scoped : "";
+	const parts = raw.split(":");
+	const headIndex = parts.lastIndexOf("head");
+	const end = headIndex > 0 ? headIndex : parts.length;
+	return { runId: raw === "" ? undefined : parts.at(end - 2), node: raw === "" ? "r0-stamp" : parts.at(end - 1) || "r0-stamp" };
+}
 /** Control actions, always after the agent's own options and matched by position. */
 const CONTROLS = ["Write an answer...", "Dismiss", "Skip", "Stop reviewing"] as const;
 const exec = promisify(execFile);
@@ -91,9 +100,23 @@ export function describe(entry: Question, nowMs: number): string {
 	const lines = [
 		`[${entry.urgency}] asked ${formatAge(nowMs - entry.askedAt)} ago by session ${entry.sessionId}`,
 		`cwd: ${entry.cwd}`,
-		"",
-		entry.question,
 	];
+	const pr = entry.prContext;
+	if (pr !== undefined) {
+		lines.push(
+			"",
+			pr.prUrl ?? "PR URL: unavailable",
+			`PR title: ${pr.prTitle ?? "untitled"}`,
+			`Repository: ${pr.prRepo ?? "unknown"}`,
+			"",
+			`THE ORIGINAL ISSUE: ${pr.originalIssue ?? "Not recorded."}`,
+			`OUR FIX: ${pr.ourFix ?? "Not recorded."}`,
+			`WHY IT IS CORRECT: ${pr.whyCorrect ?? "No evidence recorded."}`,
+			`CI: ${pr.ciState ?? "unknown"}`,
+			`mergeStateStatus: ${pr.mergeStateStatus ?? "unknown"}`,
+		);
+	}
+	lines.push("", entry.question);
 	if (entry.context !== undefined) lines.push("", `context: ${entry.context}`);
 	if (entry.recommendation !== undefined) lines.push("", `agent recommends: ${entry.recommendation}`);
 	return lines.join("\n");
@@ -130,6 +153,10 @@ export function registerQuestions(
 		const pending = pendingAnswersFor(file, sessionId);
 		let delivered = 0;
 		for (const entry of pending) {
+			if (entry.deliverAnswer === false) {
+				markDelivered(file, entry.id, runtime.now());
+				continue;
+			}
 			// Send BEFORE marking. The failure this ordering picks: a crash between
 			// the two lines re-delivers one answer, which is merely noisy, whereas
 			// marking first would drop that answer permanently and silently park
@@ -268,8 +295,15 @@ export function registerQuestions(
 					text = written.trim();
 				}
 				let applied = false;
-				if (entry.questionKind === "stamp" && text === "Stamp") {
+				const selectedOption = control === undefined ? choice : -1;
+				if (entry.questionKind === "stamp" && selectedOption === 0) {
 					applied = await approveStamp(ctx, entry);
+				} else if (entry.questionKind === "approve" && selectedOption === 0) {
+					applied = await approvePullRequest(ctx, entry);
+				} else if (entry.questionKind === "stamp" && selectedOption === 2) {
+					applied = await closeStamp(ctx, entry);
+				} else if (entry.questionKind === "agent" && selectedOption === 1 && entry.prContext !== undefined) {
+					applied = await closePullRequest(ctx, entry);
 				} else {
 					applied = resolve(ctx, entry, text, "answered");
 				}
@@ -285,15 +319,92 @@ export function registerQuestions(
 		},
 	});
 
+	const closeStamp = async (ctx: QuestionsContext, entry: Question): Promise<boolean> => {
+		const { runId, node } = parseStampGateId(entry.id);
+		if (runId === undefined) {
+			ctx.ui.notify("Stamp close needs a valid pipeline gate.", "error");
+			return false;
+		}
+		try {
+			await executor("smithers", ["deny", runId, "--node", node, "--by", "captain"], { cwd: pipelineDir(), timeout: 15_000 });
+			return resolve(ctx, entry, "Close", "answered");
+		} catch (error) {
+			ctx.ui.notify(`Stamp was not closed: ${error instanceof Error ? error.message : "unknown error"}`, "error");
+			return false;
+		}
+	};
+
+	const closePullRequest = async (ctx: QuestionsContext, entry: Question): Promise<boolean> => {
+		const pr = entry.prContext;
+		if (pr?.prNumber === undefined || pr.prRepo === undefined || pr.headSha === undefined) {
+			ctx.ui.notify("Closing needs a PR number, repository, and reviewed head.", "error");
+			return false;
+		}
+		try {
+			const current = await executor("gh", ["pr", "view", String(pr.prNumber), "--repo", pr.prRepo, "--json", "headRefOid"], { cwd: ctx.cwd, timeout: 15_000 });
+			const value = typeof current === "object" && current !== null && "stdout" in current ? JSON.parse(String((current as { stdout: unknown }).stdout)) : current;
+			if (typeof value !== "object" || value === null || String((value as { headRefOid?: unknown }).headRefOid) !== pr.headSha) {
+				ctx.ui.notify("Close stopped because the PR head changed or could not be verified.", "warning");
+				return false;
+			}
+			await executor("gh", ["pr", "close", String(pr.prNumber), "--repo", pr.prRepo], { cwd: ctx.cwd, timeout: 15_000 });
+			return resolve(ctx, entry, "Close", "answered");
+		} catch (error) {
+			ctx.ui.notify(`PR was not closed: ${error instanceof Error ? error.message : "unknown error"}`, "error");
+			return false;
+		}
+	};
+
+	const approvePullRequest = async (ctx: QuestionsContext, entry: Question): Promise<boolean> => {
+		const pr = entry.prContext;
+		if (pr?.prNumber === undefined || pr.prRepo === undefined || pr.headSha === undefined) {
+			ctx.ui.notify("Approval needs a PR number, repository, and reviewed head.", "error");
+			return false;
+		}
+		try {
+			const current = await executor("gh", ["pr", "view", String(pr.prNumber), "--repo", pr.prRepo, "--json", "headRefOid"], { cwd: ctx.cwd, timeout: 15_000 });
+			const currentValue = typeof current === "object" && current !== null && "stdout" in current
+				? JSON.parse(String((current as { stdout: unknown }).stdout))
+				: current;
+			const currentSha = typeof currentValue === "object" && currentValue !== null && "headRefOid" in currentValue
+				? String((currentValue as { headRefOid: unknown }).headRefOid)
+				: "";
+			if (currentSha !== pr.headSha) {
+				ctx.ui.notify("Approval stopped because the PR head changed or could not be verified. Review it again.", "warning");
+				return false;
+			}
+			await executor("gh", ["pr", "review", String(pr.prNumber), "--repo", pr.prRepo, "--approve"], { cwd: ctx.cwd, timeout: 15_000 });
+			return resolve(ctx, entry, "Approve", "answered");
+		} catch (error) {
+			ctx.ui.notify(`Approval was not recorded: ${error instanceof Error ? error.message : "unknown error"}`, "error");
+			return false;
+		}
+	};
+
 	const approveStamp = async (ctx: QuestionsContext, entry: Question): Promise<boolean> => {
-		const scopedId = entry.id.includes("deck-fleet:") ? entry.id.slice(entry.id.indexOf("deck-fleet:")) : entry.id;
-		const rawId = scopedId.startsWith("deck-fleet:") ? scopedId.slice("deck-fleet:".length) : scopedId;
-		const parts = rawId.split(":");
-		const runId = rawId.startsWith("stamp:") ? parts.at(-2) : undefined;
-		// The stamp id is stamp:<repo>:<pr>:stamp:<run>:<node>. The node may
-		// contain colons, so it is the final segment, not the remainder.
-		const node = rawId.startsWith("stamp:") ? parts.at(-1) || "r0-stamp" : "r0-stamp";
-		if (runId === undefined) return resolve(ctx, entry, "Stamp", "answered");
+		const pr = entry.prContext;
+		if (pr?.prNumber !== undefined || pr?.prRepo !== undefined) {
+			if (pr.prNumber === undefined || pr.prRepo === undefined || pr.headSha === undefined) {
+				ctx.ui.notify("Stamp needs a PR number, repository, and reviewed head.", "error");
+				return false;
+			}
+			try {
+				const current = await executor("gh", ["pr", "view", String(pr.prNumber), "--repo", pr.prRepo, "--json", "headRefOid"], { cwd: ctx.cwd, timeout: 15_000 });
+				const value = typeof current === "object" && current !== null && "stdout" in current ? JSON.parse(String((current as { stdout: unknown }).stdout)) : current;
+				if (typeof value !== "object" || value === null || String((value as { headRefOid?: unknown }).headRefOid) !== pr.headSha) {
+					ctx.ui.notify("Stamp stopped because the PR head changed. Review it again.", "warning");
+					return false;
+				}
+			} catch (error) {
+				ctx.ui.notify(`Stamp was not verified: ${error instanceof Error ? error.message : "unknown error"}`, "error");
+				return false;
+			}
+		}
+		const { runId, node } = parseStampGateId(entry.id);
+		if (runId === undefined) {
+			ctx.ui.notify("Stamp needs a valid pipeline gate.", "error");
+			return false;
+		}
 		try {
 			try {
 				await executor("smithers", ["approve", runId, "--node", node, "--by", "captain"], { cwd: pipelineDir(), timeout: 15_000 });

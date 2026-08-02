@@ -100,6 +100,7 @@ describe("fleet frame state", () => {
 			step: "r0-stamp",
 			status: "waiting-approval",
 			state: "paused",
+			headRefOid: "head-42",
 			started: "2026-01-01T00:00:00.000Z",
 		};
 		try {
@@ -136,14 +137,14 @@ describe("fleet frame state", () => {
 			}));
 			const result = await buildFrame({ workflowCwd: directory, psRuns: [
 				{ id: "old", rootDir: directory, prNumber: 42, status: "finished", state: "succeeded" },
-				{ id: "stamp", rootDir: directory, prNumber: 42, step: "r0-stamp", status: "waiting-approval", state: "paused" },
+				{ id: "stamp", rootDir: directory, prNumber: 42, step: "r0-stamp", status: "waiting-approval", state: "paused", headRefOid: "head-42" },
 			] });
 			const question = JSON.parse(fs.readFileSync(process.env.DECK_QUESTIONS_FILE, "utf8"));
 			expect(question.id).toContain("acme/widgets:42:stamp");
-			expect(question.question).toContain("https://github.com/acme/widgets/pull/42");
-			expect(question.question).toContain("Fix widget");
-			expect(question.question).toContain("Restore widget startup");
-			expect(question.question).toContain("1 prior pipeline generation");
+			expect(question.prContext.prUrl).toBe("https://github.com/acme/widgets/pull/42");
+			expect(question.prContext.prTitle).toBe("Fix widget");
+			expect(question.prContext.originalIssue).toBe("Restore widget startup");
+			expect(question.question).toContain("Stamp PR #42");
 			expect(result.counters.efforts).toBe(1);
 		} finally {
 			if (previousHome === undefined) delete process.env.DECK_V2_HOME; else process.env.DECK_V2_HOME = previousHome;
