@@ -22,7 +22,6 @@ import pipeline, { buildModelPolicy, DEFAULT_GITHUB } from "../pipeline.tsx";
 import type { ProjectProfile } from "../lib/profiles.ts";
 import { falloutPrompt, localFixPrompt, localReviewPrompt, reviewersDecisionPrompt } from "../lib/prompts.ts";
 import { resolveAdversary } from "../lib/models.ts";
-import { startValidatedGateway } from "../../../broker/src/validated-gateway.ts";
 
 const validBrief = {
 	ticket: "LIN-123",
@@ -217,23 +216,18 @@ describe("fallout prompt rendering contracts", () => {
 		expect(agentsByNode.get("r0-watch-fix")?.opts).toMatchObject({ model: "gpt-5.6-luna", thinking: "low" });
 		expect(agentsByNode.get("fallout-watch")?.opts).toMatchObject({ model: "gpt-5.6-sol", thinking: "max" });
 		expect(agentsByNode.size).toBeGreaterThanOrEqual(4);
-		const forwarded: Array<Record<string, unknown>> = [];
-		const upstreamServer = Bun.serve({ port: 0, fetch: async (request) => { forwarded.push(await request.json() as Record<string, unknown>); return Response.json({ ok: true }); } });
-		const gateway = startValidatedGateway({ bind: "127.0.0.1:0" } as never, (() => ({ url: `http://127.0.0.1:${upstreamServer.port}`, close: async () => upstreamServer.stop() })) as never);
-		try {
-			for (const nodeId of ["implement", "local-review", "r0-watch-fix", "fallout-watch"]) {
-				const agent = agentsByNode.get(nodeId) as { opts: { provider: string; model: string; thinking: string }; buildArgs: (input: { prompt: string; cwd: string; mode: string }) => string[] };
-				const args = agent.buildArgs({ prompt: "broker-seat-probe", cwd: "/tmp/lindy-wt", mode: "text" });
-				expect(agent.opts.provider).toBe("deck");
-				expect(args).toEqual(expect.arrayContaining(["--provider", "deck", "--model", agent.opts.model, "--thinking", agent.opts.thinking]));
-				const response = await fetch(`${gateway.url}/v1/chat/completions`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model: `${agent.opts.provider}/${agent.opts.model}`, reasoning_effort: agent.opts.thinking }) });
-				expect(response.status).toBe(200);
-			}
-		} finally {
-			await gateway.close();
+		// Seat-level reasoning threading is a pipeline concern: prove each seat carries
+		// --provider/--model/--thinking into the pi args. The wire mapping of reasoning_effort
+		// to each provider's native field is broker's own concern, proven in
+		// broker/test/validated-gateway.test.ts — do not import broker src here (CI has no broker deps).
+		const expectedThinking: Record<string, string> = { implement: "high", "local-review": "xhigh", "r0-watch-fix": "low", "fallout-watch": "max" };
+		for (const nodeId of ["implement", "local-review", "r0-watch-fix", "fallout-watch"]) {
+			const agent = agentsByNode.get(nodeId) as { opts: { provider: string; model: string; thinking: string }; buildArgs: (input: { prompt: string; cwd: string; mode: string }) => string[] };
+			const args = agent.buildArgs({ prompt: "broker-seat-probe", cwd: "/tmp/lindy-wt", mode: "text" });
+			expect(agent.opts.provider).toBe("deck");
+			expect(agent.opts.thinking).toBe(expectedThinking[nodeId]);
+			expect(args).toEqual(expect.arrayContaining(["--provider", "deck", "--model", agent.opts.model, "--thinking", agent.opts.thinking]));
 		}
-		expect(forwarded).toHaveLength(4);
-		expect(forwarded.map((body) => body.reasoning_effort)).toEqual(["high", "xhigh", "low", "max"]);
 		expect(rendered.toXml()).toContain("RATE_LIMIT_ENABLED flag");
 		expect(rendered.toXml()).toContain('{\\"verdict\\":\\"clean|regression\\"');
 		expect(rendered.toXml()).not.toContain("[object Object]");
