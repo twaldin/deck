@@ -1,6 +1,8 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { appendStatus } from "./events";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { ensureHomeDirs, stateDir } from "./home";
 
 const exec = promisify(execFile);
 
@@ -31,8 +33,11 @@ export async function reapOrphanedBunTests(options: {
 		try {
 			await kill(victim.pid);
 			killed.push(victim.pid);
-			appendStatus("orphan-reaper", "working", `reaped orphan bun test pid=${victim.pid} ppid=1`);
-		} catch { /* process exited between ps and kill */ }
+		} catch {
+			continue; // process exited between ps and kill
+		}
+		ensureHomeDirs();
+		fs.appendFileSync(path.join(stateDir(), "orphan-reaper.log"), `${new Date().toISOString()} reaped orphan bun test pid=${victim.pid} ppid=1\n`, { mode: 0o600 });
 	}
 	return killed;
 }

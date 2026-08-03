@@ -20,6 +20,10 @@ function clean(value: string): string {
 
 export function generatePullRequestDescription(input: PullRequestDescriptionInput): string {
 	const acceptance = input.brief.acceptanceCriteria.map((criterion) => `- ${clean(criterion)}`).join("\n");
+	const source = [input.brief.summary, ...input.brief.acceptanceCriteria, input.testing ?? ""].join(" ");
+	const pipelineNote = /pipeline\\.tsx/i.test(source)
+		? "Editing pipeline.tsx kills resume of in-flight Smithers runs (RESUME_METADATA_MISMATCH); the orchestrator must recut after merge."
+		: "";
 	return [
 		"## Problem",
 		clean(input.brief.summary),
@@ -32,7 +36,7 @@ export function generatePullRequestDescription(input: PullRequestDescriptionInpu
 		"",
 		"## Notes",
 		acceptance || "No additional notes.",
-		"Editing pipeline.tsx kills resume of in-flight Smithers runs (RESUME_METADATA_MISMATCH); the orchestrator must recut after merge.",
+		pipelineNote,
 		input.reviewOutcome ? `\n${clean(input.reviewOutcome)}` : "",
 	].join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
