@@ -77,12 +77,12 @@ export function shortCause(cause: string): string {
 	return firstLine.length > MAX_CAUSE_CHARS ? `${firstLine.slice(0, MAX_CAUSE_CHARS)}\u2026` : firstLine;
 }
 
-async function deadAccounts(storage: AuthStorage): Promise<DeadAccount[]> {
+async function deadAccounts(storage: AuthStorage): Promise<DeadAccount[] | null> {
 	let tombstones: Awaited<ReturnType<AuthStorage["listDisabledCredentials"]>>;
 	try {
 		tombstones = await storage.listDisabledCredentials();
 	} catch {
-		return []; // a store without tombstones must not fail the roster
+		return null; // a store without tombstones must not fail the roster
 	}
 	return tombstones
 		.filter(row => isAuthDeadCause(row.cause))
@@ -144,6 +144,7 @@ export async function refreshUsageRoster(storage: AuthStorage, signal?: AbortSig
 	for (const provider of getProviderCatalog(loggedIn).filter(entry => entry.needsAuth)) {
 		accounts.push({ id: -1, provider: provider.id, email: null, accountId: null, status: "not logged in" });
 	}
+	const currentDead = await deadAccounts(storage);
 	const roster: UsageRoster = {
 		generatedAt: new Date().toISOString(),
 		accounts,
@@ -151,7 +152,7 @@ export async function refreshUsageRoster(storage: AuthStorage, signal?: AbortSig
 			const { raw: _raw, ...rest } = report as unknown as UsageRosterEntry & { raw?: unknown };
 			return rest as UsageRosterEntry;
 		}),
-		dead: probeFailed && Array.isArray(previous.dead) ? previous.dead : await deadAccounts(storage),
+		dead: currentDead ?? (probeFailed && Array.isArray(previous.dead) ? previous.dead : []),
 	};
 	writeJsonAtomic(USAGE_JSON, roster);
 	return roster;

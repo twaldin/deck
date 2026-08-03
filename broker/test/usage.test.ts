@@ -19,6 +19,7 @@ describe("usage roster refresh", () => {
 			const { refreshUsageRoster } = await import("../src/usage");
 			const storage = {
 				fetchUsageReports: async () => { throw new Error("provider timeout"); },
+				listDisabledCredentials: async () => [],
 				exportSnapshot: () => ({ credentials: [] }),
 			} as any;
 			const roster = await refreshUsageRoster(storage);
