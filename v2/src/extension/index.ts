@@ -561,7 +561,10 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 			// Read the atomic disk snapshot first. Broker status refresh is background
 			// work, so a slow provider never delays the overlay.
 			ctx.ui?.notify?.(buildUsageText(roster, asFleetTheme(ctx.ui?.theme ?? PLAIN_FLEET_THEME)), "info");
-			void readLiveControlAccounts();
+			void readLiveControlAccounts().then(() => {
+				const fresh = readUsageRoster();
+				if (fresh !== null) ctx.ui?.notify?.(buildUsageText(fresh, asFleetTheme(ctx.ui?.theme ?? PLAIN_FLEET_THEME)), "info");
+			});
 		},
 	});
 
