@@ -563,8 +563,10 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 			ctx.ui?.notify?.(buildUsageText(roster, asFleetTheme(ctx.ui?.theme ?? PLAIN_FLEET_THEME)), "info");
 			void readLiveControlAccounts().then(() => {
 				const fresh = readUsageRoster();
-				if (fresh !== null) ctx.ui?.notify?.(buildUsageText(fresh, asFleetTheme(ctx.ui?.theme ?? PLAIN_FLEET_THEME)), "info");
-			});
+				if (fresh !== null && fresh.generatedAt !== roster?.generatedAt) {
+					ctx.ui?.notify?.(buildUsageText(fresh, asFleetTheme(ctx.ui?.theme ?? PLAIN_FLEET_THEME)), "info");
+				}
+			}).catch(() => {});
 		},
 	});
 

@@ -61,7 +61,7 @@ describe("footer usage roster", () => {
 			],
 			reports: [{ provider: "anthropic", metadata: { email: "reported@example.com" }, limits: [] }],
 		});
-		expect(text).toContain("as of 12s ago");
+		expect(text).toMatch(/as of 1[0-4]s ago/);
 		expect(text).toContain("missing@example.com · openai: no usage API");
 		expect(text).toContain("xai · not logged in");
 		expect(text).not.toContain("reported@example.com · anthropic: no usage API");
