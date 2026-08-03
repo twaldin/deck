@@ -558,8 +558,10 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 		description: "Show broker quota by account and tier",
 		handler: async (_args: string, ctx: any) => {
 			const roster = readUsageRoster();
-			const accounts = await readLiveControlAccounts();
-			ctx.ui?.notify?.(buildUsageText(roster === null ? null : mergeLiveAccounts(roster, accounts), asFleetTheme(ctx.ui?.theme ?? PLAIN_FLEET_THEME)), "info");
+			// Read the atomic disk snapshot first. Broker status refresh is background
+			// work, so a slow provider never delays the overlay.
+			ctx.ui?.notify?.(buildUsageText(roster, asFleetTheme(ctx.ui?.theme ?? PLAIN_FLEET_THEME)), "info");
+			void readLiveControlAccounts();
 		},
 	});
 

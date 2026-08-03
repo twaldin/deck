@@ -9,6 +9,7 @@
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
 import { isInvalidatedOAuthTokenError } from "@oh-my-pi/pi-ai/error";
 import { USAGE_JSON, writeJsonAtomic } from "./paths";
+import { getProviderCatalog } from "./models";
 
 export interface UsageRosterEntry {
 	provider: string;
@@ -30,8 +31,17 @@ export interface DeadAccount {
 	disabledAtMs: number | null;
 }
 
+export interface UsageRosterAccount {
+	id: number;
+	provider: string;
+	email: string | null;
+	accountId: string | null;
+	status: "reported" | "no usage API" | "not logged in";
+}
+
 export interface UsageRoster {
 	generatedAt: string;
+	accounts: UsageRosterAccount[];
 	reports: UsageRosterEntry[];
 	/** Auth-dead accounts: re-login required. Empty when every grant is live. */
 	dead: DeadAccount[];
@@ -85,11 +95,38 @@ async function deadAccounts(storage: AuthStorage): Promise<DeadAccount[]> {
 		}));
 }
 
-/** Fetch (cache-served when warm), strip raw, persist atomically. Returns the roster. */
+/** Fetch all credential reports concurrently. A bounded signal keeps a dead provider from holding the roster request. */
 export async function refreshUsageRoster(storage: AuthStorage, signal?: AbortSignal): Promise<UsageRoster> {
-	const reports = (await storage.fetchUsageReports({ signal })) ?? [];
+	const timeout = new AbortController();
+	const timer = setTimeout(() => timeout.abort(), 5_000);
+	if (signal) signal.addEventListener("abort", () => timeout.abort(), { once: true });
+	let reports: Awaited<ReturnType<NonNullable<AuthStorage["fetchUsageReports"]>>> = [];
+	try {
+		reports = (await storage.fetchUsageReports({ signal: timeout.signal })) ?? [];
+	} catch {
+		// Keep the roster usable when a provider probe times out.
+	} finally {
+		clearTimeout(timer);
+	}
+	const reported = new Set(reports.map(report => {
+		const metadata = report.metadata as Record<string, unknown> | undefined;
+		return `${report.provider}\0${metadata?.email ?? metadata?.accountId ?? metadata?.account ?? ""}`;
+	}));
+	const credentials = storage.exportSnapshot().credentials;
+	const accounts: UsageRosterAccount[] = credentials.map(entry => {
+		const credential = entry.credential;
+		const email = credential.type === "oauth" ? (credential.email ?? null) : null;
+		const accountId = credential.type === "oauth" ? (credential.accountId ?? null) : null;
+		return { id: entry.id, provider: entry.provider, email, accountId,
+			status: reported.has(`${entry.provider}\0${email ?? accountId ?? ""}`) ? "reported" : "no usage API" };
+	});
+	const loggedIn = new Set(credentials.map(entry => entry.provider));
+	for (const provider of getProviderCatalog(loggedIn).filter(entry => entry.needsAuth)) {
+		accounts.push({ id: -1, provider: provider.id, email: null, accountId: null, status: "not logged in" });
+	}
 	const roster: UsageRoster = {
 		generatedAt: new Date().toISOString(),
+		accounts,
 		reports: reports.map(report => {
 			const { raw: _raw, ...rest } = report as unknown as UsageRosterEntry & { raw?: unknown };
 			return rest as UsageRosterEntry;
