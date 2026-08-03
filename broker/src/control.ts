@@ -43,6 +43,14 @@ interface ControlRequest {
 
 type PendingReply = { resolve: (value: string) => void; reject: (err: Error) => void };
 
+/** `out` holds bytes the kernel would not take yet; see {@link flush}. */
+type ControlSocketData = {
+	buffer: string;
+	pending: Map<string, PendingReply>;
+	loginActive: boolean;
+	out: Uint8Array | null;
+};
+
 function capMatches(expected: string, supplied: unknown): boolean {
 	if (typeof supplied !== "string" || supplied.length === 0) return false;
 	const a = Buffer.from(expected);
@@ -80,11 +88,14 @@ export function startControlSocket(sockPath: string, deps: ControlDeps): { close
 		// not present — fine
 	}
 
-	const server = Bun.listen<{ buffer: string; pending: Map<string, PendingReply>; loginActive: boolean }>({
+	const server = Bun.listen<ControlSocketData>({
 		unix: sockPath,
 		socket: {
 			open(socket) {
-				socket.data = { buffer: "", pending: new Map(), loginActive: false };
+				socket.data = { buffer: "", pending: new Map(), loginActive: false, out: null };
+			},
+			drain(socket) {
+				flush(socket);
 			},
 			data(socket, chunk) {
 				socket.data.buffer += chunk.toString("utf8");
@@ -98,7 +109,7 @@ export function startControlSocket(sockPath: string, deps: ControlDeps): { close
 					try {
 						request = JSON.parse(line) as ControlRequest;
 					} catch {
-						socket.write(`${JSON.stringify({ ok: false, error: "malformed JSON line" })}\n`);
+						send(socket, { ok: false, error: "malformed JSON line" });
 						continue;
 					}
 					void handleRequest(socket, request);
@@ -117,10 +128,39 @@ export function startControlSocket(sockPath: string, deps: ControlDeps): { close
 	});
 	fs.chmodSync(sockPath, 0o600);
 
-	type ControlSocket = Bun.Socket<{ buffer: string; pending: Map<string, PendingReply>; loginActive: boolean }>;
+	type ControlSocket = Bun.Socket<ControlSocketData>;
+
+	/**
+	 * Drain queued bytes, keeping whatever the socket would not take.
+	 *
+	 * `socket.write` returns the number of bytes ACCEPTED, which is capped by the
+	 * send buffer (8KB here). A `status` response carries the whole provider
+	 * catalog and is far larger, so ignoring that count truncated the reply
+	 * mid-JSON: the client waited for a newline that never arrived and every
+	 * caller fell back to its timeout — which is why the TUI showed no accounts.
+	 */
+	function flush(socket: ControlSocket): void {
+		const queued = socket.data.out;
+		if (queued === null) return;
+		let written: number;
+		try {
+			written = socket.write(queued);
+		} catch {
+			socket.data.out = null; // peer is gone; nothing to keep
+			return;
+		}
+		if (written < 0) {
+			socket.data.out = null;
+			return;
+		}
+		socket.data.out = written >= queued.length ? null : queued.subarray(written);
+	}
 
 	function send(socket: ControlSocket, payload: Record<string, unknown>): void {
-		socket.write(`${JSON.stringify(payload)}\n`);
+		const bytes = Buffer.from(`${JSON.stringify(payload)}\n`, "utf8");
+		const queued = socket.data.out;
+		socket.data.out = queued === null ? bytes : Buffer.concat([queued, bytes]);
+		flush(socket);
 	}
 
 	/** Ask the connected client for input (login prompt / pasted code). */
@@ -153,7 +193,10 @@ export function startControlSocket(sockPath: string, deps: ControlDeps): { close
 			switch (op) {
 				case "status": {
 					const accounts = describeAccounts(deps.storage, deps.listBlocks);
-					const usage = await refreshUsageRoster(deps.storage);
+					const usage = await refreshUsageRoster(deps.storage).catch(error => {
+						console.error("broker status usage refresh failed:", error instanceof Error ? error.message : error);
+						return undefined;
+					});
 					send(socket, {
 						id,
 						ok: true,
@@ -163,8 +206,12 @@ export function startControlSocket(sockPath: string, deps: ControlDeps): { close
 							uptimeMs: Date.now() - deps.startedAt,
 							gateway: deps.gatewayUrl,
 							accounts,
+							// Accounts whose OAuth grant is definitively gone. Only a captain
+							// re-login fixes these, so they are first-class status, not a
+							// footnote inside the usage payload.
+							dead: usage?.dead ?? null,
 							providers: getProviderCatalog(new Set(accounts.map(account => account.provider))),
-							usage,
+							usage: usage ?? null,
 						},
 					});
 					return;
@@ -198,7 +245,15 @@ export function startControlSocket(sockPath: string, deps: ControlDeps): { close
 							onPrompt: prompt => askClient(socket, `${id}#p${++promptSeq}`, { event: "prompt", message: prompt.message, placeholder: prompt.placeholder ?? null }),
 							onManualCodeInput: () => askClient(socket, `${id}#c${++promptSeq}`, { event: "code" }),
 						});
-						send(socket, { id, ok: true, data: { identity: identity ?? null, accounts: describeAccounts(deps.storage, deps.listBlocks) } });
+						// A successful login replaces the dead grant, and pi-ai purges the
+						// superseded tombstone on upsert. Rewrite the roster now so every
+						// reader (TUI, statusline, question sync) stops warning at once
+						// instead of on the next 5-minute sweep.
+						const roster = await refreshUsageRoster(deps.storage).catch(error => {
+							console.error("broker login roster refresh failed:", error instanceof Error ? error.message : error);
+							return undefined;
+						});
+						send(socket, { id, ok: true, data: { identity: identity ?? null, accounts: describeAccounts(deps.storage, deps.listBlocks), dead: roster?.dead ?? null } });
 					} finally {
 						socket.data.loginActive = false;
 					}
@@ -211,7 +266,11 @@ export function startControlSocket(sockPath: string, deps: ControlDeps): { close
 						return;
 					}
 					await deps.storage.remove(provider);
-					send(socket, { id, ok: true, data: { accounts: describeAccounts(deps.storage, deps.listBlocks) } });
+					const roster = await refreshUsageRoster(deps.storage).catch(error => {
+						console.error("broker logout roster refresh failed:", error instanceof Error ? error.message : error);
+						return undefined;
+					});
+					send(socket, { id, ok: true, data: { accounts: describeAccounts(deps.storage, deps.listBlocks), dead: roster?.dead ?? null } });
 					return;
 				}
 				case "refresh": {

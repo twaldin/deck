@@ -6,7 +6,7 @@
 import { describe, expect, test } from "bun:test";
 import { z } from "zod";
 import { buildModelIndex, DEFAULT_ALLOWLIST, isModelAllowed } from "../src/models";
-import { CHEAP_MODEL, gatewayGet, gatewayPost } from "./harness";
+import { CHEAP_MODEL, gatewayGet, gatewayPost, hasLiveBroker } from "./harness";
 
 const planProvider = z.enum(["anthropic", "openai-codex"]);
 type PlanProvider = z.infer<typeof planProvider>;
@@ -207,7 +207,10 @@ async function abortAfterFirstContentDelta(response: Response, controller: Abort
 	}
 }
 
-describe("SPEC 6.5 eligibility and cancellation", () => {
+// The battery burns real tokens against a running deck-broker. It skips when
+// none is reachable, which is also the case when a unit-test file in the same
+// `bun test` process has repointed DECK_HOME at a throwaway home.
+describe.skipIf(!hasLiveBroker())("SPEC 6.5 eligibility and cancellation", () => {
 	test("(7) every listed plan model remains live-eligible", async () => {
 		const models = await getModels();
 		const results: ProbeResult[] = [];

@@ -29,7 +29,7 @@ import {
 } from "./paths";
 import { refreshUsageRoster } from "./usage";
 import { startValidatedGateway } from "./validated-gateway";
-import { normalizeBlockScopes, routingProvider } from "./quota";
+import { routingProvider, snapshotQuotaAccounts } from "./quota";
 
 
 export const BROKER_VERSION = "deck-broker/0.1.0";
@@ -55,22 +55,40 @@ async function main(): Promise<void> {
 		version: BROKER_VERSION,
 		resolveModel: models.resolve,
 		listModels: models.list,
-		quotaAccounts: () => {
-			const snapshot = storage.exportSnapshot();
-			const now = Date.now();
-			return snapshot.credentials.map(entry => ({
-				credentialId: entry.id,
-				provider: routingProvider(entry.provider),
-				authProvider: entry.provider,
-				blocked: store.listCredentialBlocks([entry.id]).filter(block => block.blockedUntilMs > now).flatMap(block => normalizeBlockScopes(block.blockScope, entry.provider)), 
-			}));
-		},
+		quotaAccounts: () => snapshotQuotaAccounts(storage.exportSnapshot(), ids => store.listCredentialBlocks(ids)),
 		quotaPreferences: () => [...models.list()].map(model => ({
 			id: model.id,
 			provider: routingProvider(model.provider),
 		})),
 		onQuotaEvent: event => console.error(JSON.stringify(event)),
 	});
+
+	const refreshRoster = async (): Promise<void> => {
+		try {
+			await refreshUsageRoster(storage);
+		} catch (error) {
+			console.error("usage roster refresh failed:", error instanceof Error ? error.message : error);
+		}
+	};
+	// A definitive refresh failure removes the row from active routing inside
+	// AuthStorage. Publish its tombstone at once, so the orchestrator can create
+	// the durable re-auth question without waiting for the five-minute cadence.
+	let rosterRefresh: Promise<void> | undefined;
+	let rosterRefreshAgain = false;
+	const scheduleRosterRefresh = () => {
+		if (rosterRefresh !== undefined) {
+			rosterRefreshAgain = true;
+			return;
+		}
+		rosterRefresh = refreshRoster().finally(() => {
+			rosterRefresh = undefined;
+			if (rosterRefreshAgain) {
+				rosterRefreshAgain = false;
+				scheduleRosterRefresh();
+			}
+		});
+	};
+	const stopDisabledListener = storage.onCredentialDisabled(scheduleRosterRefresh);
 
 	const refresher = new AuthBrokerRefresher({ storage });
 	refresher.start();
@@ -87,10 +105,6 @@ async function main(): Promise<void> {
 
 	// Usage roster: initial snapshot + steady cadence (matches AuthStorage's
 	// 5-min per-credential cache, so this never hammers provider usage APIs).
-	const refreshRoster = () =>
-		refreshUsageRoster(storage).catch(error => {
-			console.error("usage roster refresh failed:", error instanceof Error ? error.message : error);
-		});
 	void refreshRoster();
 	const rosterTimer = setInterval(refreshRoster, USAGE_ROSTER_INTERVAL_MS);
 
@@ -101,6 +115,7 @@ async function main(): Promise<void> {
 		console.error(`${signal}: shutting down`);
 		clearInterval(rosterTimer);
 		refresher.stop();
+		stopDisabledListener();
 		control.close();
 		await gateway.close();
 		storage.close();

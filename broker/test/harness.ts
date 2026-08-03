@@ -8,26 +8,70 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { BROKER_DIR, BROKER_SOCK } from "../src/paths";
 
-const meta = JSON.parse(fs.readFileSync(path.join(BROKER_DIR, "broker.meta.json"), "utf8")) as { gateway: string };
+/**
+ * Live-broker credentials, read on demand.
+ *
+ * Reading these at import time made the battery unrunnable next to the unit
+ * tests. `bun test` shares ONE process, `paths.ts` resolves DECK_HOME once at
+ * first import, and `tmp-home.ts` repoints DECK_HOME as an import side effect,
+ * so BROKER_DIR became a throwaway directory for every file in the run and the
+ * battery died on a missing broker.meta.json before a single test executed.
+ *
+ * Resolving lazily lets the battery report the honest state instead: skipped
+ * when no live broker is reachable, run when there is one.
+ */
+function readLive(): { gateway: string; gatewayToken: string; controlCap: string } | null {
+	try {
+		const meta = JSON.parse(fs.readFileSync(path.join(BROKER_DIR, "broker.meta.json"), "utf8")) as { gateway: string };
+		return {
+			gateway: meta.gateway,
+			gatewayToken: fs.readFileSync(path.join(BROKER_DIR, "gateway.token"), "utf8").trim(),
+			controlCap: fs.readFileSync(path.join(BROKER_DIR, "control.token"), "utf8").trim(),
+		};
+	} catch {
+		return null;
+	}
+}
 
-export const GATEWAY_URL: string = meta.gateway;
-export const GATEWAY_TOKEN: string = fs.readFileSync(path.join(BROKER_DIR, "gateway.token"), "utf8").trim();
-const CONTROL_CAP: string = fs.readFileSync(path.join(BROKER_DIR, "control.token"), "utf8").trim();
+let cached: ReturnType<typeof readLive> | undefined;
+function live(): NonNullable<ReturnType<typeof readLive>> {
+	cached ??= readLive();
+	if (cached === null) throw new Error(`no live broker under ${BROKER_DIR}: run the battery on its own against a running deck-broker`);
+	return cached;
+}
+
+let warned = false;
+
+/** True when a live broker is reachable, so the battery can skip instead of failing. */
+export function hasLiveBroker(): boolean {
+	cached ??= readLive();
+	if (cached === null && !warned) {
+		warned = true;
+		// Say why, once. A battery that skips without a reason reads as a battery
+		// that passed.
+		console.warn(
+			`[battery] SKIP: no live broker under ${BROKER_DIR}. Start deck-broker and run the conformance files on their own; in a shared \`bun test\` run DECK_HOME points at a throwaway home.`,
+		);
+	}
+	return cached !== null;
+}
 
 /** Cheap default for battery calls; thinking tests pick a reasoning model. */
 export const CHEAP_MODEL = "claude-haiku-4-5";
 
 export async function gatewayPost(pathname: string, body: unknown, init?: { signal?: AbortSignal }): Promise<Response> {
-	return fetch(`${GATEWAY_URL}${pathname}`, {
+	const { gateway, gatewayToken } = live();
+	return fetch(`${gateway}${pathname}`, {
 		method: "POST",
-		headers: { authorization: `Bearer ${GATEWAY_TOKEN}`, "content-type": "application/json" },
+		headers: { authorization: `Bearer ${gatewayToken}`, "content-type": "application/json" },
 		body: JSON.stringify(body),
 		signal: init?.signal,
 	});
 }
 
 export async function gatewayGet(pathname: string): Promise<Response> {
-	return fetch(`${GATEWAY_URL}${pathname}`, { headers: { authorization: `Bearer ${GATEWAY_TOKEN}` } });
+	const { gateway, gatewayToken } = live();
+	return fetch(`${gateway}${pathname}`, { headers: { authorization: `Bearer ${gatewayToken}` } });
 }
 
 /** One-shot control request over the NDJSON unix socket. */
@@ -38,7 +82,7 @@ export async function controlRequest<T = unknown>(op: string, args: Record<strin
 			unix: BROKER_SOCK,
 			socket: {
 				open(socket) {
-					socket.write(`${JSON.stringify({ id: "battery", cap: CONTROL_CAP, op, ...args })}\n`);
+					socket.write(`${JSON.stringify({ id: "battery", cap: live().controlCap, op, ...args })}\n`);
 				},
 				data(socket, chunk) {
 					buffer += chunk.toString("utf8");

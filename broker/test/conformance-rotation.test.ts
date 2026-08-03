@@ -24,7 +24,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { z } from "zod";
-import { controlRequest, gatewayPost } from "./harness";
+import { controlRequest, gatewayPost, hasLiveBroker } from "./harness";
 
 const blockShape = z.looseObject({ providerKey: z.string(), blockScope: z.string(), blockedUntilMs: z.number() });
 const statusShape = z.looseObject({
@@ -60,8 +60,12 @@ function anthropicAccounts(status: Status) {
 }
 
 // ── Establish preconditions (top-level: drives skipIf) ──────────────────────
-const preStatus = statusShape.parse(await controlRequest("status"));
-const preRoster = rosterShape.parse(await controlRequest("usage", { force: true }));
+// Top-level await runs even when the describe below is skipped, so the live
+// broker has to be checked HERE too — otherwise the control socket is dialled
+// against a throwaway DECK_HOME and the file fails before any test is chosen.
+const liveBroker = hasLiveBroker();
+const preStatus = liveBroker ? statusShape.parse(await controlRequest("status")) : { accounts: [] };
+const preRoster = liveBroker ? rosterShape.parse(await controlRequest("usage", { force: true })) : { reports: [] };
 
 /** accountIds whose 7d fable window is exhausted per the FRESH roster. */
 const exhaustedAccountIds = new Set<string>();
@@ -81,14 +85,17 @@ const exhausted = pool.filter(account => account.accountId !== null && exhausted
 const healthy = pool.filter(
 	account => account.accountId !== null && anthropicReportAccountIds.has(account.accountId) && !exhaustedAccountIds.has(account.accountId),
 );
-const runnable = pool.length >= 2 && exhausted.length >= 1 && healthy.length >= 1;
-if (!runnable) {
+const runnable = liveBroker && pool.length >= 2 && exhausted.length >= 1 && healthy.length >= 1;
+if (liveBroker && !runnable) {
 	console.warn(
 		`[rotation] SKIP: pool=${pool.length} exhausted=${exhausted.length} healthy=${healthy.length} — need >=2 anthropic creds with >=1 fable-exhausted and >=1 healthy`,
 	);
 }
 
-describe("SPEC 6.5 rotation (I8)", () => {
+// The battery burns real tokens against a running deck-broker. It skips when
+// none is reachable, which is also the case when a unit-test file in the same
+// `bun test` process has repointed DECK_HOME at a throwaway home.
+describe.skipIf(!liveBroker)("SPEC 6.5 rotation (I8)", () => {
 	test.skipIf(!runnable)("fable-5 succeeds while a pool account is fable-exhausted", async () => {
 		// Defensive re-assert of the established preconditions.
 		expect(exhausted.length).toBeGreaterThanOrEqual(1);
