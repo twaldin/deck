@@ -29,6 +29,20 @@ describe("usage roster refresh", () => {
 				fetchUsageReports: async () => [{ provider: "anthropic", metadata: { account: "acct-key" }, limits: [] }],
 			} as any);
 			expect(apiRoster.accounts.find(account => account.id === 1)?.status).toBe("reported");
+
+			let aggregateCalls = 0;
+			const multiAccountRoster = await refreshUsageRoster({
+				exportSnapshot: () => ({ credentials: [
+					{ id: 1, provider: "anthropic", credential: { type: "api", key: "one" } },
+					{ id: 2, provider: "anthropic", credential: { type: "api", key: "two" } },
+				] }),
+				fetchUsageReports: async () => {
+					aggregateCalls += 1;
+					return [{ provider: "anthropic", metadata: { account: "acct-key" }, limits: [] }];
+				},
+			} as any);
+			expect(aggregateCalls).toBe(1);
+			expect(multiAccountRoster.accounts.filter(account => account.id > 0)).toHaveLength(2);
 		} finally {
 			rmSync(home, { recursive: true, force: true });
 		}
