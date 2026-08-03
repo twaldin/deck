@@ -1089,6 +1089,7 @@ export default smithers((ctx) => {
 											brief: brief ?? { summary: "", acceptanceCriteria: [] },
 											testing: implementation.testEvidence,
 											reviewOutcome: latestLocalReview?.summary,
+											changedFiles: dryRun ? fixtures.changedFiles : await fetchChangedFiles(ghCtx, prNumber),
 										}),
 									]);
 									url = createOut.trim().split("\n").pop() ?? "";

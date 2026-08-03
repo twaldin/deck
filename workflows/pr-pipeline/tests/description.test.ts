@@ -2,6 +2,12 @@ import { describe, expect, test } from "bun:test";
 import { generatePullRequestDescription } from "../lib/description.ts";
 
 describe("pull request description", () => {
+	test("adds the resume warning only when the diff changes pipeline.tsx", () => {
+		const base = { brief: { summary: "pipeline", acceptanceCriteria: [] as string[] } };
+		expect(generatePullRequestDescription({ ...base, changedFiles: ["src/pipeline.tsx"] })).toContain("RESUME_METADATA_MISMATCH");
+		expect(generatePullRequestDescription({ ...base, changedFiles: ["src/other.ts"] })).not.toContain("RESUME_METADATA_MISMATCH");
+	});
+
 	test("rewrites internal input into a team-facing template", () => {
 		const output = generatePullRequestDescription({
 			brief: {
