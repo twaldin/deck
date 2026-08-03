@@ -29,6 +29,7 @@ import { promisify } from "node:util";
 import type { FleetFrame, SourceHealth, TaskRow } from "./fleet";
 import { stateDir, stateFiles } from "./home";
 import { readMeta, updateMeta } from "./meta";
+import { reapOrphanedBunTests } from "./orphan-reaper";
 
 const run = promisify(execFile);
 
@@ -245,6 +246,9 @@ export async function projectFleet(frame: FleetFrame): Promise<SourceHealth> {
 }
 
 async function pass(frame: FleetFrame): Promise<SourceHealth> {
+	// Reap crashed test shards before projection. This runs on every herdr tick,
+	// even when herdr itself is unavailable.
+	await reapOrphanedBunTests();
 	// Liveness probe first: no herdr means no projection, not an error.
 	if ((await herdr(["workspace", "list"])) === null) {
 		return { name: "herdr-projection", state: "skipped", detail: "herdr not running" };

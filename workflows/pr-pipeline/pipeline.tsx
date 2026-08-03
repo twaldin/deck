@@ -88,6 +88,7 @@ import { rebaseAndPush } from "./lib/rebase.ts";
 import type { Brief, MigrationEvidenceEntry } from "./lib/types.ts";
 import { claimMainFailure, produceWakeConditions, releaseMainFailure } from "../../v2/src/wake-producers.ts";
 import { smithersWorkspaceCwd } from "../../v2/src/workspace.ts";
+import { runTestCommand } from "./lib/test-lane.ts";
 
 // ---------------------------------------------------------------------------
 // Defaults (normalized in code, not via zod .default(), to keep semantics
@@ -417,6 +418,10 @@ async function sleepSeconds(total: number): Promise<void> {
 
 async function runShell(command: string, cwd: string): Promise<string> {
 	return execOrThrow(bunExec, ["bash", "-lc", command], { cwd });
+}
+
+async function runTests(command: string, cwd: string): Promise<string> {
+	return runTestCommand(bunExec, cwd, command);
 }
 
 function nowIso(): string {
@@ -1264,7 +1269,7 @@ export default smithers((ctx) => {
 														`Configure it and resume, or run manually and record evidence via a patched input on a new run.`,
 												);
 											}
-											const out = await runShell(command, input.worktree);
+											const out = await runTests(command, input.worktree);
 											return { stage, ok: true, detail: out.slice(-2000), at: nowIso() };
 										})()
 									}

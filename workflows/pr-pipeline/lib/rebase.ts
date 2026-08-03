@@ -1,8 +1,9 @@
 import { execOrThrow, type ExecFn } from "./gh.ts";
+import { testLaneCommand } from "./test-lane.ts";
 
 export async function runRebaseTests(exec: ExecFn, worktree: string, command?: string): Promise<string> {
 	if (!command) throw new Error("A project test command is required for rebase validation.");
-	return execOrThrow(exec, ["sh", "-lc", command], { cwd: worktree });
+	return execOrThrow(exec, ["sh", "-lc", testLaneCommand(command)], { cwd: worktree });
 }
 
 /** Rebase a non-mergeable PR branch and publish it without changing its PR. */
