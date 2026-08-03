@@ -9,7 +9,12 @@ const exec = promisify(execFile);
 export type ProcessRow = { pid: number; ppid: number; command: string };
 
 export function orphanedBunTests(rows: ProcessRow[]): ProcessRow[] {
-	return rows.filter((row) => row.ppid === 1 && /(^|\/)bun( |$)/.test(row.command) && /\btest\b/.test(row.command));
+	return rows.filter((row) => {
+		if (row.ppid !== 1) return false;
+		const args = row.command.trim().split(/\s+/);
+		if (!/(^|\/)bun$/.test(args[0] ?? "")) return false;
+		return args[1] === "test";
+	});
 }
 
 export function parseProcessList(output: string): ProcessRow[] {

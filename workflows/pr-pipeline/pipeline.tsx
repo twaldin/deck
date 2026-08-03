@@ -73,6 +73,11 @@ import {
 	type ModelPolicy,
 } from "./lib/models.ts";
 import { findProfile, type ModelSeat, type ProjectProfile } from "./lib/profiles.ts";
+
+async function changedFilesForBranch(exec: typeof bunExec, worktree: string, baseBranch: string): Promise<string[]> {
+	const output = await execOrThrow(exec, ["git", "diff", "--name-only", `origin/${baseBranch}...HEAD`], { cwd: worktree });
+	return output.split("\\n").map((file) => file.trim()).filter(Boolean);
+}
 import {
 	falloutPrompt,
 	implementPrompt,
@@ -1089,7 +1094,7 @@ export default smithers((ctx) => {
 											brief: brief ?? { summary: "", acceptanceCriteria: [] },
 											testing: implementation.testEvidence,
 											reviewOutcome: latestLocalReview?.summary,
-											changedFiles: dryRun ? fixtures.changedFiles : await fetchChangedFiles(ghCtx, prNumber),
+											changedFiles: dryRun ? fixtures.changedFiles : await changedFilesForBranch(bunExec, input.worktree, baseBranch),
 										}),
 									]);
 									url = createOut.trim().split("\n").pop() ?? "";

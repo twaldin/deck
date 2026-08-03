@@ -6,7 +6,7 @@ import { orphanedBunTests, parseProcessList, reapOrphanedBunTests } from "../src
 
 describe("orphan reaper decision", () => {
 	test("selects only bun test processes adopted by launchd", () => {
-		const rows = parseProcessList("101 1 bun test --watch\n102 1 bun run build\n103 8 bun test\n104 1 /usr/bin/node bun test");
+		const rows = parseProcessList("101 1 bun test --watch\n102 1 bun run build\n103 8 bun test\n104 1 /usr/bin/node bun test\n105 1 bun smithers up pipeline.tsx --resume true\n106 1 bun smithers up --run-id fix-test-flake-123");
 		expect(orphanedBunTests(rows).map((row) => row.pid)).toEqual([101]);
 	});
 
