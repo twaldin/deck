@@ -406,13 +406,24 @@ describe("watch helpers", () => {
 	test("reviewersNeedingReRequest skips bots, self, active-after-push, and already-requested", () => {
 		const lastPush = "2026-07-27T10:00:00Z";
 		const reviewers = [
-			{ login: "stale", isBot: false, lastActivityAt: "2026-07-27T09:00:00Z", lastReviewState: "COMMENTED" },
+			{ login: "stale", isBot: false, lastActivityAt: "2026-07-27T09:00:00Z", lastReviewState: null },
 			{ login: "fresh", isBot: false, lastActivityAt: "2026-07-27T11:00:00Z", lastReviewState: "APPROVED" },
 			{ login: "bot[bot]", isBot: true, lastActivityAt: "2026-07-27T09:00:00Z", lastReviewState: "COMMENTED" },
 			{ login: "requested", isBot: false, lastActivityAt: "2026-07-27T09:00:00Z", lastReviewState: "COMMENTED" },
 			{ login: "me", isBot: false, lastActivityAt: "2026-07-27T09:00:00Z", lastReviewState: null },
 		];
 		expect(reviewersNeedingReRequest(reviewers, ["requested"], lastPush, ["me"])).toEqual(["stale"]);
+	});
+
+	test("never re-requests reviewers with an existing decision", () => {
+		const lastPush = "2026-07-27T10:00:00Z";
+		const reviewers = [
+			{ login: "approved", isBot: false, lastActivityAt: "2026-07-27T09:00:00Z", lastReviewState: "APPROVED" },
+			{ login: "commented", isBot: false, lastActivityAt: "2026-07-27T09:00:00Z", lastReviewState: "COMMENTED" },
+			{ login: "changes", isBot: false, lastActivityAt: "2026-07-27T09:00:00Z", lastReviewState: "CHANGES_REQUESTED" },
+			{ login: "silent", isBot: false, lastActivityAt: "2026-07-27T09:00:00Z", lastReviewState: null },
+		];
+		expect(reviewersNeedingReRequest(reviewers, [], lastPush)).toEqual(["changes", "silent"]);
 	});
 
 	test("unansweredComments counts only others' comments newer than our latest activity", () => {
@@ -450,6 +461,9 @@ describe("watch fix worker boundary", () => {
 		expect(prompt).toContain("fetch origin/main");
 		expect(prompt).toContain("force-with-lease");
 		expect(prompt).toContain("Never sleep-poll CI or review state");
+		expect(prompt).toContain("reviewersNeedingReRequest list");
+		expect(prompt).toContain("Never re-request a reviewer whose latest state is APPROVED");
+		expect(prompt).not.toContain("re-request every prior human reviewer");
 		expect(prompt).toContain("persisted Smithers poll owns the wait");
 	});
 
