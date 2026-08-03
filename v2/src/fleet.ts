@@ -20,7 +20,7 @@ import { lastEvent, openDecisions } from "./events";
 import { internalSummary } from "./backlog";
 import { stateDir, stateFiles } from "./home";
 import { readMeta } from "./meta";
-import { ask, openQuestions, queueFile, readQuestions } from "./questions-store";
+import { ask, askIfAbsent, openQuestions, queueFile, readQuestionHistory, readQuestions } from "./questions-store";
 import { pending } from "./queue";
 import { unresolvedReceipts } from "./side-effects";
 import { SMITHERS_SPEC } from "./smithers";
@@ -499,6 +499,9 @@ async function collectRunsOnce(
 					} catch { ciState = "unavailable"; }
 					try {
 						const review = await run("gh", ["pr", "view", String(prNumber), "--repo", input.repo, "--json", "reviewDecision,reviews,mergeStateStatus,headRefOid"], { cwd, timeout: 15_000, maxBuffer: 1_000_000 });
+						const value = JSON.parse(review.stdout) as { reviewDecision?: string; mergeStateStatus?: string; headRefOid?: string; reviews?: Array<{ author?: { login?: string }; state?: string; submittedAt?: string }> };
+						mergeStateStatus = value.mergeStateStatus ?? "unknown";
+						headRefOid = value.headRefOid;
 						const [owner, name] = input.repo.split("/");
 						const threadNodes: Array<{ isResolved?: boolean }> = [];
 						let cursor: string | null = null;
@@ -512,9 +515,6 @@ async function collectRunsOnce(
 							threadNodes.push(...(threadsPage?.nodes ?? []));
 							cursor = threadsPage?.pageInfo?.hasNextPage ? (threadsPage.pageInfo.endCursor ?? null) : null;
 						} while (cursor !== null);
-						const value = JSON.parse(review.stdout) as { reviewDecision?: string; mergeStateStatus?: string; headRefOid?: string; reviews?: Array<{ author?: { login?: string }; state?: string; submittedAt?: string }> };
-						mergeStateStatus = value.mergeStateStatus ?? "unknown";
-						headRefOid = value.headRefOid;
 						const threadValue = { data: { repository: { pullRequest: { reviewThreads: { nodes: threadNodes } } } } };
 						const latest = new Map<string, { state?: string }>();
 						for (const item of [...(value.reviews ?? [])].sort((a, b) => (Date.parse(a.submittedAt ?? "") || 0) - (Date.parse(b.submittedAt ?? "") || 0))) {
@@ -671,8 +671,8 @@ async function collectPanes(): Promise<{
 	}
 }
 
-function readQuestionsForStamp(file: string, id: string): boolean {
-	return readQuestions(file).some((question) => question.id === `deck-fleet:${id}`);
+function questionForStamp(file: string, id: string): ReturnType<typeof readQuestionHistory>[number] | undefined {
+	return readQuestionHistory(file).find((question) => question.id === id || question.id === `deck-fleet:${id}`);
 }
 
 function realpath(target: string): string {
@@ -883,11 +883,33 @@ export async function buildFrame(
 		// decision, while every render of this parked run uses one stable id.
 		const input = readShipInput(wf.runId);
 		const currentHead = efforts.find((item) => item.runId === wf.runId)?.headRefOid;
-		if (currentHead === undefined || currentHead === null || currentHead === "") continue;
+		if (currentHead === undefined || currentHead === null || currentHead === "") {
+			try {
+				const warningId = `stamp-head-unavailable:${wf.runId}`;
+				if (readQuestionHistory(queueFile()).some((question) => question.id === warningId)) continue;
+				askIfAbsent(queueFile(), {
+					id: warningId, question: "Stamp is blocked: the PR head could not be verified.",
+					questionKind: "agent",
+					origin: "fleet",
+					idScope: "global",
+					deliverAnswer: false,
+					options: ["Hold"],
+					recommendation: "Restore GitHub access, then refresh the fleet view.",
+					urgency: "high",
+					sessionId: "deck-fleet",
+					cwd: options.workflowCwd ?? process.cwd(),
+				});
+			} catch { /* A warning question must not break the fleet view. */ }
+			continue;
+		}
 		const id = `stamp:${wf.repo ?? wf.rootDir ?? "unknown"}:${wf.prNumber ?? input.prNumber ?? "unknown"}:stamp:${wf.runId}:${wf.step ?? "r0-stamp"}`;
 		try {
-			const existing = readQuestionsForStamp(queueFile(), id);
-			if (!existing) {
+			const existing = questionForStamp(queueFile(), id);
+			if (existing !== undefined && existing.status === "answered") continue;
+			const questionId = existing?.status === "dismissed" ? `stamp:v2:${id.slice("stamp:".length)}` : id;
+			const nextExisting = questionForStamp(queueFile(), questionId);
+			if (nextExisting !== undefined && nextExisting.status !== "answered") continue;
+			{
 				const effort = efforts.find((item) => item.runId === wf.runId);
 				const repo = input.repo ?? workflowIdentity(wf);
 				const pr = wf.prNumber ?? input.prNumber;
@@ -896,8 +918,9 @@ export async function buildFrame(
 				const originalIssue = input.why ?? "No ship brief summary was recorded.";
 				const reviewEvidence = `CI: ${effort?.ciState ?? "unknown"}; mergeStateStatus: ${effort?.mergeStateStatus ?? "unknown"}; review: ${effort?.reviewState ?? "unknown"}.`;
 				ask(queueFile(), {
-					id,
+					id: questionId,
 					questionKind: "stamp",
+					origin: "fleet",
 					question: `Stamp PR #${pr ?? "unknown"}: ${title}?`,
 					context: wf.repo ?? wf.rootDir ?? undefined,
 					prContext: {
@@ -912,7 +935,9 @@ export async function buildFrame(
 						ciState: effort?.ciState ?? "unknown",
 						mergeStateStatus: effort?.mergeStateStatus ?? "unknown",
 					},
-					options: ["Stamp", "Hold", "Close"],
+					options: ["Stamp", "Hold", "Deny gate"],
+					actions: ["stamp", "hold", "deny-gate"],
+					deliverAnswer: false,
 					recommendation: "Hold until reviewed.",
 					urgency: "high",
 					sessionId: "deck-fleet",

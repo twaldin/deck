@@ -622,12 +622,13 @@ describe("questions extension", () => {
 		const file = freshFile();
 		const pi = new Harness();
 		const commands: Array<{ command: string; args: string[] }> = [];
-		const executor = async (command: string, args: string[]) => { commands.push({ command, args }); return {}; };
+		const executor = async (command: string, args: string[]) => { commands.push({ command, args }); return command === "gh" ? { stdout: JSON.stringify({ headRefOid: "head-12", mergeable: "MERGEABLE", mergeStateStatus: "CLEAN", statusCheckRollup: [{ conclusion: "SUCCESS" }] }) } : {}; };
 		registerQuestions(pi as any, envFor(file), pi.runtime, executor as any);
-		ask(file, { id: "deck-fleet:stamp:owner/repo:12:stamp:run-7:stamp", question: "Stamp?", questionKind: "stamp", options: ["Stamp"], sessionId: "s", cwd: "/" });
+		ask(file, { id: "deck-fleet:stamp:owner/repo:12:stamp:run-7:stamp", question: "Stamp?", questionKind: "stamp", origin: "fleet", prContext: { prRepo: "owner/repo", prNumber: 12, headSha: "head-12" }, options: ["Stamp"], sessionId: "s", cwd: "/" });
 		const captain = fakeContext("captain", ["1. Stamp"]);
 		await pi.commands.get("questions")!.handler("", captain);
 		expect(commands).toEqual([
+			{ command: "gh", args: ["pr", "view", "12", "--repo", "owner/repo", "--json", "headRefOid,mergeable,mergeStateStatus,statusCheckRollup"] },
 			{ command: "smithers", args: ["approve", "run-7", "--node", "stamp", "--by", "captain"] },
 			{ command: "smithers", args: ["up", "pipeline.tsx", "--run-id", "run-7", "--resume", "true"] },
 		]);
@@ -640,18 +641,18 @@ describe("questions extension", () => {
 		const commands: Array<{ command: string; args: string[] }> = [];
 		registerQuestions(pi as any, envFor(file), pi.runtime, async (command, args) => {
 			commands.push({ command, args });
-			return command === "gh" && args[1] === "view" ? { stdout: JSON.stringify({ headRefOid: "head-12" }) } : {};
+			return command === "gh" && args[1] === "view" ? { stdout: JSON.stringify({ headRefOid: "head-12", mergeable: "MERGEABLE", mergeStateStatus: "CLEAN", statusCheckRollup: [{ conclusion: "SUCCESS" }] }) } : {};
 		});
 		ask(file, {
 			id: "review-gate-pr-12-head",
 			question: "Captain approval needed",
-			questionKind: "approve",
+			questionKind: "approve", origin: "review-gate",
 			prContext: { prRepo: "owner/repo", prNumber: 12, headSha: "head-12", prUrl: "https://github.com/owner/repo/pull/12", prTitle: "Fix gate" },
-			options: ["Approve", "Hold"], sessionId: "s", cwd: "/work/deck",
+			options: ["Approve", "Hold"], actions: ["approve", "hold"], sessionId: "s", cwd: "/work/deck",
 		});
 		await pi.commands.get("questions")!.handler("", fakeContext("captain", ["1. Approve"]));
 		expect(commands).toEqual([
-			{ command: "gh", args: ["pr", "view", "12", "--repo", "owner/repo", "--json", "headRefOid"] },
+			{ command: "gh", args: ["pr", "view", "12", "--repo", "owner/repo", "--json", "headRefOid,mergeable,mergeStateStatus,statusCheckRollup"] },
 			{ command: "gh", args: ["pr", "review", "12", "--repo", "owner/repo", "--approve"] },
 		]);
 		expect(openQuestions(file)).toHaveLength(0);
@@ -662,7 +663,7 @@ describe("questions extension", () => {
 		const pi = new Harness();
 		const commands: string[][] = [];
 		registerQuestions(pi as any, envFor(file), pi.runtime, async (_command, args) => { commands.push(args); return { stdout: JSON.stringify({ headRefOid: "new-head" }) }; });
-		ask(file, { id: "review-gate-pr-12-head", question: "Captain approval needed", questionKind: "approve", prContext: { prRepo: "owner/repo", prNumber: 12, headSha: "old-head" }, options: ["Approve", "Hold"], sessionId: "s", cwd: "/" });
+		ask(file, { id: "review-gate-pr-12-head", question: "Captain approval needed", questionKind: "approve", origin: "review-gate", prContext: { prRepo: "owner/repo", prNumber: 12, headSha: "old-head" }, options: ["Approve", "Hold"], actions: ["approve", "hold"], sessionId: "s", cwd: "/" });
 		await pi.commands.get("questions")!.handler("", fakeContext("captain", ["1. Approve"]));
 		expect(commands).toHaveLength(1);
 		expect(openQuestions(file)).toHaveLength(1);
@@ -673,7 +674,7 @@ describe("questions extension", () => {
 		const pi = new Harness();
 		const commands: string[][] = [];
 		registerQuestions(pi as any, envFor(file), pi.runtime, async (_command, args) => { commands.push(args); return { stdout: JSON.stringify({ headRefOid: "head-12" }) }; });
-		ask(file, { id: "review-gate-pr-12-head", question: "Captain decision needed", questionKind: "agent", prContext: { prRepo: "owner/repo", prNumber: 12, headSha: "head-12" }, options: ["Hold", "Close"], sessionId: "s", cwd: "/" });
+		ask(file, { id: "review-gate-pr-12-head", question: "Captain decision needed", questionKind: "agent", origin: "review-gate", prContext: { prRepo: "owner/repo", prNumber: 12, headSha: "head-12" }, options: ["Hold", "Close"], actions: ["hold", "close-pr"], sessionId: "s", cwd: "/" });
 		await pi.commands.get("questions")!.handler("", fakeContext("captain", ["2. Close"]));
 		expect(commands).toEqual([
 			["pr", "view", "12", "--repo", "owner/repo", "--json", "headRefOid"],
@@ -686,10 +687,10 @@ describe("questions extension", () => {
 		const file = freshFile();
 		const pi = new Harness();
 		registerQuestions(pi as any, envFor(file), pi.runtime, async (command, args) => {
-			if (command === "gh" && args[1] === "view") return { stdout: JSON.stringify({ headRefOid: "head-12" }) };
+			if (command === "gh" && args[1] === "view") return { stdout: JSON.stringify({ headRefOid: "head-12", mergeable: "MERGEABLE", mergeStateStatus: "CLEAN", statusCheckRollup: [{ conclusion: "SUCCESS" }] }) };
 			throw new Error("permission denied");
 		});
-		ask(file, { id: "review-gate-pr-12-head", question: "Captain approval needed", questionKind: "approve", prContext: { prRepo: "owner/repo", prNumber: 12, headSha: "head-12" }, options: ["Approve", "Hold"], sessionId: "s", cwd: "/" });
+		ask(file, { id: "review-gate-pr-12-head", question: "Captain approval needed", questionKind: "approve", origin: "review-gate", prContext: { prRepo: "owner/repo", prNumber: 12, headSha: "head-12" }, options: ["Approve", "Hold"], actions: ["approve", "hold"], sessionId: "s", cwd: "/" });
 		await pi.commands.get("questions")!.handler("", fakeContext("captain", ["1. Approve"]));
 		expect(openQuestions(file)).toHaveLength(1);
 	});
@@ -705,18 +706,39 @@ describe("questions extension", () => {
 
 	test("rich PR context is rendered as a self-contained decision", () => {
 		const file = freshFile();
-		const asked = ask(file, { question: "Stamp this PR?", questionKind: "stamp", prContext: {
+		const asked = ask(file, { question: "Stamp this PR?", questionKind: "stamp", origin: "fleet", prContext: {
 			prUrl: "https://github.com/owner/repo/pull/12", prRepo: "owner/repo", prNumber: 12, prTitle: "Fix gate",
 			originalIssue: "The gate did not notify the captain.", ourFix: "The gate posts findings and queues approval.",
 			whyCorrect: "43 tests pass. Adversarial review found no blockers. Blast radius is limited to gate decisions.", ciState: "green", mergeStateStatus: "CLEAN",
 		}, options: ["Stamp", "Hold", "Close"], sessionId: "s", cwd: "/", now: 0 });
 		const rendered = describeQuestion({ ...asked, status: "open", delivered: false }, 0);
 		expect(rendered).toContain("https://github.com/owner/repo/pull/12");
-		expect(rendered).toContain("THE ORIGINAL ISSUE: The gate did not notify the captain.");
-		expect(rendered).toContain("OUR FIX: The gate posts findings and queues approval.");
-		expect(rendered).toContain("WHY IT IS CORRECT: 43 tests pass.");
+		expect(rendered).toContain("THE ORIGINAL ISSUE (AGENT CLAIM): The gate did not notify the captain.");
+		expect(rendered).toContain("OUR FIX (AGENT CLAIM): The gate posts findings and queues approval.");
+		expect(rendered).toContain("WHY IT IS CORRECT (AGENT CLAIM): 43 tests pass.");
+		expect(rendered).toContain("Target: owner/repo#12@unknown");
 		expect(rendered).toContain("CI: green");
 		expect(rendered).toContain("mergeStateStatus: CLEAN");
+	});
+
+	test("legacy stamp without PR evidence stays open", async () => {
+		const file = freshFile();
+		const pi = new Harness();
+		const commands: string[][] = [];
+		registerQuestions(pi as any, envFor(file), pi.runtime, async (_command, args) => { commands.push(args); return {}; });
+		ask(file, { id: "deck-fleet:stamp:owner/repo:12:stamp:run-7:gate", question: "Stamp?", questionKind: "stamp", origin: "fleet", options: ["Stamp"], sessionId: "s", cwd: "/" });
+		await pi.commands.get("questions")!.handler("", fakeContext("captain", ["1. Stamp"]));
+		expect(commands).toEqual([]);
+		expect(openQuestions(file)).toHaveLength(1);
+	});
+
+	test("hold keeps the decision open", async () => {
+		const file = freshFile();
+		const pi = new Harness();
+		registerQuestions(pi as any, envFor(file), pi.runtime, async () => ({}));
+		ask(file, { id: "deck-fleet:stamp:owner/repo:12:stamp:run-7:gate", question: "Stamp?", questionKind: "stamp", origin: "fleet", prContext: { prRepo: "owner/repo", prNumber: 12, headSha: "head-12" }, options: ["Stamp", "Hold", "Deny gate"], actions: ["stamp", "hold", "deny-gate"], sessionId: "s", cwd: "/" });
+		await pi.commands.get("questions")!.handler("", fakeContext("captain", ["2. Hold"]));
+		expect(openQuestions(file)).toHaveLength(1);
 	});
 
 	test("stamp refuses when the reviewed PR head changed", async () => {
@@ -724,7 +746,7 @@ describe("questions extension", () => {
 		const pi = new Harness();
 		const commands: string[][] = [];
 		registerQuestions(pi as any, envFor(file), pi.runtime, async (_command, args) => { commands.push(args); return { stdout: JSON.stringify({ headRefOid: "new-head" }) }; });
-		ask(file, { id: "deck-fleet:stamp:owner/repo:12:stamp:run-7:gate", question: "Stamp?", questionKind: "stamp", prContext: { prRepo: "owner/repo", prNumber: 12, headSha: "old-head" }, options: ["Stamp"], sessionId: "s", cwd: "/" });
+		ask(file, { id: "deck-fleet:stamp:owner/repo:12:stamp:run-7:gate", question: "Stamp?", questionKind: "stamp", origin: "fleet", prContext: { prRepo: "owner/repo", prNumber: 12, headSha: "old-head" }, options: ["Stamp"], sessionId: "s", cwd: "/" });
 		await pi.commands.get("questions")!.handler("", fakeContext("captain", ["1. Stamp"]));
 		expect(commands).toHaveLength(1);
 		expect(openQuestions(file)).toHaveLength(1);
@@ -735,8 +757,8 @@ describe("questions extension", () => {
 		const pi = new Harness();
 		const commands: string[][] = [];
 		registerQuestions(pi as any, envFor(file), pi.runtime, async (_command, args) => { commands.push(args); return {}; });
-		ask(file, { id: "deck-fleet:stamp:owner/repo:12:stamp:run-7:gate", question: "Stamp?", questionKind: "stamp", options: ["Stamp", "Hold", "Close"], sessionId: "s", cwd: "/" });
-		await pi.commands.get("questions")!.handler("", fakeContext("captain", ["3. Close"]));
+		ask(file, { id: "deck-fleet:stamp:owner/repo:12:stamp:run-7:gate", question: "Stamp?", questionKind: "stamp", origin: "fleet", prContext: { prRepo: "owner/repo", prNumber: 12, headSha: "head-12" }, options: ["Stamp", "Hold", "Deny gate"], actions: ["stamp", "hold", "deny-gate"], sessionId: "s", cwd: "/" });
+		await pi.commands.get("questions")!.handler("", fakeContext("captain", ["3. Deny gate"]));
 		expect(commands).toEqual([["deny", "run-7", "--node", "gate", "--by", "captain"]]);
 		expect(openQuestions(file)).toHaveLength(0);
 	});
@@ -746,7 +768,7 @@ describe("questions extension", () => {
 		const pi = new Harness();
 		const commands: string[][] = [];
 		registerQuestions(pi as any, envFor(file), pi.runtime, async (_command, args) => { commands.push(args); throw new Error("permission denied"); });
-		ask(file, { id: "deck-fleet:stamp:owner/repo:12:stamp:run-7:gate", question: "Stamp?", questionKind: "stamp", options: ["Stamp"], sessionId: "s", cwd: "/" });
+		ask(file, { id: "deck-fleet:stamp:owner/repo:12:stamp:run-7:gate", question: "Stamp?", questionKind: "stamp", origin: "fleet", prContext: { prRepo: "owner/repo", prNumber: 12, headSha: "head-12" }, options: ["Stamp"], sessionId: "s", cwd: "/" });
 		await pi.commands.get("questions")!.handler("", fakeContext("captain", ["1. Stamp"]));
 		expect(commands).toHaveLength(1);
 		expect(openQuestions(file)).toHaveLength(1);
@@ -756,8 +778,8 @@ describe("questions extension", () => {
 		const file = freshFile();
 		const pi = new Harness();
 		const commands: string[][] = [];
-		registerQuestions(pi as any, envFor(file), pi.runtime, async (_command, args) => { commands.push(args); if (commands.length === 2) throw new Error("resume failed"); return {}; });
-		ask(file, { id: "deck-fleet:stamp:owner/repo:12:stamp:run-7:gate", question: "Stamp?", questionKind: "stamp", options: ["Stamp"], sessionId: "s", cwd: "/" });
+		registerQuestions(pi as any, envFor(file), pi.runtime, async (command, args) => { if (command === "gh") return { stdout: JSON.stringify({ headRefOid: "head-12", mergeable: "MERGEABLE", mergeStateStatus: "CLEAN", statusCheckRollup: [{ conclusion: "SUCCESS" }] }) }; commands.push(args); if (commands.length === 2) throw new Error("resume failed"); return {}; });
+		ask(file, { id: "deck-fleet:stamp:owner/repo:12:stamp:run-7:gate", question: "Stamp?", questionKind: "stamp", origin: "fleet", prContext: { prRepo: "owner/repo", prNumber: 12, headSha: "head-12" }, options: ["Stamp"], sessionId: "s", cwd: "/" });
 		await pi.commands.get("questions")!.handler("", fakeContext("captain", ["1. Stamp"]));
 		expect(commands).toHaveLength(2);
 		expect(openQuestions(file)).toHaveLength(1);
@@ -767,8 +789,8 @@ describe("questions extension", () => {
 		const file = freshFile();
 		const pi = new Harness();
 		const commands: string[][] = [];
-		registerQuestions(pi as any, envFor(file), pi.runtime, async (_command, args) => { commands.push(args); if (commands.length === 1) throw new Error("approval is already approved"); return {}; });
-		ask(file, { id: "deck-fleet:stamp:owner/repo:12:stamp:run-7:gate", question: "Stamp?", questionKind: "stamp", options: ["Stamp"], sessionId: "s", cwd: "/" });
+		registerQuestions(pi as any, envFor(file), pi.runtime, async (command, args) => { if (command === "gh") return { stdout: JSON.stringify({ headRefOid: "head-12", mergeable: "MERGEABLE", mergeStateStatus: "CLEAN", statusCheckRollup: [{ conclusion: "SUCCESS" }] }) }; commands.push(args); if (commands.length === 1) throw new Error("approval is already approved"); return {}; });
+		ask(file, { id: "deck-fleet:stamp:owner/repo:12:stamp:run-7:gate", question: "Stamp?", questionKind: "stamp", origin: "fleet", prContext: { prRepo: "owner/repo", prNumber: 12, headSha: "head-12" }, options: ["Stamp"], sessionId: "s", cwd: "/" });
 		await pi.commands.get("questions")!.handler("", fakeContext("captain", ["1. Stamp"]));
 		expect(commands).toHaveLength(2);
 		expect(openQuestions(file)).toHaveLength(0);

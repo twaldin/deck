@@ -85,10 +85,12 @@ const DISMISSED = "(dismissed by the captain without an answer)";
 function parseStampGateId(id: string): { runId?: string; node: string } {
 	const scoped = id.includes("deck-fleet:") ? id.slice(id.indexOf("deck-fleet:") + "deck-fleet:".length) : id;
 	const raw = scoped.startsWith("stamp:") ? scoped : "";
-	const parts = raw.split(":");
-	const headIndex = parts.lastIndexOf("head");
-	const end = headIndex > 0 ? headIndex : parts.length;
-	return { runId: raw === "" ? undefined : parts.at(end - 2), node: raw === "" ? "r0-stamp" : parts.at(end - 1) || "r0-stamp" };
+	const marker = ":stamp:";
+	const markerIndex = raw.indexOf(marker, "stamp:".length);
+	if (raw === "" || markerIndex < 0) return { runId: undefined, node: "r0-stamp" };
+	const tail = raw.slice(markerIndex + marker.length);
+	const separator = tail.indexOf(":");
+	return separator < 1 ? { runId: undefined, node: "r0-stamp" } : { runId: tail.slice(0, separator), node: tail.slice(separator + 1) || "r0-stamp" };
 }
 /** Control actions, always after the agent's own options and matched by position. */
 const CONTROLS = ["Write an answer...", "Dismiss", "Skip", "Stop reviewing"] as const;
@@ -105,13 +107,16 @@ export function describe(entry: Question, nowMs: number): string {
 	if (pr !== undefined) {
 		lines.push(
 			"",
-			pr.prUrl ?? "PR URL: unavailable",
+			pr.prRepo !== undefined && pr.prNumber !== undefined
+				? `PR URL: https://github.com/${pr.prRepo}/pull/${pr.prNumber}`
+				: "PR URL: unavailable",
+			`Target: ${pr.prRepo ?? "unknown"}#${pr.prNumber ?? "unknown"}@${pr.headSha ?? "unknown"}`,
 			`PR title: ${pr.prTitle ?? "untitled"}`,
 			`Repository: ${pr.prRepo ?? "unknown"}`,
 			"",
-			`THE ORIGINAL ISSUE: ${pr.originalIssue ?? "Not recorded."}`,
-			`OUR FIX: ${pr.ourFix ?? "Not recorded."}`,
-			`WHY IT IS CORRECT: ${pr.whyCorrect ?? "No evidence recorded."}`,
+			`THE ORIGINAL ISSUE (AGENT CLAIM): ${pr.originalIssue ?? "Not recorded."}`,
+			`OUR FIX (AGENT CLAIM): ${pr.ourFix ?? "Not recorded."}`,
+			`WHY IT IS CORRECT (AGENT CLAIM): ${pr.whyCorrect ?? "No evidence recorded."}`,
 			`CI: ${pr.ciState ?? "unknown"}`,
 			`mergeStateStatus: ${pr.mergeStateStatus ?? "unknown"}`,
 		);
@@ -153,10 +158,6 @@ export function registerQuestions(
 		const pending = pendingAnswersFor(file, sessionId);
 		let delivered = 0;
 		for (const entry of pending) {
-			if (entry.deliverAnswer === false) {
-				markDelivered(file, entry.id, runtime.now());
-				continue;
-			}
 			// Send BEFORE marking. The failure this ordering picks: a crash between
 			// the two lines re-delivers one answer, which is merely noisy, whereas
 			// marking first would drop that answer permanently and silently park
@@ -296,13 +297,18 @@ export function registerQuestions(
 				}
 				let applied = false;
 				const selectedOption = control === undefined ? choice : -1;
-				if (entry.questionKind === "stamp" && selectedOption === 0) {
+				const selectedLabel = control === undefined ? text : undefined;
+				const action = selectedOption >= 0 ? entry.actions?.[selectedOption] : undefined;
+				if (action === "hold") continue;
+				const trustedStamp = entry.questionKind === "stamp" && entry.origin === "fleet";
+				const trustedReviewGate = entry.origin === "review-gate" && entry.prContext !== undefined;
+				if ((action === "stamp" && trustedStamp || action === undefined && trustedStamp && selectedLabel === "Stamp")) {
 					applied = await approveStamp(ctx, entry);
-				} else if (entry.questionKind === "approve" && selectedOption === 0) {
+				} else if ((action === "approve" && trustedReviewGate || action === undefined && trustedReviewGate && entry.questionKind === "approve" && selectedLabel === "Approve")) {
 					applied = await approvePullRequest(ctx, entry);
-				} else if (entry.questionKind === "stamp" && selectedOption === 2) {
+				} else if ((action === "deny-gate" && trustedStamp || action === undefined && trustedStamp && selectedLabel === "Close")) {
 					applied = await closeStamp(ctx, entry);
-				} else if (entry.questionKind === "agent" && selectedOption === 1 && entry.prContext !== undefined) {
+				} else if ((action === "close-pr" && trustedReviewGate || action === undefined && trustedReviewGate && entry.questionKind === "agent" && selectedLabel === "Close")) {
 					applied = await closePullRequest(ctx, entry);
 				} else {
 					applied = resolve(ctx, entry, text, "answered");
@@ -362,15 +368,23 @@ export function registerQuestions(
 			return false;
 		}
 		try {
-			const current = await executor("gh", ["pr", "view", String(pr.prNumber), "--repo", pr.prRepo, "--json", "headRefOid"], { cwd: ctx.cwd, timeout: 15_000 });
+			const current = await executor("gh", ["pr", "view", String(pr.prNumber), "--repo", pr.prRepo, "--json", "headRefOid,mergeable,mergeStateStatus,statusCheckRollup"], { cwd: ctx.cwd, timeout: 15_000 });
 			const currentValue = typeof current === "object" && current !== null && "stdout" in current
 				? JSON.parse(String((current as { stdout: unknown }).stdout))
 				: current;
 			const currentSha = typeof currentValue === "object" && currentValue !== null && "headRefOid" in currentValue
 				? String((currentValue as { headRefOid: unknown }).headRefOid)
 				: "";
-			if (currentSha !== pr.headSha) {
-				ctx.ui.notify("Approval stopped because the PR head changed or could not be verified. Review it again.", "warning");
+			const checks = typeof currentValue === "object" && currentValue !== null && Array.isArray((currentValue as { statusCheckRollup?: unknown }).statusCheckRollup)
+				? (currentValue as { statusCheckRollup: Array<{ conclusion?: unknown; state?: unknown; status?: unknown }> }).statusCheckRollup
+				: [];
+			const mergeable = typeof currentValue === "object" && currentValue !== null ? String((currentValue as { mergeable?: unknown }).mergeable).toUpperCase() : "UNKNOWN";
+			const mergeState = typeof currentValue === "object" && currentValue !== null ? String((currentValue as { mergeStateStatus?: unknown }).mergeStateStatus).toUpperCase() : "UNKNOWN";
+			const checkStates = checks.map((check) => String(check.conclusion || check.status || check.state).toUpperCase());
+			const safeChecks = checks.length === 0 || checkStates.every((state) => ["SUCCESS", "SKIPPED", "NEUTRAL"].includes(state));
+			const unsafe = mergeable === "UNMERGEABLE" || ["DIRTY", "BEHIND", "UNSTABLE"].includes(mergeState) || !safeChecks;
+			if (currentSha !== pr.headSha || unsafe) {
+				ctx.ui.notify("Approval stopped because the PR head, CI, or merge state changed. Review it again.", "warning");
 				return false;
 			}
 			await executor("gh", ["pr", "review", String(pr.prNumber), "--repo", pr.prRepo, "--approve"], { cwd: ctx.cwd, timeout: 15_000 });
@@ -383,16 +397,26 @@ export function registerQuestions(
 
 	const approveStamp = async (ctx: QuestionsContext, entry: Question): Promise<boolean> => {
 		const pr = entry.prContext;
+		if (entry.questionKind === "stamp" && (pr?.prNumber === undefined || pr.prRepo === undefined || pr.headSha === undefined)) {
+			ctx.ui.notify("Stamp needs a PR number, repository, and reviewed head. Re-queue this question.", "error");
+			return false;
+		}
 		if (pr?.prNumber !== undefined || pr?.prRepo !== undefined) {
 			if (pr.prNumber === undefined || pr.prRepo === undefined || pr.headSha === undefined) {
 				ctx.ui.notify("Stamp needs a PR number, repository, and reviewed head.", "error");
 				return false;
 			}
 			try {
-				const current = await executor("gh", ["pr", "view", String(pr.prNumber), "--repo", pr.prRepo, "--json", "headRefOid"], { cwd: ctx.cwd, timeout: 15_000 });
+				const current = await executor("gh", ["pr", "view", String(pr.prNumber), "--repo", pr.prRepo, "--json", "headRefOid,mergeable,mergeStateStatus,statusCheckRollup"], { cwd: ctx.cwd, timeout: 15_000 });
 				const value = typeof current === "object" && current !== null && "stdout" in current ? JSON.parse(String((current as { stdout: unknown }).stdout)) : current;
-				if (typeof value !== "object" || value === null || String((value as { headRefOid?: unknown }).headRefOid) !== pr.headSha) {
-					ctx.ui.notify("Stamp stopped because the PR head changed. Review it again.", "warning");
+				const checks = typeof value === "object" && value !== null && Array.isArray((value as { statusCheckRollup?: unknown }).statusCheckRollup) ? (value as { statusCheckRollup: Array<{ conclusion?: unknown; state?: unknown; status?: unknown }> }).statusCheckRollup : [];
+				const checkStates = checks.map((check) => String(check.conclusion || check.status || check.state).toUpperCase());
+				const safeChecks = checks.length === 0 || checkStates.every((state) => ["SUCCESS", "SKIPPED", "NEUTRAL"].includes(state));
+				const mergeState = typeof value === "object" && value !== null ? String((value as { mergeStateStatus?: unknown }).mergeStateStatus).toUpperCase() : "UNKNOWN";
+				const mergeable = typeof value === "object" && value !== null ? String((value as { mergeable?: unknown }).mergeable).toUpperCase() : "UNKNOWN";
+				const verified = typeof value === "object" && value !== null && String((value as { headRefOid?: unknown }).headRefOid) === pr.headSha && mergeable !== "UNMERGEABLE" && !["DIRTY", "BEHIND", "UNSTABLE"].includes(mergeState) && safeChecks;
+				if (!verified) {
+					ctx.ui.notify("Stamp stopped because the PR head, CI, or merge state changed. Review it again.", "warning");
 					return false;
 				}
 			} catch (error) {

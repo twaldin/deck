@@ -113,8 +113,9 @@ describe("fleet frame state", () => {
 			const { answer, readQuestions } = await import("../src/questions-store");
 			answer(queue, readQuestions(queue)[0]!.id, "Do not stamp", "dismissed");
 			const afterAnswer = await buildFrame({ workflowCwd: directory, psRuns: [run] });
-			expect(afterAnswer.counters.openQuestions).toBe(0);
+			expect(afterAnswer.counters.openQuestions).toBe(1);
 			expect(fs.readFileSync(queue, "utf8")).toContain('"status":"dismissed"');
+			expect(fs.readFileSync(queue, "utf8").trim().split("\n")).toHaveLength(3);
 		} finally {
 			if (previous === undefined) delete process.env.DECK_QUESTIONS_FILE;
 			else process.env.DECK_QUESTIONS_FILE = previous;

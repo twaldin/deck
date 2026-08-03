@@ -24,7 +24,8 @@ test("polls the captain review-request queue programmatically", () => {
 
 test("gate has a hard no-approval rule and verifies state before queueing", () => {
   expect(source).toContain("NEVER run any GitHub approve command");
-  expect(source).not.toMatch(/gh[^\n]*approve/);
+  expect(source).not.toContain('"--approve"');
+  expect(source).not.toMatch(/"pr",\s*"merge"/);
   expect(source).toContain("mergeStateStatus");
   expect(source).toContain('questionKind: clean ? "approve" : "agent"');
 });
@@ -49,7 +50,7 @@ test("clean and exhausted rounds use different captain decisions without self-ap
   expect(source).toContain('maxIterations={rounds}');
   expect(source).toContain('Math.min(input.limits?.rounds ?? 3, 3)');
   expect(source).toContain('questionKind: clean ? "approve" : "agent"');
-  expect(source).toContain('options: clean ? ["Approve", "Hold"] : ["Hold", "Close"]');
+  expect(source).toContain('options: clean ? ["Approve", "Hold"] : ["Hold", "Close PR"]');
   expect(source).not.toMatch(/\["pr", "review"[^\n]*"--approve"/);
 });
 
