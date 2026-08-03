@@ -150,7 +150,7 @@ export async function refreshUsageRoster(storage: AuthStorage, signal?: AbortSig
 		accounts.push({ id: -1, provider: provider.id, email: null, accountId: null, status: "not logged in" });
 	}
 	const currentDead = await deadAccounts(storage);
-	const preservedDead = probeFailed && Array.isArray(previous.dead) ? previous.dead : [];
+	const preservedDead = (probeFailed || currentDead === null) && Array.isArray(previous.dead) ? previous.dead : [];
 	const dead = currentDead === null ? preservedDead : [...currentDead, ...preservedDead.filter(previousEntry => !currentDead.some(currentEntry => currentEntry.id === previousEntry.id))];
 	const roster: UsageRoster = {
 		generatedAt: probeFailed && typeof previous.generatedAt === "string" ? previous.generatedAt : new Date().toISOString(),
