@@ -47,10 +47,14 @@ export type CiState = "green" | "will-be-green" | "red" | "none";
 
 export interface CheckRun {
 	name: string;
+	/** Workflow name when GitHub provides it. */
+	workflowName?: string;
 	/** completed | in_progress | queued | pending ... */
 	status: string;
 	/** success | failure | neutral | skipped | cancelled | timed_out | null while running */
 	conclusion: string | null;
+	/** GitHub's completion time, used to identify the newest workflow run. */
+	completedAt?: string | null;
 }
 
 export interface ReviewerActivity {

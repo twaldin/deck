@@ -31,9 +31,19 @@ export function assessCi(checkRuns: CheckRun[]): CiState {
 			continue;
 		}
 		const conclusion = (run.conclusion ?? "").toLowerCase();
-		if (conclusion === "failure" || conclusion === "timed_out" || conclusion === "cancelled") {
-			return "red";
+		if (conclusion === "failure" || conclusion === "timed_out") return "red";
+		if (conclusion !== "cancelled") continue;
+
+		const workflow = run.workflowName ?? run.name;
+		if (checkRuns.some((candidate) => candidate.status !== "completed" && (candidate.workflowName ?? candidate.name) === workflow)) {
+			pending = true;
+			continue;
 		}
+		const newest = checkRuns
+			.filter((candidate) => candidate.status === "completed" && (candidate.workflowName ?? candidate.name) === workflow)
+			.sort((a, b) => (b.completedAt ?? "").localeCompare(a.completedAt ?? ""))[0];
+		const newestConclusion = (newest?.conclusion ?? "").toLowerCase();
+		if (newestConclusion !== "success" && newestConclusion !== "skipped") return "red";
 	}
 	return pending ? "will-be-green" : "green";
 }
