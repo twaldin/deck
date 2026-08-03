@@ -8,6 +8,7 @@
  */
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
 import { isInvalidatedOAuthTokenError } from "@oh-my-pi/pi-ai/error";
+import { readFileSync } from "node:fs";
 import { USAGE_JSON, writeJsonAtomic } from "./paths";
 import { getProviderCatalog } from "./models";
 
@@ -95,19 +96,33 @@ async function deadAccounts(storage: AuthStorage): Promise<DeadAccount[]> {
 		}));
 }
 
+/** Read the last successful probe so a transient failure does not erase usage state. */
+function cachedRoster(): Partial<UsageRoster> {
+	try {
+		const value: unknown = JSON.parse(readFileSync(USAGE_JSON, "utf8"));
+		return typeof value === "object" && value !== null ? value as Partial<UsageRoster> : {};
+	} catch {
+		return {};
+	}
+}
+
 /** Fetch all credential reports concurrently. A bounded signal keeps a dead provider from holding the roster request. */
 export async function refreshUsageRoster(storage: AuthStorage, signal?: AbortSignal): Promise<UsageRoster> {
 	const timeout = new AbortController();
 	const timer = setTimeout(() => timeout.abort(), 5_000);
+	const previous = cachedRoster();
 	if (signal) signal.addEventListener("abort", () => timeout.abort(), { once: true });
 	let reports: Awaited<ReturnType<NonNullable<AuthStorage["fetchUsageReports"]>>> = [];
+	let probeFailed = false;
 	try {
 		reports = (await storage.fetchUsageReports({ signal: timeout.signal })) ?? [];
 	} catch {
 		// Keep the roster usable when a provider probe times out.
+		probeFailed = true;
 	} finally {
 		clearTimeout(timer);
 	}
+	if (probeFailed && Array.isArray(previous.reports)) reports = previous.reports as typeof reports;
 	const reported = new Set(reports.map(report => {
 		const metadata = report.metadata as Record<string, unknown> | undefined;
 		return `${report.provider}\0${metadata?.email ?? metadata?.accountId ?? metadata?.account ?? ""}`;
@@ -131,7 +146,7 @@ export async function refreshUsageRoster(storage: AuthStorage, signal?: AbortSig
 			const { raw: _raw, ...rest } = report as unknown as UsageRosterEntry & { raw?: unknown };
 			return rest as UsageRosterEntry;
 		}),
-		dead: await deadAccounts(storage),
+		dead: probeFailed && Array.isArray(previous.dead) ? previous.dead : await deadAccounts(storage),
 	};
 	writeJsonAtomic(USAGE_JSON, roster);
 	return roster;

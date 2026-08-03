@@ -13,6 +13,7 @@ describe("usage roster refresh", () => {
 			paths.writeJsonAtomic(paths.USAGE_JSON, {
 				generatedAt: "2020-01-01T00:00:00.000Z",
 				accounts: [],
+				dead: [{ id: 7, provider: "anthropic", email: "dead@example.com", accountId: null, cause: "invalid_grant", disabledAtMs: 1 }],
 				reports: [{ provider: "anthropic", metadata: { email: "cached@example.com" }, limits: [] }],
 			});
 			const { refreshUsageRoster } = await import("../src/usage");
@@ -23,6 +24,7 @@ describe("usage roster refresh", () => {
 			const roster = await refreshUsageRoster(storage);
 			expect(roster.reports).toHaveLength(1);
 			expect(roster.reports[0]?.metadata).toEqual({ email: "cached@example.com" });
+			expect(roster.dead).toEqual([{ id: 7, provider: "anthropic", email: "dead@example.com", accountId: null, cause: "invalid_grant", disabledAtMs: 1 }]);
 
 			const apiRoster = await refreshUsageRoster({
 				exportSnapshot: () => ({ credentials: [{ id: 1, provider: "anthropic", credential: { type: "api", key: "secret" } }] }),
