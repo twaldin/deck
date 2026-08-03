@@ -49,10 +49,9 @@ export function assessCi(checkRuns: CheckRun[]): CiState {
 }
 
 /**
- * Reviewers whose last activity predates the last push and who are not
- * currently in requested_reviewers: these are the silent no-ops the SOP
- * calls out. Bots and reviewers whose latest state is APPROVED after the
- * push are excluded.
+ * Reviewers that need a new request after a push. Only stale changes
+ * requests and reviewers with no review decision are eligible. Approved,
+ * commented, and dismissed reviewers are not re-requested.
  */
 export function reviewersNeedingReRequest(
 	reviewers: ReviewerActivity[],
@@ -76,10 +75,10 @@ export function reviewersNeedingReRequest(
 			if (reviewer.lastActivityAt < lastPushAt || !requested.has(login)) out.push(reviewer.login);
 			continue;
 		}
-		if (requested.has(login)) continue;
-		// Activity after the last push means they have seen the current head.
-		if (reviewer.lastActivityAt >= lastPushAt) continue;
-		out.push(reviewer.login);
+		// A reviewer with no decision may be silent, so request them only when
+		// their activity predates the push. Never reset an existing decision.
+		if (reviewer.lastReviewState !== null || requested.has(login)) continue;
+		if (reviewer.lastActivityAt < lastPushAt) out.push(reviewer.login);
 	}
 	return out;
 }
