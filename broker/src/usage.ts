@@ -145,6 +145,8 @@ export async function refreshUsageRoster(storage: AuthStorage, signal?: AbortSig
 		accounts.push({ id: -1, provider: provider.id, email: null, accountId: null, status: "not logged in" });
 	}
 	const currentDead = await deadAccounts(storage);
+	const preservedDead = probeFailed && Array.isArray(previous.dead) ? previous.dead : [];
+	const dead = currentDead === null ? preservedDead : [...currentDead, ...preservedDead.filter(previousEntry => !currentDead.some(currentEntry => currentEntry.id === previousEntry.id))];
 	const roster: UsageRoster = {
 		generatedAt: new Date().toISOString(),
 		accounts,
@@ -152,7 +154,7 @@ export async function refreshUsageRoster(storage: AuthStorage, signal?: AbortSig
 			const { raw: _raw, ...rest } = report as unknown as UsageRosterEntry & { raw?: unknown };
 			return rest as UsageRosterEntry;
 		}),
-		dead: currentDead ?? (probeFailed && Array.isArray(previous.dead) ? previous.dead : []),
+		dead,
 	};
 	writeJsonAtomic(USAGE_JSON, roster);
 	return roster;
