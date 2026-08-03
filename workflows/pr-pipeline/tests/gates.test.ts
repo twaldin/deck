@@ -377,6 +377,19 @@ describe("watch helpers", () => {
 		expect(assessCi([{ name: "a", status: "completed", conclusion: "timed_out" }])).toBe("red");
 		expect(
 			assessCi([
+				{ name: "claude", workflowName: "Claude Code", status: "completed", conclusion: "skipped", completedAt: "2026-07-30T10:00:00Z" },
+				{ name: "ci", workflowName: "CI", status: "completed", conclusion: "cancelled", completedAt: "2026-07-30T11:00:00Z" },
+				{ name: "ci", workflowName: "CI", status: "completed", conclusion: "success", completedAt: "2026-07-30T12:00:00Z" },
+			]),
+		).toBe("green");
+		expect(
+			assessCi([
+				{ name: "ci", workflowName: "CI", status: "completed", conclusion: "cancelled", completedAt: "2026-07-30T11:00:00Z" },
+				{ name: "ci", workflowName: "CI", status: "completed", conclusion: "failure", completedAt: "2026-07-30T12:00:00Z" },
+			]),
+		).toBe("red");
+		expect(
+			assessCi([
 				{ name: "a", status: "completed", conclusion: "success" },
 				{ name: "b", status: "completed", conclusion: "failure" },
 			]),

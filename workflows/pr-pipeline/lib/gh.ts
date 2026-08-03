@@ -126,10 +126,14 @@ export function parseCheckRuns(payload: unknown): CheckRun[] {
 	const runs: CheckRun[] = [];
 	for (const raw of payload.check_runs) {
 		if (!isRecord(raw)) continue;
+		const workflowName = isRecord(raw.check_suite) ? str(raw.check_suite.workflow_name) : "";
+		const completedAt = raw.completed_at === null ? null : str(raw.completed_at);
 		runs.push({
 			name: str(raw.name),
+			...(workflowName !== "" ? { workflowName } : {}),
 			status: str(raw.status),
 			conclusion: raw.conclusion === null ? null : str(raw.conclusion),
+			...(completedAt !== "" ? { completedAt } : {}),
 		});
 	}
 	return runs;
