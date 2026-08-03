@@ -122,7 +122,7 @@ export async function refreshUsageRoster(storage: AuthStorage, signal?: AbortSig
 	} finally {
 		clearTimeout(timer);
 	}
-	if (probeFailed && Array.isArray(previous.reports)) reports = previous.reports as typeof reports;
+	if (probeFailed && Array.isArray(previous.reports)) reports = previous.reports as unknown as typeof reports;
 	const reportIdentifiers = (report: { metadata?: unknown }): Set<string> => {
 		const metadata = report.metadata as Record<string, unknown> | undefined;
 		const scope = metadata?.scope as Record<string, unknown> | undefined;
