@@ -23,6 +23,12 @@ describe("usage roster refresh", () => {
 			const roster = await refreshUsageRoster(storage);
 			expect(roster.reports).toHaveLength(1);
 			expect(roster.reports[0]?.metadata).toEqual({ email: "cached@example.com" });
+
+			const apiRoster = await refreshUsageRoster({
+				exportSnapshot: () => ({ credentials: [{ id: 1, provider: "anthropic", credential: { type: "api", key: "secret" } }] }),
+				fetchUsageReports: async () => [{ provider: "anthropic", metadata: { account: "acct-key" }, limits: [] }],
+			} as any);
+			expect(apiRoster.accounts.find(account => account.id === 1)?.status).toBe("reported");
 		} finally {
 			rmSync(home, { recursive: true, force: true });
 		}
