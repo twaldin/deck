@@ -28,12 +28,15 @@ describe("test lane command", () => {
 		} finally { fs.rmSync(path.dirname(lock), { recursive: true, force: true }); }
 	});
 
-	test("reclaims a lock directory with no pid file", async () => {
+	test("reclaims old pid-less locks but preserves fresh ones", async () => {
 		const lock = fs.mkdtempSync(path.join(os.tmpdir(), "deck-lane-")) + "/lock";
 		fs.mkdirSync(`${lock}.0`);
 		try {
 			expect(await run(testLaneCommand("true", lock))).toBe(0);
-		expect(fs.existsSync(`${lock}.0`)).toBe(false);
+			expect(fs.existsSync(`${lock}.0`)).toBe(true);
+			fs.utimesSync(`${lock}.0`, new Date(0), new Date(0));
+			expect(await run(testLaneCommand("true", lock))).toBe(0);
+			expect(fs.existsSync(`${lock}.0`)).toBe(false);
 		} finally { fs.rmSync(path.dirname(lock), { recursive: true, force: true }); }
 	});
 });
