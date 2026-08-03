@@ -5,9 +5,10 @@ import { join } from "node:path";
 import { createConnection } from "node:net";
 
 export type UsageTheme = { fg: (key: string, text: string) => string; bold: (text: string) => string };
-export type UsageAccount = { provider?: string; email?: string | null; accountId?: string | null; id?: number; blocks?: Array<{ blockedUntilMs?: number }> };
+export type UsageAccount = { provider?: string; email?: string | null; accountId?: string | null; id?: number; status?: string; blocks?: Array<{ blockedUntilMs?: number }> };
 /** An account the broker tore down: its OAuth grant is gone until the captain logs in again. */
 export type DeadAccount = { id?: number; provider?: string; email?: string | null; accountId?: string | null; cause?: string; disabledAtMs?: number | null };
+export type UsageProvider = { id?: string; needsAuth?: boolean; name?: string };
 export type UsageRoster = {
 	generatedAt?: string;
 	accounts?: UsageAccount[];
@@ -29,6 +30,7 @@ export type UsageRoster = {
 
 const PLAIN: UsageTheme = { fg: (_key, text) => text, bold: (text) => text };
 const BAR_WIDTH = 6;
+const BROKER_STATUS_TIMEOUT_MS = 7_000;
 
 type UsageLimit = {
 	id?: string;
@@ -88,7 +90,7 @@ export async function readLiveControlAccounts(home = homedir()): Promise<UsageAc
 		const socket = createConnection(join(base, "run", "broker.sock"));
 		return await new Promise<UsageAccount[]>((resolve, reject) => {
 			let buffer = "";
-			const timer = setTimeout(() => { socket.destroy(); reject(new Error("broker status timeout")); }, 2000);
+			const timer = setTimeout(() => { socket.destroy(); reject(new Error("broker status timeout")); }, BROKER_STATUS_TIMEOUT_MS);
 			socket.on("connect", () => socket.write(`${JSON.stringify({ id: "deck-usage", cap, op: "status" })}\n`));
 			socket.on("data", chunk => {
 				buffer += chunk.toString();
@@ -98,8 +100,11 @@ export async function readLiveControlAccounts(home = homedir()): Promise<UsageAc
 				if (!line) return;
 				clearTimeout(timer); socket.destroy();
 				try {
-					const response = JSON.parse(line) as { ok?: boolean; data?: { accounts?: UsageAccount[] } };
-					if (!response.ok) reject(new Error("broker status failed")); else resolve(response.data?.accounts ?? []);
+					const response = JSON.parse(line) as { ok?: boolean; data?: { accounts?: UsageAccount[]; providers?: UsageProvider[] } };
+					if (!response.ok) reject(new Error("broker status failed")); else resolve([
+						...(response.data?.accounts ?? []),
+						...(response.data?.providers ?? []).filter(provider => provider.needsAuth).map(provider => ({ provider: provider.id, status: "not logged in" })),
+					]);
 				} catch (error) {
 					reject(error instanceof Error ? error : new Error("broker status parse failed"));
 				}

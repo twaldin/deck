@@ -1771,7 +1771,12 @@ export function buildFactoryText(
 
 export function buildUsageText(roster: import("./usage-roster").UsageRoster | null, theme: FleetTheme = PLAIN_FLEET_THEME): string {
 	if (roster === null) return "deck usage\n\nNo broker roster available.";
-	const lines = [theme.bold(theme.fg("accent", "deck usage"))];
+	const age = roster.generatedAt ? Math.max(0, Math.round((Date.now() - Date.parse(roster.generatedAt)) / 1000)) : null;
+	const lines = [theme.bold(theme.fg("accent", "deck usage")), ...(age === null ? [] : [theme.fg("dim", `as of ${age}s ago`)])];
+	for (const account of roster.accounts ?? []) {
+		if (account.status === "not logged in") lines.push("", `${account.provider ?? "?"} · not logged in`);
+		else if (account.status === "no usage API") lines.push("", `${account.email ?? account.accountId ?? account.provider ?? "unknown account"} · ${account.provider ?? "?"}: no usage API`);
+	}
 	for (const report of roster.reports ?? []) {
 		const identity = report.metadata?.email ?? report.metadata?.accountId ?? report.metadata?.account;
 		const account = (roster.accounts ?? []).find((candidate) => candidate.email === identity || candidate.accountId === identity || candidate.provider === report.provider);

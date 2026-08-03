@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { buildUsageText } from "../src/fleet";
 import { usageStatusLine, type UsageRoster } from "../src/usage-roster";
 
 describe("footer usage roster", () => {
@@ -48,6 +49,31 @@ describe("footer usage roster", () => {
 		expect(line).toContain("7d █░░░░░ 20%");
 		expect(line).toContain("credits █████░ 90%");
 		expect(line).toContain("other ██░░░░ 30%");
+	});
+
+	test("renders account statuses and roster age", () => {
+		const text = buildUsageText({
+			generatedAt: new Date(Date.now() - 12_000).toISOString(),
+			accounts: [
+				{ provider: "anthropic", email: "reported@example.com", status: "reported" },
+				{ provider: "openai", email: "missing@example.com", status: "no usage API" },
+				{ provider: "xai", status: "not logged in" },
+			],
+			reports: [{ provider: "anthropic", metadata: { email: "reported@example.com" }, limits: [] }],
+		});
+		expect(text).toMatch(/as of 1[0-4]s ago/);
+		expect(text).toContain("missing@example.com · openai: no usage API");
+		expect(text).toContain("xai · not logged in");
+		expect(text).not.toContain("reported@example.com · anthropic: no usage API");
+	});
+
+	test("trusts reported account status even when report identity differs", () => {
+		const text = buildUsageText({
+			accounts: [{ provider: "api-key-provider", status: "reported" }],
+			reports: [{ provider: "api-key-provider", metadata: { account: "key" }, limits: [] }],
+		});
+		expect(text).not.toContain("no usage API");
+		expect(text).toContain("key · api-key-provider");
 	});
 
 	test("returns empty for a missing or empty roster", () => {

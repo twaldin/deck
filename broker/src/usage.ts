@@ -8,7 +8,9 @@
  */
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
 import { isInvalidatedOAuthTokenError } from "@oh-my-pi/pi-ai/error";
+import { readFileSync } from "node:fs";
 import { USAGE_JSON, writeJsonAtomic } from "./paths";
+import { getProviderCatalog } from "./models";
 
 export interface UsageRosterEntry {
 	provider: string;
@@ -30,8 +32,17 @@ export interface DeadAccount {
 	disabledAtMs: number | null;
 }
 
+export interface UsageRosterAccount {
+	id: number;
+	provider: string;
+	email: string | null;
+	accountId: string | null;
+	status: "reported" | "no usage API" | "not logged in";
+}
+
 export interface UsageRoster {
 	generatedAt: string;
+	accounts: UsageRosterAccount[];
 	reports: UsageRosterEntry[];
 	/** Auth-dead accounts: re-login required. Empty when every grant is live. */
 	dead: DeadAccount[];
@@ -66,12 +77,12 @@ export function shortCause(cause: string): string {
 	return firstLine.length > MAX_CAUSE_CHARS ? `${firstLine.slice(0, MAX_CAUSE_CHARS)}\u2026` : firstLine;
 }
 
-async function deadAccounts(storage: AuthStorage): Promise<DeadAccount[]> {
+async function deadAccounts(storage: AuthStorage): Promise<DeadAccount[] | null> {
 	let tombstones: Awaited<ReturnType<AuthStorage["listDisabledCredentials"]>>;
 	try {
 		tombstones = await storage.listDisabledCredentials();
 	} catch {
-		return []; // a store without tombstones must not fail the roster
+		return null; // a store without tombstones must not fail the roster
 	}
 	return tombstones
 		.filter(row => isAuthDeadCause(row.cause))
@@ -85,16 +96,70 @@ async function deadAccounts(storage: AuthStorage): Promise<DeadAccount[]> {
 		}));
 }
 
-/** Fetch (cache-served when warm), strip raw, persist atomically. Returns the roster. */
-export async function refreshUsageRoster(storage: AuthStorage, signal?: AbortSignal): Promise<UsageRoster> {
-	const reports = (await storage.fetchUsageReports({ signal })) ?? [];
+/** Read the last successful probe so a transient failure does not erase usage state. */
+function cachedRoster(): Partial<UsageRoster> {
+	try {
+		const value: unknown = JSON.parse(readFileSync(USAGE_JSON, "utf8"));
+		return typeof value === "object" && value !== null ? value as Partial<UsageRoster> : {};
+	} catch {
+		return {};
+	}
+}
+
+/** Fetch all credential reports concurrently. A bounded signal keeps a dead provider from holding the roster request. */
+export async function refreshUsageRoster(storage: AuthStorage, signal?: AbortSignal, options: { allowCachedProbeFailure?: boolean } = {}): Promise<UsageRoster> {
+	const timeout = new AbortController();
+	const allowCachedProbeFailure = options.allowCachedProbeFailure ?? true;
+	const timer = setTimeout(() => timeout.abort(), 5_000);
+	const previous = cachedRoster();
+	if (signal) signal.addEventListener("abort", () => timeout.abort(), { once: true });
+	let reports: Awaited<ReturnType<NonNullable<AuthStorage["fetchUsageReports"]>>> = [];
+	let probeFailed = false;
+	try {
+		reports = (await storage.fetchUsageReports({ signal: timeout.signal })) ?? [];
+	} catch {
+		// Keep the roster usable when a provider probe times out.
+		probeFailed = true;
+	} finally {
+		clearTimeout(timer);
+	}
+	if (probeFailed) {
+		if (!allowCachedProbeFailure) throw new Error("usage probe failed");
+		if (!Array.isArray(previous.reports)) throw new Error("usage probe failed with no cached roster");
+		reports = previous.reports as unknown as typeof reports;
+	}
+	const reportIdentifiers = (report: { metadata?: unknown }): Set<string> => {
+		const metadata = report.metadata as Record<string, unknown> | undefined;
+		const scope = metadata?.scope as Record<string, unknown> | undefined;
+		return new Set([metadata?.email, metadata?.accountId, metadata?.account, metadata?.user, metadata?.username, scope?.accountId]
+			.filter((value): value is string => typeof value === "string" && value.length > 0));
+	};
+	const credentials = storage.exportSnapshot().credentials;
+	const accounts: UsageRosterAccount[] = credentials.map(entry => {
+		const credential = entry.credential;
+		const email = credential.type === "oauth" ? (credential.email ?? null) : null;
+		const accountId = credential.type === "oauth" ? (credential.accountId ?? null) : null;
+		const identifiers = new Set([email, accountId].filter((value): value is string => value !== null));
+		const isReported = reports.some(report => report.provider === entry.provider &&
+			(identifiers.size === 0 || [...reportIdentifiers(report)].some(identifier => identifiers.has(identifier))));
+		return { id: entry.id, provider: entry.provider, email, accountId,
+			status: isReported ? "reported" : "no usage API" };
+	});
+	const loggedIn = new Set(credentials.map(entry => entry.provider));
+	for (const provider of getProviderCatalog(loggedIn).filter(entry => entry.needsAuth)) {
+		accounts.push({ id: -1, provider: provider.id, email: null, accountId: null, status: "not logged in" });
+	}
+	const currentDead = await deadAccounts(storage);
+	const preservedDead = (probeFailed || currentDead === null) && Array.isArray(previous.dead) ? previous.dead : [];
+	const dead = currentDead === null ? preservedDead : [...currentDead, ...preservedDead.filter(previousEntry => !currentDead.some(currentEntry => currentEntry.id === previousEntry.id))];
 	const roster: UsageRoster = {
-		generatedAt: new Date().toISOString(),
+		generatedAt: probeFailed && typeof previous.generatedAt === "string" ? previous.generatedAt : new Date().toISOString(),
+		accounts,
 		reports: reports.map(report => {
 			const { raw: _raw, ...rest } = report as unknown as UsageRosterEntry & { raw?: unknown };
 			return rest as UsageRosterEntry;
 		}),
-		dead: await deadAccounts(storage),
+		dead,
 	};
 	writeJsonAtomic(USAGE_JSON, roster);
 	return roster;
