@@ -35,6 +35,10 @@ export function assessCi(checkRuns: CheckRun[]): CiState {
 		if (conclusion !== "cancelled") continue;
 
 		const workflow = run.workflowName ?? run.name;
+		if (checkRuns.some((candidate) => candidate.status !== "completed" && (candidate.workflowName ?? candidate.name) === workflow)) {
+			pending = true;
+			continue;
+		}
 		const newest = checkRuns
 			.filter((candidate) => candidate.status === "completed" && (candidate.workflowName ?? candidate.name) === workflow)
 			.sort((a, b) => (b.completedAt ?? "").localeCompare(a.completedAt ?? ""))[0];
