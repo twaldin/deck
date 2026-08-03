@@ -380,6 +380,7 @@ describe("watch helpers", () => {
 				{ name: "claude", workflowName: "Claude Code", status: "completed", conclusion: "skipped", completedAt: "2026-07-30T10:00:00Z" },
 				{ name: "ci", workflowName: "CI", status: "completed", conclusion: "cancelled", completedAt: "2026-07-30T11:00:00Z" },
 				{ name: "ci", workflowName: "CI", status: "completed", conclusion: "success", completedAt: "2026-07-30T12:00:00Z" },
+				{ name: "ci", workflowName: "CI", status: "completed", conclusion: "cancelled", completedAt: "2026-07-30T11:00:00Z" },
 			]),
 		).toBe("green");
 		expect(
