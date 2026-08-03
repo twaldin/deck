@@ -21,7 +21,7 @@ function clean(value: string): string {
 export function generatePullRequestDescription(input: PullRequestDescriptionInput): string {
 	const acceptance = input.brief.acceptanceCriteria.map((criterion) => `- ${clean(criterion)}`).join("\n");
 	const source = [input.brief.summary, ...input.brief.acceptanceCriteria, input.testing ?? ""].join(" ");
-	const pipelineNote = /pipeline\\.tsx/i.test(source)
+	const pipelineNote = /pipeline\.tsx/i.test(source)
 		? "Editing pipeline.tsx kills resume of in-flight Smithers runs (RESUME_METADATA_MISMATCH); the orchestrator must recut after merge."
 		: "";
 	return [
