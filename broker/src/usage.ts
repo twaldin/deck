@@ -123,17 +123,22 @@ export async function refreshUsageRoster(storage: AuthStorage, signal?: AbortSig
 		clearTimeout(timer);
 	}
 	if (probeFailed && Array.isArray(previous.reports)) reports = previous.reports as typeof reports;
-	const reported = new Set(reports.map(report => {
+	const reportIdentifiers = (report: { metadata?: unknown }): Set<string> => {
 		const metadata = report.metadata as Record<string, unknown> | undefined;
-		return `${report.provider}\0${metadata?.email ?? metadata?.accountId ?? metadata?.account ?? ""}`;
-	}));
+		const scope = metadata?.scope as Record<string, unknown> | undefined;
+		return new Set([metadata?.email, metadata?.accountId, metadata?.account, metadata?.user, metadata?.username, scope?.accountId]
+			.filter((value): value is string => typeof value === "string" && value.length > 0));
+	};
 	const credentials = storage.exportSnapshot().credentials;
 	const accounts: UsageRosterAccount[] = credentials.map(entry => {
 		const credential = entry.credential;
 		const email = credential.type === "oauth" ? (credential.email ?? null) : null;
 		const accountId = credential.type === "oauth" ? (credential.accountId ?? null) : null;
+		const identifiers = new Set([email, accountId].filter((value): value is string => value !== null));
+		const isReported = reports.some(report => report.provider === entry.provider &&
+			(identifiers.size === 0 || [...reportIdentifiers(report)].some(identifier => identifiers.has(identifier))));
 		return { id: entry.id, provider: entry.provider, email, accountId,
-			status: reported.has(`${entry.provider}\0${email ?? accountId ?? ""}`) ? "reported" : "no usage API" };
+			status: isReported ? "reported" : "no usage API" };
 	});
 	const loggedIn = new Set(credentials.map(entry => entry.provider));
 	for (const provider of getProviderCatalog(loggedIn).filter(entry => entry.needsAuth)) {
