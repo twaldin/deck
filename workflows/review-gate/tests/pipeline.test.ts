@@ -24,9 +24,10 @@ test("polls the captain review-request queue programmatically", () => {
 
 test("gate has a hard no-approval rule and verifies state before queueing", () => {
   expect(source).toContain("NEVER run any GitHub approve command");
-  expect(source).not.toMatch(/gh[^\n]*approve/);
-  expect(source).toContain("checked?.mergeable === true && checked?.ciGreen === true");
-  expect(source).toContain('questionKind: "stamp"');
+  expect(source).not.toContain('"--approve"');
+  expect(source).not.toMatch(/"pr",\s*"merge"/);
+  expect(source).toContain("mergeStateStatus");
+  expect(source).toContain('questionKind: clean ? "approve" : "agent"');
 });
 
 test("blockers dispatch a fix and rebase is an agent task", () => {
@@ -37,8 +38,24 @@ test("blockers dispatch a fix and rebase is an agent task", () => {
   expect(source).toContain("Load the exact skills .agent/skills/sathiras-gate");
 });
 
+test("each blocker round posts findings and requests changes", () => {
+  expect(source).toContain('"pr", "comment"');
+  expect(source).toContain('"pr", "review"');
+  expect(source).toContain('"--request-changes"');
+  expect(source).toContain("— Tim's agent");
+  expect(source).toContain("Blockers remain");
+});
+
+test("clean and exhausted rounds use different captain decisions without self-approval", () => {
+  expect(source).toContain('maxIterations={rounds}');
+  expect(source).toContain('Math.min(input.limits?.rounds ?? 3, 3)');
+  expect(source).toContain('questionKind: clean ? "approve" : "agent"');
+  expect(source).toContain('options: clean ? ["Approve", "Hold"] : ["Hold", "Close PR"]');
+  expect(source).not.toMatch(/\["pr", "review"[^\n]*"--approve"/);
+});
+
 test("polling and every requested PR are durable workflow paths", () => {
   expect(source).toContain('maxIterations={polls}');
-  expect(source).toContain("prs.map(reviewPath)");
+  expect(source).toContain("reviewPrs.map((pr) =>");
   expect(source).toContain("pr.url");
 });

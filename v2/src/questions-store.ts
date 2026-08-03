@@ -19,13 +19,53 @@ import { deckV2Home } from "./home";
 
 export type Urgency = "low" | "normal" | "high";
 export type QuestionStatus = "open" | "answered" | "dismissed";
-export type QuestionKind = "agent" | "stamp";
+export type QuestionKind = "agent" | "stamp" | "approve";
+export type QuestionOrigin = "fleet" | "review-gate";
+
+/** PR evidence shown with a captain stamp or approval decision. */
+export interface PrQuestionContext {
+	prUrl?: string;
+	prRepo?: string;
+	prNumber?: number;
+	headSha?: string;
+	prTitle?: string;
+	originalIssue?: string;
+	ourFix?: string;
+	whyCorrect?: string;
+	ciState?: string;
+	mergeStateStatus?: string;
+}
+
+function boundedPrContext(value: PrQuestionContext | undefined): PrQuestionContext | undefined {
+	if (value === undefined) return undefined;
+	const text = (item: string | undefined, bytes: number): string | undefined =>
+		item === undefined ? undefined : truncateBytes(item.replace(/[\r\n]+/g, " "), bytes);
+	return {
+		prUrl: text(value.prUrl, 500),
+		prRepo: text(value.prRepo, 200),
+		prNumber: value.prNumber,
+		headSha: text(value.headSha, 100),
+		prTitle: text(value.prTitle, 500),
+		originalIssue: text(value.originalIssue, 800),
+		ourFix: text(value.ourFix, 800),
+		whyCorrect: text(value.whyCorrect, 1400),
+		ciState: text(value.ciState, 200),
+		mergeStateStatus: text(value.mergeStateStatus, 100),
+	};
+}
 
 export interface AskEvent {
 	kind: "ask";
 	id: string;
 	/** The queue kind is presentation-neutral: stamps are captain questions. */
 	questionKind?: QuestionKind;
+	/** Reserved provenance for privileged captain actions. Agent tools cannot set this. */
+	origin?: QuestionOrigin;
+	/** Structured PR context is rendered before the free-form question. */
+	prContext?: PrQuestionContext;
+	/** Gate questions can be terminal without waking a vanished worker session. */
+	deliverAnswer?: boolean;
+	actions?: Array<"stamp" | "approve" | "hold" | "close-pr" | "deny-gate" | null>;
 	question: string;
 	context?: string;
 	options?: string[];
@@ -165,6 +205,21 @@ export function readQuestions(file: string): Question[] {
 	return [...byId.values()];
 }
 
+/** Reads live queue state plus archived terminal entries for durable idempotency checks. */
+export function readQuestionHistory(file: string): Question[] {
+	const byId = new Map(readQuestions(file).map((entry) => [entry.id, entry]));
+	try {
+		for (const line of readFileSync(path.join(path.dirname(file), "archive.jsonl"), "utf8").split("\n")) {
+			if (line.trim() === "") continue;
+			try {
+				const entry = JSON.parse(line) as Question;
+				if (typeof entry.id === "string" && !byId.has(entry.id)) byId.set(entry.id, entry);
+			} catch { /* one damaged archive entry must not hide the rest */ }
+		}
+	} catch { /* no archive yet */ }
+	return [...byId.values()];
+}
+
 function pick(existing: Question | undefined): Partial<Question> {
 	if (existing === undefined) return {};
 	return {
@@ -185,6 +240,10 @@ export function ask(
 	input: {
 		id?: string;
 		questionKind?: QuestionKind;
+		origin?: QuestionOrigin;
+		prContext?: PrQuestionContext;
+		deliverAnswer?: boolean;
+		actions?: Array<"stamp" | "approve" | "hold" | "close-pr" | "deny-gate" | null>;
 		question: string;
 		context?: string;
 		options?: string[];
@@ -215,6 +274,10 @@ export function ask(
 					? supplied
 					: `${input.sessionId}:${supplied}`, 
 		...(input.questionKind === undefined ? {} : { questionKind: input.questionKind }),
+		...(input.origin === undefined ? {} : { origin: input.origin }),
+		...(input.prContext === undefined ? {} : { prContext: boundedPrContext(input.prContext) }),
+		...(input.deliverAnswer === undefined ? {} : { deliverAnswer: input.deliverAnswer }),
+		...(input.actions === undefined ? {} : { actions: input.actions }),
 		question,
 		...(input.context === undefined ? {} : { context: input.context }),
 		...(input.options === undefined || input.options.length === 0
@@ -314,7 +377,7 @@ export function pendingAnswersFor(file: string, sessionId: string): Question[] {
 	return readQuestions(file)
 		.filter(
 			(entry) =>
-				entry.sessionId === sessionId && entry.status !== "open" && !entry.delivered,
+				entry.sessionId === sessionId && entry.status !== "open" && entry.deliverAnswer !== false && !entry.delivered,
 		)
 		.sort((a, b) => (a.answeredAt ?? 0) - (b.answeredAt ?? 0));
 }
@@ -333,7 +396,7 @@ export const STALE_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
  * (firstmate-era records) can never age out, so it goes immediately.
  */
 function isLive(entry: Question, now: number): boolean {
-	if (entry.status !== "open") return !entry.delivered;
+	if (entry.status !== "open") return entry.deliverAnswer === false ? false : !entry.delivered;
 	if (typeof entry.askedAt !== "number" || !Number.isFinite(entry.askedAt)) return false;
 	return now - entry.askedAt <= STALE_AFTER_MS;
 }
@@ -376,11 +439,13 @@ export function compact(file: string, now = Date.now()): { kept: number; archive
 	if (drop.length === 0) return { kept: keep.length, archived: 0 };
 	const dir = path.dirname(file);
 	mkdirSync(dir, { recursive: true, mode: 0o700 });
-	appendFileSync(
-		path.join(dir, "archive.jsonl"),
-		`${drop.map((entry) => JSON.stringify(entry)).join("\n")}\n`,
-		{ encoding: "utf8", mode: 0o600 },
-	);
+	const archive = path.join(dir, "archive.jsonl");
+	appendFileSync(archive, `${drop.map((entry) => JSON.stringify(entry)).join("\n")}\n`, { encoding: "utf8", mode: 0o600 });
+	try {
+		const archiveLines = readFileSync(archive, "utf8").split("\n").filter(Boolean);
+		const keptArchive = archiveLines.slice(-2000);
+		if (keptArchive.length !== archiveLines.length) writeFileSync(archive, `${keptArchive.join("\n")}\n`, { encoding: "utf8", mode: 0o600 });
+	} catch { /* The live queue remains authoritative if archive maintenance fails. */ }
 	const tmp = `${file}.tmp`;
 	const body = keep.flatMap(eventLines).join("\n");
 	writeFileSync(tmp, body === "" ? "" : `${body}\n`, { encoding: "utf8", mode: 0o600 });
