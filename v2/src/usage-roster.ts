@@ -30,6 +30,7 @@ export type UsageRoster = {
 
 const PLAIN: UsageTheme = { fg: (_key, text) => text, bold: (text) => text };
 const BAR_WIDTH = 6;
+const BROKER_STATUS_TIMEOUT_MS = 7_000;
 
 type UsageLimit = {
 	id?: string;
@@ -89,7 +90,7 @@ export async function readLiveControlAccounts(home = homedir()): Promise<UsageAc
 		const socket = createConnection(join(base, "run", "broker.sock"));
 		return await new Promise<UsageAccount[]>((resolve, reject) => {
 			let buffer = "";
-			const timer = setTimeout(() => { socket.destroy(); reject(new Error("broker status timeout")); }, 2000);
+			const timer = setTimeout(() => { socket.destroy(); reject(new Error("broker status timeout")); }, BROKER_STATUS_TIMEOUT_MS);
 			socket.on("connect", () => socket.write(`${JSON.stringify({ id: "deck-usage", cap, op: "status" })}\n`));
 			socket.on("data", chunk => {
 				buffer += chunk.toString();
