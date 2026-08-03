@@ -32,6 +32,7 @@ export function generatePullRequestDescription(input: PullRequestDescriptionInpu
 		"",
 		"## Notes",
 		acceptance || "No additional notes.",
+		"Editing pipeline.tsx kills resume of in-flight Smithers runs (RESUME_METADATA_MISMATCH); the orchestrator must recut after merge.",
 		input.reviewOutcome ? `\n${clean(input.reviewOutcome)}` : "",
 	].join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
