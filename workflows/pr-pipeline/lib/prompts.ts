@@ -135,7 +135,7 @@ export function watchFixPrompt(args: {
 
 		"4. Hard-red CI: flake -> rerun; trivial/correctness fix -> commit + push. Product/decision-class",
 		"   failures are NOT yours - describe them in the summary instead of guessing.",
-		"5. If you pushed changes, re-request ONLY the logins in the machine poll state's reviewersNeedingReRequest list.",
+		"5. If you pushed changes, re-request ONLY the logins in the machine poll state's reviewersToReRequest list.",
 		"   Never re-request a reviewer whose latest state is APPROVED, COMMENTED, or DISMISSED; do not use a blanket prior-reviewer list.",
 		`   For each eligible login, run: \`${args.gh} api repos/${args.repo}/pulls/${args.prNumber}/requested_reviewers -f 'reviewers[]=LOGIN'\``,
 		"   (the requested_reviewers API is verified by the next poll - silent no-ops are caught).",

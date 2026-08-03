@@ -461,7 +461,7 @@ describe("watch fix worker boundary", () => {
 		expect(prompt).toContain("fetch origin/main");
 		expect(prompt).toContain("force-with-lease");
 		expect(prompt).toContain("Never sleep-poll CI or review state");
-		expect(prompt).toContain("reviewersNeedingReRequest list");
+		expect(prompt).toContain("reviewersToReRequest list");
 		expect(prompt).toContain("Never re-request a reviewer whose latest state is APPROVED");
 		expect(prompt).not.toContain("re-request every prior human reviewer");
 		expect(prompt).toContain("persisted Smithers poll owns the wait");
