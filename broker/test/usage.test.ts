@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -25,7 +25,17 @@ describe("usage roster refresh", () => {
 			const roster = await refreshUsageRoster(storage);
 			expect(roster.reports).toHaveLength(1);
 			expect(roster.reports[0]?.metadata).toEqual({ email: "cached@example.com" });
+			expect(roster.generatedAt).toBe("2020-01-01T00:00:00.000Z");
 			expect(roster.dead).toEqual([{ id: 7, provider: "anthropic", email: "dead@example.com", accountId: null, cause: "invalid_grant", disabledAtMs: 1 }]);
+
+			rmSync(paths.USAGE_JSON, { force: true });
+			const noCacheStorage = {
+				exportSnapshot: () => ({ credentials: [{ id: 2, provider: "anthropic", credential: { type: "oauth", email: "offline@example.com", accountId: null } }] }),
+				fetchUsageReports: async () => { throw new Error("provider timeout"); },
+				listDisabledCredentials: async () => [],
+			} as any;
+			await expect(refreshUsageRoster(noCacheStorage)).rejects.toThrow("usage probe failed");
+			expect(existsSync(paths.USAGE_JSON)).toBe(false);
 
 			const apiRoster = await refreshUsageRoster({
 				exportSnapshot: () => ({ credentials: [{ id: 1, provider: "anthropic", credential: { type: "api", key: "secret" } }] }),

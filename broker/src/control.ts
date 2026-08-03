@@ -193,7 +193,7 @@ export function startControlSocket(sockPath: string, deps: ControlDeps): { close
 			switch (op) {
 				case "status": {
 					const accounts = describeAccounts(deps.storage, deps.listBlocks);
-					const usage = await refreshUsageRoster(deps.storage).catch(error => {
+					const usage = await refreshUsageRoster(deps.storage, undefined, { allowCachedProbeFailure: false }).catch(error => {
 						console.error("broker status usage refresh failed:", error instanceof Error ? error.message : error);
 						return undefined;
 					});

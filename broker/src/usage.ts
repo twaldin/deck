@@ -107,8 +107,9 @@ function cachedRoster(): Partial<UsageRoster> {
 }
 
 /** Fetch all credential reports concurrently. A bounded signal keeps a dead provider from holding the roster request. */
-export async function refreshUsageRoster(storage: AuthStorage, signal?: AbortSignal): Promise<UsageRoster> {
+export async function refreshUsageRoster(storage: AuthStorage, signal?: AbortSignal, options: { allowCachedProbeFailure?: boolean } = {}): Promise<UsageRoster> {
 	const timeout = new AbortController();
+	const allowCachedProbeFailure = options.allowCachedProbeFailure ?? true;
 	const timer = setTimeout(() => timeout.abort(), 5_000);
 	const previous = cachedRoster();
 	if (signal) signal.addEventListener("abort", () => timeout.abort(), { once: true });
@@ -122,7 +123,11 @@ export async function refreshUsageRoster(storage: AuthStorage, signal?: AbortSig
 	} finally {
 		clearTimeout(timer);
 	}
-	if (probeFailed && Array.isArray(previous.reports)) reports = previous.reports as unknown as typeof reports;
+	if (probeFailed) {
+		if (!allowCachedProbeFailure) throw new Error("usage probe failed");
+		if (!Array.isArray(previous.reports)) throw new Error("usage probe failed with no cached roster");
+		reports = previous.reports as unknown as typeof reports;
+	}
 	const reportIdentifiers = (report: { metadata?: unknown }): Set<string> => {
 		const metadata = report.metadata as Record<string, unknown> | undefined;
 		const scope = metadata?.scope as Record<string, unknown> | undefined;
@@ -148,7 +153,7 @@ export async function refreshUsageRoster(storage: AuthStorage, signal?: AbortSig
 	const preservedDead = probeFailed && Array.isArray(previous.dead) ? previous.dead : [];
 	const dead = currentDead === null ? preservedDead : [...currentDead, ...preservedDead.filter(previousEntry => !currentDead.some(currentEntry => currentEntry.id === previousEntry.id))];
 	const roster: UsageRoster = {
-		generatedAt: new Date().toISOString(),
+		generatedAt: probeFailed && typeof previous.generatedAt === "string" ? previous.generatedAt : new Date().toISOString(),
 		accounts,
 		reports: reports.map(report => {
 			const { raw: _raw, ...rest } = report as unknown as UsageRosterEntry & { raw?: unknown };
