@@ -30,8 +30,10 @@ describe("stack owner", () => {
   });
 
   test("non-converging review stops with a max-adversarial wake", async () => {
-    const sim = simulate((await import("../pipeline.tsx")).default, { input: { ...baseInput, fixtures: { finding: "same blocker" }, limits: { adversarial: 2 } } });
+    const sim = simulate((await import("../pipeline.tsx")).default, { input: { ...baseInput, fixtures: { finding: "same blocker" } } });
     await sim.run();
+    expect((sim.outputs.review ?? []).length).toBe(2);
+    expect(sim.outputs.opened).toBeUndefined();
     expect((sim.outputs.result?.[0] as { done?: boolean } | undefined)?.done).toBe(false);
     expect(fs.readFileSync(wakeFiles().queue, "utf8")).toContain("max-adversarial");
   });
