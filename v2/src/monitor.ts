@@ -684,6 +684,7 @@ export async function buildFrame(
   for (const taskId of deckOwnedTasks()) {
     if (taskIds.has(taskId) || runs.some((run) => run.id === taskId)) continue;
     const candidateMeta = readMeta(taskId);
+    if (runs.length > 0 && candidateMeta?.worktree === undefined && candidateMeta?.run_id === undefined) continue;
     if (candidateMeta?.worktree !== undefined && taskByRoot.has(realpath(candidateMeta.worktree))) continue;
     const meta = readMeta(taskId);
     const event = lastEvent(taskId);
