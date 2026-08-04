@@ -22,7 +22,7 @@ const schemas = {
   fix: z.object({ fixed: z.boolean() }),
   reviewGate: z.object({ ok: z.boolean() }),
   wake: z.object({ action: z.string(), signal: z.string() }),
-  poll: z.object({ signal: z.enum(["ci-fail", "actionable-comment", "decision-ask", "idle", "complete"]), reason: z.string() }),
+  poll: z.object({ signal: z.enum(["ci-fail", "actionable-comment", "decision-ask", "idle", "exhausted", "complete"]), reason: z.string() }),
   result: z.object({ done: z.boolean(), summary: z.string() }),
 };
 const { outputs, smithers } = createSmithers(schemas);
@@ -31,7 +31,7 @@ const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export default smithers((ctx) => {
   const input = ctx.input; const dryRun = input.dryRun === true; const gh = input.github?.gh ?? "gh";
-  const maxRounds = input.limits?.adversarial ?? 6; const maxPolls = input.limits?.polls ?? 60;
+  const maxRounds = input.limits?.adversarial ?? 6; const maxPolls = input.limits?.polls ?? 60; const pollSeconds = input.limits?.pollSeconds ?? 30;
   const implAgent = agent("gpt-5.6-luna"); const reviewAgent = agent("claude-fable-5");
   const taskId = `stack-owner:${input.repo}:${input.branch}`;
   const reviewHistory = () => (ctx.outputs.review ?? []).filter((row) => String((row as { nodeId?: string }).nodeId ?? "").startsWith("adversarial-review")).sort((a, b) => Number((a as { iteration?: number }).iteration ?? 0) - Number((b as { iteration?: number }).iteration ?? 0)).map((row) => row as { blockers?: string[] });
@@ -84,18 +84,22 @@ export default smithers((ctx) => {
   const poll = <Task id="poll-stack" output={outputs.poll} retries={2}>{async () => {
     const prs = ctx.latest(outputs.opened, "open-stack")?.prs ?? [];
     if (dryRun) { const signal = input.fixtures?.ciFail ? "ci-fail" : "complete"; return { signal, reason: signal === "ci-fail" ? "fixture CI failure" : "fixture complete" }; }
+    const pollNo = (ctx.outputs.poll ?? []).length;
+    if (!dryRun && pollNo > 0) await wait(pollSeconds * 1000);
     const result = await pollStack(bunExec, input.repo, prs.map((p) => p.number), gh);
-    produceWakeConditions({ taskId, ciFail: result.signal === "ci-fail", actionableComment: result.signal === "actionable-comment", decisionAsk: result.signal === "decision-ask" });
-    return { signal: result.signal, reason: result.reason };
+    const exhausted = pollNo + 1 >= maxPolls && result.signal === "idle";
+    const signal = exhausted ? "exhausted" : result.signal;
+    produceWakeConditions({ taskId, ciFail: signal === "ci-fail", actionableComment: signal === "actionable-comment", decisionAsk: signal === "decision-ask" });
+    return { signal, reason: exhausted ? "Poll limit reached without a wake condition" : result.reason };
   }}</Task>;
-  const watch = <Loop id="code-poll-loop" maxIterations={maxPolls} onMaxReached="return-last" skipIf={ctx.latest(outputs.reviewGate, "review-gate")?.ok === false} until={ctx.latest(outputs.poll, "poll-stack")?.signal === "complete"}>
-    <Sequence>{poll}<Task id="wake-fix" output={outputs.wake} agent={undefined}>{async () => { const signal = ctx.latest(outputs.poll, "poll-stack")?.signal; if ((input.limits?.pollSeconds ?? 0) > 0) await wait((input.limits?.pollSeconds ?? 0) * 1000); if (signal === "idle") return { action: "wait", signal }; return { action: signal === "decision-ask" ? "escalate" : "fix", signal }; }}</Task></Sequence>
+  const watch = <Loop id="code-poll-loop" maxIterations={maxPolls} onMaxReached="return-last" skipIf={ctx.latest(outputs.reviewGate, "review-gate")?.ok === false} until={["complete", "ci-fail", "actionable-comment", "decision-ask", "exhausted"].includes(ctx.latest(outputs.poll, "poll-stack")?.signal ?? "")}>
+    <Sequence>{poll}<Task id="wake-fix" output={outputs.wake} agent={undefined}>{async () => { const signal = ctx.latest(outputs.poll, "poll-stack")?.signal; if (signal === "idle" || signal === "exhausted") return { action: "wait", signal }; return { action: signal === "decision-ask" ? "escalate" : "fix", signal }; }}</Task></Sequence>
   </Loop>;
   return <Workflow name="lindy-stack-owner"><Sequence>{implementation}{reviewLoop}{reviewGate}{open}{watch}<Task id="done" output={outputs.result}>{() => {
     const blockers = ctx.latest(outputs.review, "adversarial-review")?.blockers ?? [];
     const signal = ctx.latest(outputs.poll, "poll-stack")?.signal;
     const ok = blockers.length === 0 && signal === "complete";
-    produceWakeConditions({ taskId, terminal: ok, maxAdversarial: !ok && blockers.length > 0, ciFail: !ok && signal === "ci-fail", actionableComment: !ok && signal === "actionable-comment", decisionAsk: !ok && (signal === "decision-ask" || signal === "idle" || signal === undefined) });
+    produceWakeConditions({ taskId, terminal: ok, maxAdversarial: !ok && blockers.length > 0, ciFail: !ok && signal === "ci-fail", actionableComment: !ok && signal === "actionable-comment", decisionAsk: !ok && signal === "decision-ask" });
     return ok ? { done: true, summary: input.profile === "lindy-full" ? "green stack parked for captain stamp" : "green stack ready for yolo merge" } : { done: false, summary: `stack owner stopped with unresolved ${blockers.length ? "review blockers" : `${signal ?? "unknown"} poll signal`}` };
   }}</Task></Sequence></Workflow>;
 });
