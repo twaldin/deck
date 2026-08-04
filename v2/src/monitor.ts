@@ -1661,7 +1661,8 @@ function factoryRows(
     if (
       terminal ||
       (task.lastVerb === "failed" && !actionableFailure) ||
-      (task.runId !== null && represented.has(task.runId))
+      ((task.runId !== null && represented.has(task.runId)) ||
+        represented.has(task.taskId.startsWith("run:") ? task.taskId.slice(4) : ""))
     )
       continue;
     const runId = task.runId ?? `task:${task.taskId}`;
