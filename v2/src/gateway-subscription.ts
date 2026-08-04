@@ -8,6 +8,7 @@ export class GatewaySubscription {
 	private readonly subscribers = new Set<GatewaySubscriber>();
 	private running = false;
 	private stopStream: (() => void) | undefined;
+	private inFlight = new Map<string, Promise<unknown>>();
 
 	subscribe(subscriber: GatewaySubscriber): () => void {
 		this.subscribers.add(subscriber);
@@ -29,6 +30,19 @@ export class GatewaySubscription {
 		this.running = false;
 		this.stopStream?.();
 		this.stopStream = undefined;
+	}
+
+	/** Coalesce concurrent requests for the same workspace snapshot. */
+	request<T>(key: string, producer: () => Promise<T>): Promise<T> {
+		const current = this.inFlight.get(key);
+		if (current !== undefined) return current as Promise<T>;
+		const result = producer();
+		this.inFlight.set(key, result);
+		void result.then(
+			() => { if (this.inFlight.get(key) === result) this.inFlight.delete(key); },
+			() => { if (this.inFlight.get(key) === result) this.inFlight.delete(key); },
+		);
+		return result;
 	}
 
 	get subscriberCount(): number { return this.subscribers.size; }

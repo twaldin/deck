@@ -45,8 +45,8 @@ import { standingRulesDigest } from "./standing-rules";
 import { readMeta } from "../meta";
 import { loadProfiles } from "../projects";
 import { renderReasoning, setSeatReasoning, assertReasoningLevel } from "../reasoning";
-import { gatewaySubscription } from "../gateway-subscription";
 import { observePsSnapshotWithInspect, type PsSnapshotRow } from "../observer";
+import { gatewaySubscription } from "../gateway-subscription";
 import { reconcileRecuts } from "../recut";
 import { registerQuestions } from "../questions";
 import { enqueue, pending } from "../queue";
@@ -77,12 +77,11 @@ const text = (body: string): ToolResult => ({
 });
 
 type DeckV2Dependencies = {
-	/** Optional Gateway event stream. One stream is shared by all consumers. */
-	gatewayStream?: (workspace: string, onEvent: (event: import("../gateway-subscription").GatewayEvent) => void) => (() => void) | Promise<() => void>;
 	/** Test seam for the raw ps command. Production uses the enriched collector below. */
 	collectPsSnapshot?: typeof collectPsSnapshot;
 	collectRuns?: typeof collectRuns;
 	inspectRun?: (command: string, args: readonly string[], cwd: string) => Promise<{ stdout: string; exitCode: number } | null>;
+	gatewayStream?: (workspace: string, onEvent: (event: import("../gateway-subscription").GatewayEvent) => void) => (() => void) | Promise<() => void>;
 };
 
 const inspectRun = promisify(execFile);
@@ -761,18 +760,6 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 		const workflowSnapshot = snapshots.find(({ workspace }) => workspace === workflowCwd)?.snapshot;
 		const allRuns = snapshots.flatMap(({ snapshot: current }) => current.runs);
 		const rows = snapshots.flatMap(({ workspace, snapshot: current }) => current.runs.map((run) => ({ ...run, workspace }))) as PsSnapshotRow[];
-		if (workflowCwd !== undefined) await observePsSnapshotWithInspect({
-			rows,
-			workspace: workflowCwd,
-			run: dependencies.inspectRun ?? (async (command, args, cwd) => {
-				try {
-					const result = await inspectRun(command, [...args], { cwd, timeout: INSPECT_TIMEOUT_MS, maxBuffer: INSPECT_MAX_BUFFER });
-					return { stdout: result.stdout, exitCode: 0 };
-				} catch (error: any) {
-					return { stdout: String(error?.stdout ?? ""), exitCode: Number(error?.code ?? 1) };
-				}
-			}),
-		});
 		if (workflowCwd !== undefined) void reconcileRecuts(workflowCwd, pipelineDir(), workflowSnapshot?.runs ?? []).catch(() => {});
 		if (workflowCwd !== undefined && dependencies.gatewayStream !== undefined) {
 			const subscription = gatewaySubscription(workflowCwd);
@@ -784,19 +771,10 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 			}
 		}
 		if (workflowCwd !== undefined) {
-			observing = observing.then(() => observePsSnapshotWithInspect({
-				rows: allRuns.map((run) => ({
-					id: run.id,
-					workflow: run.workflow,
-					status: run.status,
-					state: run.state,
-					step: run.step,
-					rootDir: run.rootDir,
-					workspace: workflowCwd,
-					blockedNode: run.blockedNode,
-					pendingApprovals: run.pendingApprovals,
-				})),
-				workspace: workflowCwd,
+			const observationKey = rows.map((row) => `${row.workspace}:${row.id}:${row.status}:${row.step ?? ""}`).join("|");
+			observing = observing.then(() => gatewaySubscription(workflowCwd!).request(observationKey, () => observePsSnapshotWithInspect({
+				rows,
+				workspace: workflowCwd!,
 				run: async (command, args, cwd) => {
 					try {
 						const result = await execFileAsync(command, [...args], { cwd, maxBuffer: 10 * 1024 * 1024 });
@@ -805,7 +783,7 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 						return { stdout: typeof error?.stdout === "string" ? error.stdout : "", exitCode: error?.code ?? 1 };
 					}
 				},
-			})).then(() => undefined, () => undefined);
+			}))).then(() => undefined, () => undefined);
 		}
 		const frame = workflowCwd === undefined
 			? await buildFrame({})

@@ -3,7 +3,7 @@
 <plist version="1.0"><dict>
 <key>Label</key><string>ai.deck.resource-monitor</string>
 <key>ProgramArguments</key><array><string>/bin/sh</string><string>@DECK_ROOT@/ops/resource-monitor</string></array>
-<key>KeepAlive</key><true/><key>RunAtLoad</key><true/><key>ProcessType</key><string>Background</string>
+<key>KeepAlive</key><true/><key>RunAtLoad</key><true/><key>ThrottleInterval</key><integer>60</integer><key>ProcessType</key><string>Background</string>
 <key>StandardOutPath</key><string>@LOG_DIR@/resource-monitor.log</string>
 <key>StandardErrorPath</key><string>@LOG_DIR@/resource-monitor.log</string>
 </dict></plist>

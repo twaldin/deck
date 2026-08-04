@@ -6,9 +6,9 @@ import type { WorktreeEntry } from "./schema";
 export type ReapDecision = "reap" | "keep-dirty" | "keep-active" | "keep-young";
 export function classifyIdleWorktree(entry: WorktreeEntry, now: number, ttlMs: number, dirty: boolean, terminal: boolean): ReapDecision {
 	if (!terminal) return "keep-active";
-	// Terminal efforts release their slot immediately. The reaper already checks
-	// terminal state before calling this function; a failed git read must not
-	// make a finished slot permanent.
+	if (dirty) return "keep-dirty";
+	const created = Date.parse(entry.created);
+	if (!Number.isFinite(created) || now - created < ttlMs) return "keep-young";
 	return "reap";
 }
 export function worktreeDirty(worktree: string): boolean {
