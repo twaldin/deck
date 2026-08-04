@@ -41,11 +41,12 @@ test("blockers dispatch a fix and rebase is an agent task", () => {
   expect(source).toContain("Load the exact skills .agent/skills/sathiras-gate");
 });
 
-test("each blocker round posts findings and requests changes", () => {
-  expect(source).toContain('"pr", "review"');
-  expect(source).toContain('"--request-changes"');
+test("blocker reports draft findings and submit only follows captain approval", () => {
+  expect(source).toContain("reviewCommand(pr.number, input.repo, blockers.length === 0)");
+  expect(source).toContain('request-changes');
+  expect(source).toContain("draftFingerprint");
+  expect(source).toContain("draftBody");
   expect(source).toContain("— Tim's agent");
-  expect(source).toContain("Blockers remain");
 });
 
 test("clean and exhausted rounds use different captain decisions without self-approval", () => {
