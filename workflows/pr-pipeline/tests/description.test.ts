@@ -18,13 +18,22 @@ describe("pull request description", () => {
 	test("sanitizes raw brief input before body generation", () => {
 		const input = sanitizeDescriptionInput({
 			title: "Fix",
+<<<<<<< HEAD
 			summary: "Pins the agent. See /Users/private/.deck/wt/example; captain says yolo.",
+=======
+			summary: "See /Users/private/.deck/wt/example and ~/.deck/wt/example; captain says yolo",
+>>>>>>> bb57dc7 (fix(pipeline): wire sanitized PR descriptions)
 			acceptanceCriteria: ["No orch or stamp details"],
 			testing: "Managed by workflow run abc123. Tests passed in /home/user/wt.",
 		});
+<<<<<<< HEAD
 		const serialized = JSON.stringify(input);
 		expect(serialized).not.toMatch(/\/Users|\/home|\.deck|captain|yolo|orch|stamp|Managed by/i);
 		expect(generatePullRequestDescription(input)).not.toMatch(/\/Users|\/home|\.deck|captain|yolo|orch|stamp|Managed by/i);
+=======
+		expect(input.summary).toBe("See the local worktree and the local workflow directory  says");
+		expect(JSON.stringify(input)).not.toMatch(/\/Users|\.deck|captain|yolo|orch|stamp/i);
+>>>>>>> bb57dc7 (fix(pipeline): wire sanitized PR descriptions)
 	});
 
 	test("denylist hits fail instead of being silently scrubbed", () => {
