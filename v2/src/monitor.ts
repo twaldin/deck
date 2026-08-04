@@ -654,7 +654,7 @@ export async function buildFrame(
     if (rootDir !== null) taskByRoot.set(rootDir, taskId);
     const meta = rootDir === null ? null : readMetaForWorktree(rootDir);
     const localId = meta?.id;
-    taskIds.add(taskId);
+    taskIds.add(meta?.id ?? taskId);
     tasks.push({
       taskId,
       kind: input.kind ?? psRun.workflow ?? meta?.kind ?? "smithers",
@@ -1641,8 +1641,10 @@ function factoryRows(
     const workflow = workflows.get(effort.runId);
     return workflow === undefined ||
       workflow.superseded ||
-      effortLiveness({ status: workflow.status, state: workflow.state }) === "archived" ||
-      effortLiveness({ status: effort.state }) === "archived" ||
+      (effortLiveness({ status: workflow.status, state: workflow.state }) === "archived" &&
+        !isActionableWorkflowFailure(workflow, frame.workflows)) ||
+      (effortLiveness({ status: effort.state }) === "archived" &&
+        !isActionableWorkflowFailure(workflow, frame.workflows)) ||
       (isTerminalWorkflow(workflow) &&
         !isActionableWorkflowFailure(workflow, frame.workflows))
       ? []
@@ -2020,7 +2022,7 @@ export function renderFooterLines(
 ): string[] {
   const attention = [
     `Nq ${frame.counters.openQuestions}`,
-    `${frame.efforts?.filter((effort) => effortLiveness({ status: effort.state }) === "live").length ?? 0} efforts`,
+    `${frame.efforts === undefined ? frame.counters.efforts ?? 0 : frame.efforts.filter((effort) => effortLiveness({ status: effort.state }) === "live").length} efforts`,
     `${frame.counters.agents ?? frame.agents?.length ?? 0} agents`,
     (frame.counters.unhealedFailures ??
       frame.efforts?.filter((effort) => effort.failed).length ??
