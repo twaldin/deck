@@ -14,9 +14,11 @@
  * orchestrator's own process, so there is no second thing that can die silently
  * while the orchestrator keeps running. fm2 lost a watcher for 23.8h that way.
  */
-import { execFile, spawn as spawnProcess } from "node:child_process";
-import { promisify } from "node:util";
+import { execFile as execFileCallback, spawn as spawnProcess } from "node:child_process";
 import * as path from "node:path";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFileCallback);
 import { Box, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { DECK_OPERATIONAL_PREFIX, registerCalm } from "../calm";
@@ -105,6 +107,7 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 	let unwatch: (() => void) | undefined;
 	let refreshFactoryOverlay: (() => void) | undefined;
 	let reconcileFallback: ReturnType<typeof setInterval> | undefined;
+	let observing: Promise<void> = Promise.resolve();
 	const RECONCILE_FALLBACK_MS = 60_000;
 	let workflowCwd: string | undefined;
 	let workflowWorkspaces: string[] = [];
@@ -779,6 +782,30 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 				});
 				subscription.start((onEvent) => dependencies.gatewayStream!(workflowCwd!, onEvent));
 			}
+		}
+		if (workflowCwd !== undefined) {
+			observing = observing.then(() => observePsSnapshotWithInspect({
+				rows: allRuns.map((run) => ({
+					id: run.id,
+					workflow: run.workflow,
+					status: run.status,
+					state: run.state,
+					step: run.step,
+					rootDir: run.rootDir,
+					workspace: workflowCwd,
+					blockedNode: run.blockedNode,
+					pendingApprovals: run.pendingApprovals,
+				})),
+				workspace: workflowCwd,
+				run: async (command, args, cwd) => {
+					try {
+						const result = await execFileAsync(command, [...args], { cwd, maxBuffer: 10 * 1024 * 1024 });
+						return { stdout: result.stdout, exitCode: 0 };
+					} catch (error: any) {
+						return { stdout: typeof error?.stdout === "string" ? error.stdout : "", exitCode: error?.code ?? 1 };
+					}
+				},
+			})).then(() => undefined, () => undefined);
 		}
 		const frame = workflowCwd === undefined
 			? await buildFrame({})

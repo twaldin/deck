@@ -11,9 +11,11 @@ DOMAIN="gui/${USER_UID}"
 
 LABELS=(
 	"ai.deck.broker"
+	"ai.deck.resource-monitor"
 )
 ENTRYPOINTS=(
 	"${DECK_ROOT}/broker/src/main.ts"
+	"${DECK_ROOT}/ops/resource-monitor"
 )
 
 usage() {
@@ -120,6 +122,10 @@ for index in "${!LABELS[@]}"; do
 		exit 1
 	fi
 
-	install -m 0644 "${source}" "${destination}"
+	sed \
+		-e "s|@DECK_ROOT@|${DECK_ROOT}|g" \
+		-e "s|@LOG_DIR@|${LOG_DIR}|g" \
+		"${source}" > "${destination}"
+		chmod 0644 "${destination}"
 	bootstrap_agent "${label}" "${destination}"
 done
