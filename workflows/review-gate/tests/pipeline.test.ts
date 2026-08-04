@@ -3,6 +3,7 @@ import { readFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { askIfAbsent, openQuestions } from "../../../v2/src/questions-store.ts";
+import { reviewCommand, shouldSubmitReview } from "../decision.ts";
 
 const source = readFileSync(new URL("../pipeline.tsx", import.meta.url), "utf8");
 
@@ -24,10 +25,12 @@ test("polls the captain review-request queue programmatically", () => {
 
 test("gate has a hard no-approval rule and verifies state before queueing", () => {
   expect(source).toContain("NEVER run any GitHub approve command");
-  expect(source).not.toContain('"--approve"');
+  expect(source).toContain("<Approval");
+  expect(source).toContain("review-approval-gate-");
   expect(source).not.toMatch(/"pr",\s*"merge"/);
   expect(source).toContain("mergeStateStatus");
-  expect(source).toContain('questionKind: clean ? "approve" : "agent"');
+  expect(source).toContain('questionKind: clean ? "stamp" : "agent"');
+  expect(source).toContain('workflowDir: process.cwd(), workflowFile: fileURLToPath(import.meta.url)');
 });
 
 test("blockers dispatch a fix and rebase is an agent task", () => {
@@ -38,20 +41,29 @@ test("blockers dispatch a fix and rebase is an agent task", () => {
   expect(source).toContain("Load the exact skills .agent/skills/sathiras-gate");
 });
 
-test("each blocker round posts findings and requests changes", () => {
-  expect(source).toContain('"pr", "comment"');
-  expect(source).toContain('"pr", "review"');
-  expect(source).toContain('"--request-changes"');
+test("blocker reports draft findings and submit only follows captain approval", () => {
+  expect(source).toContain("reviewCommand(pr.number, input.repo, blockers.length === 0)");
+  expect(source).toContain('request-changes');
+  expect(source).toContain("draftFingerprint");
+  expect(source).toContain("draftBody");
   expect(source).toContain("— Tim's agent");
-  expect(source).toContain("Blockers remain");
 });
 
 test("clean and exhausted rounds use different captain decisions without self-approval", () => {
   expect(source).toContain('maxIterations={rounds}');
   expect(source).toContain('Math.min(input.limits?.rounds ?? 3, 3)');
-  expect(source).toContain('questionKind: clean ? "approve" : "agent"');
-  expect(source).toContain('options: clean ? ["Approve", "Hold"] : ["Hold", "Close PR"]');
-  expect(source).not.toMatch(/\["pr", "review"[^\n]*"--approve"/);
+  expect(source).toContain('questionKind: clean ? "stamp" : "agent"');
+  expect(source).toContain('const cleanCaptainOptions = ["Approve", "Hold", "Deny gate"]');
+  expect(source).toContain('reviewCommand(pr.number, input.repo, blockers.length === 0)');
+  expect(source).toContain('shouldSubmitReview(decision)');
+});
+
+test("captain decision is required before exactly one review command", () => {
+  expect(shouldSubmitReview(undefined)).toBe(false);
+  expect(shouldSubmitReview({ approved: false })).toBe(false);
+  expect(shouldSubmitReview({ approved: true })).toBe(true);
+  expect(reviewCommand(7, "owner/repo", true)).toEqual(["pr", "review", "7", "--repo", "owner/repo", "--approve"]);
+  expect(reviewCommand(7, "owner/repo", false)).toEqual(["pr", "review", "7", "--repo", "owner/repo", "--request-changes"]);
 });
 
 test("polling and every requested PR are durable workflow paths", () => {
