@@ -22,6 +22,13 @@ describe("wake producers", () => {
 		for (const key of ["max-adversarial", "reviewer-silent", "main-red", "migration-gate", "broker-no-quota"]) expect(queue).toContain(key);
 	});
 
+	test("publishes a needs-decision condition", async () => {
+		const { produceWakeConditions } = await import("../src/wake-producers");
+		produceWakeConditions({ taskId: "ticket", needsDecision: "Choose the safe path" });
+		const queue = fs.readFileSync(path.join(root, "state", ".wake-queue.jsonl"), "utf8");
+		expect(queue).toContain("needs-decision");
+	});
+
 	test("releases a recovered incident so a later failure can claim it", async () => {
 		const { claimMainFailure, releaseMainFailure } = await import("../src/wake-producers");
 		const fingerprint = "repo:main";
