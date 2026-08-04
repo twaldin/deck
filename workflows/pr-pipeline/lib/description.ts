@@ -4,6 +4,7 @@ export interface PullRequestDescriptionInput {
 	brief: Pick<Brief, "summary" | "acceptanceCriteria">;
 	testing?: string;
 	reviewOutcome?: string;
+	changedFiles?: string[];
 }
 
 function clean(value: string): string {
@@ -20,6 +21,9 @@ function clean(value: string): string {
 
 export function generatePullRequestDescription(input: PullRequestDescriptionInput): string {
 	const acceptance = input.brief.acceptanceCriteria.map((criterion) => `- ${clean(criterion)}`).join("\n");
+	const pipelineNote = (input.changedFiles ?? []).some((file) => /(?:^|\/)pipeline\.tsx$/i.test(file))
+		? "Editing pipeline.tsx kills resume of in-flight Smithers runs (RESUME_METADATA_MISMATCH); the orchestrator must recut after merge."
+		: "";
 	return [
 		"## Problem",
 		clean(input.brief.summary),
@@ -32,6 +36,7 @@ export function generatePullRequestDescription(input: PullRequestDescriptionInpu
 		"",
 		"## Notes",
 		acceptance || "No additional notes.",
+		pipelineNote,
 		input.reviewOutcome ? `\n${clean(input.reviewOutcome)}` : "",
 	].join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }

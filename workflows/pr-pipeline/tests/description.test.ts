@@ -1,7 +1,26 @@
 import { describe, expect, test } from "bun:test";
 import { generatePullRequestDescription } from "../lib/description.ts";
+import { changedFilesForBranch } from "../pipeline.tsx";
 
 describe("pull request description", () => {
+	test("adds the resume warning only when the diff changes pipeline.tsx", () => {
+		const base = { brief: { summary: "pipeline", acceptanceCriteria: [] as string[] } };
+		expect(generatePullRequestDescription({ ...base, changedFiles: ["src/pipeline.tsx"] })).toContain("RESUME_METADATA_MISMATCH");
+		expect(generatePullRequestDescription({ ...base, changedFiles: ["src/other.ts"] })).not.toContain("RESUME_METADATA_MISMATCH");
+	});
+
+	test("passes the real git diff output into the pipeline note path", async () => {
+		const exec = async () => ({
+			code: 0,
+			stdout: "a.ts\nworkflows/pr-pipeline/pipeline.tsx\nz.ts\n",
+			stderr: "",
+		});
+		const changedFiles = await changedFilesForBranch(exec, "/tmp/worktree", "main");
+		expect(generatePullRequestDescription({ brief: { summary: "pipeline", acceptanceCriteria: [] }, changedFiles })).toContain(
+			"RESUME_METADATA_MISMATCH",
+		);
+	});
+
 	test("rewrites internal input into a team-facing template", () => {
 		const output = generatePullRequestDescription({
 			brief: {
