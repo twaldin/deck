@@ -238,7 +238,7 @@ describe("observer event selection", () => {
 		};
 		const events = observer.observeOnce("t1", observation);
 		expect(events).toHaveLength(1);
-		expect(events[0]?.scope).toBeUndefined();
+		expect(events[0]?.taskId).toBe("t1");
 		expect(events[0]?.verb).toBe("failed");
 		expect(observer.isFinished(observation)).toBe(true);
 		expect(observer.isFinished({ run: run("running"), nodes: [] })).toBe(false);

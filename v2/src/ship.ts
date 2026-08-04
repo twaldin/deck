@@ -26,7 +26,6 @@ import { SMITHERS_SPEC } from "./smithers";
 import { pipelineHash } from "./recut";
 import { smithersWorkspaceCwd, uiWarn, warnOnShadowWorkspace } from "./workspace";
 import { claimWorktree, updateWorktreePid } from "./worktree-lock";
-import { updateMeta } from "./meta";
 
 export type ShipRequest = {
 	/** Ticket / effort id; also seeds the smithers run id. */
