@@ -389,7 +389,7 @@ export function registerQuestions(
 			return false;
 		}
 		try {
-			await executor("smithers", ["deny", runId, "--node", node, "--by", "captain"], { cwd: pipelineDir(), timeout: 15_000 });
+			await executor("smithers", ["deny", runId, "--node", node, "--by", "captain"], { cwd: entry.prContext?.workflowDir ?? pipelineDir(), timeout: 15_000 });
 			return resolve(ctx, entry, "Close", "answered");
 		} catch (error) {
 			ctx.ui.notify(`Stamp was not closed: ${error instanceof Error ? error.message : "unknown error"}`, "error");
@@ -488,7 +488,7 @@ export function registerQuestions(
 		}
 		try {
 			try {
-				await executor("smithers", ["approve", runId, "--node", node, "--by", "captain"], { cwd: pipelineDir(), timeout: 15_000 });
+				await executor("smithers", ["approve", runId, "--node", node, "--by", "captain"], { cwd: entry.prContext?.workflowDir ?? pipelineDir(), timeout: 15_000 });
 			} catch (error) {
 				// Approval is idempotent for this recovery path. A retry after the
 				// approval succeeded but resume failed reports the gate as no longer
@@ -496,7 +496,8 @@ export function registerQuestions(
 				const message = error instanceof Error ? error.message : String(error);
 				if (!/(?:approval|gate)\s+(?:is\s+)?(?:already\s+approved|already\s+resolved)|already\s+approved|approval\s+is\s+not\s+pending|gate\s+is\s+not\s+pending/i.test(message)) throw error;
 			}
-			await executor("smithers", ["up", "pipeline.tsx", "--run-id", runId, "--resume", "true"], { cwd: pipelineDir(), timeout: 15_000 });
+			const workflowDir = entry.prContext?.workflowDir ?? pipelineDir();
+			await executor("smithers", ["up", "pipeline.tsx", "--run-id", runId, "--resume", "true"], { cwd: workflowDir, timeout: 15_000 });
 			return resolve(ctx, entry, "Stamp", "answered");
 		} catch (error) {
 			ctx.ui.notify(`Stamp was not recorded; the pipeline remains actionable: ${error instanceof Error ? error.message : "unknown error"}`, "error");
