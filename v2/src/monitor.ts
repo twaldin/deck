@@ -214,6 +214,7 @@ export type PsRun = {
   waitingFor?: WaitingFor;
 };
 type ShipInput = {
+  kind?: unknown;
   existingPr?: unknown;
   repo?: unknown;
   brief?: { title?: unknown; summary?: unknown };
@@ -230,6 +231,7 @@ type ShipInput = {
 };
 
 type ShipIdentity = {
+  kind: string | null;
   repo: string | null;
   prNumber: number | null;
   prTitle: string | null;
@@ -248,6 +250,7 @@ function readShipInput(runId: string): ShipIdentity {
       ),
     ) as ShipInput;
     return {
+      kind: typeof input.kind === "string" ? input.kind : null,
       repo: typeof input.repo === "string" ? input.repo : null,
       prNumber:
         typeof input.existingPr === "number" &&
@@ -303,6 +306,7 @@ function readShipInput(runId: string): ShipIdentity {
     };
   } catch {
     return {
+      kind: null,
       repo: null,
       prNumber: null,
       prTitle: null,
@@ -874,7 +878,9 @@ export async function buildFrame(
         const pr = wf.prNumber ?? input.prNumber;
         const title = wf.prTitle ?? input.prTitle ?? "untitled PR";
         const prUrl =
-          pr === null ? undefined : `https://github.com/${repo}/pull/${pr}`;
+          pr === null || repo === null
+            ? undefined
+            : `https://github.com/${repo}/pull/${pr}`;
         const originalIssue =
           input.why ?? "No ship brief summary was recorded.";
         const reviewEvidence = `CI: ${effort?.ciState ?? "unknown"}; mergeStateStatus: ${effort?.mergeStateStatus ?? "unknown"}; review: ${effort?.reviewState ?? "unknown"}.`;
@@ -886,7 +892,7 @@ export async function buildFrame(
           context: wf.repo ?? wf.rootDir ?? undefined,
           prContext: {
             prUrl,
-            prRepo: repo,
+            prRepo: repo ?? undefined,
             prNumber: pr ?? undefined,
             headSha: currentHead ?? undefined,
             prTitle: title,
@@ -1645,9 +1651,9 @@ function factoryRows(
     const workflow = workflows.get(effort.runId);
     return workflow === undefined ||
       workflow.superseded ||
-      (effortLiveness({ status: workflow.status, state: workflow.state }) === "archived" &&
+      (effortLiveness({ status: workflow.status ?? undefined, state: workflow.state ?? undefined }) === "archived" &&
         !isActionableWorkflowFailure(workflow, frame.workflows)) ||
-      (effortLiveness({ status: effort.state }) === "archived" &&
+      (effortLiveness({ status: effort.state ?? undefined }) === "archived" &&
         !isActionableWorkflowFailure(workflow, frame.workflows)) ||
       (isTerminalWorkflow(workflow) &&
         !isActionableWorkflowFailure(workflow, frame.workflows))
@@ -2026,7 +2032,7 @@ export function renderFooterLines(
 ): string[] {
   const attention = [
     `Nq ${frame.counters.openQuestions}`,
-    `${frame.efforts === undefined ? frame.counters.efforts ?? 0 : frame.efforts.filter((effort) => effortLiveness({ status: effort.state }) === "live").length} efforts`,
+    `${frame.efforts === undefined ? frame.counters.efforts ?? 0 : frame.efforts.filter((effort) => effortLiveness({ status: effort.state ?? undefined }) === "live").length} efforts`,
     `${frame.counters.agents ?? frame.agents?.length ?? 0} agents`,
     (frame.counters.unhealedFailures ??
       frame.efforts?.filter((effort) => effort.failed).length ??
