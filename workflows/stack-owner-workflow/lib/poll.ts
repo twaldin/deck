@@ -32,8 +32,8 @@ export async function pollStack(exec: ExecFn, repo: string, numbers: number[], g
     prs.push({ number, headSha, mergeable: pr.mergeable === true, ci, actionableComments: actionable.length, decisionAsk });
   }
   if (prs.some((p) => p.ci === "red")) return { signal: "ci-fail", prs, reason: "CI failed" };
-  if (prs.some((p) => p.actionableComments > 0)) return { signal: "actionable-comment", prs, reason: "Actionable review comment found" };
   if (prs.some((p) => p.decisionAsk)) return { signal: "decision-ask", prs, reason: "Decision is required" };
+  if (prs.some((p) => p.actionableComments > 0)) return { signal: "actionable-comment", prs, reason: "Actionable review comment found" };
   if (prs.length > 0 && prs.every((p) => p.ci === "green" && p.mergeable && p.actionableComments === 0 && !p.decisionAsk)) return { signal: "complete", prs, reason: "Stack is green, clear, and mergeable" };
   return { signal: "idle", prs, reason: "No wake condition" };
 }

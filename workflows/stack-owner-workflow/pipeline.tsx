@@ -20,6 +20,7 @@ const schemas = {
   opened: z.object({ changed: z.boolean(), prs: z.array(z.object({ number: z.number().int().positive(), branch: z.string() })), summary: z.string() }),
   review: z.object({ blockers: z.array(z.string()), summary: z.string() }),
   fix: z.object({ fixed: z.boolean() }),
+  reviewGate: z.object({ ok: z.boolean() }),
   wake: z.object({ action: z.string(), signal: z.string() }),
   poll: z.object({ signal: z.enum(["ci-fail", "actionable-comment", "decision-ask", "idle", "complete"]), reason: z.string() }),
   result: z.object({ done: z.boolean(), summary: z.string() }),
@@ -40,7 +41,7 @@ export default smithers((ctx) => {
   const review = <Task id="adversarial-review" output={outputs.review} agent={dryRun ? undefined : reviewAgent}>
     {dryRun ? () => ({ blockers: input.fixtures?.finding ? [input.fixtures.finding] : [], summary: "dry-run review" }) : `Review the entire current stack implementation in ${input.worktree}. Find only actionable blockers. Do not edit or push. Return JSON with blockers and summary.`}
   </Task>;
-  const reviewLoop = <Loop id="adversarial-loop" maxIterations={maxRounds} onMaxReached="fail" until={(ctx.latest(outputs.review, "adversarial-review")?.blockers?.length ?? 1) === 0}>
+  const reviewLoop = <Loop id="adversarial-loop" maxIterations={maxRounds} onMaxReached="return-last" until={(ctx.latest(outputs.review, "adversarial-review")?.blockers?.length ?? 1) === 0}>
     <Sequence>{review}<Task id="fix-review" output={outputs.fix} agent={dryRun ? undefined : agent("gpt-5.6-luna")}>
       {async () => {
         const blockers = ctx.latest(outputs.review, "adversarial-review")?.blockers ?? [];
@@ -57,6 +58,14 @@ export default smithers((ctx) => {
       }}
     </Task></Sequence>
   </Loop>;
+  const reviewGate = <Task id="review-gate" output={outputs.reviewGate}>{() => {
+    const blockers = ctx.latest(outputs.review, "adversarial-review")?.blockers ?? [];
+    if (blockers.length > 0) {
+      produceWakeConditions({ taskId, maxAdversarial: true });
+      throw new Error("adversarial review did not converge before opening PRs");
+    }
+    return { ok: true };
+  }}</Task>;
   const open = <Task id="open-stack" output={outputs.opened} retries={1}>{async () => {
     const impl = ctx.latest(outputs.implementation, "implement-stack"); const planned = impl?.prs ?? [];
     if (dryRun) return { changed: impl?.changed ?? true, prs: (input.fixtures?.prs ?? [1]).map((number) => ({ number, branch: input.branch })), summary: "dry-run PR stack opened" };
@@ -69,10 +78,10 @@ export default smithers((ctx) => {
       const number = url ? Number(url[1]) : Number(await execOrThrow(bunExec, [gh, "pr", "view", pr.branch, "--repo", input.repo, "--json", "number", "--jq", ".number"]));
       prs.push({ number, branch: pr.branch }); base = pr.branch;
     }
-    if (prs.length) {
-      const context = { gh, repo: input.repo, prNumber: prs[0].number, exec: bunExec };
+    for (const createdPr of prs) {
+      const context = { gh, repo: input.repo, prNumber: createdPr.number, exec: bunExec };
       await executeReviewerRequest({ explicit: input.github?.reviewers ?? [], exclude: [], denylist: [], max: 2 }, {
-        fetchChangedFiles: () => fetchChangedFiles(context, prs[0].number), fetchCodeowners: () => fetchCodeowners(context), fetchRecentAuthors: (files) => fetchRecentAuthors(context, files), resolveLogin: (name) => resolveReviewerLogin(context, name), isCollaborator: (login) => isCollaborator(context, login), requestReviewers: (logins) => requestReviewers(context, prs[0].number, logins), fetchRequestedReviewers: () => fetchRequestedReviewers(context, prs[0].number),
+        fetchChangedFiles: () => fetchChangedFiles(context, createdPr.number), fetchCodeowners: () => fetchCodeowners(context), fetchRecentAuthors: (files) => fetchRecentAuthors(context, files), resolveLogin: (name) => resolveReviewerLogin(context, name), isCollaborator: (login) => isCollaborator(context, login), requestReviewers: (logins) => requestReviewers(context, createdPr.number, logins), fetchRequestedReviewers: () => fetchRequestedReviewers(context, createdPr.number),
       });
     }
     return { changed: impl?.changed ?? true, prs, summary: "PR stack opened in dependency order" };
@@ -87,7 +96,7 @@ export default smithers((ctx) => {
   const watch = <Loop id="code-poll-loop" maxIterations={maxPolls} onMaxReached="return-last" until={ctx.latest(outputs.poll, "poll-stack")?.signal === "complete"}>
     <Sequence>{poll}<Task id="wake-fix" output={outputs.wake} agent={undefined}>{async () => { const signal = ctx.latest(outputs.poll, "poll-stack")?.signal; if (signal === "idle") { if ((input.limits?.pollSeconds ?? 0) > 0) await wait((input.limits?.pollSeconds ?? 0) * 1000); return { action: "wait", signal }; } return { action: signal === "decision-ask" ? "escalate" : "fix", signal }; }}</Task></Sequence>
   </Loop>;
-  return <Workflow name="lindy-stack-owner"><Sequence>{implementation}{reviewLoop}{open}{watch}<Task id="done" output={outputs.result}>{() => {
+  return <Workflow name="lindy-stack-owner"><Sequence>{implementation}{reviewLoop}{reviewGate}{open}{watch}<Task id="done" output={outputs.result}>{() => {
     const blockers = ctx.latest(outputs.review, "adversarial-review")?.blockers ?? [];
     const signal = ctx.latest(outputs.poll, "poll-stack")?.signal;
     const ok = blockers.length === 0 && signal === "complete";

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { renderWorkflow, simulate } from "smithers-orchestrator/testing";
 import { pollHasNoAgent, pollStack } from "../lib/poll.ts";
 import { produceWakeConditions } from "../../../v2/src/wake-producers.ts";
@@ -6,6 +6,8 @@ import { wakeFiles } from "../../../v2/src/home.ts";
 import * as fs from "node:fs";
 
 const baseInput = { repo: "org/repo", worktree: "/tmp/worktree", branch: "feature", prompt: "Add feature", dryRun: true };
+const testHome = fs.mkdtempSync("/tmp/stack-owner-test-");
+beforeEach(() => { process.env.DECK_V2_HOME = testHome; });
 
 afterEach(() => {
   for (const file of Object.values(wakeFiles())) fs.rmSync(file, { force: true });
@@ -24,7 +26,7 @@ describe("stack owner", () => {
   test("workflow graph executes in dry-run mode", async () => {
     const sim = simulate((await import("../pipeline.tsx")).default, { input: baseInput });
     await sim.run();
-    expect(sim.outputs.result?.[0]?.done).toBe(true);
+    expect((sim.outputs.result?.[0] as { done?: boolean } | undefined)?.done).toBe(true);
   });
 
   test("rendered graph contains the open-to-poll dependency", async () => {
