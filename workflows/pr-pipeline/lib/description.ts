@@ -4,39 +4,79 @@ export interface PullRequestDescriptionInput {
 	brief: Pick<Brief, "summary" | "acceptanceCriteria">;
 	testing?: string;
 	reviewOutcome?: string;
-	changedFiles?: string[];
 }
 
+/** Strip internal fleet/agent brief residue from team-facing PR text. */
 function clean(value: string): string {
-	return value
-		.replace(/(?:\/Users\/|\/home\/)[^\s\n)]+/gi, "the local worktree")
-		.replace(/[A-Za-z]:[\\\\/]+[^\s\n)]+/g, "the local worktree")
-		.replace(/\b(?:run|execution)[-_ ]?id[:= ]+?[A-Za-z0-9_-]{6,}\b/gi, "")
-		.replace(/\b[0-9a-f]{7,40}\b/gi, "")
-		.replace(/Managed by[^\n]*/gi, "")
-		.replace(/Local review nits[^\n]*(?:\n[-*].*)*/gi, "")
-		.replace(/\b(?:READ|DO NOT)\b[^\n]*/gi, "")
-		.trim();
+	let s = value;
+	s = s.replace(/(?:\/Users\/|\/home\/|~\/)[^\s\n)`"']*/gi, "");
+	s = s.replace(/\.deck\/[^\s\n)`"']*/gi, "");
+	s = s.replace(/[A-Za-z]:[\\\\/]+[^\s\n)`"']+/g, "");
+	s = s.replace(
+		/\b(?:captain|orch(?:estrator)?|fleet|stamp(?:able)?|yolo|smithers|worktree|implementer|adversar(?:y|ial))\b/gi,
+		"",
+	);
+	s = s.replace(/\bPR\s*\d+[A-Z]?\s+of\b[^.!\n]*/gi, "");
+	s = s.replace(/\([^)]*priority\s*#?\s*\d+[^)]*\)/gi, "");
+	s = s.replace(/\bpriority\s*#?\s*\d+\b/gi, "");
+	s = s.replace(/\bSpec\s*=\s*[^.!\n]*/gi, "");
+	s = s.replace(/\([^)]*implementer must[^)]*\)/gi, "");
+	s = s.replace(/\b(?:must read|READ FIRST|DO NOT)[^.!\n]*/gi, "");
+	s = s.replace(/['"]###[^'"]*['"]/g, "");
+	s = s.replace(/\bREPORT\.md\b/gi, "");
+	s = s.replace(/\b(?:run|execution)[-_ ]?id[:= ]+?[A-Za-z0-9_-]{6,}\b/gi, "");
+	s = s.replace(/\b[0-9a-f]{40}\b/gi, "");
+	s = s.replace(/Managed by[^\n]*/gi, "");
+	s = s.replace(/[ \t]{2,}/g, " ");
+	s = s.replace(/ ?([,.;:])/g, "$1");
+	s = s.replace(/\(\s*\)/g, "");
+	s = s.replace(/[ \t]+\n/g, "\n");
+	s = s.replace(/\n{3,}/g, "\n\n");
+	return s.trim();
+}
+
+function summarize(text: string): string {
+	const cleaned = clean(text);
+	const sentences = cleaned
+		.split(/(?<=\.)\s+/)
+		.map((x) => x.trim())
+		.filter((x) => x.length > 20 && /[A-Za-z]{4,}/.test(x));
+	if (sentences.length === 0) {
+		const blob = cleaned.replace(/^[\s.]+/, "").trim();
+		return blob.length > 20
+			? blob.slice(0, 480)
+			: "This change updates product behavior.";
+	}
+	let out = "";
+	for (const sentence of sentences) {
+		const next = out ? `${out} ${sentence}` : sentence;
+		if (next.length > 480) break;
+		out = next;
+	}
+	return out;
 }
 
 export function generatePullRequestDescription(input: PullRequestDescriptionInput): string {
-	const acceptance = input.brief.acceptanceCriteria.map((criterion) => `- ${clean(criterion)}`).join("\n");
-	const pipelineNote = (input.changedFiles ?? []).some((file) => /(?:^|\/)pipeline\.tsx$/i.test(file))
-		? "Editing pipeline.tsx kills resume of in-flight Smithers runs (RESUME_METADATA_MISMATCH); the orchestrator must recut after merge."
-		: "";
+	const problem = summarize(input.brief.summary || "");
+	const acceptance = input.brief.acceptanceCriteria
+		.map((criterion) => clean(criterion))
+		.filter((c) => c.length > 8 && /[A-Za-z]{4,}/.test(c))
+		.filter((c) => !/^must approve\.?$/i.test(c))
+		.map((c) => `- ${c}`)
+		.join("\n");
+	const testing = clean(input.testing ?? "");
+	const testingLine = testing.length > 8 ? testing : "Relevant automated checks were run.";
+
 	return [
-		"## Problem",
-		clean(input.brief.summary),
-		"",
-		"## Fix",
-		"Implemented the requested change and its acceptance criteria.",
+		"## Summary",
+		problem,
 		"",
 		"## Testing",
-		clean(input.testing ?? "Relevant tests were run locally."),
-		"",
-		"## Notes",
-		acceptance || "No additional notes.",
-		pipelineNote,
-		input.reviewOutcome ? `\n${clean(input.reviewOutcome)}` : "",
-	].join("\n").replace(/\n{3,}/g, "\n\n").trim();
+		testingLine,
+		acceptance ? `\n## Checklist\n${acceptance}` : "",
+		input.reviewOutcome ? `\n## Notes\n${clean(input.reviewOutcome)}` : "",
+	]
+		.join("\n")
+		.replace(/\n{3,}/g, "\n\n")
+		.trim();
 }
