@@ -19,6 +19,7 @@ test("atomic global asks queue one event under concurrent callers", () => {
 test("polls the captain review-request queue programmatically", () => {
   expect(source).toContain("review-requested:${login}");
   expect(source).toContain('"review-requested:"');
+  expect(source).toContain("review-requested:");
   expect(source).toContain('"review-requested-poll"');
   expect(source).toContain("const proc = Bun.spawn"); // polling is a programmatic GH call
 });
