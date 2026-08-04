@@ -26,6 +26,7 @@ import { SMITHERS_SPEC } from "./smithers";
 import { pipelineHash } from "./recut";
 import { smithersWorkspaceCwd, uiWarn, warnOnShadowWorkspace } from "./workspace";
 import { claimWorktree, updateWorktreePid } from "./worktree-lock";
+import { updateMeta } from "./meta";
 
 export type ShipRequest = {
 	/** Ticket / effort id; also seeds the smithers run id. */
@@ -220,10 +221,10 @@ export async function startShip(
 	// Keep the task-to-workflow join durable when the caller already created a
 	// deck task with the ticket id. Smithers ps does not expose a unique worktree.
 	try {
-		if (readMeta(request.ticket) !== null)
-			updateMeta(request.ticket, { run_id: runId });
+		updateMeta(request.ticket, { run_id: runId, worktree: request.worktree, kind: "ship" });
 	} catch {
-		// A ticket is not always a deck task id. There is no metadata to join.
+		// A ticket is not always a valid deck task id. The ship input remains the
+		// durable fallback used by the observer.
 	}
 
 	const shipDir = path.join(stateDir(), "ship");
@@ -240,7 +241,7 @@ export async function startShip(
 	// that never happened (bunx missing, spawn EPERM) would still print
 	// "started" — a silent false positive on the default ship path.
 	try {
-		releaseWorktreeLock = claimWorktree(request.worktree, runId);
+		releaseWorktreeLock = claimWorktree(request.worktree, runId, process.pid, true);
 		child = spawn(
 			"bunx",
 			[

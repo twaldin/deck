@@ -32,6 +32,15 @@ describe("worktree locks", () => {
 		release();
 	});
 
+	test("a durable owner is not reclaimed when its launcher pid dies", () => {
+		const home = fs.mkdtempSync(path.join(os.tmpdir(), "deck-lock-")); homes.push(home);
+		process.env.DECK_V2_HOME = home;
+		const wt = path.join(home, "wt"); fs.mkdirSync(wt);
+		claimWorktree(wt, "run", 999999, true);
+		expect(() => claimWorktree(wt, "next")).toThrow(/already in use by run/);
+		releaseWorktree(wt, "run");
+	});
+
 	test("a stale release closure cannot remove a replacement owner", () => {
 		const home = fs.mkdtempSync(path.join(os.tmpdir(), "deck-lock-")); homes.push(home);
 		process.env.DECK_V2_HOME = home;

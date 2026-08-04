@@ -1313,10 +1313,11 @@ export default smithers((ctx) => {
 								const readyNode = `r${k}-ready-poll`;
 								const latestReady = ctx.latest(outputs.readyPoll, readyNode);
 								const readyRows = readyPollRows.filter((row) => row.round === k && row.poll >= 0);
-								const greenApproved =
-									latestReady?.approvedBy != null &&
-									latestReady?.ci === "green" &&
-									latestReady?.regressed !== true;
+								const greenApprovedRow = [...readyRows].reverse().find((row) =>
+									row.approvedBy != null && row.ci === "green" && row.regressed !== true,
+								);
+								const greenApproved = greenApprovedRow !== undefined;
+								const stampReadyRow = latestReady?.ready === true ? latestReady : greenApprovedRow;
 								// A green, human-approved row is sufficient even when the poll
 								// budget was consumed by a transient non-ready result. Keep the
 								// migration gate authoritative below.
@@ -1610,17 +1611,17 @@ prNumber: pr.prNumber,
 										{/* stage 7: stamp + merge word. A yolo profile skips the park: the
 										    workflow writes the approved row itself (same node id, so
 										    stamp-validity, head re-check and merge run unchanged). */}
-										{(latestReady?.ready === true || greenApproved) && stamp === undefined && yolo ? (
+										{stampReadyRow !== undefined && stamp === undefined && yolo ? (
 											<Task id={`r${k}-stamp`} output={outputs.approvals} retries={0}>
 												{() => ({
 													approved: true,
-													note: `yolo profile "${profile?.id}": stamp gate skipped; merge fires on green (CI: ${latestReady.ci}).`,
+													note: `yolo profile "${profile?.id}": stamp gate skipped; merge fires on green (CI: ${stampReadyRow.ci}).`,
 													decidedBy: `profile:${profile?.id}`,
 													decidedAt: nowIso(),
 												})}
 											</Task>
 										) : null}
-										{(latestReady?.ready === true || greenApproved) && stamp === undefined && !yolo ? (
+										{stampReadyRow !== undefined && stamp === undefined && !yolo ? (
 											<Gate
 												id={`r${k}-stamp`}
 												title={`STAMP + merge word: ${input.ticket} PR #${pr.prNumber} (round ${k})`}
@@ -1629,10 +1630,10 @@ prNumber: pr.prNumber,
 													`Fix: ${implementation?.summary ?? "(see PR)"}`,
 													`Danger/blast radius: ${brief?.blastRadius ?? "(not declared in brief)"}`,
 													`PR: ${pr.url}`,
-													`Head at ready: ${latestReady.headSha}`,
-													`Human review approval: ${latestReady.approvedBy ?? "n/a"}`,
-													`CI: ${latestReady.ci} (green-or-will-be-green per captain ruling)`,
-													`Migration gate: ${migRequired ? `TRIGGERED (evidence ${migEvidenceOk ? "complete" : "INCOMPLETE"})` : "not triggered"}`,
+																									`Head at ready: ${stampReadyRow.headSha}`,
+												`Human review approval: ${stampReadyRow.approvedBy ?? "n/a"}`,
+												`CI: ${stampReadyRow.ci} (green-or-will-be-green per captain ruling)`,
+`Migration gate: ${migRequired ? `TRIGGERED (evidence ${migEvidenceOk ? "complete" : "INCOMPLETE"})` : "not triggered"}`,
 													``,
 													`Approving = stamp + the per-PR merge word. The workflow (not an agent)`,
 													`submits to the GitHub merge queue. Head change after this stamp`,

@@ -351,7 +351,14 @@ export function observeOnce(taskId: string, observation: Observation): EmittedEv
 	const events = planEvents(taskId, observation, ledger);
 	commitEvents(taskId, events, ledger);
 	if (isFinished(observation)) {
-		const worktree = readMeta(taskId)?.worktree;
+		const metaWorktree = readMeta(taskId)?.worktree;
+		const shipInput = path.join(stateDir(), "ship", `${observation.run.id}.input.json`);
+		let inputWorktree: string | undefined;
+		try {
+			const input = JSON.parse(fs.readFileSync(shipInput, "utf8")) as { worktree?: unknown };
+			if (typeof input.worktree === "string") inputWorktree = input.worktree;
+		} catch { /* non-ship tasks have no ship input */ }
+		const worktree = metaWorktree ?? inputWorktree;
 		if (worktree !== undefined) releaseWorktree(worktree, observation.run.id);
 	}
 	return events;
