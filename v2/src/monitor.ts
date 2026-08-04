@@ -1651,6 +1651,7 @@ function factoryRows(
   const represented = new Set(rows.map(({ workflow }) => workflow.runId));
   for (const task of frame.tasks) {
     const terminal = ["done", "cancelled"].includes(task.lastVerb ?? "");
+    const gatewayTerminal = task.runId !== null && isTerminalWorkflow(frame.workflows.find((wf) => wf.runId === task.runId) ?? { runId: "", workflow: null, status: null, state: null, step: null, taskId: null });
     const actionableFailure =
       task.lastVerb === "failed" &&
       (task.openDecisions > 0 ||
@@ -1660,6 +1661,7 @@ function factoryRows(
         task.lastNote !== null);
     if (
       terminal ||
+      gatewayTerminal ||
       (task.lastVerb === "failed" && !actionableFailure) ||
       ((task.runId !== null && represented.has(task.runId)) ||
         represented.has(task.taskId.startsWith("run:") ? task.taskId.slice(4) : ""))
