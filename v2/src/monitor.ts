@@ -682,7 +682,7 @@ export async function buildFrame(
     });
   }
   for (const taskId of deckOwnedTasks()) {
-    if (taskIds.has(taskId)) continue;
+    if (taskIds.has(taskId) || runs.some((run) => run.id === taskId)) continue;
     const candidateMeta = readMeta(taskId);
     if (candidateMeta?.worktree !== undefined && taskByRoot.has(realpath(candidateMeta.worktree))) continue;
     const meta = readMeta(taskId);
