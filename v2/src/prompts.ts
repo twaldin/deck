@@ -7,11 +7,11 @@
  * a hand-written wait-for-another-lane clause cost 3.5 lane-days, and every lane
  * briefed from that text self-blocked identically. The scaffold is the contract.
  *
- * The captain's audit of a real fm2 brief removed four things, and none of them
+ * The operator's audit of a real fm2 brief removed four things, and none of them
  * appear here: the Herdr safety-gate section, every no-mistakes mention, the
  * project-memory boilerplate, and the delivery-mode taxonomy.
  *
- * Roles: ORCHESTRATOR (captain-facing, one per fleet) and WORKER (one per task).
+ * Roles: ORCHESTRATOR (operator-facing, one per fleet) and WORKER (one per task).
  * Names are plain so a status line or prompt can never be ambiguous about which
  * is meant.
  */
@@ -65,10 +65,10 @@ export function buildStandingDoctrine(project?: string): string {
 Distilled fleet rules (absolute paths, open when the topic goes deep):
 
 - ${path.join(distill, "STANDING-RULES.md")}
-- ${path.join(data, "captain.md")} (captain's preferences)
+- ${path.join(data, "captain.md")} (operator's preferences)
 - ${path.join(data, "secrets-map.md")} (credential locations, names only — never values)
 
-You never contact the captain directly; every question routes through your status file.`;
+You never contact the operator directly; every question routes through your status file.`;
 	// A profile with no knowledge pack still carries its merge posture.
 	return profile === null ? thin : `${thin}\n\n- ${mergeHint(profile)}`;
 }
@@ -126,7 +126,7 @@ You are done when all of these are true, and not before:
 ${acceptance.map((item) => `- ${item}`).join("\n")}`);
 
 	// Isolation assertion. Non-negotiable: a worker that writes to the primary
-	// checkout corrupts the captain's own working copy.
+	// checkout corrupts the operator's own working copy.
 	sections.push(`## Dependencies
 
 Dependency warming may start in the background when this worktree is allocated. Before running tests, check \`${worktree}/.deck-deps-ready\`. If it is absent, check \`${worktree}/.deck-deps-failed\`; read its error tail and continue when possible. Wait briefly and recheck while the background install can still be starting. If neither marker appears after that bounded wait, proceed with the install yourself or continue and report the missing marker. Dependency warming is best effort and never blocks this task.
@@ -172,7 +172,7 @@ Use \`blocked:\` when you are stuck and need help. Use \`paused:\` only when you
 deliberately waiting on a known external event that will clear on its own.
 If you hit the same obstacle twice, append \`blocked:\` and stop.
 
-You never contact the captain. If a choice belongs to him (product direction,
+You never contact the operator. If a choice belongs to him (product direction,
 irreversible action, scope change), append \`needs-decision: {the options}\` and
 stop. The orchestrator asks him and returns the answer to you. Do not look for a
 way to ask him yourself: one channel means one place to look, and two channels
@@ -193,7 +193,7 @@ document their own rails, and the rails are faster and correct.
 When a credential seems dead, suspect your own extraction before the credential.
 Values in \`.env\` files are often quoted, so \`source\` works while \`grep\`/\`cut\`
 extraction silently yields the quotes too and the request returns 401. A wrong
-"the key is dead" verdict sends the captain to rotate a key that was fine.
+"the key is dead" verdict sends the operator to rotate a key that was fine.
 
 Write as little code as the task allows. Prefer what already exists in this
 repo, then the standard library, then a native platform feature, then an
@@ -241,7 +241,7 @@ Never add a co-author or agent-attribution line to a commit.
 
 Then append \`done: PR {url}\` and stop. Do not sleep-poll CI or review state.
 Deck orchestration or a durable Smithers workflow owns every watch.
-You own code and push only. You never merge; the captain gives that word.
+You own code and push only. You never merge; the operator gives that word.
 
 If the orchestrator later sends a specific review or CI failure, inspect that
 reported item, make the bounded fix, push, report, and stop.

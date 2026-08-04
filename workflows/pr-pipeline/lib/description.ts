@@ -1,43 +1,71 @@
-import type { Brief } from "./types.ts";
-
 export interface PullRequestDescriptionInput {
-	brief: Pick<Brief, "summary" | "acceptanceCriteria">;
+	title: string;
+	summary: string;
+	acceptanceCriteria: string[];
 	testing?: string;
 	reviewOutcome?: string;
 	changedFiles?: string[];
 }
 
-/** Strip internal fleet/agent brief residue from team-facing PR text. */
+/** Remove private workflow instructions before the body-generation step sees them. */
+export function sanitizeDescriptionInput(input: PullRequestDescriptionInput): PullRequestDescriptionInput {
+	const sanitize = (value: string) => {
+		let s = value;
+		// Remove whole sentences that contain brief-only control information first.
+		s = s.replace(/[^.!?\n]*\bpriority\s*#?\s*\d+\b[^.!?\n]*[.!?]?/gi, " ");
+		s = s.replace(/[^.!?\n]*\bSpec\s*=\b[^.!?\n]*[.!?]?/gi, " ");
+		s = s.replace(/[^.!?\n]*\bPR\s*\d+[A-Z]?\s+of\b[^.!?\n]*[.!?]?/gi, " ");
+		s = s.replace(/[^.!?\n]*\bimplementer\s+must\b[^.!?\n]*[.!?]?/gi, " ");
+		s = s.replace(/[^.!?\n]*\bREPORT\.md\b[^.!?\n]*[.!?]?/gi, " ");
+		// Remove local paths and private vocabulary. This is the primary protection;
+		// clean() below remains a failing backstop for any missed input.
+		s = s.replace(/(?:\/Users\/|\/home\/|~\/)[^\s\n)`\"']*/gi, "");
+		s = s.replace(/\.deck\/[^\s\n)`\"']*/gi, "");
+		s = s.replace(/[A-Za-z]:[\\\\/]+[^\s\n)`\"']+/g, "");
+		s = s.replace(
+			/\b(?:captain|orch(?:estrator)?|fleet|stamp(?:able)?|yolo|smithers|worktree|implementer|adversar(?:y|ial))\b/gi,
+			"",
+		);
+		s = s.replace(/\b(?:must read|READ FIRST|DO NOT)\b[^.!?\n]*/gi, "");
+		s = s.replace(/[\"']###[^\"']*[\"']/g, "");
+		s = s.replace(/\b(?:run|execution)[-_ ]?id[:= ]+?[A-Za-z0-9_-]{6,}\b/gi, "");
+		s = s.replace(/\b[0-9a-f]{40}\b/gi, "");
+		s = s.replace(/Managed by[^\n]*/gi, "");
+		s = s.replace(/Local review nits[^\n]*(?:\n[-*].*)*/gi, "");
+		return s
+			.replace(/[ \t]{2,}/g, " ")
+			.replace(/ ?([,.;:])/g, "$1")
+			.replace(/\(\s*\)/g, "")
+			.replace(/(?:^|\s)\.(?=\s|$)/g, " ")
+			.replace(/[ \t]+\n/g, "\n")
+			.replace(/\n{3,}/g, "\n\n")
+			.trim();
+	};
+
+	return {
+		title: sanitize(input.title),
+		summary: sanitize(input.summary),
+		acceptanceCriteria: input.acceptanceCriteria.map(sanitize),
+		testing: input.testing === undefined ? undefined : sanitize(input.testing),
+		reviewOutcome: input.reviewOutcome === undefined ? undefined : sanitize(input.reviewOutcome),
+		changedFiles: input.changedFiles,
+	};
+}
+
+const DENYLIST = [
+	/\b(?:captain|orch(?:estrator)?|fleet|stamp(?:able)?|yolo|smithers|worktree|implementer|adversar(?:y|ial))\b/i,
+	/\b(?:priority\s*#?\s*\d+|Spec\s*=|PR\s*\d+[A-Z]?\s+of|REPORT\.md)\b/i,
+	/(?:\/Users\/|\/home\/|~\/|\.deck\/|[A-Za-z]:[\\\\/])/i,
+	/\b(?:run|execution)[-_ ]?id[:= ]+?[A-Za-z0-9_-]{6,}\b/i,
+	/\b[0-9a-f]{40}\b/i,
+	/\b(?:Managed by|Local review nits)\b/i,
+];
+
+/** Assert that sanitized text is safe. Never silently scrub generated output. */
 function clean(value: string): string {
-	let s = value;
-	// Drop whole sentences that are pure brief-ops residue first
-	s = s.replace(/[^.!\n]*\bpriority\s*#?\s*\d+\b[^.!\n]*[.!?]?/gi, " ");
-	s = s.replace(/[^.!\n]*\bSpec\s*=\b[^.!\n]*[.!?]?/gi, " ");
-	s = s.replace(/[^.!\n]*\bPR\s*\d+[A-Z]?\s+of\b[^.!\n]*[.!?]?/gi, " ");
-	s = s.replace(/[^.!\n]*\bimplementer must\b[^.!\n]*[.!?]?/gi, " ");
-	s = s.replace(/[^.!\n]*\bREPORT\.md\b[^.!\n]*[.!?]?/gi, " ");
-	// paths
-	s = s.replace(/(?:\/Users\/|\/home\/|~\/)[^\s\n)`"']*/gi, "");
-	s = s.replace(/\.deck\/[^\s\n)`"']*/gi, "");
-	s = s.replace(/[A-Za-z]:[\\\\/]+[^\s\n)`"']+/g, "");
-	// internal vocabulary
-	s = s.replace(
-		/\b(?:captain|orch(?:estrator)?|fleet|stamp(?:able)?|yolo|smithers|worktree|implementer|adversar(?:y|ial))\b/gi,
-		"",
-	);
-	s = s.replace(/\b(?:must read|READ FIRST|DO NOT)\b[^.!\n]*/gi, "");
-	s = s.replace(/['"]###[^'"]*['"]/g, "");
-	s = s.replace(/\b(?:run|execution)[-_ ]?id[:= ]+?[A-Za-z0-9_-]{6,}\b/gi, "");
-	s = s.replace(/\b[0-9a-f]{40}\b/gi, "");
-	s = s.replace(/Managed by[^\n]*/gi, "");
-	s = s.replace(/Local review nits[^\n]*(?:\n[-*].*)*/gi, "");
-	s = s.replace(/[ \t]{2,}/g, " ");
-	s = s.replace(/ ?([,.;:])/g, "$1");
-	s = s.replace(/\(\s*\)/g, "");
-	s = s.replace(/(?:^|\s)\.(?=\s|$)/g, " ");
-	s = s.replace(/[ \t]+\n/g, "\n");
-	s = s.replace(/\n{3,}/g, "\n\n");
-	return s.trim();
+	const hit = DENYLIST.find((pattern) => pattern.test(value));
+	if (hit !== undefined) throw new Error(`PR description contains internal vocabulary: ${hit}`);
+	return value.trim();
 }
 
 function summarize(text: string): string {
@@ -52,8 +80,8 @@ function summarize(text: string): string {
 }
 
 export function generatePullRequestDescription(input: PullRequestDescriptionInput): string {
-	const problem = summarize(input.brief.summary || "");
-	const acceptance = input.brief.acceptanceCriteria
+	const problem = summarize(input.summary || "");
+	const acceptance = input.acceptanceCriteria
 		.map((criterion) => clean(criterion))
 		.filter((c) => c.length > 8 && /[A-Za-z]{4,}/.test(c))
 		.filter((c) => !/^must approve\.?$/i.test(c))
@@ -62,7 +90,7 @@ export function generatePullRequestDescription(input: PullRequestDescriptionInpu
 	const testing = clean(input.testing ?? "");
 	const testingLine = testing.length > 8 ? testing : "Relevant automated checks were run.";
 	const pipelineNote = (input.changedFiles ?? []).some((file) => /(?:^|\/)pipeline\.tsx$/i.test(file))
-		? "Editing pipeline.tsx invalidates resume of in-flight workflow runs (RESUME_METADATA_MISMATCH). Recut those runs after merge."
+		? "Editing pipeline.tsx can invalidate in-flight runs; the workflow must recut after merge."
 		: "";
 
 	return [
