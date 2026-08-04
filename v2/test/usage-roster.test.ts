@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { buildUsageText } from "../src/fleet";
+import { buildUsageText } from "../src/monitor";
 import { usageStatusLine, type UsageRoster } from "../src/usage-roster";
 
 describe("footer usage roster", () => {

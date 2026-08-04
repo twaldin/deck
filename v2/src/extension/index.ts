@@ -14,9 +14,8 @@
  * orchestrator's own process, so there is no second thing that can die silently
  * while the orchestrator keeps running. fm2 lost a watcher for 23.8h that way.
  */
-import { execFile, spawn as spawnProcess } from "node:child_process";
+import { spawn as spawnProcess } from "node:child_process";
 import * as path from "node:path";
-import { promisify } from "node:util";
 import { Box, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { DECK_OPERATIONAL_PREFIX, registerCalm } from "../calm";
@@ -36,18 +35,16 @@ import {
 	renderFooterLines,
 	type FooterSessionBits,
 	type PsRun,
-} from "../fleet";
+} from "../monitor";
 import { projectFleet } from "../herdr";
 import { deckV2Home, stateFiles } from "../home";
 import { standingRulesDigest } from "./standing-rules";
 import { readMeta } from "../meta";
 import { loadProfiles } from "../projects";
 import { renderReasoning, setSeatReasoning, assertReasoningLevel } from "../reasoning";
-import { observePsSnapshotWithInspect, type PsSnapshotRow } from "../observer";
 import { registerQuestions } from "../questions";
 import { enqueue, pending } from "../queue";
 import { pipelineDir, startShip } from "../ship";
-import { reconcileRecuts } from "../recut";
 import { peekSession, startRun } from "../spawn";
 import { STATUS_VERBS, type StatusVerb } from "../status";
 import { syncAuthDeadQuestions } from "../auth-dead";
@@ -77,12 +74,8 @@ type DeckV2Dependencies = {
 	/** Test seam for the raw ps command. Production uses the enriched collector below. */
 	collectPsSnapshot?: typeof collectPsSnapshot;
 	collectRuns?: typeof collectRuns;
-	inspectRun?: (command: string, args: readonly string[], cwd: string) => Promise<{ stdout: string; exitCode: number } | null>;
 };
 
-const inspectRun = promisify(execFile);
-const INSPECT_TIMEOUT_MS = 15_000;
-const INSPECT_MAX_BUFFER = 4_000_000;
 
 export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): void {
 	// Keep the raw snapshot seam for focused extension tests, but never use it in
@@ -752,28 +745,7 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 		const snapshots = workflowWorkspaces.length === 0
 			? []
 			: await Promise.all(workflowWorkspaces.map(async (workspace) => ({ workspace, snapshot: await collectEnrichedRuns(workspace) })));
-		const workflowSnapshot = snapshots.find(({ workspace }) => workspace === workflowCwd)?.snapshot;
 		const allRuns = snapshots.flatMap(({ snapshot: current }) => current.runs);
-		const rows = snapshots.flatMap(({ workspace, snapshot: current }) => current.runs.map((run) => ({ ...run, workspace }))) as PsSnapshotRow[];
-		if (workflowCwd !== undefined) void reconcileRecuts(workflowCwd, pipelineDir(), workflowSnapshot?.runs ?? []).catch(() => {});
-		if (workflowCwd !== undefined) {
-			await observePsSnapshotWithInspect({
-				rows,
-				workspace: workflowCwd,
-				run: dependencies.inspectRun ?? (async (command, args, cwd) => {
-					try {
-						const result = await inspectRun(command, [...args], {
-							cwd,
-							timeout: INSPECT_TIMEOUT_MS,
-							maxBuffer: INSPECT_MAX_BUFFER,
-						});
-						return { stdout: result.stdout, exitCode: 0 };
-					} catch (error: any) {
-						return { stdout: String(error?.stdout ?? ""), exitCode: Number(error?.code ?? 1) };
-					}
-				}),
-			});
-		}
 		const frame = workflowCwd === undefined
 			? await buildFrame({})
 			: await buildFrame({

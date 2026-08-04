@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { authDeadQuestionId, syncAuthDeadQuestions } from "../src/auth-dead";
 import { answer, compact, markDelivered, openQuestions, readQuestions } from "../src/questions-store";
-import { buildUsageText } from "../src/fleet";
+import { buildUsageText } from "../src/monitor";
 import { authDeadStatusLine, usageStatusLine, type UsageRoster } from "../src/usage-roster";
 
 let dir: string;

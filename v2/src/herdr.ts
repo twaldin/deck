@@ -26,7 +26,7 @@ import { execFile } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { promisify } from "node:util";
-import type { FleetFrame, SourceHealth, TaskRow } from "./fleet";
+import type { FleetFrame, SourceHealth, TaskRow } from "./monitor";
 import { stateDir, stateFiles } from "./home";
 import { readMeta, updateMeta } from "./meta";
 import { reapOrphanedBunTests } from "./orphan-reaper";

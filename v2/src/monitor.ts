@@ -687,6 +687,24 @@ function frameModelForTask(taskId: string, tasks: TaskRow[]): string | null {
 	return tasks.find((task) => task.taskId === taskId)?.model ?? null;
 }
 
+export type EffortLiveness = "live" | "archived";
+
+/** One liveness rule shared by the monitor and statusline. */
+export function effortLiveness(run: Pick<PsRun, "status" | "state" | "started" | "prNumber"> & { watchActive?: boolean }): EffortLiveness {
+	const terminal = new Set(["finished", "succeeded", "failed", "cancelled", "terminal"]);
+	const status = (run.status ?? "").toLowerCase();
+	const state = (run.state ?? "").toLowerCase();
+	if (status === "running" || status === "paused" || state === "running" || state === "paused") return "live";
+	if (run.prNumber !== undefined && run.prNumber !== null && run.watchActive === true) return "live";
+	if (terminal.has(status) || terminal.has(state)) return "archived";
+	const started = run.started === undefined ? NaN : Date.parse(run.started);
+	return Number.isFinite(started) && Date.now() - started > 3 * 24 * 60 * 60 * 1000 ? "archived" : "live";
+}
+
+export function liveEffortCount(runs: readonly PsRun[]): number {
+	return runs.filter((run) => effortLiveness(run) === "live").length;
+}
+
 export async function buildFrame(
 	options: { workflowCwd?: string; psRuns?: PsRun[] } = {},
 ): Promise<FleetFrame> {
@@ -963,7 +981,7 @@ export async function buildFrame(
 		agents,
 		counters: {
 			tasks: tasks.length,
-			running: tasks.filter((task) => task.runState === "running").length,
+			running: workflows.filter((workflow) => effortLiveness({ status: workflow.status ?? undefined, state: workflow.state ?? undefined, started: workflow.startedAt ?? undefined, prNumber: workflow.prNumber ?? undefined }) === "live").length,
 			blocked: tasks.filter((task) => task.lastVerb === "blocked").length,
 			openDecisions: tasks.reduce(
 				(sum, task) => sum + task.openDecisions,

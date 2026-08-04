@@ -34,7 +34,7 @@ import {
 	type FleetFrame,
 	type TaskRow,
 	type WorkflowRow,
-} from "../src/fleet";
+} from "../src/monitor";
 
 function task(overrides: Partial<TaskRow> = {}): TaskRow {
 	return {

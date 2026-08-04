@@ -18,7 +18,7 @@ import {
 import { bootstrapHome, formatBootstrap } from "./bootstrap";
 import { homeSyncPull, homeSyncPush, homeSyncStatus } from "./home-sync";
 import { appendStatus, readStatus } from "./events";
-import { buildFrame, renderFrame } from "./fleet";
+import { buildFrame, renderFrame } from "./monitor";
 import { projectFleet } from "./herdr";
 import { assertHomeIsNotACheckout, assertHomeIsNotAnotherFleet, deckV2Home, stateFiles } from "./home";
 import { readMeta } from "./meta";
