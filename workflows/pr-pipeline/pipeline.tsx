@@ -1316,7 +1316,7 @@ export default smithers((ctx) => {
 								const greenApproved =
 									latestReady?.approvedBy !== null &&
 									latestReady?.approvedBy !== undefined &&
-									latestReady?.ci !== "red";
+									latestReady?.ci === "green";
 								const readyExhausted =
 									readyRows.length >= limits.readyPolls &&
 									latestReady?.ready !== true &&
@@ -1607,7 +1607,7 @@ prNumber: pr.prNumber,
 										{/* stage 7: stamp + merge word. A yolo profile skips the park: the
 										    workflow writes the approved row itself (same node id, so
 										    stamp-validity, head re-check and merge run unchanged). */}
-										{latestReady?.ready === true && stamp === undefined && yolo ? (
+										{(latestReady?.ready === true || greenApproved) && stamp === undefined && yolo ? (
 											<Task id={`r${k}-stamp`} output={outputs.approvals} retries={0}>
 												{() => ({
 													approved: true,
@@ -1617,7 +1617,7 @@ prNumber: pr.prNumber,
 												})}
 											</Task>
 										) : null}
-										{latestReady?.ready === true && stamp === undefined && !yolo ? (
+										{(latestReady?.ready === true || greenApproved) && stamp === undefined && !yolo ? (
 											<Gate
 												id={`r${k}-stamp`}
 												title={`STAMP + merge word: ${input.ticket} PR #${pr.prNumber} (round ${k})`}
