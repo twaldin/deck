@@ -3,6 +3,8 @@
  * PR record AND the local worktree both match what the run declared. Pure and
  * unit-testable; the pipeline feeds it fetchPrOverview + local git state.
  */
+import * as fs from "node:fs";
+import * as path from "node:path";
 
 export interface PrOverview {
 	number: number;
@@ -36,6 +38,15 @@ export function repoFromRemoteUrl(url: string): string {
 }
 
 /** Throws [escalate] on any mismatch; returns void when the PR is adoptable. */
+export const KNOWN_SCRATCH_FILES = [".deck-deps-failed", ".deck-deps-failed.log", ".husky/_"] as const;
+
+/** Remove dependency and hook scratch files before checking adopt cleanliness. */
+export function cleanKnownScratchFiles(worktree: string, remove: (file: string) => void = (file) => {
+	fs.rmSync(file, { force: true, recursive: true });
+}): void {
+	for (const file of KNOWN_SCRATCH_FILES) remove(path.join(worktree, file));
+}
+
 export function assertAdoptable(overview: PrOverview, expected: AdoptExpectation): void {
 	const pr = `PR #${overview.number}`;
 	if (overview.state !== "open") {

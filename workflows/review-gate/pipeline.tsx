@@ -39,7 +39,7 @@ async function ghRun(cli: string, args: string[], cwd: string): Promise<void> {
   const proc = Bun.spawn([cli, ...args], { cwd, stdout: "pipe", stderr: "pipe" });
   if (await proc.exited !== 0) throw new Error(await new Response(proc.stderr).text());
 }
-async function requested(cli: string, repo: string, login: string): Promise<Pr[]> { return ghJson(cli, ["pr", "list", "--repo", repo, "--reviewer", login, "--state", "open", "--json", "number,url,title,headRefName,headRefOid"]); }
+async function requested(cli: string, repo: string, login: string): Promise<Pr[]> { return ghJson(cli, ["pr", "list", "--repo", repo, "--search", `review-requested:${login}`, "--state", "open", "--json", "number,url,title,headRefName,headRefOid"]); }
 async function state(cli: string, repo: string, pr: number) {
   const v = await ghJson(cli, ["pr", "view", String(pr), "--repo", repo, "--json", "mergeable,mergeStateStatus,statusCheckRollup,headRefOid"]);
   const checks = Array.isArray(v.statusCheckRollup) ? v.statusCheckRollup : [];

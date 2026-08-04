@@ -40,7 +40,7 @@ import { z } from "zod";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-import { assertAdoptable, decideAdoptPush } from "./lib/adopt.ts";
+import { assertAdoptable, cleanKnownScratchFiles, decideAdoptPush } from "./lib/adopt.ts";
 import { validateBrief } from "./lib/brief.ts";
 import { evaluateDone } from "./lib/done.ts";
 import {
@@ -594,6 +594,9 @@ export default smithers((ctx) => {
 		regressed: boolean;
 		migrationDetected: boolean;
 		migrationFiles: string[];
+		approvedBy: string | null;
+		ci: string;
+		headSha: string;
 		at: string;
 	}>;
 	const watchPollRows = (ctx.outputs.watchPoll ?? []) as Array<{ round: number; poll: number; exitOk: boolean }>;
@@ -957,7 +960,8 @@ export default smithers((ctx) => {
 											cwd: input.worktree,
 										})
 									).trim();
-									const worktreeStatus = await execOrThrow(
+									cleanKnownScratchFiles(input.worktree);
+					const worktreeStatus = await execOrThrow(
 										bunExec,
 										[github.git, "status", "--porcelain"],
 										{ cwd: input.worktree },
@@ -1620,10 +1624,10 @@ prNumber: pr.prNumber,
 													`Fix: ${implementation?.summary ?? "(see PR)"}`,
 													`Danger/blast radius: ${brief?.blastRadius ?? "(not declared in brief)"}`,
 													`PR: ${pr.url}`,
-													`Head at ready: ${latestReady.headSha}`,
-													`Human review approval: ${latestReady.approvedBy ?? "n/a"}`,
-													`CI: ${latestReady.ci} (green-or-will-be-green per captain ruling)`,
-													`Migration gate: ${migRequired ? `TRIGGERED (evidence ${migEvidenceOk ? "complete" : "INCOMPLETE"})` : "not triggered"}`,
+																									`Head at ready: ${latestReady.headSha}`,
+												`Human review approval: ${latestReady.approvedBy ?? "n/a"}`,
+												`CI: ${latestReady.ci} (green-or-will-be-green per captain ruling)`,
+`Migration gate: ${migRequired ? `TRIGGERED (evidence ${migEvidenceOk ? "complete" : "INCOMPLETE"})` : "not triggered"}`,
 													``,
 													`Approving = stamp + the per-PR merge word. The workflow (not an agent)`,
 													`submits to the GitHub merge queue. Head change after this stamp`,

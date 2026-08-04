@@ -32,6 +32,8 @@ import { appendStatus } from "./events";
 import type { StatusVerb } from "./status";
 import { stateDir } from "./home";
 import { SMITHERS_SPEC } from "./smithers";
+import { readMeta } from "./meta";
+import { releaseWorktree } from "./worktree-lock";
 
 /** A run as the read-only CLI reports it. */
 export type ObservedRun = {
@@ -233,6 +235,9 @@ export function planEvents(
 	ledger: ObserverLedger,
 ): EmittedEvent[] {
 	const seen = new Set(ledger.emitted);
+	// Cancelled runs can remain in `ps` output while old node rows are still
+	// visible. Never wake from stale node rows after cancellation. The run-level
+	// cancellation event below is still emitted once, so the task records closure.
 	const events: EmittedEvent[] = [];
 	const { run, nodes } = observation;
 
@@ -243,6 +248,7 @@ export function planEvents(
 	// payload get distinct keys instead of collapsing to one event.
 	const seenNode = new Map<string, number>();
 	for (const node of nodes) {
+		if (observation.run.status === "cancelled") continue;
 		// Real step states seen live: finished, waiting-approval, failed.
 		const milestone = run.workflow === "pr-pipeline" ? PIPELINE_MILESTONES[node.nodeId] : undefined;
 		const landingConfirmed = node.nodeId !== "landing-poll" ||
@@ -344,6 +350,17 @@ export function observeOnce(taskId: string, observation: Observation): EmittedEv
 	const ledger = readLedger(taskId);
 	const events = planEvents(taskId, observation, ledger);
 	commitEvents(taskId, events, ledger);
+	if (isFinished(observation)) {
+		const metaWorktree = readMeta(taskId)?.worktree;
+		const shipInput = path.join(stateDir(), "ship", `${observation.run.id}.input.json`);
+		let inputWorktree: string | undefined;
+		try {
+			const input = JSON.parse(fs.readFileSync(shipInput, "utf8")) as { worktree?: unknown };
+			if (typeof input.worktree === "string") inputWorktree = input.worktree;
+		} catch { /* non-ship tasks have no ship input */ }
+		const worktree = metaWorktree ?? inputWorktree;
+		if (worktree !== undefined) releaseWorktree(worktree, observation.run.id);
+	}
 	return events;
 }
 

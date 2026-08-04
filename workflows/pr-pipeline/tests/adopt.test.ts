@@ -7,7 +7,7 @@
 
 import { describe, expect, test } from "bun:test";
 
-import { assertAdoptable, decideAdoptPush, repoFromRemoteUrl, type PrOverview } from "../lib/adopt.ts";
+import { assertAdoptable, cleanKnownScratchFiles, decideAdoptPush, KNOWN_SCRATCH_FILES, repoFromRemoteUrl, type PrOverview } from "../lib/adopt.ts";
 import { fetchPrOverview, type ExecFn } from "../lib/gh.ts";
 
 const goodOverview: PrOverview = {
@@ -269,4 +269,10 @@ describe("fetchPrOverview (mocked gh, non-dry-run parse path)", () => {
 			fetchPrOverview({ gh: "gh", repo: "lindy-ai/lindy", exec: execReturning("", 1) }, 777),
 		).rejects.toThrow(/command failed/);
 	});
+});
+
+test("cleanKnownScratchFiles removes every known scratch file", () => {
+	const removed: string[] = [];
+	cleanKnownScratchFiles("/tmp/worktree", (file) => removed.push(file));
+	expect(removed).toEqual(KNOWN_SCRATCH_FILES.map((file) => `/tmp/worktree/${file}`));
 });
