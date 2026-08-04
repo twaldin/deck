@@ -29,6 +29,8 @@ import {
   readQuestions,
 } from "./questions-store";
 import { pending } from "./queue";
+import { deckOwnedTasks } from "./wake";
+import { readMeta } from "./meta";
 import { unresolvedReceipts } from "./side-effects";
 import { pidAlive } from "./spawn";
 import {
@@ -577,6 +579,18 @@ function realpath(target: string): string {
   }
 }
 
+function readMetaForWorktree(worktree: string): ReturnType<typeof readMeta> {
+  for (const taskId of deckOwnedTasks()) {
+    const meta = readMeta(taskId);
+    if (meta?.worktree !== undefined && realpath(meta.worktree) === worktree) return meta;
+  }
+  return null;
+}
+
+function localTaskId(id: string): boolean {
+  return /^[a-z0-9][a-z0-9-]{0,63}$/.test(id);
+}
+
 function frameModelForTask(taskId: string, tasks: TaskRow[]): string | null {
   return tasks.find((task) => task.taskId === taskId)?.model ?? null;
 }
@@ -593,8 +607,7 @@ export function effortLiveness(
     return "live";
   if (run.prNumber !== undefined && run.watchActive === true) return "live";
   const started = run.started === undefined ? NaN : Date.parse(run.started);
-  return status === "finished" ||
-    status === "succeeded" ||
+  return ["finished", "succeeded", "completed", "complete", "done", "cancelled", "failed"].includes(status) ||
     (Number.isFinite(started) && Date.now() - started > 3 * 24 * 60 * 60 * 1000)
     ? "archived"
     : "live";
@@ -631,29 +644,29 @@ export async function buildFrame(
       collectPanes(),
     ]);
   const taskByRoot = new Map<string, string>();
-  const tasks: TaskRow[] = runs.map((psRun) => {
+  const tasks: TaskRow[] = [];
+  const taskIds = new Set<string>();
+  for (const psRun of runs) {
     const input = readShipInput(psRun.id);
     const taskId = `run:${psRun.id}`;
-    const rootDir =
-      psRun.rootDir === undefined ? null : realpath(psRun.rootDir);
+    const rootDir = psRun.rootDir === undefined ? null : realpath(psRun.rootDir);
     const step = normalizeStep(psRun.step) ?? psRun.blockedNode ?? null;
     if (rootDir !== null) taskByRoot.set(rootDir, taskId);
-    return {
+    const meta = rootDir === null ? null : readMetaForWorktree(rootDir);
+    const localId = meta?.id;
+    taskIds.add(taskId);
+    tasks.push({
       taskId,
-      kind: psRun.workflow ?? "smithers",
-      model: input.modelSeats,
-      project: input.repo,
-      runState:
-        effortLiveness({ ...psRun, watchActive: step?.includes("watch") }) ===
-        "live"
-          ? "running"
-          : "finished",
-      lastVerb: null,
-      lastNote: null,
-      openDecisions: 0,
-      queuedMessages: 0,
-      unresolvedSideEffects: 0,
-      pr: psRun.prNumber === undefined ? null : String(psRun.prNumber),
+      kind: input.kind ?? psRun.workflow ?? meta?.kind ?? "smithers",
+      model: input.modelSeats ?? meta?.model ?? null,
+      project: input.repo ?? meta?.project ?? null,
+      runState: effortLiveness({ ...psRun, watchActive: step?.includes("watch") }) === "live" ? "running" : "finished",
+      lastVerb: localId && localTaskId(localId) ? lastEvent(localId)?.verb ?? null : null,
+      lastNote: localId && localTaskId(localId) ? lastEvent(localId)?.note ?? null : null,
+      openDecisions: localId && localTaskId(localId) ? openDecisions(localId).size : 0,
+      queuedMessages: localId && localTaskId(localId) ? pending(localId).length : 0,
+      unresolvedSideEffects: localId && localTaskId(localId) ? unresolvedReceipts(localId).length : 0,
+      pr: psRun.prNumber === undefined ? (meta?.pr ?? null) : String(psRun.prNumber),
       ticket: input.ticket,
       prNumber: psRun.prNumber ?? input.prNumber,
       prTitle: psRun.prTitle ?? input.prTitle,
@@ -665,8 +678,39 @@ export async function buildFrame(
       stage: step,
       pane: rootDir === null ? null : (byWorktree.get(rootDir) ?? null),
       statusAgeMs: ageMs(psRun.started),
-    };
-  });
+    });
+  }
+  for (const taskId of deckOwnedTasks()) {
+    if (taskIds.has(taskId)) continue;
+    const meta = readMeta(taskId);
+    const event = lastEvent(taskId);
+    const worktree = meta?.worktree ? realpath(meta.worktree) : null;
+    const pid = meta?.run_pid;
+    tasks.push({
+      taskId,
+      kind: meta?.kind ?? "ship",
+      model: meta?.model ?? null,
+      project: meta?.project ?? null,
+      runState: pid === undefined ? "none" : pidAlive(pid) ? "running" : "finished",
+      lastVerb: event?.verb ?? null,
+      lastNote: event?.note ?? null,
+      openDecisions: openDecisions(taskId).size,
+      queuedMessages: pending(taskId).length,
+      unresolvedSideEffects: unresolvedReceipts(taskId).length,
+      pr: meta?.pr ?? null,
+      ticket: null,
+      prNumber: prNumberFrom(meta?.pr ?? null),
+      prTitle: null,
+      phase: null,
+      waitingFor: null,
+      activity: undefined,
+      worktree,
+      runId: meta?.run_id ?? null,
+      stage: null,
+      pane: worktree === null ? null : (byWorktree.get(worktree) ?? null),
+      statusAgeMs: null,
+    });
+  }
 
   const taskByRun = new Map(
     tasks.flatMap((task) =>
@@ -887,7 +931,7 @@ export async function buildFrame(
       openQuestions: questionsOpen,
       internalOpen: internal.open,
       internalCap: internal.cap,
-      efforts: efforts.length,
+      efforts: liveEffortCount(runs.map((run) => ({ ...run, watchActive: normalizeStep(run.step)?.includes("watch") }))),
       agents: liveSpawnCount(tasks),
       unhealedFailures,
     },
@@ -1597,6 +1641,8 @@ function factoryRows(
     const workflow = workflows.get(effort.runId);
     return workflow === undefined ||
       workflow.superseded ||
+      effortLiveness({ status: workflow.status, state: workflow.state }) === "archived" ||
+      effortLiveness({ status: effort.state }) === "archived" ||
       (isTerminalWorkflow(workflow) &&
         !isActionableWorkflowFailure(workflow, frame.workflows))
       ? []
@@ -1971,7 +2017,7 @@ export function renderFooterLines(
 ): string[] {
   const attention = [
     `Nq ${frame.counters.openQuestions}`,
-    `${frame.counters.efforts ?? frame.efforts?.length ?? 0} efforts`,
+    `${frame.efforts?.filter((effort) => effortLiveness({ status: effort.state }) === "live").length ?? 0} efforts`,
     `${frame.counters.agents ?? frame.agents?.length ?? 0} agents`,
     (frame.counters.unhealedFailures ??
       frame.efforts?.filter((effort) => effort.failed).length ??
