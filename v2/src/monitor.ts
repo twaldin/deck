@@ -654,7 +654,7 @@ export async function buildFrame(
     if (rootDir !== null) taskByRoot.set(rootDir, taskId);
     const meta = rootDir === null ? null : readMetaForWorktree(rootDir);
     const localId = meta?.id;
-    const displayTaskId = localId ?? taskId;
+    const displayTaskId = localId !== undefined && !taskIds.has(localId) ? localId : taskId;
     taskIds.add(displayTaskId);
     tasks.push({
       taskId: displayTaskId,
