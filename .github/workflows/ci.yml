@@ -39,6 +39,22 @@ jobs:
         working-directory: workflows/pr-pipeline
         run: bun test
 
+  stack-owner-tests:
+    name: stack owner workflow tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Install workflow dependencies
+        working-directory: workflows/stack-owner-workflow
+        run: bun install
+      - name: Run stack owner tests
+        working-directory: workflows/stack-owner-workflow
+        run: bun test
+      - name: Typecheck stack owner workflow
+        working-directory: workflows/stack-owner-workflow
+        run: bun run typecheck
+
   typecheck:
     name: typecheck
     runs-on: ubuntu-latest
