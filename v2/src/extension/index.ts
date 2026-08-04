@@ -106,7 +106,6 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 	let unwatch: (() => void) | undefined;
 	let refreshFactoryOverlay: (() => void) | undefined;
 	let reconcileFallback: ReturnType<typeof setInterval> | undefined;
-	let observing: Promise<void> = Promise.resolve();
 	const RECONCILE_FALLBACK_MS = 60_000;
 	let workflowCwd: string | undefined;
 	let workflowWorkspaces: string[] = [];
@@ -772,7 +771,7 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 		}
 		if (workflowCwd !== undefined) {
 			const observationKey = rows.map((row) => `${row.workspace}:${row.id}:${row.status}:${row.step ?? ""}`).join("|");
-			observing = observing.then(() => gatewaySubscription(workflowCwd!).request(observationKey, () => observePsSnapshotWithInspect({
+			await gatewaySubscription(workflowCwd!).request(observationKey, () => observePsSnapshotWithInspect({
 				rows,
 				workspace: workflowCwd!,
 				run: async (command, args, cwd) => {
@@ -783,7 +782,7 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 						return { stdout: typeof error?.stdout === "string" ? error.stdout : "", exitCode: error?.code ?? 1 };
 					}
 				},
-			}))).then(() => undefined, () => undefined);
+			})).catch(() => undefined);
 		}
 		const frame = workflowCwd === undefined
 			? await buildFrame({})

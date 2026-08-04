@@ -4,11 +4,12 @@ import { execFileSync } from "node:child_process";
 import type { WorktreeEntry } from "./schema";
 
 export type ReapDecision = "reap" | "keep-dirty" | "keep-active" | "keep-young";
-export function classifyIdleWorktree(entry: WorktreeEntry, now: number, ttlMs: number, dirty: boolean, terminal: boolean): ReapDecision {
+export function classifyIdleWorktree(_entry: WorktreeEntry, _now: number, _ttlMs: number, dirty: boolean, terminal: boolean): ReapDecision {
+	// `created` is allocation time. It is not terminal activity time. Terminal
+	// efforts are safe to release immediately; the TTL applies only to future
+	// non-terminal idle cleanup, not to completed work.
 	if (!terminal) return "keep-active";
 	if (dirty) return "keep-dirty";
-	const created = Date.parse(entry.created);
-	if (!Number.isFinite(created) || now - created < ttlMs) return "keep-young";
 	return "reap";
 }
 export function worktreeDirty(worktree: string): boolean {

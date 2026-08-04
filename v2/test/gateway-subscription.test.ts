@@ -2,6 +2,20 @@ import { describe, expect, test } from "bun:test";
 import { GatewaySubscription } from "../src/gateway-subscription";
 
 describe("GatewaySubscription", () => {
+	test("coalesces concurrent snapshot producers", async () => {
+		const subscription = new GatewaySubscription();
+		let calls = 0;
+		let resolve!: (value: string) => void;
+		const pending = new Promise<string>((done) => { resolve = done; });
+		const producer = () => { calls++; return pending; };
+		const first = subscription.request("same-snapshot", producer);
+		const second = subscription.request("same-snapshot", producer);
+		expect(first).toBe(second);
+		expect(calls).toBe(1);
+		resolve("observed");
+		expect(await second).toBe("observed");
+	});
+
 	test("starts one stream for concurrent subscribers and fans out events", async () => {
 		const subscription = new GatewaySubscription();
 		let starts = 0;

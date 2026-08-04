@@ -19,6 +19,8 @@ import {
 } from "./state";
 
 const admissionLimitSchema = z.number().int().positive();
+// Keep the on-disk pool bounded even when completed slots are retained.
+export const MAX_WORKTREE_POOL_SIZE = 24;
 const nodeErrorSchema = z.object({ code: z.string() }).passthrough();
 
 function projectName(repo: string): string {
@@ -144,6 +146,9 @@ export async function allocateWorktree(request: AllocateRequest): Promise<Worktr
 		const reusable = state.entries.find(
 			(entry) => entry.repo === repo && entry.state === "free" && !fs.existsSync(entry.path),
 		);
+		if (reusable === undefined && state.entries.length >= MAX_WORKTREE_POOL_SIZE) {
+			throw new DeckError("E_CAP", `worktree pool capacity reached (${MAX_WORKTREE_POOL_SIZE})`, { limit: MAX_WORKTREE_POOL_SIZE });
+		}
 		let number = reusable === undefined ? nextSlotNumber(state, project) : entryNumber(reusable);
 		let worktreePath = reusable?.path ?? path.join(WORKTREE_POOL_DIR, `${project}-${number}`);
 		while (reusable === undefined && fs.existsSync(worktreePath)) {
