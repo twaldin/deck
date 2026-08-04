@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { claimWorktree, releaseWorktree } from "../src/worktree-lock";
+import { claimWorktree, releaseWorktree, updateWorktreePid } from "../src/worktree-lock";
 
 const oldHome = process.env.DECK_V2_HOME;
 const homes: string[] = [];
@@ -32,11 +32,12 @@ describe("worktree locks", () => {
 		release();
 	});
 
-	test("a durable owner is not reclaimed when its launcher pid dies", () => {
+	test("a durable owner remains protected after its launcher pid is updated", () => {
 		const home = fs.mkdtempSync(path.join(os.tmpdir(), "deck-lock-")); homes.push(home);
 		process.env.DECK_V2_HOME = home;
 		const wt = path.join(home, "wt"); fs.mkdirSync(wt);
-		claimWorktree(wt, "run", 999999, true);
+		claimWorktree(wt, "run", process.pid, true);
+		updateWorktreePid(wt, "run", 999999);
 		expect(() => claimWorktree(wt, "next")).toThrow(/already in use by run/);
 		releaseWorktree(wt, "run");
 	});

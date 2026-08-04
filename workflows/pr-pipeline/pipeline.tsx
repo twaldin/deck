@@ -594,6 +594,9 @@ export default smithers((ctx) => {
 		regressed: boolean;
 		migrationDetected: boolean;
 		migrationFiles: string[];
+		approvedBy: string | null;
+		ci: string;
+		headSha: string;
 		at: string;
 	}>;
 	const watchPollRows = (ctx.outputs.watchPoll ?? []) as Array<{ round: number; poll: number; exitOk: boolean }>;
@@ -1318,9 +1321,6 @@ export default smithers((ctx) => {
 								);
 								const greenApproved = greenApprovedRow !== undefined;
 								const stampReadyRow = latestReady?.ready === true ? latestReady : greenApprovedRow;
-								// A green, human-approved row is sufficient even when the poll
-								// budget was consumed by a transient non-ready result. Keep the
-								// migration gate authoritative below.
 								const readyExhausted =
 									readyRows.length >= limits.readyPolls &&
 									latestReady?.ready !== true &&
@@ -1473,7 +1473,7 @@ prNumber: pr.prNumber,
 											<Loop
 												id={`r${k}-ready-loop`}
 												until={
-													ctx.latest(outputs.readyPoll, readyNode)?.ready === true ||
+													readyPollRows.some((row) => row.round === k && row.approvedBy != null && row.ci === "green" && row.regressed !== true) ||
 													ctx.latest(outputs.readyPoll, readyNode)?.regressed === true
 												}
 												maxIterations={limits.readyPolls}

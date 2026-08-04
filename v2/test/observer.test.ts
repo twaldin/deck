@@ -227,11 +227,20 @@ describe("observer event selection", () => {
 		expect(event?.verb).toBe("paused");
 	});
 
-	test("a cancelled run is terminal and reported as failed", async () => {
+	test("a cancelled run is terminal and suppresses stale node wake events", async () => {
 		const { observer } = await mods();
-		const [event] = observer.observeOnce("t1", { run: run("cancelled"), nodes: [] });
-		expect(event?.verb).toBe("failed");
-		expect(observer.isFinished({ run: run("cancelled"), nodes: [] })).toBe(true);
+		const observation = {
+			run: run("cancelled"),
+			nodes: [
+				{ nodeId: "push-pr", status: "finished", attempt: 0, output: { prNumber: 42 } },
+				{ nodeId: "merge-gate", status: "waiting-approval", attempt: 0 },
+			],
+		};
+		const events = observer.observeOnce("t1", observation);
+		expect(events).toHaveLength(1);
+		expect(events[0]?.scope).toBeUndefined();
+		expect(events[0]?.verb).toBe("failed");
+		expect(observer.isFinished(observation)).toBe(true);
 		expect(observer.isFinished({ run: run("running"), nodes: [] })).toBe(false);
 	});
 

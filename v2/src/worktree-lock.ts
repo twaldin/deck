@@ -56,7 +56,7 @@ export function claimWorktree(worktree: string, owner: string, pid = process.pid
 			return claimWorktree(worktree, owner, pid, durable);
 		}
 		try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* lock owner remains authoritative */ }
-		throw new Error(`refusing to start: worktree ${path.resolve(worktree)} is already in use by ${current?.owner ?? "unknown"}`);
+		throw new Error(`refusing to start: worktree ${path.resolve(worktree)} is already in use by ${current?.owner ?? "unknown"}; inspect or remove lock ${ownerFile(file)}`);
 	}
 	return () => releaseWorktree(worktree, owner);
 }
@@ -66,6 +66,6 @@ export function updateWorktreePid(worktree: string, owner: string, pid: number):
 	const lock = readLock(file);
 	if (lock?.owner !== owner) return;
 	const tmp = `${ownerFile(file)}.tmp-${process.pid}`;
-	fs.writeFileSync(tmp, `${JSON.stringify({ owner, pid })}\n`, { mode: 0o600 });
+	fs.writeFileSync(tmp, `${JSON.stringify({ owner, pid, durable: lock.durable })}\n`, { mode: 0o600 });
 	fs.renameSync(tmp, ownerFile(file));
 }
