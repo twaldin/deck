@@ -97,7 +97,12 @@ function parseStampGateId(id: string): { runId?: string; node: string } {
 	if (raw === "" || markerIndex < 0) return { runId: undefined, node: "r0-stamp" };
 	const tail = raw.slice(markerIndex + marker.length);
 	const separator = tail.indexOf(":");
-	return separator < 1 ? { runId: undefined, node: "r0-stamp" } : { runId: tail.slice(0, separator), node: tail.slice(separator + 1) || "r0-stamp" };
+	if (separator < 1) return { runId: undefined, node: "r0-stamp" };
+	const runId = tail.slice(0, separator);
+	const nodeParts = tail.slice(separator + 1).split(":");
+	// Gateway ids end in the approval iteration, not part of the Smithers node id.
+	if (raw.startsWith("stamp:gateway:") && nodeParts.length > 1 && /^\d+$/.test(nodeParts.at(-1) ?? "")) nodeParts.pop();
+	return { runId, node: nodeParts.join(":") || "r0-stamp" };
 }
 /** Control actions, always after the agent's own options and matched by position. */
 const CONTROLS = ["Write an answer...", "Dismiss", "Skip", "Stop reviewing"] as const;
