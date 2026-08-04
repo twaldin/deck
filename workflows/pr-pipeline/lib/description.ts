@@ -38,22 +38,15 @@ function clean(value: string): string {
 }
 
 function summarize(text: string): string {
-	const cleaned = clean(text);
+	const cleaned = clean(text).replace(/^[\s.]+/, "").trim();
+	if (!cleaned) return "This change updates product behavior.";
+	// Prefer complete sentences; fall back to cleaned blob.
 	const sentences = cleaned
 		.split(/(?<=\.)\s+/)
 		.map((x) => x.trim())
-		.filter((x) => x.length > 20 && /[A-Za-z]{4,}/.test(x));
-	if (sentences.length === 0) {
-		const blob = cleaned.replace(/^[\s.]+/, "").trim();
-		return blob.length > 20 ? blob.slice(0, 480) : "This change updates product behavior.";
-	}
-	let out = "";
-	for (const sentence of sentences) {
-		const next = out ? `${out} ${sentence}` : sentence;
-		if (next.length > 480) break;
-		out = next;
-	}
-	return out;
+		.filter((x) => /[A-Za-z]{3,}/.test(x) && x.length > 15);
+	const body = (sentences.length ? sentences : [cleaned]).join(" ");
+	return body.length > 480 ? `${body.slice(0, 477)}...` : body;
 }
 
 export function generatePullRequestDescription(input: PullRequestDescriptionInput): string {
