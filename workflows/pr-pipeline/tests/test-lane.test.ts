@@ -22,7 +22,7 @@ describe("test lane command", () => {
 		const lock = fs.mkdtempSync(path.join(os.tmpdir(), "deck-lane-")) + "/lock";
 		const observations = `${lock}.observations`;
 		try {
-			const command = `printf '%s\\n' "$(find '${lock}.0' '${lock}.1' -maxdepth 0 -type d 2>/dev/null | wc -l | tr -d ' ')" >> '${observations}'; sleep .1`;
+			const command = `printf '%s\\n' "$(ls -d '${lock}'.[0-9]* 2>/dev/null | grep -v '\\.reclaim$' | wc -l | tr -d ' ')" >> '${observations}'; sleep .1`;
 			const statuses = await Promise.all(Array.from({ length: 6 }, () => run(testLaneCommand(command, lock))));
 			expect(statuses).toEqual([0, 0, 0, 0, 0, 0]);
 			const liveCounts = fs.readFileSync(observations, "utf8").trim().split("\n").map(Number);
