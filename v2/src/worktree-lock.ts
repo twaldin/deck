@@ -3,32 +3,63 @@ import * as path from "node:path";
 import { stateDir } from "./home";
 
 function lockPath(worktree: string): string {
-	const key = Buffer.from(path.resolve(worktree)).toString("base64url");
+	const resolved = fs.existsSync(worktree) ? fs.realpathSync(worktree) : path.resolve(worktree);
+	const key = Buffer.from(resolved).toString("base64url");
 	return path.join(stateDir(), "worktree-locks", `${key}.lock`);
 }
 
 /** Claim a worktree before launching a run. mkdir is atomic across processes. */
-export function releaseWorktree(worktree: string, owner: string): void {
-	const file = lockPath(worktree);
+function ownerFile(file: string): string { return path.join(file, "owner"); }
+
+function readLock(file: string): { owner: string; pid: number } | null {
 	try {
-		if (fs.readFileSync(path.join(file, "owner"), "utf8").trim() === owner) fs.rmSync(file, { recursive: true, force: true });
-	} catch { /* already released */ }
+		const row = JSON.parse(fs.readFileSync(ownerFile(file), "utf8")) as { owner?: unknown; pid?: unknown };
+		return typeof row.owner === "string" && typeof row.pid === "number" ? { owner: row.owner, pid: row.pid } : null;
+	} catch { return null; }
 }
 
-export function claimWorktree(worktree: string, owner: string): () => void {
+function pidAlive(pid: number): boolean {
+	try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+export function releaseWorktree(worktree: string, owner: string): void {
+	const file = lockPath(worktree);
+	const lock = readLock(file);
+	if (lock?.owner !== owner) return;
+	// Rename the directory away before removing it. A new claimant cannot be
+	// deleted by this release if it wins the mkdir race after the check.
+	const tombstone = `${file}.release-${process.pid}-${Date.now()}`;
+	try { fs.renameSync(file, tombstone); fs.rmSync(tombstone, { recursive: true, force: true }); } catch { /* already released */ }
+}
+
+/** Claim a worktree. A dead recorded process is reclaimable after a crash. */
+export function claimWorktree(worktree: string, owner: string, pid = process.pid): () => void {
 	const file = lockPath(worktree);
 	fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+	const tmp = `${file}.tmp-${process.pid}-${Date.now()}`;
 	try {
-		fs.mkdirSync(file, { mode: 0o700 });
-		fs.writeFileSync(path.join(file, "owner"), `${owner}\n`, { mode: 0o600 });
+		fs.mkdirSync(tmp, { mode: 0o700 });
+		fs.writeFileSync(ownerFile(tmp), `${JSON.stringify({ owner, pid })}\n`, { mode: 0o600 });
+		fs.renameSync(tmp, file);
 	} catch {
-		let current = "unknown";
-		try { current = fs.readFileSync(path.join(file, "owner"), "utf8").trim() || current; } catch { /* lock exists */ }
-		// Even the same owner must not start a second process. This closes the
-		// duplicate-ship race instead of treating an accidental retry as safe.
-		throw new Error(`refusing to start: worktree ${path.resolve(worktree)} is already in use by ${current}`);
+		const current = readLock(file);
+		if (current !== null && !pidAlive(current.pid)) {
+			const stale = `${file}.stale-${process.pid}-${Date.now()}`;
+			try { fs.renameSync(file, stale); fs.rmSync(stale, { recursive: true, force: true }); } catch { /* another claimant won */ }
+			try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* retry below */ }
+			return claimWorktree(worktree, owner, pid);
+		}
+		try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* lock owner remains authoritative */ }
+		throw new Error(`refusing to start: worktree ${path.resolve(worktree)} is already in use by ${current?.owner ?? "unknown"}`);
 	}
-	return () => {
-		fs.rmSync(file, { recursive: true, force: true });
-	};
+	return () => releaseWorktree(worktree, owner);
+}
+
+export function updateWorktreePid(worktree: string, owner: string, pid: number): void {
+	const file = lockPath(worktree);
+	const lock = readLock(file);
+	if (lock?.owner !== owner) return;
+	const tmp = `${ownerFile(file)}.tmp-${process.pid}`;
+	fs.writeFileSync(tmp, `${JSON.stringify({ owner, pid })}\n`, { mode: 0o600 });
+	fs.renameSync(tmp, ownerFile(file));
 }

@@ -1314,9 +1314,12 @@ export default smithers((ctx) => {
 								const latestReady = ctx.latest(outputs.readyPoll, readyNode);
 								const readyRows = readyPollRows.filter((row) => row.round === k && row.poll >= 0);
 								const greenApproved =
-									latestReady?.approvedBy !== null &&
-									latestReady?.approvedBy !== undefined &&
-									latestReady?.ci === "green";
+									latestReady?.approvedBy != null &&
+									latestReady?.ci === "green" &&
+									latestReady?.regressed !== true;
+								// A green, human-approved row is sufficient even when the poll
+								// budget was consumed by a transient non-ready result. Keep the
+								// migration gate authoritative below.
 								const readyExhausted =
 									readyRows.length >= limits.readyPolls &&
 									latestReady?.ready !== true &&

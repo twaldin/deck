@@ -32,6 +32,8 @@ import { appendStatus } from "./events";
 import type { StatusVerb } from "./status";
 import { stateDir } from "./home";
 import { SMITHERS_SPEC } from "./smithers";
+import { readMeta } from "./meta";
+import { releaseWorktree } from "./worktree-lock";
 
 /** A run as the read-only CLI reports it. */
 export type ObservedRun = {
@@ -348,6 +350,10 @@ export function observeOnce(taskId: string, observation: Observation): EmittedEv
 	const ledger = readLedger(taskId);
 	const events = planEvents(taskId, observation, ledger);
 	commitEvents(taskId, events, ledger);
+	if (isFinished(observation)) {
+		const worktree = readMeta(taskId)?.worktree;
+		if (worktree !== undefined) releaseWorktree(worktree, observation.run.id);
+	}
 	return events;
 }
 
