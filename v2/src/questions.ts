@@ -89,20 +89,24 @@ const defaultRuntime: QuestionsRuntime = {
 };
 
 const DISMISSED = "(dismissed by the captain without an answer)";
-function parseStampGateId(id: string): { runId?: string; node: string } {
+export function parseStampGateId(id: string): { runId?: string; node: string } {
 	const scoped = id.includes("deck-fleet:") ? id.slice(id.indexOf("deck-fleet:") + "deck-fleet:".length) : id;
 	const raw = scoped.startsWith("stamp:") ? scoped : "";
-	const marker = ":stamp:";
-	const markerIndex = raw.indexOf(marker, "stamp:".length);
+	if (raw.startsWith("stamp:gateway:")) {
+		const rest = raw.slice("stamp:gateway:".length);
+		const marker = rest.indexOf(":stamp:");
+		if (marker < 1) return { runId: undefined, node: "r0-stamp" };
+		const runId = rest.slice(0, marker);
+		const tail = rest.slice(marker + ":stamp:".length).split(":");
+		if (/^\d+$/.test(tail.at(-1) ?? "")) tail.pop();
+		return { runId, node: tail.join(":") || "r0-stamp" };
+	}
+	const markerIndex = raw.indexOf(":stamp:", "stamp:".length);
 	if (raw === "" || markerIndex < 0) return { runId: undefined, node: "r0-stamp" };
-	const tail = raw.slice(markerIndex + marker.length);
+	const tail = raw.slice(markerIndex + ":stamp:".length);
 	const separator = tail.indexOf(":");
 	if (separator < 1) return { runId: undefined, node: "r0-stamp" };
-	const runId = tail.slice(0, separator);
-	const nodeParts = tail.slice(separator + 1).split(":");
-	// Gateway ids end in the approval iteration, not part of the Smithers node id.
-	if (raw.startsWith("stamp:gateway:") && nodeParts.length > 1 && /^\d+$/.test(nodeParts.at(-1) ?? "")) nodeParts.pop();
-	return { runId, node: nodeParts.join(":") || "r0-stamp" };
+	return { runId: tail.slice(0, separator), node: tail.slice(separator + 1) || "r0-stamp" };
 }
 /** Control actions, always after the agent's own options and matched by position. */
 const CONTROLS = ["Write an answer...", "Dismiss", "Skip", "Stop reviewing"] as const;
