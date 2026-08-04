@@ -683,6 +683,8 @@ export async function buildFrame(
   }
   for (const taskId of deckOwnedTasks()) {
     if (taskIds.has(taskId)) continue;
+    const candidateMeta = readMeta(taskId);
+    if (candidateMeta?.worktree !== undefined && taskByRoot.has(realpath(candidateMeta.worktree))) continue;
     const meta = readMeta(taskId);
     const event = lastEvent(taskId);
     const worktree = meta?.worktree ? realpath(meta.worktree) : null;
