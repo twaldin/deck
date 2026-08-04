@@ -29,6 +29,13 @@ describe("stack owner", () => {
     expect((sim.outputs.result?.[0] as { done?: boolean } | undefined)?.done).toBe(true);
   });
 
+  test("non-converging review stops with a max-adversarial wake", async () => {
+    const sim = simulate((await import("../pipeline.tsx")).default, { input: { ...baseInput, fixtures: { finding: "same blocker" }, limits: { adversarial: 2 } } });
+    await sim.run();
+    expect((sim.outputs.result?.[0] as { done?: boolean } | undefined)?.done).toBe(false);
+    expect(fs.readFileSync(wakeFiles().queue, "utf8")).toContain("max-adversarial");
+  });
+
   test("rendered graph contains the open-to-poll dependency", async () => {
     const rendered = await renderWorkflow((await import("../pipeline.tsx")).default, { input: baseInput, workflowPath: new URL("../pipeline.tsx", import.meta.url).pathname });
     expect(rendered.tasks.some((task) => task.nodeId === "open-stack")).toBe(true);
@@ -43,7 +50,9 @@ describe("stack owner", () => {
     produceWakeConditions({ taskId, terminal: true, ciFail: true });
     const baseline = fs.readFileSync(wakeFiles().baseline, "utf8");
     expect(baseline).not.toContain(`${taskId}:ci-fail`);
+    const before = fs.readFileSync(queue, "utf8").split("\n").filter(Boolean).length;
     produceWakeConditions({ taskId, terminal: false, ciFail: true });
-    expect(fs.readFileSync(queue, "utf8")).toContain("ci-fail");
+    const after = fs.readFileSync(queue, "utf8").split("\n").filter(Boolean).length;
+    expect(after).toBeGreaterThan(before);
   });
 });

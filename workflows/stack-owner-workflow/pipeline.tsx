@@ -33,25 +33,22 @@ export default smithers((ctx) => {
   const input = ctx.input; const dryRun = input.dryRun === true; const gh = input.github?.gh ?? "gh";
   const maxRounds = input.limits?.adversarial ?? 6; const maxPolls = input.limits?.polls ?? 60;
   const implAgent = agent("gpt-5.6-luna"); const reviewAgent = agent("claude-fable-5");
-  let lastFindingFingerprint = ""; let repeatedFinding = 0; let adversarialRounds = 0;
   const taskId = `stack-owner:${input.repo}:${input.branch}`;
+  const reviewHistory = () => (ctx.outputs.review ?? []).filter((row) => String((row as { nodeId?: string }).nodeId ?? "").startsWith("adversarial-review")).map((row) => row as { blockers?: string[] });
+  const findingFingerprint = (review: { blockers?: string[] } | undefined) => (review?.blockers ?? []).map((item) => item.trim().toLowerCase().replace(/\s+/g, " ")).sort().join("|");
+  const repeatedFinding = () => { const rows = reviewHistory(); const current = findingFingerprint(rows.at(-1)); const previous = findingFingerprint(rows.at(-2)); return current !== "" && current === previous; };
   const implementation = <Task id="implement-stack" output={outputs.implementation} agent={dryRun ? undefined : implAgent}>
     {dryRun ? () => ({ changed: true, prs: (input.fixtures?.prs ?? [0]).map((number) => ({ number, branch: input.branch })), summary: "dry-run implementation" }) : `Implement this prompt in ${input.worktree}: ${input.prompt}. You own the complete ordered PR stack. Split only when needed. Commit each branch and return JSON with changed, prs [{number:0,branch}] and summary. The number is a placeholder and is not a GitHub PR number; open-stack creates the PRs.`}
   </Task>;
   const review = <Task id="adversarial-review" output={outputs.review} agent={dryRun ? undefined : reviewAgent}>
     {dryRun ? () => ({ blockers: input.fixtures?.finding ? [input.fixtures.finding] : [], summary: "dry-run review" }) : `Review the entire current stack implementation in ${input.worktree}. Find only actionable blockers. Do not edit or push. Return JSON with blockers and summary.`}
   </Task>;
-  const reviewLoop = <Loop id="adversarial-loop" maxIterations={maxRounds} onMaxReached="return-last" until={(ctx.latest(outputs.review, "adversarial-review")?.blockers?.length ?? 1) === 0}>
+  const reviewLoop = <Loop id="adversarial-loop" maxIterations={maxRounds} onMaxReached="return-last" until={(ctx.latest(outputs.review, "adversarial-review")?.blockers?.length ?? 1) === 0 || repeatedFinding()}>
     <Sequence>{review}<Task id="fix-review" output={outputs.fix} agent={dryRun ? undefined : agent("gpt-5.6-luna")}>
       {async () => {
         const blockers = ctx.latest(outputs.review, "adversarial-review")?.blockers ?? [];
-        adversarialRounds += 1;
-        const fingerprint = blockers.join("\n");
-        repeatedFinding = fingerprint !== "" && fingerprint === lastFindingFingerprint ? repeatedFinding + 1 : 0;
-        lastFindingFingerprint = fingerprint;
-        if (repeatedFinding >= 1 || blockers.length > 0 && adversarialRounds >= maxRounds) {
+        if (repeatedFinding() || blockers.length > 0 && reviewHistory().length >= maxRounds) {
           produceWakeConditions({ taskId, maxAdversarial: true });
-          if (repeatedFinding >= 1) throw new Error("repeated adversarial finding; orchestrator intervention required");
         }
         if (dryRun) return { fixed: true };
         return `Fix every blocker in the latest adversarial review in ${input.worktree}. Run focused tests and commit. Do not open or merge PRs. If the same critical finding appears twice, stop and report it to the orchestrator.`;
@@ -60,13 +57,11 @@ export default smithers((ctx) => {
   </Loop>;
   const reviewGate = <Task id="review-gate" output={outputs.reviewGate}>{() => {
     const blockers = ctx.latest(outputs.review, "adversarial-review")?.blockers ?? [];
-    if (blockers.length > 0) {
-      produceWakeConditions({ taskId, maxAdversarial: true });
-      throw new Error("adversarial review did not converge before opening PRs");
-    }
-    return { ok: true };
+    const ok = blockers.length === 0;
+    if (!ok) produceWakeConditions({ taskId, maxAdversarial: true });
+    return { ok };
   }}</Task>;
-  const open = <Task id="open-stack" output={outputs.opened} retries={1}>{async () => {
+  const open = <Task id="open-stack" output={outputs.opened} retries={1} skipIf={ctx.latest(outputs.reviewGate, "review-gate")?.ok === false}>{async () => {
     const impl = ctx.latest(outputs.implementation, "implement-stack"); const planned = impl?.prs ?? [];
     if (dryRun) return { changed: impl?.changed ?? true, prs: (input.fixtures?.prs ?? [1]).map((number) => ({ number, branch: input.branch })), summary: "dry-run PR stack opened" };
     const prs: Array<{ number: number; branch: string }> = [];
@@ -93,7 +88,7 @@ export default smithers((ctx) => {
     produceWakeConditions({ taskId, ciFail: result.signal === "ci-fail", actionableComment: result.signal === "actionable-comment", decisionAsk: result.signal === "decision-ask" });
     return { signal: result.signal, reason: result.reason };
   }}</Task>;
-  const watch = <Loop id="code-poll-loop" maxIterations={maxPolls} onMaxReached="return-last" until={ctx.latest(outputs.poll, "poll-stack")?.signal === "complete"}>
+  const watch = <Loop id="code-poll-loop" maxIterations={maxPolls} onMaxReached="return-last" skipIf={ctx.latest(outputs.reviewGate, "review-gate")?.ok === false} until={ctx.latest(outputs.poll, "poll-stack")?.signal === "complete"}>
     <Sequence>{poll}<Task id="wake-fix" output={outputs.wake} agent={undefined}>{async () => { const signal = ctx.latest(outputs.poll, "poll-stack")?.signal; if (signal === "idle") { if ((input.limits?.pollSeconds ?? 0) > 0) await wait((input.limits?.pollSeconds ?? 0) * 1000); return { action: "wait", signal }; } return { action: signal === "decision-ask" ? "escalate" : "fix", signal }; }}</Task></Sequence>
   </Loop>;
   return <Workflow name="lindy-stack-owner"><Sequence>{implementation}{reviewLoop}{reviewGate}{open}{watch}<Task id="done" output={outputs.result}>{() => {
