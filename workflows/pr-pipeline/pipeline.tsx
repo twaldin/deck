@@ -74,9 +74,9 @@ import {
 } from "./lib/models.ts";
 import { findProfile, type ModelSeat, type ProjectProfile } from "./lib/profiles.ts";
 
-async function changedFilesForBranch(exec: typeof bunExec, worktree: string, baseBranch: string): Promise<string[]> {
+export async function changedFilesForBranch(exec: typeof bunExec, worktree: string, baseBranch: string): Promise<string[]> {
 	const output = await execOrThrow(exec, ["git", "diff", "--name-only", `origin/${baseBranch}...HEAD`], { cwd: worktree });
-	return output.split("\\n").map((file) => file.trim()).filter(Boolean);
+	return output.split("\n").map((file) => file.trim()).filter(Boolean);
 }
 import {
 	falloutPrompt,
