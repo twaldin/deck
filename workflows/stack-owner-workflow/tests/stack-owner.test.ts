@@ -6,7 +6,7 @@ describe("stack owner", () => {
   test("poll loop is machine-only", () => expect(pollHasNoAgent).toBe(true));
   test("dry-run poll reads no LLM", async () => {
     const calls: string[][] = [];
-    const exec = async (argv: string[]) => { calls.push(argv); const stdout = argv.includes("pulls") ? JSON.stringify({ number: 1, head: { sha: "x" }, mergeable: true, mergeStateStatus: "CLEAN" }) : argv.some((arg) => arg.includes("/comments")) ? "[]" : JSON.stringify({ check_runs: [] }); return { code: 0, stdout, stderr: "" }; };
+    const exec = async (argv: string[]) => { calls.push(argv); const stdout = argv.some((arg) => arg.includes("/pulls/")) ? JSON.stringify({ number: 1, head: { sha: "x" }, mergeable: true, mergeStateStatus: "CLEAN" }) : argv.some((arg) => arg.includes("/comments")) ? "[]" : JSON.stringify({ check_runs: [] }); return { code: 0, stdout, stderr: "" }; };
     const result = await pollStack(exec, "org/repo", [1]);
     expect(result.signal).toBe("complete");
     expect(calls.every((call) => call.includes("api"))).toBe(true);
