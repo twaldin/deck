@@ -1316,15 +1316,9 @@ export default smithers((ctx) => {
 								const readyNode = `r${k}-ready-poll`;
 								const latestReady = ctx.latest(outputs.readyPoll, readyNode);
 								const readyRows = readyPollRows.filter((row) => row.round === k && row.poll >= 0);
-								const greenApprovedRow = [...readyRows].reverse().find((row) =>
-									row.approvedBy != null && row.ci === "green" && row.regressed !== true,
-								);
-								const greenApproved = greenApprovedRow !== undefined;
-								const stampReadyRow = latestReady?.ready === true ? latestReady : greenApprovedRow;
 								const readyExhausted =
 									readyRows.length >= limits.readyPolls &&
 									latestReady?.ready !== true &&
-									!greenApproved &&
 									latestReady?.regressed !== true;
 								const readyGateOpen =
 									watchSettled && (!migRequired || migEvidenceOk);
@@ -1473,7 +1467,7 @@ prNumber: pr.prNumber,
 											<Loop
 												id={`r${k}-ready-loop`}
 												until={
-													readyPollRows.some((row) => row.round === k && row.approvedBy != null && row.ci === "green" && row.regressed !== true) ||
+													ctx.latest(outputs.readyPoll, readyNode)?.ready === true ||
 													ctx.latest(outputs.readyPoll, readyNode)?.regressed === true
 												}
 												maxIterations={limits.readyPolls}
@@ -1611,17 +1605,17 @@ prNumber: pr.prNumber,
 										{/* stage 7: stamp + merge word. A yolo profile skips the park: the
 										    workflow writes the approved row itself (same node id, so
 										    stamp-validity, head re-check and merge run unchanged). */}
-										{stampReadyRow !== undefined && stamp === undefined && yolo ? (
+										{latestReady?.ready === true && stamp === undefined && yolo ? (
 											<Task id={`r${k}-stamp`} output={outputs.approvals} retries={0}>
 												{() => ({
 													approved: true,
-													note: `yolo profile "${profile?.id}": stamp gate skipped; merge fires on green (CI: ${stampReadyRow.ci}).`,
+													note: `yolo profile "${profile?.id}": stamp gate skipped; merge fires on green (CI: ${latestReady.ci}).`,
 													decidedBy: `profile:${profile?.id}`,
 													decidedAt: nowIso(),
 												})}
 											</Task>
 										) : null}
-										{stampReadyRow !== undefined && stamp === undefined && !yolo ? (
+										{latestReady?.ready === true && stamp === undefined && !yolo ? (
 											<Gate
 												id={`r${k}-stamp`}
 												title={`STAMP + merge word: ${input.ticket} PR #${pr.prNumber} (round ${k})`}
@@ -1630,9 +1624,9 @@ prNumber: pr.prNumber,
 													`Fix: ${implementation?.summary ?? "(see PR)"}`,
 													`Danger/blast radius: ${brief?.blastRadius ?? "(not declared in brief)"}`,
 													`PR: ${pr.url}`,
-																									`Head at ready: ${stampReadyRow.headSha}`,
-												`Human review approval: ${stampReadyRow.approvedBy ?? "n/a"}`,
-												`CI: ${stampReadyRow.ci} (green-or-will-be-green per captain ruling)`,
+																									`Head at ready: ${latestReady.headSha}`,
+												`Human review approval: ${latestReady.approvedBy ?? "n/a"}`,
+												`CI: ${latestReady.ci} (green-or-will-be-green per captain ruling)`,
 `Migration gate: ${migRequired ? `TRIGGERED (evidence ${migEvidenceOk ? "complete" : "INCOMPLETE"})` : "not triggered"}`,
 													``,
 													`Approving = stamp + the per-PR merge word. The workflow (not an agent)`,

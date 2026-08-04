@@ -1,10 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { evaluateReadyForStamp } from "../lib/ready.ts";
 
-type ReadyRow = { ready: boolean; regressed: boolean; approvedBy: string | null; ci: string; headSha: string };
-function selectStampReadyRow(latest: ReadyRow | undefined, rows: ReadyRow[]): ReadyRow | undefined {
-	return latest?.ready === true ? latest : [...rows].reverse().find((row) => row.approvedBy !== null && row.ci === "green" && !row.regressed);
-}
+const pipelineSource = readFileSync(new URL("../pipeline.tsx", import.meta.url), "utf8");
 
 describe("ready exhaustion inputs", () => {
 	test("green approval is ready, so exhaustion must not rescue a non-ready row", () => {
@@ -20,12 +18,12 @@ describe("ready exhaustion inputs", () => {
 			author: "author", excludedApprovers: [],
 		});
 		expect(result.ready).toBe(false);
-		expect(selectStampReadyRow(undefined, [{ ready: false, regressed: false, approvedBy: "reviewer", ci: "red", headSha: "h" }])).toBeUndefined();
+		expect(pipelineSource).toContain("ctx.latest(outputs.readyPoll, readyNode)?.ready === true");
 	});
 
-	test("a later non-ready poll still selects the earlier green approved row", () => {
-		const approved = { ready: true, regressed: false, approvedBy: "reviewer", ci: "green", headSha: "h1" };
-		const later = { ready: false, regressed: false, approvedBy: null, ci: "none", headSha: "h2" };
-		expect(selectStampReadyRow(later, [approved, later])).toEqual(approved);
+	test("the production ready loop exits on any ready row", () => {
+		expect(pipelineSource).toContain("ctx.latest(outputs.readyPoll, readyNode)?.ready === true ||");
+		expect(pipelineSource).not.toContain("greenApprovedRow");
+		expect(pipelineSource).not.toContain("stampReadyRow");
 	});
 });
