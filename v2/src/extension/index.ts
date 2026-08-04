@@ -14,11 +14,11 @@
  * orchestrator's own process, so there is no second thing that can die silently
  * while the orchestrator keeps running. fm2 lost a watcher for 23.8h that way.
  */
-import { execFile as execFileCallback, spawn as spawnProcess } from "node:child_process";
+import { execFile, spawn as spawnProcess } from "node:child_process";
 import * as path from "node:path";
 import { promisify } from "node:util";
 
-const execFileAsync = promisify(execFileCallback);
+const execFileAsync = promisify(execFile);
 import { Box, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { DECK_OPERATIONAL_PREFIX, registerCalm } from "../calm";
@@ -47,7 +47,6 @@ import { loadProfiles } from "../projects";
 import { renderReasoning, setSeatReasoning, assertReasoningLevel } from "../reasoning";
 import { observePsSnapshotWithInspect, type PsSnapshotRow } from "../observer";
 import { gatewaySubscription } from "../gateway-subscription";
-import { reconcileRecuts } from "../recut";
 import { registerQuestions } from "../questions";
 import { enqueue, pending } from "../queue";
 import { pipelineDir, startShip } from "../ship";
@@ -759,7 +758,6 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 		const workflowSnapshot = snapshots.find(({ workspace }) => workspace === workflowCwd)?.snapshot;
 		const allRuns = snapshots.flatMap(({ snapshot: current }) => current.runs);
 		const rows = snapshots.flatMap(({ workspace, snapshot: current }) => current.runs.map((run) => ({ ...run, workspace }))) as PsSnapshotRow[];
-		if (workflowCwd !== undefined) void reconcileRecuts(workflowCwd, pipelineDir(), workflowSnapshot?.runs ?? []).catch(() => {});
 		if (workflowCwd !== undefined && dependencies.gatewayStream !== undefined) {
 			const subscription = gatewaySubscription(workflowCwd);
 			if (!subscription.isRunning) {
