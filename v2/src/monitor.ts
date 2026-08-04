@@ -465,10 +465,13 @@ export async function collectPsSnapshot(
       },
     );
     if (!response.ok) throw new Error(`Gateway HTTP ${response.status}`);
-    const payload = (await response.json()) as unknown;
-    if (!Array.isArray(payload))
+    const frame = (await response.json()) as {
+      ok?: boolean;
+      payload?: unknown;
+    };
+    if (frame.ok !== true || !Array.isArray(frame.payload))
       throw new Error("invalid Gateway listRuns response");
-    const runs = payload.filter(isPsRun);
+    const runs = frame.payload.filter(isPsRun);
     return {
       runs,
       health: {
@@ -578,23 +581,55 @@ function frameModelForTask(taskId: string, tasks: TaskRow[]): string | null {
   return tasks.find((task) => task.taskId === taskId)?.model ?? null;
 }
 
-export function effortLiveness(run: Pick<PsRun, "status" | "state" | "started" | "prNumber"> & { watchActive?: boolean }): "live" | "archived" {
+export function effortLiveness(
+  run: Pick<PsRun, "status" | "state" | "started" | "prNumber"> & {
+    watchActive?: boolean;
+  },
+): "live" | "archived" {
   const status = (run.status ?? run.state ?? "").toLowerCase();
-  if (["running", "paused", "waiting-approval", "waiting-human"].includes(status)) return "live";
+  if (
+    ["running", "paused", "waiting-approval", "waiting-human"].includes(status)
+  )
+    return "live";
   if (run.prNumber !== undefined && run.watchActive === true) return "live";
   const started = run.started === undefined ? NaN : Date.parse(run.started);
-  return status === "finished" || status === "succeeded" || (Number.isFinite(started) && Date.now() - started > 3 * 24 * 60 * 60 * 1000) ? "archived" : "live";
+  return status === "finished" ||
+    status === "succeeded" ||
+    (Number.isFinite(started) && Date.now() - started > 3 * 24 * 60 * 60 * 1000)
+    ? "archived"
+    : "live";
 }
-export function liveEffortCount(runs: readonly PsRun[]): number { return runs.filter((run) => effortLiveness(run) === "live").length; }
+export function liveEffortCount(runs: readonly PsRun[]): number {
+  return runs.filter((run) => effortLiveness(run) === "live").length;
+}
 
 export async function buildFrame(
   options: { workflowCwd?: string; psRuns?: PsRun[] } = {},
 ): Promise<FleetFrame> {
   const ids = [] as string[];
-  const [{ runs, health: runHealth }, { byWorktree, health: paneHealth }] = await Promise.all([
-    options.workflowCwd === undefined ? Promise.resolve({ runs: options.psRuns ?? [], health: { name: "smithers-gateway", state: "skipped", detail: "no workflow dir configured" } as SourceHealth }) : options.psRuns === undefined ? collectRuns(options.workflowCwd) : Promise.resolve({ runs: options.psRuns, health: { name: "smithers-gateway", state: "ok", detail: `${options.psRuns.length} run(s)` } as SourceHealth }),
-    collectPanes(),
-  ]);
+  const [{ runs, health: runHealth }, { byWorktree, health: paneHealth }] =
+    await Promise.all([
+      options.workflowCwd === undefined
+        ? Promise.resolve({
+            runs: options.psRuns ?? [],
+            health: {
+              name: "smithers-gateway",
+              state: "skipped",
+              detail: "no workflow dir configured",
+            } as SourceHealth,
+          })
+        : options.psRuns === undefined
+          ? collectRuns(options.workflowCwd)
+          : Promise.resolve({
+              runs: options.psRuns,
+              health: {
+                name: "smithers-gateway",
+                state: "ok",
+                detail: `${options.psRuns.length} run(s)`,
+              } as SourceHealth,
+            }),
+      collectPanes(),
+    ]);
   const taskByRoot = new Map<string, string>();
   const tasks: TaskRow[] = runs.map((psRun) => {
     const input = readShipInput(psRun.id);
@@ -608,7 +643,11 @@ export async function buildFrame(
       kind: psRun.workflow ?? "smithers",
       model: input.modelSeats,
       project: input.repo,
-      runState: effortLiveness(psRun) === "live" ? "running" : "finished",
+      runState:
+        effortLiveness({ ...psRun, watchActive: step?.includes("watch") }) ===
+        "live"
+          ? "running"
+          : "finished",
       lastVerb: null,
       lastNote: null,
       openDecisions: 0,
