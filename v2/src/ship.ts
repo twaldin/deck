@@ -25,6 +25,7 @@ import { findProfile, type ProjectProfile } from "./projects";
 import { SMITHERS_SPEC } from "./smithers";
 import { pipelineHash } from "./recut";
 import { smithersWorkspaceCwd, uiWarn, warnOnShadowWorkspace } from "./workspace";
+import { claimWorktree } from "./worktree-lock";
 
 export type ShipRequest = {
 	/** Ticket / effort id; also seeds the smithers run id. */
@@ -214,6 +215,7 @@ export async function startShip(
 	const runId =
 		request.runId ??
 		`${request.ticket.toLowerCase().replace(/[^a-z0-9-]+/g, "-")}-pipeline`;
+	const releaseWorktreeLock = claimWorktree(request.worktree, runId);
 	const input = buildPipelineInput(request, profile);
 	// Keep the task-to-workflow join durable when the caller already created a
 	// deck task with the ticket id. Smithers ps does not expose a unique worktree.
@@ -266,6 +268,9 @@ export async function startShip(
 				),
 			);
 		});
+	} catch (error) {
+		releaseWorktreeLock();
+		throw error;
 	} finally {
 		fs.closeSync(log);
 	}

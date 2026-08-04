@@ -40,7 +40,7 @@ import { z } from "zod";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-import { assertAdoptable, decideAdoptPush } from "./lib/adopt.ts";
+import { assertAdoptable, cleanKnownScratchFiles, decideAdoptPush } from "./lib/adopt.ts";
 import { validateBrief } from "./lib/brief.ts";
 import { evaluateDone } from "./lib/done.ts";
 import {
@@ -957,7 +957,8 @@ export default smithers((ctx) => {
 											cwd: input.worktree,
 										})
 									).trim();
-									const worktreeStatus = await execOrThrow(
+									cleanKnownScratchFiles(input.worktree);
+					const worktreeStatus = await execOrThrow(
 										bunExec,
 										[github.git, "status", "--porcelain"],
 										{ cwd: input.worktree },
@@ -1312,9 +1313,14 @@ export default smithers((ctx) => {
 								const readyNode = `r${k}-ready-poll`;
 								const latestReady = ctx.latest(outputs.readyPoll, readyNode);
 								const readyRows = readyPollRows.filter((row) => row.round === k && row.poll >= 0);
+								const greenApproved =
+									latestReady?.approvedBy !== null &&
+									latestReady?.approvedBy !== undefined &&
+									latestReady?.ci !== "red";
 								const readyExhausted =
 									readyRows.length >= limits.readyPolls &&
 									latestReady?.ready !== true &&
+									!greenApproved &&
 									latestReady?.regressed !== true;
 								const readyGateOpen =
 									watchSettled && (!migRequired || migEvidenceOk);

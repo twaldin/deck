@@ -233,6 +233,9 @@ export function planEvents(
 	ledger: ObserverLedger,
 ): EmittedEvent[] {
 	const seen = new Set(ledger.emitted);
+	// Cancelled runs can remain in `ps` output while old node rows are still
+	// visible. Never wake from stale node rows after cancellation. The run-level
+	// cancellation event below is still emitted once, so the task records closure.
 	const events: EmittedEvent[] = [];
 	const { run, nodes } = observation;
 
@@ -243,6 +246,7 @@ export function planEvents(
 	// payload get distinct keys instead of collapsing to one event.
 	const seenNode = new Map<string, number>();
 	for (const node of nodes) {
+		if (observation.run.status === "cancelled") continue;
 		// Real step states seen live: finished, waiting-approval, failed.
 		const milestone = run.workflow === "pr-pipeline" ? PIPELINE_MILESTONES[node.nodeId] : undefined;
 		const landingConfirmed = node.nodeId !== "landing-poll" ||

@@ -20,6 +20,7 @@ import { workerBrief } from "./prompts";
 import { assertDeckModel } from "../../workflows/pr-pipeline/lib/models";
 import { buildHydration } from "./hydrate";
 import { ack as ackMessages } from "./queue";
+import { claimWorktree, releaseWorktree } from "./worktree-lock";
 
 /** Captain policy 2026-07-31: one-shot/spawn bread-and-butter is luna (high TPS). */
 export const DEFAULT_WORKER_MODEL = "deck/gpt-5.6-luna";
@@ -340,9 +341,15 @@ export function startRun(request: SpawnRequest, primaryCheckout: string): SpawnR
 	const allocated = request.worktree === undefined ? allocateWorktree(request) : undefined;
 	const worktree = allocated?.worktree ?? (request.worktree as string);
 	const branch = allocated?.branch ?? request.branch;
+	let releaseLock: (() => void) | undefined;
 	try {
+		// Check isolation before claiming. The claim remains until the run is
+		// terminal; a second process must fail before it can edit the worktree.
+		assertIsolatedWorktree(worktree, primaryCheckout);
+		releaseLock = claimWorktree(worktree, request.taskId);
 		return launchRun(request, worktree, branch, allocated, primaryCheckout);
 	} catch (error) {
+		releaseLock?.();
 		// A failed launch must not strand a fresh allocation as an active slot.
 		if (allocated !== undefined) releaseAllocated(allocated.wtId);
 		throw error;
@@ -397,6 +404,11 @@ function launchRun(
 	// no listener it crashes the orchestrator process. The pid check below is the
 	// synchronous detection path, so the event itself only needs absorbing.
 	child.on("error", () => {});
+	child.once("exit", () => {
+		// The process owns the claim for the duration of this run. A terminal
+		// worker releases it so the worktree can be reused safely.
+		releaseWorktree(worktree, request.taskId);
+	});
 	child.stdin?.end(prompt);
 	child.unref();
 
