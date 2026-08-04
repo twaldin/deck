@@ -654,9 +654,10 @@ export async function buildFrame(
     if (rootDir !== null) taskByRoot.set(rootDir, taskId);
     const meta = rootDir === null ? null : readMetaForWorktree(rootDir);
     const localId = meta?.id;
-    taskIds.add(meta?.id ?? taskId);
+    const displayTaskId = localId ?? taskId;
+    taskIds.add(displayTaskId);
     tasks.push({
-      taskId,
+      taskId: displayTaskId,
       kind: input.kind ?? psRun.workflow ?? meta?.kind ?? "smithers",
       model: input.modelSeats ?? meta?.model ?? null,
       project: input.repo ?? meta?.project ?? null,
