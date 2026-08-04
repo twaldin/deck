@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+out="${HOME}/.deck/data/resource-monitor"
+mkdir -p "$(dirname "$out")"
+while :; do
+  max=$(sysctl -n kern.maxfiles 2>/dev/null || echo 0)
+  used=$(lsof -n 2>/dev/null | awk 'NR > 1 {n++} END {print n+0}')
+  swap=$(vm_stat 2>/dev/null | awk '/Pages free/ {free=$3} END {gsub("\\.","",free); print free+0}')
+  printf '%s fd=%s max=%s vm.swapusage=%s\n' "$(date -u +%FT%TZ)" "$used" "$max" "$swap" >> "$out"
+  sleep 60
+done

@@ -43,7 +43,9 @@ import { standingRulesDigest } from "./standing-rules";
 import { readMeta } from "../meta";
 import { loadProfiles } from "../projects";
 import { renderReasoning, setSeatReasoning, assertReasoningLevel } from "../reasoning";
+import { gatewaySubscription } from "../gateway-subscription";
 import { observePsSnapshotWithInspect, type PsSnapshotRow } from "../observer";
+import { reconcileRecuts } from "../recut";
 import { registerQuestions } from "../questions";
 import { enqueue, pending } from "../queue";
 import { pipelineDir, startShip } from "../ship";
@@ -73,6 +75,8 @@ const text = (body: string): ToolResult => ({
 });
 
 type DeckV2Dependencies = {
+	/** Optional Gateway event stream. One stream is shared by all consumers. */
+	gatewayStream?: (workspace: string, onEvent: (event: import("../gateway-subscription").GatewayEvent) => void) => (() => void) | Promise<() => void>;
 	/** Test seam for the raw ps command. Production uses the enriched collector below. */
 	collectPsSnapshot?: typeof collectPsSnapshot;
 	collectRuns?: typeof collectRuns;
@@ -82,7 +86,6 @@ type DeckV2Dependencies = {
 const inspectRun = promisify(execFile);
 const INSPECT_TIMEOUT_MS = 15_000;
 const INSPECT_MAX_BUFFER = 4_000_000;
-
 
 export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): void {
 	// Keep the raw snapshot seam for focused extension tests, but never use it in
@@ -752,6 +755,7 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 		const snapshots = workflowWorkspaces.length === 0
 			? []
 			: await Promise.all(workflowWorkspaces.map(async (workspace) => ({ workspace, snapshot: await collectEnrichedRuns(workspace) })));
+		const workflowSnapshot = snapshots.find(({ workspace }) => workspace === workflowCwd)?.snapshot;
 		const allRuns = snapshots.flatMap(({ snapshot: current }) => current.runs);
 		const rows = snapshots.flatMap(({ workspace, snapshot: current }) => current.runs.map((run) => ({ ...run, workspace }))) as PsSnapshotRow[];
 		if (workflowCwd !== undefined) await observePsSnapshotWithInspect({
@@ -766,6 +770,16 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 				}
 			}),
 		});
+		if (workflowCwd !== undefined) void reconcileRecuts(workflowCwd, pipelineDir(), workflowSnapshot?.runs ?? []).catch(() => {});
+		if (workflowCwd !== undefined && dependencies.gatewayStream !== undefined) {
+			const subscription = gatewaySubscription(workflowCwd);
+			if (!subscription.isRunning) {
+				subscription.subscribe(({ observation }) => {
+					void import("../observer").then(({ observeOnce }) => observeOnce(observation.run.id, observation));
+				});
+				subscription.start((onEvent) => dependencies.gatewayStream!(workflowCwd!, onEvent));
+			}
+		}
 		const frame = workflowCwd === undefined
 			? await buildFrame({})
 			: await buildFrame({

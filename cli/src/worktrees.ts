@@ -4,6 +4,7 @@ import { spawn } from "node:child_process";
 import { EFFORT_FILES, effortDir, loadConfig, manifestSchema, ulid, DeckError } from "./core";
 import { z } from "zod";
 import { addWorktree, prepareBase, removeWorktree, resolveRepository, validateBranchName } from "./git";
+import { classifyIdleWorktree, excludeWorktreePool, worktreeDirty, worktreeTtlMs } from "./worktree-reaper";
 import {
 	type WorktreeEntry,
 	type WorktreesState,
@@ -239,6 +240,7 @@ function readEffortTerminalState(effort: string): boolean {
 }
 
 export async function reapWorktrees(): Promise<WorktreeEntry[]> {
+	excludeWorktreePool(WORKTREE_POOL_DIR);
 	return withStateLock(async () => {
 		let state = readWorktreesState();
 		const reaped: WorktreeEntry[] = [];
@@ -252,6 +254,7 @@ export async function reapWorktrees(): Promise<WorktreeEntry[]> {
 				if (!crashedReservation && !readEffortTerminalState(entry.effort)) {
 					continue;
 				}
+				if (!crashedReservation && classifyIdleWorktree(entry, Date.now(), worktreeTtlMs(), worktreeDirty(entry.path), true) !== "reap") continue;
 				if (!(crashedReservation && !fs.existsSync(entry.repo))) {
 					await removeWorktree(entry.repo, entry.path, entry.branch, crashedReservation);
 				}
