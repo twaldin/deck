@@ -11,6 +11,10 @@ export type ProducerSnapshot = {
 	mainRed?: boolean;
 	migrationBlocked?: boolean;
 	brokerNoQuota?: boolean;
+	ciFail?: boolean;
+	actionableComment?: boolean;
+	decisionAsk?: boolean;
+	terminal?: boolean;
 };
 
 export function produceWakeConditions(snapshot: ProducerSnapshot): void {
@@ -22,9 +26,16 @@ export function produceWakeConditions(snapshot: ProducerSnapshot): void {
 	add("reviewer-silent", snapshot.reviewerSilent, "reviewer has not responded");
 	add("main-red", snapshot.mainRed, "main branch failure requires shared diagnosis");
 	add("migration-gate", snapshot.migrationBlocked, "migration gate is blocking progress");
+	if (snapshot.terminal) {
+		clearWakeConditions(snapshot.taskId, ["max-adversarial", "reviewer-silent", "main-red", "migration-gate", "broker-no-quota", "ci-fail", "actionable-comment", "decision-ask"]);
+		return;
+	}
 	add("broker-no-quota", snapshot.brokerNoQuota, "broker has no available quota");
 	if (snapshot.needsDecision) conditions.push({ key: "needs-decision", taskId: snapshot.taskId, note: snapshot.needsDecision });
-	const keys: WakeCondition["key"][] = ["max-adversarial", "reviewer-silent", "main-red", "migration-gate", "broker-no-quota", "needs-decision"];
+	add("ci-fail", snapshot.ciFail, "CI failed and needs a fix");
+	add("actionable-comment", snapshot.actionableComment, "an actionable review comment needs a fix");
+	add("decision-ask", snapshot.decisionAsk, "a decision is required");
+	const keys: WakeCondition["key"][] = ["max-adversarial", "reviewer-silent", "main-red", "migration-gate", "broker-no-quota", "needs-decision", "ci-fail", "actionable-comment", "decision-ask"];
 	const active = new Set(conditions.map((condition) => condition.key));
 	clearWakeConditions(snapshot.taskId, keys.filter((key) => !active.has(key)));
 	enqueueWakeConditions(conditions);

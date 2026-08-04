@@ -69,7 +69,7 @@ type Baseline = Record<string, { lastTier: WakeTier; lastRaw: string; count: num
 
 /** Durable, edge-triggered conditions that do not have a .status producer. */
 export type WakeCondition = {
-	key: "max-adversarial" | "reviewer-silent" | "main-red" | "migration-gate" | "broker-no-quota" | "needs-decision";
+	key: "max-adversarial" | "reviewer-silent" | "main-red" | "migration-gate" | "broker-no-quota" | "needs-decision" | "ci-fail" | "actionable-comment" | "decision-ask";
 	taskId: string;
 	note: string;
 	/** T0 is used for failures and gates; reviewer silence is batched. */
