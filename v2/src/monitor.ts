@@ -1881,12 +1881,20 @@ function footerIdentity(bits: FooterSessionBits): string {
 	].filter((value): value is string => value !== null).join(" · ");
 }
 
-function workflowCounts(frame: FleetFrame): { active: number; waiting: number } {
-	const live = (frame.efforts ?? []).filter((effort) => effortLiveness({
+function effortIsLive(effort: Pick<EffortRow, "state" | "runtimeMs" | "prNumber">): boolean {
+	return effortLiveness({
 		status: effort.state ?? undefined,
 		started: effort.runtimeMs === null || effort.runtimeMs === undefined ? undefined : new Date(Date.now() - effort.runtimeMs).toISOString(),
 		prNumber: effort.prNumber ?? undefined,
-	}) === "live");
+	}) === "live";
+}
+
+function liveEfforts(frame: FleetFrame): EffortRow[] {
+	return (frame.efforts ?? []).filter(effortIsLive);
+}
+
+function workflowCounts(frame: FleetFrame): { active: number; waiting: number } {
+	const live = liveEfforts(frame);
 	return { active: live.filter((effort) => effort.waitingFor === null).length, waiting: live.filter((effort) => effort.waitingFor !== null).length };
 }
 
@@ -1899,7 +1907,7 @@ export function renderFooterLines(
 ): string[] {
 	const attention = [
 		`Nq ${frame.counters.openQuestions}`,
-		`${frame.counters.efforts ?? (frame.efforts?.length ?? 0)} efforts`,
+		`${liveEfforts(frame).length} efforts`,
 		`${frame.counters.agents ?? (frame.agents?.length ?? 0)} agents`,
 		(frame.counters.unhealedFailures ?? (frame.efforts?.filter((effort) => effort.failed).length ?? 0)) > 0 ? `fail ${frame.counters.unhealedFailures ?? (frame.efforts?.filter((effort) => effort.failed).length ?? 0)}` : null,
 	].filter((value): value is string => value !== null);
