@@ -7,11 +7,12 @@ INSTALL_TARGET="${INSTALL_TARGET:-$HOME/.pi/agent}"
 SOURCE_DIR="$(cd "$(dirname "$0")" && pwd)"
 DEST="$INSTALL_TARGET/extensions/ponytail"
 
-mkdir -p "$DEST" "$INSTALL_TARGET/skills"
+mkdir -p "$DEST" "$DEST/skills" "$INSTALL_TARGET/skills"
 # Copy, rather than link, so a checkout can be removed without breaking pi.
 # rsync makes repeated installs converge and removes stale vendored files.
 if command -v rsync >/dev/null 2>&1; then
   rsync -a --delete "$SOURCE_DIR/pi-extension/" "$DEST/"
+  mkdir -p "$DEST/skills"
   rsync -a --delete "$SOURCE_DIR/hooks/" "$DEST/hooks/"
   for skill in "$SOURCE_DIR"/skills/*; do
     rsync -a --delete "$skill/" "$DEST/skills/$(basename "$skill")/"

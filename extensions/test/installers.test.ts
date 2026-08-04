@@ -147,8 +147,15 @@ describe("ponytail installer", () => {
 		return marker.json().then((parsed) => expect(parsed.type).toBe("commonjs"));
 	});
 
-	test("skills install at user scope for discovery", () => {
-		for (const skill of ["ponytail", "ponytail-review", "ponytail-help"]) {
+	test("all skills install at user scope for discovery", () => {
+		for (const skill of [
+			"ponytail",
+			"ponytail-review",
+			"ponytail-audit",
+			"ponytail-debt",
+			"ponytail-gain",
+			"ponytail-help",
+		]) {
 			expect(existsSync(path.join(target, "skills", skill, "SKILL.md"))).toBe(true);
 		}
 	});
