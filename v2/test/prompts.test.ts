@@ -46,7 +46,7 @@ describe("worker brief", () => {
 
 		// And the safety sentences still say what they are supposed to say.
 		expect(brief).toContain("The path check is authoritative.");
-		expect(brief).toContain("You never contact the captain.");
+		expect(brief).toContain("You never contact the operator.");
 	});
 
 	test("the earned blocks are present for every task kind", () => {
