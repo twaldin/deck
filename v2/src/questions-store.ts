@@ -36,6 +36,7 @@ export interface PrQuestionContext {
 	mergeStateStatus?: string;
 	/** Absolute workflow directory used to resume a gate owned by another workflow. */
 	workflowDir?: string;
+	workflowFile?: string;
 	draftedVerdict?: string;
 	draftedComment?: string;
 	evidence?: string;
@@ -57,6 +58,7 @@ function boundedPrContext(value: PrQuestionContext | undefined): PrQuestionConte
 		ciState: text(value.ciState, 200),
 		mergeStateStatus: text(value.mergeStateStatus, 100),
 		workflowDir: text(value.workflowDir, 500),
+		workflowFile: text(value.workflowFile, 500),
 		draftedVerdict: text(value.draftedVerdict, 100),
 		draftedComment: text(value.draftedComment, 2000),
 		evidence: text(value.evidence, 2000),

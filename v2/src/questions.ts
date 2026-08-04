@@ -363,7 +363,7 @@ export function registerQuestions(
 					applied = await approveStamp(ctx, entry);
 				} else if ((action === "approve" && trustedReviewGate || action === undefined && trustedReviewGate && entry.questionKind === "approve" && selectedLabel === "Approve")) {
 					applied = await approvePullRequest(ctx, entry);
-				} else if ((action === "deny-gate" && trustedStamp || action === undefined && trustedStamp && selectedLabel === "Close")) {
+				} else if ((action === "deny-gate" && (trustedStamp || trustedReviewGate) || action === undefined && trustedStamp && selectedLabel === "Close")) {
 					applied = await closeStamp(ctx, entry);
 				} else if ((action === "close-pr" && trustedReviewGate || action === undefined && trustedReviewGate && entry.questionKind === "agent" && selectedLabel === "Close")) {
 					applied = await closePullRequest(ctx, entry);
@@ -411,6 +411,10 @@ export function registerQuestions(
 				return false;
 			}
 			await executor("gh", ["pr", "close", String(pr.prNumber), "--repo", pr.prRepo], { cwd: ctx.cwd, timeout: 15_000 });
+			const { runId, node } = parseStampGateId(entry.id);
+			if (runId !== undefined) {
+				await executor("smithers", ["deny", runId, "--node", node, "--by", "captain"], { cwd: entry.prContext?.workflowDir ?? pipelineDir(), timeout: 15_000 });
+			}
 			return resolve(ctx, entry, "Close", "answered");
 		} catch (error) {
 			ctx.ui.notify(`PR was not closed: ${error instanceof Error ? error.message : "unknown error"}`, "error");
@@ -497,7 +501,8 @@ export function registerQuestions(
 				if (!/(?:approval|gate)\s+(?:is\s+)?(?:already\s+approved|already\s+resolved)|already\s+approved|approval\s+is\s+not\s+pending|gate\s+is\s+not\s+pending/i.test(message)) throw error;
 			}
 			const workflowDir = entry.prContext?.workflowDir ?? pipelineDir();
-			await executor("smithers", ["up", "pipeline.tsx", "--run-id", runId, "--resume", "true"], { cwd: workflowDir, timeout: 15_000 });
+			const workflowFile = entry.prContext?.workflowFile ?? "pipeline.tsx";
+			await executor("smithers", ["up", workflowFile, "--run-id", runId, "--resume", "true"], { cwd: workflowDir, timeout: 15_000 });
 			return resolve(ctx, entry, "Stamp", "answered");
 		} catch (error) {
 			ctx.ui.notify(`Stamp was not recorded; the pipeline remains actionable: ${error instanceof Error ? error.message : "unknown error"}`, "error");

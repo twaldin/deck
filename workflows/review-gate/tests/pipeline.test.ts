@@ -3,6 +3,7 @@ import { readFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { askIfAbsent, openQuestions } from "../../../v2/src/questions-store.ts";
+import { reviewCommand, shouldSubmitReview } from "../decision.ts";
 
 const source = readFileSync(new URL("../pipeline.tsx", import.meta.url), "utf8");
 
@@ -28,7 +29,8 @@ test("gate has a hard no-approval rule and verifies state before queueing", () =
   expect(source).toContain("review-approval-gate-");
   expect(source).not.toMatch(/"pr",\s*"merge"/);
   expect(source).toContain("mergeStateStatus");
-  expect(source).toContain('questionKind: "stamp"');
+  expect(source).toContain('questionKind: clean ? "stamp" : "agent"');
+  expect(source).toContain('workflowDir: process.cwd(), workflowFile: fileURLToPath(import.meta.url)');
 });
 
 test("blockers dispatch a fix and rebase is an agent task", () => {
@@ -49,9 +51,18 @@ test("each blocker round posts findings and requests changes", () => {
 test("clean and exhausted rounds use different captain decisions without self-approval", () => {
   expect(source).toContain('maxIterations={rounds}');
   expect(source).toContain('Math.min(input.limits?.rounds ?? 3, 3)');
-  expect(source).toContain('questionKind: "stamp"');
-  expect(source).toContain('options: ["Approve", "Hold"]');
-  expect(source).toContain('blockers.length === 0 ? "--approve" : "--request-changes"');
+  expect(source).toContain('questionKind: clean ? "stamp" : "agent"');
+  expect(source).toContain('const cleanCaptainOptions = ["Approve", "Hold", "Deny gate"]');
+  expect(source).toContain('reviewCommand(pr.number, input.repo, blockers.length === 0)');
+  expect(source).toContain('shouldSubmitReview(decision)');
+});
+
+test("captain decision is required before exactly one review command", () => {
+  expect(shouldSubmitReview(undefined)).toBe(false);
+  expect(shouldSubmitReview({ approved: false })).toBe(false);
+  expect(shouldSubmitReview({ approved: true })).toBe(true);
+  expect(reviewCommand(7, "owner/repo", true)).toEqual(["pr", "review", "7", "--repo", "owner/repo", "--approve"]);
+  expect(reviewCommand(7, "owner/repo", false)).toEqual(["pr", "review", "7", "--repo", "owner/repo", "--request-changes"]);
 });
 
 test("polling and every requested PR are durable workflow paths", () => {
