@@ -21,7 +21,7 @@ export function parseProcessList(output: string): ProcessRow[] {
 	return output.split("\n").flatMap((line) => {
 		const match = line.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/);
 		if (match === null) return [];
-		return [{ pid: Number(match[1]), ppid: Number(match[2]), command: match[3] }];
+		return [{ pid: Number(match[1]), ppid: Number(match[2]), command: match[3] ?? "" }];
 	});
 }
 
