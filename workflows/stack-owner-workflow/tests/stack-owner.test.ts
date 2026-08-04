@@ -1,6 +1,15 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
+import { renderWorkflow, simulate } from "smithers-orchestrator/testing";
 import { pollHasNoAgent, pollStack } from "../lib/poll.ts";
 import { produceWakeConditions } from "../../../v2/src/wake-producers.ts";
+import { wakeFiles } from "../../../v2/src/home.ts";
+import * as fs from "node:fs";
+
+const baseInput = { repo: "org/repo", worktree: "/tmp/worktree", branch: "feature", prompt: "Add feature", dryRun: true };
+
+afterEach(() => {
+  for (const file of Object.values(wakeFiles())) fs.rmSync(file, { force: true });
+});
 
 describe("stack owner", () => {
   test("poll loop is machine-only", () => expect(pollHasNoAgent).toBe(true));
@@ -12,9 +21,27 @@ describe("stack owner", () => {
     expect(result.prs[0]?.ci).toBe("pending");
     expect(calls.every((call) => call.includes("api"))).toBe(true);
   });
-  test("terminal producer emits no wake", () => {
+  test("workflow graph executes in dry-run mode", async () => {
+    const sim = simulate((await import("../pipeline.tsx")).default, { input: baseInput });
+    await sim.run();
+    expect(sim.outputs.result?.[0]?.done).toBe(true);
+  });
+
+  test("rendered graph contains the open-to-poll dependency", async () => {
+    const rendered = await renderWorkflow((await import("../pipeline.tsx")).default, { input: baseInput, workflowPath: new URL("../pipeline.tsx", import.meta.url).pathname });
+    expect(rendered.tasks.some((task) => task.nodeId === "open-stack")).toBe(true);
+    expect(rendered.tasks.some((task) => task.nodeId === "poll-stack")).toBe(true);
+  });
+
+  test("terminal producer clears wakes, failed terminal preserves a wake", () => {
     const taskId = `stack-owner-test-${Date.now()}`;
-    expect(() => produceWakeConditions({ taskId, terminal: true, ciFail: true })).not.toThrow();
-    expect(() => produceWakeConditions({ taskId, ciFail: true })).not.toThrow();
+    produceWakeConditions({ taskId, ciFail: true });
+    const queue = wakeFiles().queue;
+    expect(fs.readFileSync(queue, "utf8")).toContain("ci-fail");
+    produceWakeConditions({ taskId, terminal: true, ciFail: true });
+    const baseline = fs.readFileSync(wakeFiles().baseline, "utf8");
+    expect(baseline).not.toContain(`${taskId}:ci-fail`);
+    produceWakeConditions({ taskId, terminal: false, ciFail: true });
+    expect(fs.readFileSync(queue, "utf8")).toContain("ci-fail");
   });
 });
