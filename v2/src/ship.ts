@@ -16,6 +16,7 @@
  * bare ship spawns on profiled repos (see assertShipGoesThroughPipeline).
  */
 import { spawn as spawnProcess } from "node:child_process";
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -25,6 +26,12 @@ import { findProfile, type ProjectProfile } from "./projects";
 import { SMITHERS_SPEC } from "./smithers";
 import { smithersWorkspaceCwd, uiWarn, warnOnShadowWorkspace } from "./workspace";
 import { claimWorktree, updateWorktreePid } from "./worktree-lock";
+
+function pipelineWorkflowHash(dir: string): string {
+	const hash = createHash("sha256");
+	hash.update(fs.readFileSync(path.join(dir, "pipeline.tsx")));
+	return hash.digest("hex");
+}
 
 export type ShipRequest = {
 	/** Ticket / effort id; also seeds the smithers run id. */
@@ -90,6 +97,7 @@ export function buildPipelineInput(
 	profile: ProjectProfile,
 ): Record<string, unknown> {
 	const input: Record<string, unknown> = {
+		__smithersDurability: { entryWorkflowHash: pipelineWorkflowHash(pipelineDir()) },
 		ticket: request.ticket,
 		repo: profile.repo,
 		worktree: request.worktree,

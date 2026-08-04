@@ -864,8 +864,7 @@ export async function buildFrame(
 		// an unreadable queue must not take the fleet view down with it
 	}
 	const liveRuns = [...workflows.filter((wf) =>
-		!wf.superseded &&
-		(!isTerminalWorkflow(wf) || isActionableWorkflowFailure(wf, workflows)),
+		!wf.superseded && effortLiveness({ status: wf.status ?? undefined, state: wf.state ?? undefined, started: wf.startedAt ?? undefined, prNumber: wf.prNumber ?? undefined, watchActive: wf.waitingFor !== "none" }) === "live",
 	)].sort((a, b) => Date.parse(b.startedAt ?? "") - Date.parse(a.startedAt ?? ""));
 	const workflowIdentity = (wf: WorkflowRow): string =>
 		wf.repo ?? wf.rootDir ?? "unknown-repo";
@@ -981,7 +980,7 @@ export async function buildFrame(
 		agents,
 		counters: {
 			tasks: tasks.length,
-			running: workflows.filter((workflow) => effortLiveness({ status: workflow.status ?? undefined, state: workflow.state ?? undefined, started: workflow.startedAt ?? undefined, prNumber: workflow.prNumber ?? undefined }) === "live").length,
+			running: efforts.length,
 			blocked: tasks.filter((task) => task.lastVerb === "blocked").length,
 			openDecisions: tasks.reduce(
 				(sum, task) => sum + task.openDecisions,
@@ -1578,28 +1577,22 @@ export function buildFleetView(
 		);
 	};
 
-	if (frame.tasks.length === 0) lines.push(theme.fg("dim", "  (no tasks)"));
-	for (const task of activeTasks) renderTask(task);
-	if (effortRows.length > 0) {
-		lines.push("");
+	if (effortRows.length === 0) {
+		if (frame.tasks.length === 0) lines.push(theme.fg("dim", "  (no tasks)"));
+		for (const task of activeTasks) renderTask(task);
+		for (const wf of [...activeWorkflows, ...(!showAll ? failedWorkflows : [])]) renderWorkflow(wf);
+	} else {
 		lines.push(theme.bold(theme.fg("toolTitle", "efforts")));
 		for (const effort of effortRows) {
-			const label = effort.prNumber === null ? effort.ticket ?? effort.identity : `PR #${effort.prNumber}`;
-			const blocker = effort.waitingFor === null ? "" : ` waitingFor=${effort.waitingFor}`;
-			lines.push(`  ${theme.fg(effort.failed ? "warning" : "accent", `[${effort.failed ? "failed" : "active"}]`)} ${theme.fg("text", truncate(`${label}${blocker}`, Math.max(1, noteMax)))}`);
+			const live = effortLiveness({ status: effort.state ?? undefined, prNumber: effort.prNumber ?? undefined, started: effort.runtimeMs == null ? undefined : new Date(Date.now() - effort.runtimeMs).toISOString() }) === "live";
+			if (!live && !showAll) continue;
+			const label = effort.prUrl ?? (effort.prNumber === null ? effort.ticket ?? effort.identity : `PR #${effort.prNumber}`);
+			const details = [effort.step, effort.runtimeMs == null ? null : humanAge(effort.runtimeMs), effort.waitingFor == null ? null : `waiting ${effort.waitingFor}`].filter((v): v is string => v !== null).join(" · ");
+			lines.push(`  ${theme.fg(effort.failed ? "warning" : "accent", `[${effort.failed ? "failed" : "active"}]`)} ${theme.fg("text", truncate(`${label}${details ? ` · ${details}` : ""}`, Math.max(1, noteMax)))}`);
 		}
 	}
-	if (
-		activeWorkflows.length > 0 ||
-		(!showAll && failedWorkflows.length > 0)
-	) {
-		lines.push("");
-		lines.push(theme.bold(theme.fg("toolTitle", "workflows")));
-		for (const wf of [
-			...activeWorkflows,
-			...(!showAll ? failedWorkflows : []),
-		])
-			renderWorkflow(wf);
+	if (effortRows.length > 0 && frame.tasks.length === 0) {
+		// Effort rows are the canonical view; task and workflow rows are not repeated.
 	}
 
 	const terminal = doneTasks.length + doneWorkflows.length;
@@ -1743,12 +1736,12 @@ export function buildFactoryView(
 		for (const { effort, workflow } of entries) {
 			const identity = effort.prUrl ?? (effort.prNumber === null ? effort.ticket ?? `run:${truncateTail(effort.runId, 12)}` : `PR #${effort.prNumber}`);
 			const details = [
-				workflow.step ?? "step ?",
-				effort.runtimeMs === null || effort.runtimeMs === undefined ? "runtime ?" : humanAge(effort.runtimeMs),
+				workflow.step === null || workflow.step === undefined ? null : workflow.step,
+				effort.runtimeMs === null || effort.runtimeMs === undefined ? null : humanAge(effort.runtimeMs),
 				effort.waitingFor === null ? null : `waiting ${effort.waitingFor}`,
-				`CI ${effort.ciState ?? "unknown"}`,
-				`review ${effort.reviewState ?? "unknown"}`,
-				`model ${effort.model ?? "?"}`,
+				effort.ciState === null || effort.ciState === undefined ? null : `CI ${effort.ciState}`,
+				effort.reviewState === null || effort.reviewState === undefined ? null : `review ${effort.reviewState}`,
+				effort.model === null || effort.model === undefined ? null : `model ${effort.model}`, 
 			]
 				.filter((value): value is string => value !== null)
 				.join(" · ");
@@ -1889,26 +1882,12 @@ function footerIdentity(bits: FooterSessionBits): string {
 }
 
 function workflowCounts(frame: FleetFrame): { active: number; waiting: number } {
-	const correlatedTasks = new Set(
-		frame.workflows
-			.filter((wf) => !isTerminalWorkflow(wf) && wf.taskId !== null)
-			.map((wf) => wf.taskId),
-	);
-	const active = frame.workflows.filter(
-		(wf) => !isTerminalWorkflow(wf) && workflowRowActivity(wf) !== "wait",
-	).length + frame.tasks.filter(
-		(task) => !correlatedTasks.has(task.taskId) && taskActivity(task) === "active",
-	).length;
-	const waiting = frame.workflows.filter(
-		(wf) =>
-			!isTerminalWorkflow(wf) &&
-			workflowRowActivity(wf) === "wait",
-	).length + frame.tasks.filter(
-		(task) =>
-			!correlatedTasks.has(task.taskId) &&
-			taskActivity(task) === "waiting",
-	).length;
-	return { active, waiting };
+	const live = (frame.efforts ?? []).filter((effort) => effortLiveness({
+		status: effort.state ?? undefined,
+		started: effort.runtimeMs === null || effort.runtimeMs === undefined ? undefined : new Date(Date.now() - effort.runtimeMs).toISOString(),
+		prNumber: effort.prNumber ?? undefined,
+	}) === "live");
+	return { active: live.filter((effort) => effort.waitingFor === null).length, waiting: live.filter((effort) => effort.waitingFor !== null).length };
 }
 
 /** Exactly three width-safe lines for pi's custom footer. */
