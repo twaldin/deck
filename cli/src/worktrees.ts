@@ -150,11 +150,14 @@ export async function allocateWorktree(request: AllocateRequest): Promise<Worktr
 			// when its old repository differs; the path is an available slot.
 			const free = state.entries.find((entry) => entry.state === "free" && !fs.existsSync(entry.path));
 			if (free !== undefined) {
+				const branch = request.branch ?? `deck/${effort}/${ulid().slice(-8)}`;
+				await validateBranchName(repo, branch);
 				const replacement: WorktreeEntry = {
 					...free,
 					repo,
 					effort,
-					branch: request.branch ?? `deck/${effort}/${ulid().slice(-8)}`,
+					branch,
+
 					created: new Date().toISOString(),
 					state: "active",
 					...(request.desc === undefined ? {} : { desc: request.desc }),

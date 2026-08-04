@@ -776,7 +776,7 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 				workspace: workflowCwd!,
 				run: async (command, args, cwd) => {
 					try {
-						const result = await execFileAsync(command, [...args], { cwd, maxBuffer: 10 * 1024 * 1024 });
+						const result = await execFileAsync(command, [...args], { cwd, maxBuffer: 10 * 1024 * 1024, timeout: 15_000 });
 						return { stdout: result.stdout, exitCode: 0 };
 					} catch (error: any) {
 						return { stdout: typeof error?.stdout === "string" ? error.stdout : "", exitCode: error?.code ?? 1 };

@@ -411,7 +411,7 @@ export function observePsSnapshot(rows: readonly PsSnapshotRow[]): EmittedEvent[
 }
 
 /** Inspect each live Smithers row so production polling includes node transitions. */
-let psSnapshotInFlight: Promise<EmittedEvent[]> | undefined;
+const psSnapshotInFlight = new Map<string, Promise<EmittedEvent[]>>();
 
 async function observePsSnapshotWithInspectOnce(options: {
 	rows: readonly PsSnapshotRow[];
@@ -436,12 +436,13 @@ export function observePsSnapshotWithInspect(options: {
 	workspace: string;
 	run: (command: string, args: readonly string[], cwd: string) => Promise<{ stdout: string; exitCode: number } | null>;
 }): Promise<EmittedEvent[]> {
-	if (psSnapshotInFlight !== undefined) return psSnapshotInFlight;
+	const current = psSnapshotInFlight.get(options.workspace);
+	if (current !== undefined) return current;
 	const result = observePsSnapshotWithInspectOnce(options);
-	psSnapshotInFlight = result;
+	psSnapshotInFlight.set(options.workspace, result);
 	void result.then(
-		() => { if (psSnapshotInFlight === result) psSnapshotInFlight = undefined; },
-		() => { if (psSnapshotInFlight === result) psSnapshotInFlight = undefined; },
+		() => { if (psSnapshotInFlight.get(options.workspace) === result) psSnapshotInFlight.delete(options.workspace); },
+		() => { if (psSnapshotInFlight.get(options.workspace) === result) psSnapshotInFlight.delete(options.workspace); },
 	);
 	return result;
 }

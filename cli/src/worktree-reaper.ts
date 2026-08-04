@@ -10,8 +10,13 @@ export function classifyIdleWorktree(dirty: boolean, terminal: boolean): ReapDec
 	return "reap";
 }
 export function worktreeDirty(worktree: string): boolean {
-	try { return execFileSync("git", ["status", "--porcelain"], { cwd: worktree, encoding: "utf8" }).trim().length > 0; }
-	catch { return true; }
+	try {
+		const status = execFileSync("git", ["status", "--porcelain"], { cwd: worktree, encoding: "utf8" });
+		return status.split("\n").some((line) => {
+			const file = line.slice(3).trim();
+			return file !== ".deck-deps-ready" && file !== ".deck-deps-failed" && file !== "";
+		});
+	} catch { return true; }
 }
 export function excludeWorktreePool(pool: string): void {
 	if (process.platform !== "darwin") return;
