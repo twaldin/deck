@@ -4,6 +4,7 @@ export interface PullRequestDescriptionInput {
 	brief: Pick<Brief, "summary" | "acceptanceCriteria">;
 	testing?: string;
 	reviewOutcome?: string;
+	changedFiles?: string[];
 }
 
 /** Strip internal fleet/agent brief residue from team-facing PR text. */
@@ -27,6 +28,7 @@ function clean(value: string): string {
 	s = s.replace(/\b(?:run|execution)[-_ ]?id[:= ]+?[A-Za-z0-9_-]{6,}\b/gi, "");
 	s = s.replace(/\b[0-9a-f]{40}\b/gi, "");
 	s = s.replace(/Managed by[^\n]*/gi, "");
+	s = s.replace(/Local review nits[^\n]*(?:\n[-*].*)*/gi, "");
 	s = s.replace(/[ \t]{2,}/g, " ");
 	s = s.replace(/ ?([,.;:])/g, "$1");
 	s = s.replace(/\(\s*\)/g, "");
@@ -43,9 +45,7 @@ function summarize(text: string): string {
 		.filter((x) => x.length > 20 && /[A-Za-z]{4,}/.test(x));
 	if (sentences.length === 0) {
 		const blob = cleaned.replace(/^[\s.]+/, "").trim();
-		return blob.length > 20
-			? blob.slice(0, 480)
-			: "This change updates product behavior.";
+		return blob.length > 20 ? blob.slice(0, 480) : "This change updates product behavior.";
 	}
 	let out = "";
 	for (const sentence of sentences) {
@@ -66,6 +66,9 @@ export function generatePullRequestDescription(input: PullRequestDescriptionInpu
 		.join("\n");
 	const testing = clean(input.testing ?? "");
 	const testingLine = testing.length > 8 ? testing : "Relevant automated checks were run.";
+	const pipelineNote = (input.changedFiles ?? []).some((file) => /(?:^|\/)pipeline\.tsx$/i.test(file))
+		? "Editing pipeline.tsx invalidates resume of in-flight workflow runs (RESUME_METADATA_MISMATCH). Recut those runs after merge."
+		: "";
 
 	return [
 		"## Summary",
@@ -74,7 +77,8 @@ export function generatePullRequestDescription(input: PullRequestDescriptionInpu
 		"## Testing",
 		testingLine,
 		acceptance ? `\n## Checklist\n${acceptance}` : "",
-		input.reviewOutcome ? `\n## Notes\n${clean(input.reviewOutcome)}` : "",
+		pipelineNote ? `\n## Notes\n${pipelineNote}` : "",
+		input.reviewOutcome ? `\n## Review\n${clean(input.reviewOutcome)}` : "",
 	]
 		.join("\n")
 		.replace(/\n{3,}/g, "\n\n")
