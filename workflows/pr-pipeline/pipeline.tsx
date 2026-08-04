@@ -435,7 +435,7 @@ function nowIso(): string {
 
 /** Publish durable wake inputs for the deck extension. The extension reads this
  * record from the canonical Smithers workspace even without a TUI session. */
-export function publishWakeProducer(input: { taskId: string; maxAdversarial?: boolean; reviewerSilent?: boolean; mainRed?: boolean; migrationBlocked?: boolean; brokerNoQuota?: boolean }): void {
+export function publishWakeProducer(input: { taskId: string; maxAdversarial?: boolean; reviewerSilent?: boolean; mainRed?: boolean; migrationBlocked?: boolean; brokerNoQuota?: boolean; needsDecision?: string }): void {
 	if (input.taskId.length === 0) return;
 	const file = path.join(smithersWorkspaceCwd(), "wake-producers.json");
 	fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
@@ -459,6 +459,7 @@ export function publishWakeProducer(input: { taskId: string; maxAdversarial?: bo
 			mainRed: input.mainRed,
 			migrationBlocked: input.migrationBlocked,
 			brokerNoQuota: input.brokerNoQuota,
+			needsDecision: input.needsDecision,
 		});
 	} finally {
 		fs.rmSync(lock, { recursive: true, force: true });
@@ -751,6 +752,9 @@ export default smithers((ctx) => {
 				return (roster.reports ?? []).some((report) => (report.limits ?? []).some((limit) => limit.amount?.remainingFraction === 0));
 			} catch { return false; }
 		})(),
+		needsDecision: preflight !== undefined && !preflight.ok
+			? `PREFLIGHT REFUSED: ${preflight.openQuestions.join("; ")}`
+			: undefined,
 	});
 
 	// ===========================================================================
@@ -808,11 +812,11 @@ export default smithers((ctx) => {
 				{preflight !== undefined && !preflight.ok ? (
 					<Task id="preflight-refusal" output={outputs.preflight} retries={0}>
 						{() => {
-							throw new Error(
-								`PREFLIGHT REFUSED - the brief is not dispatchable. Open questions:\n` +
-									preflight.openQuestions.map((question) => `  - ${question}`).join("\n") +
-									`\nResolve every item and start a NEW run (input is immutable).`,
-							);
+							const reason = `PREFLIGHT REFUSED - the brief is not dispatchable. Open questions:\n` +
+								preflight.openQuestions.map((question) => `  - ${question}`).join("\n") +
+								`\nResolve every item and start a NEW run (input is immutable).`;
+							publishWakeProducer({ taskId: input.ticket, needsDecision: reason });
+							throw new Error(reason);
 						}}
 					</Task>
 				) : null}

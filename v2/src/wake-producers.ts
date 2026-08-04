@@ -5,6 +5,7 @@ import { clearWakeConditions, enqueueWakeConditions, type WakeCondition } from "
 /** Durable producers used by workflow observers and the headless reconciler. */
 export type ProducerSnapshot = {
 	taskId: string;
+	needsDecision?: string;
 	maxAdversarial?: boolean;
 	reviewerSilent?: boolean;
 	mainRed?: boolean;
@@ -22,7 +23,8 @@ export function produceWakeConditions(snapshot: ProducerSnapshot): void {
 	add("main-red", snapshot.mainRed, "main branch failure requires shared diagnosis");
 	add("migration-gate", snapshot.migrationBlocked, "migration gate is blocking progress");
 	add("broker-no-quota", snapshot.brokerNoQuota, "broker has no available quota");
-	const keys: WakeCondition["key"][] = ["max-adversarial", "reviewer-silent", "main-red", "migration-gate", "broker-no-quota"];
+	if (snapshot.needsDecision) conditions.push({ key: "needs-decision", taskId: snapshot.taskId, note: snapshot.needsDecision });
+	const keys: WakeCondition["key"][] = ["max-adversarial", "reviewer-silent", "main-red", "migration-gate", "broker-no-quota", "needs-decision"];
 	const active = new Set(conditions.map((condition) => condition.key));
 	clearWakeConditions(snapshot.taskId, keys.filter((key) => !active.has(key)));
 	enqueueWakeConditions(conditions);
