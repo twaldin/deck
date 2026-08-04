@@ -9,17 +9,13 @@ export interface PullRequestDescriptionInput {
 
 /** Remove private workflow instructions before the body-generation step sees them. */
 export function sanitizeDescriptionInput(input: PullRequestDescriptionInput): PullRequestDescriptionInput {
-<<<<<<< HEAD
 	const sanitize = (value: string) => {
 		let s = value;
-		// Remove whole sentences that contain brief-only control information first.
 		s = s.replace(/[^.!?\n]*\bpriority\s*#?\s*\d+\b[^.!?\n]*[.!?]?/gi, " ");
 		s = s.replace(/[^.!?\n]*\bSpec\s*=\b[^.!?\n]*[.!?]?/gi, " ");
 		s = s.replace(/[^.!?\n]*\bPR\s*\d+[A-Z]?\s+of\b[^.!?\n]*[.!?]?/gi, " ");
 		s = s.replace(/[^.!?\n]*\bimplementer\s+must\b[^.!?\n]*[.!?]?/gi, " ");
 		s = s.replace(/[^.!?\n]*\bREPORT\.md\b[^.!?\n]*[.!?]?/gi, " ");
-		// Remove local paths and private vocabulary. This is the primary protection;
-		// clean() below remains a failing backstop for any missed input.
 		s = s.replace(/(?:\/Users\/|\/home\/|~\/)[^\s\n)`\"']*/gi, "");
 		s = s.replace(/\.deck\/[^\s\n)`\"']*/gi, "");
 		s = s.replace(/[A-Za-z]:[\\\\/]+[^\s\n)`\"']+/g, "");
@@ -43,19 +39,6 @@ export function sanitizeDescriptionInput(input: PullRequestDescriptionInput): Pu
 			.trim();
 	};
 
-=======
-	const sanitize = (value: string) => value
-		.replace(/(?:^|\s|\(|"|'|\[)\/(?:Users|home)\/[^\s\n)]*/gi, " the local worktree")
-		.replace(/[A-Za-z]:[\\\\/]+[^\s\n)]+/g, "the local worktree")
-		.replace(/~\/\.deck\S*/gi, "the local workflow directory")
-		.replace(/\b(?:run|execution)[-_ ]?id[:= ]+?[A-Za-z0-9_-]{6,}\b/gi, "")
-		.replace(/\b[0-9a-f]{7,40}\b/gi, "")
-		.replace(/Managed by[^\n]*/gi, "")
-		.replace(/Local review nits[^\n]*(?:\n[-*].*)*/gi, "")
-		.replace(/\b(?:READ|DO NOT)\b[^\n]*/gi, "")
-		.replace(/\b(?:captain|orch(?:estrator)?|stamp|yolo)\b/gi, "")
-		.trim();
->>>>>>> bb57dc7 (fix(pipeline): wire sanitized PR descriptions)
 	return {
 		title: sanitize(input.title),
 		summary: sanitize(input.summary),
@@ -67,21 +50,12 @@ export function sanitizeDescriptionInput(input: PullRequestDescriptionInput): Pu
 }
 
 const DENYLIST = [
-<<<<<<< HEAD
 	/\b(?:captain|orch(?:estrator)?|fleet|stamp(?:able)?|yolo|smithers|worktree|implementer|adversar(?:y|ial))\b/i,
 	/\b(?:priority\s*#?\s*\d+|Spec\s*=|PR\s*\d+[A-Z]?\s+of|REPORT\.md)\b/i,
 	/(?:\/Users\/|\/home\/|~\/|\.deck\/|[A-Za-z]:[\\\\/])/i,
 	/\b(?:run|execution)[-_ ]?id[:= ]+?[A-Za-z0-9_-]{6,}\b/i,
 	/\b[0-9a-f]{40}\b/i,
 	/\b(?:Managed by|Local review nits)\b/i,
-=======
-	/captain/i,
-	/\borch(?:estrator)?\b/i,
-	/\bstamp\b/i,
-	/\byolo\b/i,
-	/(?:^|\s|\(|"|'|\[)\/(?:Users|home)\/|(?:^|\s|\(|"|'|\[)[A-Za-z]:[\\\\/]/i,
-	/~\/\.deck/i,
->>>>>>> bb57dc7 (fix(pipeline): wire sanitized PR descriptions)
 ];
 
 /** Assert that sanitized text is safe. Never silently scrub generated output. */

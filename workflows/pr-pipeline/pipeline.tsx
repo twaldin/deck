@@ -1106,18 +1106,7 @@ export default smithers((ctx) => {
 										"--base", baseBranch,
 										"--title", descriptionInput.title,
 										"--body",
-<<<<<<< HEAD
 										generatePullRequestDescription(descriptionInput),
-=======
-										generatePullRequestDescription(sanitizeDescriptionInput({
-											title: brief?.title ?? input.ticket,
-											summary: brief?.summary ?? "",
-											acceptanceCriteria: brief?.acceptanceCriteria ?? [],
-											testing: implementation.testEvidence,
-											reviewOutcome: latestLocalReview?.summary,
-											changedFiles: dryRun ? fixtures.changedFiles : await changedFilesForBranch(bunExec, input.worktree, baseBranch),
-										})),
->>>>>>> bb57dc7 (fix(pipeline): wire sanitized PR descriptions)
 									]);
 									url = createOut.trim().split("\n").pop() ?? "";
 									const match = url.match(/\/pull\/(\d+)/);
