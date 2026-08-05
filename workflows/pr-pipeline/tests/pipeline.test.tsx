@@ -12,7 +12,7 @@
  * self-approve.
  */
 
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -44,6 +44,17 @@ const seatModels = {
 };
 
 const testHome = fs.mkdtempSync(path.join(os.tmpdir(), "deck-pipeline-home-"));
+const originalHome = process.env.DECK_V2_HOME;
+process.env.DECK_V2_HOME = testHome;
+
+afterEach(() => {
+	fs.rmSync(path.join(testHome, "state"), { recursive: true, force: true });
+});
+afterAll(() => {
+	if (originalHome === undefined) delete process.env.DECK_V2_HOME;
+	else process.env.DECK_V2_HOME = originalHome;
+	fs.rmSync(testHome, { recursive: true, force: true });
+});
 
 const baseInput = {
 	watchSetPath: path.join(testHome, "watch-set.jsonl"),
@@ -141,7 +152,7 @@ describe("workflow rendering contracts", () => {
 			fs.mkdirSync(path.join(home, "config"), { recursive: true });
 			fs.writeFileSync(path.join(home, "config", "projects.json"), JSON.stringify([profile]));
 			const rendered = await renderWorkflow(pipeline, {
-				input: { ...baseInput, repo, profile: "test", models: inputModels, dryRun: false },
+				input: { ...baseInput, repo, profile: "test", models: inputModels, dryRun: false, wakeDryRun: true },
 				outputs: {
 					preflight: [
 						{
@@ -235,6 +246,7 @@ describe("fallout prompt rendering contracts", () => {
 			input: {
 				...baseInput,
 				dryRun: false,
+				wakeDryRun: true,
 				profile: "test",
 				models: { implementer: "deck/claude-fable-5", watcher: "deck/gpt-5.6-luna", fallout: "deck/gpt-5.6-sol", familyOpposition: true, oppositionDefaults: { anthropic: "deck/gpt-5.6-luna" }, reasoning: "high", reasoningReviewer: "xhigh", reasoningWatcher: "low", reasoningFallout: "max" },
 			},
@@ -353,15 +365,28 @@ describe("local review contracts", () => {
 });
 
 describe("preflight gate", () => {
-	test("refuses a missing brief with the open-question list; nothing downstream runs", async () => {
-		const { sim, error } = await run({ ...baseInput, brief: undefined });
-		expect(sim.status).toBe("failed");
-		expect(String(error)).toContain("PREFLIGHT REFUSED");
-		expect(String(error)).toContain("brief is missing");
-		expect(sim.executed).toContain("preflight");
-		expect(sim.executed).toContain("preflight-refusal");
-		expect(sim.executed).not.toContain("implement");
-		expect(sim.executed).not.toContain("push-pr");
+	test("REGRESSION: preflight refusal records dry-run intent but publishes no real wake", async () => {
+		const home = fs.mkdtempSync(path.join(os.tmpdir(), "deck-preflight-wake-"));
+		const savedHome = process.env.DECK_V2_HOME;
+		process.env.DECK_V2_HOME = home;
+		try {
+			const { sim, error } = await run({ ...baseInput, brief: undefined });
+			expect(sim.status).toBe("failed");
+			expect(String(error)).toContain("PREFLIGHT REFUSED");
+			expect(String(error)).toContain("brief is missing");
+			expect(sim.executed).toContain("preflight");
+			expect(sim.executed).toContain("preflight-refusal");
+			expect(sim.executed).not.toContain("implement");
+			expect(sim.executed).not.toContain("push-pr");
+			const { wakeProducerIntents } = await import("../../../v2/src/wake-producers.ts");
+			const intents = wakeProducerIntents(path.join(home, "state", "smithers"));
+			expect(intents.some((intent) => intent.snapshot.needsDecision?.includes("PREFLIGHT REFUSED"))).toBe(true);
+			expect(fs.existsSync(path.join(home, "state", ".wake-queue.jsonl"))).toBe(false);
+		} finally {
+			if (savedHome === undefined) delete process.env.DECK_V2_HOME;
+			else process.env.DECK_V2_HOME = savedHome;
+			fs.rmSync(home, { recursive: true, force: true });
+		}
 	});
 
 	test("refuses open decision-ledger entries", async () => {
@@ -378,7 +403,7 @@ describe("preflight gate", () => {
 	});
 
 	test("refuses bypassApprovals without dryRun (no real run can self-approve)", async () => {
-		const { sim, error } = await run({ ...baseInput, dryRun: false, bypassApprovals: true });
+		const { sim, error } = await run({ ...baseInput, dryRun: false, wakeDryRun: true, bypassApprovals: true });
 		expect(sim.status).toBe("failed");
 		expect(String(error)).toContain("bypassApprovals");
 	});

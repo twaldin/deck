@@ -7,7 +7,7 @@ import { runMerge } from "../pr-pipeline/lib/merge.ts";
 import { executeReviewerRequest } from "../pr-pipeline/lib/reviewers.ts";
 import { fetchChangedFiles, fetchCodeowners, fetchRecentAuthors, resolveReviewerLogin, isCollaborator, requestReviewers, fetchRequestedReviewers } from "../pr-pipeline/lib/gh.ts";
 import { pollStack } from "./lib/poll.ts";
-import { produceWakeConditions } from "../../v2/src/wake-producers.ts";
+import { publishWakeProducer } from "../../v2/src/wake-producers.ts";
 
 const inputSchema = z.object({
   repo: z.string().min(1), worktree: z.string().min(1), branch: z.string().min(1), baseBranch: z.string().optional(), prompt: z.string().min(1),
@@ -66,7 +66,7 @@ export default smithers((ctx) => {
       {async () => {
         const blockers = ctx.latest(outputs.review, "adversarial-review")?.blockers ?? [];
         if (repeatedFinding() || blockers.length > 0 && reviewHistory().length >= maxRounds) {
-          produceWakeConditions({ taskId, maxAdversarial: true });
+          publishWakeProducer({ dryRun, snapshot: { taskId, maxAdversarial: true } });
         }
         if (dryRun) return { fixed: true };
         return `Fix every blocker in the latest adversarial review in ${input.worktree}. Run focused tests and commit. Do not open or merge PRs. If the same critical finding appears twice, stop and report it to the orchestrator.`;
@@ -76,7 +76,7 @@ export default smithers((ctx) => {
   const reviewGate = <Task id="review-gate" output={outputs.reviewGate}>{() => {
     const blockers = ctx.latest(outputs.review, "adversarial-review")?.blockers ?? [];
     const ok = blockers.length === 0;
-    if (!ok) produceWakeConditions({ taskId, maxAdversarial: true });
+    if (!ok) publishWakeProducer({ dryRun, snapshot: { taskId, maxAdversarial: true } });
     return { ok };
   }}</Task>;
   const open = <Task id="open-stack" output={outputs.opened} retries={1} skipIf={ctx.latest(outputs.reviewGate, "review-gate")?.ok === false}>{async () => {
@@ -122,7 +122,7 @@ export default smithers((ctx) => {
     const result = await pollStack(bunExec, input.repo, prs.map((p) => p.number), gh);
     const exhausted = pollNo + 1 >= maxPolls && result.signal === "idle";
     const signal = exhausted ? "exhausted" : result.signal;
-    produceWakeConditions({ taskId, ciFail: signal === "ci-fail", actionableComment: signal === "actionable-comment", decisionAsk: signal === "decision-ask" });
+    publishWakeProducer({ dryRun, snapshot: { taskId, ciFail: signal === "ci-fail", actionableComment: signal === "actionable-comment", decisionAsk: signal === "decision-ask" } });
     return { signal, prs: result.prs, reason: exhausted ? "Poll limit reached without a wake condition" : result.reason };
   }}</Task>;
   const watch = <Loop id="code-poll-loop" maxIterations={maxPolls} onMaxReached="return-last" skipIf={ctx.latest(outputs.reviewGate, "review-gate")?.ok === false} until={["complete", "ci-fail", "actionable-comment", "decision-ask", "exhausted"].includes(ctx.latest(outputs.poll, "poll-stack")?.signal ?? "")}>
@@ -160,7 +160,7 @@ export default smithers((ctx) => {
     const blockers = ctx.latest(outputs.review, "adversarial-review")?.blockers ?? [];
     const signal = ctx.latest(outputs.poll, "poll-stack")?.signal;
     const ok = blockers.length === 0 && signal === "complete" && ctx.latest(outputs.merge, "merge-stack")?.merged === true;
-    produceWakeConditions({ taskId, terminal: ok, maxAdversarial: !ok && blockers.length > 0, ciFail: !ok && signal === "ci-fail", actionableComment: !ok && signal === "actionable-comment", decisionAsk: !ok && signal === "decision-ask" });
+    publishWakeProducer({ dryRun, snapshot: { taskId, terminal: ok, maxAdversarial: !ok && blockers.length > 0, ciFail: !ok && signal === "ci-fail", actionableComment: !ok && signal === "actionable-comment", decisionAsk: !ok && signal === "decision-ask" } });
     return ok ? { done: true, summary: input.profile === "lindy-full" ? "stack merged after captain approval" : "stack merged" } : { done: false, summary: `stack owner stopped with unresolved ${blockers.length ? "review blockers" : `${signal ?? "unknown"} poll signal`}` };
   }}</Task></Sequence></Workflow>;
 });

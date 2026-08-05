@@ -509,17 +509,13 @@ describe("a live worker that stops making progress", () => {
 		).toHaveLength(0);
 	});
 
-	// The narrowness guard for the test above. `resolved` is NOT terminal
-	// (TERMINAL_VERBS is done/failed), so silencing it wholesale would drop the
-	// verdict for a pipeline whose process DIED holding an open PR — unlanded work
-	// nobody is told about. Only the silence branch may skip it.
-	test("a vanished run after a resolved milestone is still stale", async () => {
+	// `resolved` is a terminal status for stale detection. A pipeline milestone
+	// must not produce the self-contradicting vanished-run message.
+	test("REGRESSION: a vanished run after a resolved milestone has no stale verdict", async () => {
 		const { wake, events, meta } = await mods();
 		events.appendStatus("t1", "resolved", "PR opened (prNumber 42)");
 		meta.writeMeta({ id: "t1", run_pid: 999999 });
-		const stale = wake.detectStale(["t1"], { runAlive: () => false });
-		expect(stale).toHaveLength(1);
-		expect(stale[0]?.reason).toContain("never reported a terminal state");
+		expect(wake.detectStale(["t1"], { runAlive: () => false })).toHaveLength(0);
 	});
 
 	test("REGRESSION: CPU activity alone keeps a silent worker working", async () => {

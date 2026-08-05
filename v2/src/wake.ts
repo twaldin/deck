@@ -33,7 +33,7 @@ import {
 } from "./events";
 import { intakeFiles, stateDir, stateFiles, wakeFiles } from "./home";
 import { readMeta } from "./meta";
-import { type StatusEvent, type WakeTier, tierFor } from "./status";
+import { STATUS_VERBS, TERMINAL_VERBS, type StatusEvent, type StatusVerb, type WakeTier, tierFor } from "./status";
 
 /**
  * The shape a wake carries. `.status` lines produce StatusEvents; the intake
@@ -67,6 +67,16 @@ export type ReconcileResult = {
 };
 
 type Baseline = Record<string, { lastTier: WakeTier; lastRaw: string; count: number }>;
+
+// These non-live states never need a stale verdict. All values exist in the
+// status grammar; terminal verbs stay sourced from status.ts.
+const STALE_SKIP_VERBS = new Set<StatusVerb>([
+	...TERMINAL_VERBS,
+	"paused",
+	"blocked",
+	"needs-decision",
+	"resolved",
+]);
 
 /** Durable, edge-triggered conditions that do not have a .status producer. */
 export type WakeCondition = {
@@ -674,7 +684,7 @@ function childLabel(command: string): string {
 /**
  * Staleness, redefined as a FACT rather than a heuristic.
  *
- * A recorded run whose process is gone with no terminal status is stale. A LIVE
+ * A recorded run whose process is gone with no terminal or resolved status is stale. A LIVE
  * run is judged on ACTIVITY, not on its deadline: a deadline says the budget is
  * spent, which is a planning fact, while writing files and appending to its
  * transcript is proof the worker is still doing the work. Alerting on the
@@ -747,35 +757,14 @@ export function detectStale(
 		}
 
 		const { lastEventVerb: currentVerb } = lastVerb(taskId);
-		// A parked task already reported its state: paused and needs-decision wait on
-		// purpose, blocked already fired its T0 wake, done/failed are finished.
-		// Chasing any of them as stale is the absorbed-stale noise class.
-		if (
-			currentVerb === "done" ||
-			currentVerb === "failed" ||
-			currentVerb === "paused" ||
-			currentVerb === "blocked" ||
-			currentVerb === "needs-decision"
-		) {
+		// A task that has reported any of these states must not receive a stale
+		// verdict.
+		if (currentVerb !== null && STALE_SKIP_VERBS.has(currentVerb)) {
 			forget(taskId);
 			continue;
 		}
 
 		if (alive(pid)) {
-			// A `resolved:` milestone is a WAIT announcement. The observer maps every
-			// pipeline milestone to this verb (push-pr, landing-poll, fallout-wait),
-			// and each one hands off to a node that deliberately writes nothing while
-			// it polls CI or waits out fallout. Judged on silence, a healthy pipeline
-			// in exactly the state it should be in reports as stuck.
-			//
-			// Scoped to the LIVE branch on purpose. `resolved` is not terminal
-			// (TERMINAL_VERBS is done/failed), so a task whose process is GONE here
-			// still falls through to the vanished-run verdict below — that case is a
-			// pipeline that died holding an open PR, which must never go unreported.
-			if (currentVerb === "resolved") {
-				forget(taskId);
-				continue;
-			}
 			// A LIVE worker that is WRITING is working, however overdue. A live worker
 			// writing nothing is the class that motivated this: observed live, a worker
 			// finished its task then retried a rate-limited search nine times, alive and
@@ -960,7 +949,7 @@ export function detectStale(
 			activityDirty = true;
 			continue;
 		}
-		// Process gone. Stale only if the task never reached a terminal event.
+		// Process gone. Stale only if the task never reached a skipped state.
 		forget(taskId);
 		verdicts.push({
 			taskId,
@@ -990,7 +979,7 @@ function defaultAlive(pid: number): boolean {
  * append. Staleness is a question about the task's real state, so it must read the
  * real record.
  */
-function lastVerb(taskId: string): { lastEventVerb: string | null } {
+function lastVerb(taskId: string): { lastEventVerb: StatusVerb | null } {
 	const { events } = readStatus(taskId);
 	const last = events[events.length - 1];
 	if (last !== undefined) return { lastEventVerb: last.verb };
@@ -1001,7 +990,7 @@ function lastVerb(taskId: string): { lastEventVerb: string | null } {
 	const colon = baseline.lastRaw.indexOf(":");
 	if (colon === -1) return { lastEventVerb: null };
 	const head = baseline.lastRaw.slice(0, colon).trim().split(/\s+/)[0];
-	return { lastEventVerb: head ?? null };
+	return { lastEventVerb: STATUS_VERBS.find((verb) => verb === head) ?? null };
 }
 
 /**
