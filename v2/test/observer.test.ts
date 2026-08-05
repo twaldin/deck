@@ -97,6 +97,26 @@ describe("observer idempotency", () => {
 });
 
 describe("observer event selection", () => {
+	test("coalesces concurrent ps inspection snapshots across consumers", async () => {
+		const { observer } = await mods();
+		const { observePsSnapshotWithInspect } = observer;
+		let calls = 0;
+		let release!: (value: { stdout: string; exitCode: number }) => void;
+		const pending = new Promise<{ stdout: string; exitCode: number }>((resolve) => { release = resolve; });
+		fs.mkdirSync(path.join(home, "state", "ship"), { recursive: true });
+		fs.writeFileSync(path.join(home, "state", "ship", "run-1.input.json"), JSON.stringify({ ticket: "task-1" }));
+		const options = {
+			rows: [{ id: "run-1", status: "running", workflow: "w", workspace: "/tmp/workspace" }],
+			workspace: "/tmp/workspace",
+			run: async () => { calls++; return pending; },
+		};
+		const first = observePsSnapshotWithInspect(options);
+		const second = observePsSnapshotWithInspect(options);
+		expect(first).toBe(second);
+		expect(calls).toBe(1);
+		release({ stdout: "{}", exitCode: 0 });
+		await Promise.all([first, second]);
+	});
 	test("pipeline milestones wake while the run stays running, in order and once", async () => {
 		const { observer, events } = await mods();
 		const base = { run: { ...run("running", "pipeline"), workflow: "pr-pipeline" }, nodes: [] as any[] };

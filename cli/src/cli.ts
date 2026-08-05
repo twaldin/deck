@@ -23,7 +23,7 @@ const EXIT_BY_ERROR_CODE: Record<DeckErrorCode, number> = {
 	E_LEASE: 2,
 	E_EVIDENCE: 2,
 	E_ADMISSION: 3,
-	E_CAP: 2,
+	E_CAP: 3,
 	E_ARG: 2,
 	E_STATE: 2,
 	E_LIVENESS: 2,

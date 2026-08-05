@@ -4,6 +4,7 @@ import { spawn } from "node:child_process";
 import { EFFORT_FILES, effortDir, loadConfig, manifestSchema, ulid, DeckError } from "./core";
 import { z } from "zod";
 import { addWorktree, prepareBase, removeWorktree, resolveRepository, validateBranchName } from "./git";
+import { classifyIdleWorktree, excludeWorktreePool, worktreeDirty } from "./worktree-reaper";
 import {
 	type WorktreeEntry,
 	type WorktreesState,
@@ -18,6 +19,7 @@ import {
 } from "./state";
 
 const admissionLimitSchema = z.number().int().positive();
+export const MAX_WORKTREE_POOL_SIZE = 24;
 const nodeErrorSchema = z.object({ code: z.string() }).passthrough();
 
 function projectName(repo: string): string {
@@ -143,6 +145,38 @@ export async function allocateWorktree(request: AllocateRequest): Promise<Worktr
 		const reusable = state.entries.find(
 			(entry) => entry.repo === repo && entry.state === "free" && !fs.existsSync(entry.path),
 		);
+		if (reusable === undefined && state.entries.length >= MAX_WORKTREE_POOL_SIZE) {
+			// Free entries are durable history, not pool capacity. Reuse one even
+			// when its old repository differs; the path is an available slot.
+			const free = state.entries.find((entry) => entry.state === "free" && !fs.existsSync(entry.path));
+			if (free !== undefined) {
+				const branch = request.branch ?? `deck/${effort}/${ulid().slice(-8)}`;
+				await validateBranchName(repo, branch);
+				const replacement: WorktreeEntry = {
+					...free,
+					repo,
+					effort,
+					branch,
+
+					created: new Date().toISOString(),
+					state: "active",
+					...(request.desc === undefined ? {} : { desc: request.desc }),
+				};
+				const reservedState = replaceEntry(state, replacement);
+				const base = await prepareBase(resolvedRepo.context, request.base);
+				writeWorktreesState(reservedState);
+				try {
+					await addWorktree(repo, free.path, replacement.branch, base);
+					fs.chmodSync(free.path, 0o700);
+					warmDependencies(free.path, repo);
+				} catch (error) {
+					writeWorktreesState(replaceEntry(reservedState, { ...replacement, state: "free" }));
+					throw error;
+				}
+				return replacement;
+			}
+			throw new DeckError("E_CAP", `worktree pool capacity reached (${MAX_WORKTREE_POOL_SIZE})`, { limit: MAX_WORKTREE_POOL_SIZE });
+		}
 		let number = reusable === undefined ? nextSlotNumber(state, project) : entryNumber(reusable);
 		let worktreePath = reusable?.path ?? path.join(WORKTREE_POOL_DIR, `${project}-${number}`);
 		while (reusable === undefined && fs.existsSync(worktreePath)) {
@@ -239,6 +273,7 @@ function readEffortTerminalState(effort: string): boolean {
 }
 
 export async function reapWorktrees(): Promise<WorktreeEntry[]> {
+	excludeWorktreePool(WORKTREE_POOL_DIR);
 	return withStateLock(async () => {
 		let state = readWorktreesState();
 		const reaped: WorktreeEntry[] = [];
@@ -251,6 +286,14 @@ export async function reapWorktrees(): Promise<WorktreeEntry[]> {
 			try {
 				if (!crashedReservation && !readEffortTerminalState(entry.effort)) {
 					continue;
+				}
+				if (!crashedReservation) {
+					const decision = classifyIdleWorktree(worktreeDirty(entry.path), true);
+					if (decision === "keep-dirty") {
+						failures.push(`${entry.id}: worktree is dirty or cannot be inspected`);
+						continue;
+					}
+					if (decision !== "reap") continue;
 				}
 				if (!(crashedReservation && !fs.existsSync(entry.repo))) {
 					await removeWorktree(entry.repo, entry.path, entry.branch, crashedReservation);
