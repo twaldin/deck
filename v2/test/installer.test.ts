@@ -29,6 +29,8 @@ beforeEach(() => {
 	fs.copyFileSync(path.join(REPO_V2, "..", "workflows", ".smithers", "bun.lock"), path.join(workflowsSource, ".smithers", "bun.lock"));
 	fs.mkdirSync(path.join(workflowsSource, ".smithers", "ui"));
 	fs.writeFileSync(path.join(workflowsSource, ".smithers", "ui", "fixture.tsx"), "fixture\n");
+	fs.mkdirSync(path.join(workflowsSource, ".smithers", "workflows"));
+	fs.writeFileSync(path.join(workflowsSource, ".smithers", "workflows", "keep.tsx"), "fixture workflow\n");
 	fs.mkdirSync(path.join(workflowsSource, "pr-pipeline", "lib"), { recursive: true });
 	fs.writeFileSync(path.join(workflowsSource, "pr-pipeline", "lib", "models.ts"), "fixture models\n");
 });
@@ -136,6 +138,15 @@ describe("installer layout", () => {
 		for (const item of ["package.json", "agents.ts", "bunfig.toml", "preload.ts", "smithers.config.ts", "smithers.toon", "ui/fixture.tsx"]) expect(fs.existsSync(path.join(workspace, ".smithers", item))).toBe(true);
 		expect(fs.readFileSync(path.join(workspace, "pr-pipeline", "lib", "models.ts"), "utf8")).toBe("fixture models\n");
 		expect(fs.existsSync(path.join(workspace, ".smithers", "node_modules"))).toBe(true);
+	});
+
+	test("pack refresh removes seeded workflows deleted by Deck", () => {
+		install();
+		const installedWorkflows = path.join(target, "home", "state", "smithers", ".smithers", "workflows");
+		fs.writeFileSync(path.join(installedWorkflows, "post-failure.tsx"), "stale seeded workflow\n");
+		install();
+		expect(fs.existsSync(path.join(installedWorkflows, "post-failure.tsx"))).toBe(false);
+		expect(fs.readFileSync(path.join(installedWorkflows, "keep.tsx"), "utf8")).toBe("fixture workflow\n");
 	});
 
 	test("installs a pinned smithers shim that matches src/smithers.ts", () => {
