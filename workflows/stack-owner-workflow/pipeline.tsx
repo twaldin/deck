@@ -217,7 +217,7 @@ export default smithers((ctx) => {
     if (dryRun) return { merged: true, receipts: stack.map((pr) => adoption ? `dry-run: PR #${pr.number} squash (#${pr.number}) verified on its base` : `dry-run: PR #${pr.number}`) };
     if (adoption) {
       const approved = (latestPoll?.prs ?? []).map((pr) => ({ number: pr.number, headSha: pr.headSha }));
-      const receipts = await mergeAdoptedStack({ exec: bunExec, gh, repo: input.repo, worktree: input.worktree, prs: adoptPrs, approved, poll: () => pollStack(bunExec, input.repo, adoptPrs.map((pr) => pr.number), gh, { adoption: true }) });
+      const receipts = await mergeAdoptedStack({ exec: bunExec, gh, repo: input.repo, worktree: input.worktree, baseBranch: adoptBase, prs: adoptPrs, approved, poll: () => pollStack(bunExec, input.repo, adoptPrs.map((pr) => pr.number), gh, { adoption: true }) });
       return { merged: true, receipts };
     }
     const verified = await pollStack(bunExec, input.repo, stack.map((pr) => pr.number), gh);

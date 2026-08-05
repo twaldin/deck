@@ -42,12 +42,12 @@ export async function pollStack(exec: ExecFn, repo: string, numbers: number[], g
       continue;
     }
     const mergeStateStatus = String(pr.mergeable_state ?? "UNKNOWN");
-    const checksBody = JSON.parse(await execOrThrow(exec, [gh, "api", `repos/${repo}/commits/${headSha}/check-runs`])) as { check_runs?: Array<{ status?: string; conclusion?: string }> };
+    const checksBody = JSON.parse(await execOrThrow(exec, [gh, "api", `repos/${repo}/commits/${headSha}/check-runs?per_page=100`])) as { check_runs?: Array<{ status?: string; conclusion?: string }> };
     const checks = checksBody.check_runs ?? [];
     const ci = checks.length === 0 ? "pending" : checks.some((c) => c.status === "completed" && ["failure", "timed_out", "cancelled", "action_required"].includes(c.conclusion ?? "")) ? "red" : checks.some((c) => c.status !== "completed") ? "pending" : "green";
-    const issueComments = JSON.parse(await execOrThrow(exec, [gh, "api", `repos/${repo}/issues/${number}/comments`])) as Comment[];
-    const reviewComments = JSON.parse(await execOrThrow(exec, [gh, "api", `repos/${repo}/pulls/${number}/comments`])) as Comment[];
-    const reviews = JSON.parse(await execOrThrow(exec, [gh, "api", `repos/${repo}/pulls/${number}/reviews`])) as Review[];
+    const issueComments = JSON.parse(await execOrThrow(exec, [gh, "api", `repos/${repo}/issues/${number}/comments?per_page=100`])) as Comment[];
+    const reviewComments = JSON.parse(await execOrThrow(exec, [gh, "api", `repos/${repo}/pulls/${number}/comments?per_page=100`])) as Comment[];
+    const reviews = JSON.parse(await execOrThrow(exec, [gh, "api", `repos/${repo}/pulls/${number}/reviews?per_page=100`])) as Review[];
     const author = String((pr.user as Record<string, unknown> | undefined)?.login ?? "");
     const actionable = [...issueComments, ...reviewComments].filter((c) => isActionable(c, author));
     const decisionAsk = [...issueComments, ...reviewComments, ...reviews].some((c) => decision.test(String(c.body ?? ""))) || reviews.some((r) => r.state === "CHANGES_REQUESTED" && decision.test(String(r.body ?? "")));

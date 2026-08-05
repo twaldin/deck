@@ -62,7 +62,7 @@ export async function fetchAdoptedPrs(exec: ExecFn, repo: string, numbers: numbe
  * Conservative ref charset. Declared branch names flow into git argv and into
  * a review agent's shell command, so anything shell-active is rejected.
  */
-const safeRef = /^[A-Za-z0-9._/-]+$/;
+const safeRef = /^(?!-)(?!.*\.\.)[A-Za-z0-9._/-]+$/;
 
 /** The declared chain must be parent-first: each PR's base is the previous PR's head. */
 export function assertDeclaredChain(baseBranch: string, declared: AdoptedPrSpec[]): void {
@@ -83,6 +83,7 @@ export function assertDeclaredChain(baseBranch: string, declared: AdoptedPrSpec[
 /** Validate every declared PR against live GitHub state. Throws [escalate] on any mismatch. */
 export function validateAdoptedStack(repo: string, baseBranch: string, declared: AdoptedPrSpec[], live: AdoptedPrLive[]): ValidatedAdoptedPr[] {
 	assertDeclaredChain(baseBranch, declared);
+	let unlandedSeen = false;
 	return declared.map((spec, index) => {
 		const pr = live.find((row) => row.number === spec.number);
 		const label = `PR #${spec.number}`;
@@ -90,6 +91,10 @@ export function validateAdoptedStack(repo: string, baseBranch: string, declared:
 		if (!pr.merged && pr.state !== "open") {
 			throw new Error(`[escalate] cannot adopt ${label}: state is "${pr.state}" and it is not merged.`);
 		}
+		if (pr.merged && unlandedSeen) {
+			throw new Error(`[escalate] cannot adopt ${label}: a landed PR appears above an unlanded parent.`);
+		}
+		if (!pr.merged) unlandedSeen = true;
 		if (!pr.merged && pr.draft) {
 			throw new Error(`[escalate] cannot adopt ${label}: it is a draft — the merge would fail, so mark it ready for review first.`);
 		}
@@ -135,8 +140,9 @@ export async function restackAdoptedPrs(
 			if (flagged.has(pr.number)) conflicts.push(`PR #${pr.number} (${pr.head}) skipped: its base ${pr.base} did not rebase`);
 			continue;
 		}
-		if (!flagged.has(pr.number)) continue;
-		const baseRef = updatedLocally.has(pr.base) ? pr.base : `origin/${pr.base}`;
+		const parentChanged = updatedLocally.has(pr.base);
+		if (!flagged.has(pr.number) && !parentChanged) continue;
+		const baseRef = parentChanged ? pr.base : `origin/${pr.base}`;
 		await run([git, "checkout", "-B", pr.head, `origin/${pr.head}`]);
 		const rebase = await exec([git, "rebase", baseRef], { cwd: args.worktree });
 		if (rebase.code !== 0) {
@@ -145,7 +151,13 @@ export async function restackAdoptedPrs(
 			conflictedLineage.add(pr.head);
 			continue;
 		}
-		await run([git, "push", "--force-with-lease", "origin", `${pr.head}:${pr.head}`]);
+		try {
+			await run([git, "push", "--force-with-lease", "origin", `${pr.head}:${pr.head}`]);
+		} catch (error) {
+			conflicts.push(`PR #${pr.number} (${pr.head}) push was rejected: ${error instanceof Error ? error.message : String(error)}`);
+			conflictedLineage.add(pr.head);
+			continue;
+		}
 		updatedLocally.add(pr.head);
 		actions.push(`rebased ${pr.head} onto ${baseRef} and pushed with lease`);
 	}
@@ -167,6 +179,7 @@ export async function mergeAdoptedStack(args: {
 	gh: string;
 	repo: string;
 	worktree: string;
+	baseBranch: string;
 	prs: AdoptedPrSpec[];
 	poll: () => Promise<PollResult>;
 	/** Head SHAs the human saw in the approval gate; any drift stops the merge. */
@@ -188,12 +201,23 @@ export async function mergeAdoptedStack(args: {
 		}
 	}
 	const landedBefore = new Set(verified.prs.filter((pr) => pr.merged).map((pr) => pr.number));
+	let unlandedSeen = false;
+	for (const pr of args.prs) {
+		if (landedBefore.has(pr.number)) {
+			if (unlandedSeen) throw new Error(`[escalate] PR #${pr.number} is landed above an unlanded parent.`);
+			continue;
+		}
+		unlandedSeen = true;
+	}
 	const receipts: string[] = [];
 	for (const pr of args.prs) {
 		if (landedBefore.has(pr.number)) {
 			receipts.push(`PR #${pr.number}: already landed`);
 			continue;
 		}
+		// After a parent lands, merge each remaining child into the real stack
+		// base. This prevents a child from landing only on its former parent ref.
+		await execOrThrow(args.exec, [args.gh, "pr", "edit", String(pr.number), "--repo", args.repo, "--base", args.baseBranch], { cwd: args.worktree });
 		await runMerge({ exec: args.exec, gh: args.gh, prNumber: pr.number, cwd: args.worktree, args: ["--auto", "--squash"] });
 		let landing: { sha: string; base: string } | null = null;
 		for (let attempt = 0; attempt < attempts && landing === null; attempt += 1) {

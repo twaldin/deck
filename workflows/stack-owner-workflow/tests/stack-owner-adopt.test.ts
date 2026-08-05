@@ -87,36 +87,36 @@ describe("adoption watch", () => {
 	test("adoption poll withholds complete until a human approval exists (the pre-adoption poller reported complete without one)", async () => {
 		const routes = {
 			"repos/org/repo/pulls/11": openPrJson(11, "sha-11"),
-			"repos/org/repo/commits/sha-11/check-runs": greenChecks,
+			"repos/org/repo/commits/sha-11/check-runs?per_page=100": greenChecks,
 		};
 		const unapproved = await pollStack(ghApi(routes).exec, "org/repo", [11], "gh", { adoption: true });
 		expect(unapproved.signal).toBe("idle");
 		const legacy = await pollStack(ghApi(routes).exec, "org/repo", [11]);
 		expect(legacy.signal).toBe("complete");
-		const stale = await pollStack(ghApi({ ...routes, "repos/org/repo/pulls/11/reviews": approvedReviewAt("old-sha") }).exec, "org/repo", [11], "gh", { adoption: true });
+		const stale = await pollStack(ghApi({ ...routes, "repos/org/repo/pulls/11/reviews?per_page=100": approvedReviewAt("old-sha") }).exec, "org/repo", [11], "gh", { adoption: true });
 		expect(stale.signal).toBe("idle");
 		expect(stale.prs[0]?.reviewState).toBe("STALE_APPROVAL");
-		const approved = await pollStack(ghApi({ ...routes, "repos/org/repo/pulls/11/reviews": approvedReviewAt("sha-11") }).exec, "org/repo", [11], "gh", { adoption: true });
+		const approved = await pollStack(ghApi({ ...routes, "repos/org/repo/pulls/11/reviews?per_page=100": approvedReviewAt("sha-11") }).exec, "org/repo", [11], "gh", { adoption: true });
 		expect(approved.signal).toBe("complete");
 	});
 	test("a later COMMENTED note does not erase an approval, and a CHANGES_REQUESTED does", async () => {
 		const routes = {
 			"repos/org/repo/pulls/11": openPrJson(11, "sha-11"),
-			"repos/org/repo/commits/sha-11/check-runs": greenChecks,
+			"repos/org/repo/commits/sha-11/check-runs?per_page=100": greenChecks,
 		};
 		const commentedAfter = [...approvedReviewAt("sha-11"), { state: "COMMENTED", submitted_at: "2026-08-02T00:00:00Z", commit_id: "sha-11", user: { login: "captain", type: "User" } }];
-		const stillApproved = await pollStack(ghApi({ ...routes, "repos/org/repo/pulls/11/reviews": commentedAfter }).exec, "org/repo", [11], "gh", { adoption: true });
+		const stillApproved = await pollStack(ghApi({ ...routes, "repos/org/repo/pulls/11/reviews?per_page=100": commentedAfter }).exec, "org/repo", [11], "gh", { adoption: true });
 		expect(stillApproved.signal).toBe("complete");
 		const rejectedAfter = [...approvedReviewAt("sha-11"), { state: "CHANGES_REQUESTED", submitted_at: "2026-08-02T00:00:00Z", commit_id: "sha-11", user: { login: "other", type: "User" } }];
-		const blocked = await pollStack(ghApi({ ...routes, "repos/org/repo/pulls/11/reviews": rejectedAfter }).exec, "org/repo", [11], "gh", { adoption: true });
+		const blocked = await pollStack(ghApi({ ...routes, "repos/org/repo/pulls/11/reviews?per_page=100": rejectedAfter }).exec, "org/repo", [11], "gh", { adoption: true });
 		expect(blocked.signal).toBe("idle");
 		expect(blocked.prs[0]?.reviewState).toBe("CHANGES_REQUESTED");
 	});
 	test("adoption poll flags behind or conflicting children as needs-rebase", async () => {
 		const routes = {
 			"repos/org/repo/pulls/11": openPrJson(11, "sha-11", { mergeable_state: "behind" }),
-			"repos/org/repo/commits/sha-11/check-runs": greenChecks,
-			"repos/org/repo/pulls/11/reviews": approvedReviewAt("sha-11"),
+			"repos/org/repo/commits/sha-11/check-runs?per_page=100": greenChecks,
+			"repos/org/repo/pulls/11/reviews?per_page=100": approvedReviewAt("sha-11"),
 		};
 		const result = await pollStack(ghApi(routes).exec, "org/repo", [11], "gh", { adoption: true });
 		expect(result.signal).toBe("needs-rebase");
@@ -124,8 +124,8 @@ describe("adoption watch", () => {
 	test("a PR closed without merging escalates and is never treated as a rebase", async () => {
 		const routes = {
 			"repos/org/repo/pulls/11": openPrJson(11, "sha-11", { state: "closed", mergeable: false, mergeable_state: "dirty" }),
-			"repos/org/repo/commits/sha-11/check-runs": greenChecks,
-			"repos/org/repo/pulls/11/reviews": approvedReviewAt("sha-11"),
+			"repos/org/repo/commits/sha-11/check-runs?per_page=100": greenChecks,
+			"repos/org/repo/pulls/11/reviews?per_page=100": approvedReviewAt("sha-11"),
 		};
 		const result = await pollStack(ghApi(routes).exec, "org/repo", [11], "gh", { adoption: true });
 		expect(result.signal).toBe("decision-ask");
@@ -135,8 +135,8 @@ describe("adoption watch", () => {
 		const { exec, calls } = ghApi({
 			"repos/org/repo/pulls/11": { ...openPrJson(11, "sha-11"), state: "closed", merged: true },
 			"repos/org/repo/pulls/12": openPrJson(12, "sha-12"),
-			"repos/org/repo/commits/sha-12/check-runs": greenChecks,
-			"repos/org/repo/pulls/12/reviews": approvedReviewAt("sha-12"),
+			"repos/org/repo/commits/sha-12/check-runs?per_page=100": greenChecks,
+			"repos/org/repo/pulls/12/reviews?per_page=100": approvedReviewAt("sha-12"),
 		});
 		const result = await pollStack(exec, "org/repo", [11, 12], "gh", { adoption: true });
 		expect(result.signal).toBe("complete");
@@ -199,7 +199,7 @@ describe("adoption merge", () => {
 	test("rechecks the whole stack after approval and refuses to merge a changed stack", async () => {
 		const { exec, calls } = ghApi({});
 		await expect(mergeAdoptedStack({
-			exec, gh: "gh", repo: "org/repo", worktree: "/tmp/wt", prs: specs,
+			exec, gh: "gh", repo: "org/repo", worktree: "/tmp/wt", baseBranch: "main", prs: specs,
 			poll: async () => ({ signal: "idle", reason: "CI restarted", prs: [] }),
 		})).rejects.toThrow(/stack changed after approval: CI restarted/);
 		expect(calls.some((argv) => argv.includes("merge"))).toBe(false);
@@ -207,7 +207,7 @@ describe("adoption merge", () => {
 	test("a head that moved after approval stops the merge even when the stack polls complete", async () => {
 		const { exec, calls } = ghApi({});
 		await expect(mergeAdoptedStack({
-			exec, gh: "gh", repo: "org/repo", worktree: "/tmp/wt", prs: specs,
+			exec, gh: "gh", repo: "org/repo", worktree: "/tmp/wt", baseBranch: "main", prs: specs,
 			approved: [{ number: 11, headSha: "sha-11" }, { number: 12, headSha: "sha-12" }],
 			poll: async () => ({ signal: "complete", reason: "ready", prs: [{ number: 11, headSha: "sha-11", merged: false } as StackPr, { number: 12, headSha: "sha-12-moved", merged: false } as StackPr] }),
 		})).rejects.toThrow(/PR #12 head moved from sha-12 to sha-12-moved after approval/);
@@ -222,7 +222,7 @@ describe("adoption merge", () => {
 				{ sha: "land-11", commit: { message: "parent change (#11)" } },
 			],
 		});
-		const receipts = await mergeAdoptedStack({ exec, gh: "gh", repo: "org/repo", worktree: "/tmp/wt", prs: specs, poll: async () => pollComplete, wait: async () => {}, attempts: 2 });
+		const receipts = await mergeAdoptedStack({ exec, gh: "gh", repo: "org/repo", worktree: "/tmp/wt", baseBranch: "main", prs: specs, poll: async () => pollComplete, wait: async () => {}, attempts: 2 });
 		expect(receipts).toEqual([
 			"PR #11: squash land-11 landed on main",
 			"PR #12: squash land-12 landed on main",
@@ -235,7 +235,7 @@ describe("adoption merge", () => {
 			"repos/org/repo/pulls/11": { merged: true, base: { ref: "main" } },
 			"repos/org/repo/commits?sha=main&per_page=100": [{ sha: "x", commit: { message: "unrelated" } }],
 		});
-		await expect(mergeAdoptedStack({ exec, gh: "gh", repo: "org/repo", worktree: "/tmp/wt", prs: [specs[0]], poll: async () => pollComplete, wait: async () => {}, attempts: 2 }))
+		await expect(mergeAdoptedStack({ exec, gh: "gh", repo: "org/repo", worktree: "/tmp/wt", baseBranch: "main", prs: [specs[0]], poll: async () => pollComplete, wait: async () => {}, attempts: 2 }))
 			.rejects.toThrow(/no squash commit \(#11\)/);
 	});
 	test("already-landed PRs get a receipt without a merge call", async () => {
@@ -244,7 +244,7 @@ describe("adoption merge", () => {
 			"repos/org/repo/commits?sha=main&per_page=100": [{ sha: "land-12", commit: { message: "child change (#12)" } }],
 		});
 		const receipts = await mergeAdoptedStack({
-			exec, gh: "gh", repo: "org/repo", worktree: "/tmp/wt", prs: specs,
+			exec, gh: "gh", repo: "org/repo", worktree: "/tmp/wt", baseBranch: "main", prs: specs,
 			poll: async () => ({ ...pollComplete, prs: [{ number: 11, merged: true } as StackPr, { number: 12, merged: false } as StackPr] }),
 			wait: async () => {}, attempts: 2,
 		});
