@@ -3,9 +3,10 @@
 | Extension | Installed as | Entry point | What it does |
 |---|---|---|---|
 | Idle compaction | `~/.pi/agent/extensions/deck-idle-compaction/` | `src/idle-compaction.ts` | Compacts a parked session while the provider prompt cache is still warm. |
+| Native compaction | `~/.pi/agent/extensions/deck-native-compaction/` | `src/native-compaction.ts` | Opt-in server compaction for supported direct OpenAI, Anthropic, and xAI routes. |
 
 Installed by `./extensions/install.sh`; inert until pi loads it (new process or
-`/reload`).
+`/reload`). Native compaction is off by default.
 
 The questions extension (`ask_captain` + `/questions`) moved into deck-v2
 (`v2/src/questions.ts`), which installs into the orchestrator home's own `.pi`.
@@ -13,6 +14,49 @@ Globally installed here, every pi session on the machine — including worker
 `pi -p` sessions — registered its own competing question surface, and the queue
 under `~/.pi/agent/questions/` collected ghost questions from dead sessions.
 The installer now removes a previously installed `deck-questions` of ours.
+
+## Native compaction
+
+`src/native-compaction.ts` uses pi's `session_before_compact` and
+`session_compact` extension hooks. It is provider-native, not a pi core patch.
+Each provider is independently opt-in:
+
+```bash
+export PI_NATIVE_COMPACTION_OPENAI=1
+export PI_NATIVE_COMPACTION_ANTHROPIC=1
+export PI_NATIVE_COMPACTION_XAI=1
+```
+
+OpenAI uses `POST /v1/responses/compact` and stores the returned compaction
+item. Anthropic uses Messages with `anthropic-beta: compact-2026-01-12` and
+`context_management.edits: [{type: "compact_20260112"}]`. xAI uses its
+`POST /v1/responses/compact` API. The stored artifact is provider locked.
+
+If a session is resumed under another provider, the extension logs a warning,
+does not inject the artifact, and returns control to pi's local compaction.
+Gemini, Baseten/K3, `deck`, and unknown routes always use pi's normal local
+LLM-prompted compaction and log that choice. A failed native request also
+falls back automatically.
+
+The capability check requires the concrete provider, API, and supported model
+family. A model name under a proxy or generic route is not enough.
+
+Vendor references:
+
+- OpenAI: https://developers.openai.com/api/docs/guides/compaction
+- OpenAI endpoint: https://developers.openai.com/api/reference/typescript/resources/responses/methods/compact/
+- Anthropic: https://platform.claude.com/docs/en/build-with-claude/compaction
+- Anthropic Bedrock Messages (not Converse): https://docs.aws.amazon.com/bedrock/latest/userguide/claude-messages-compaction.html
+- xAI: https://docs.x.ai/developers/advanced-api-usage/context-compaction
+- Gemini context caching (not compaction): https://ai.google.dev/gemini-api/docs/caching
+
+## Real-call evidence
+
+Real-call evidence is required before calling a provider implemented. The
+repository currently includes request/response capture tests for the native
+request builders. These are unit-only and do not prove vendor reachability.
+Record a JSON capture with credentials removed in `extensions/smoke/evidence/`
+and name each provider as real-call or unit-only in the PR body.
 
 ## Idle compaction
 
