@@ -21,8 +21,13 @@ bun install --cwd "$REPO/broker"
 bun install --cwd "$REPO/cli"
 bash "$REPO/v2/install.sh"
 # Install the durable review-gate poll with the same idempotent update path.
+# A scheduler failure must not hide a successful CLI and extension install.
 if command -v smithers >/dev/null 2>&1; then
-  (cd "$REPO/workflows" && bun "review-gate/launch.ts")
+  if ! (cd "$REPO/workflows" && bun "review-gate/launch.ts"); then
+    echo "warning: review-gate cron installation failed; continuing" >&2
+  fi
+else
+  echo "warning: smithers is unavailable; review-gate cron was not installed" >&2
 fi
 
 # Sync the machine's filtered home profile into the plain operator directory.

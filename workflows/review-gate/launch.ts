@@ -6,15 +6,28 @@ export const reviewGateLauncher = {
   schedule: "* * * * *",
 };
 
+type CronEntry = { id?: string; workflow?: string; cronId?: string; workflowPath?: string };
+
+export function parseCronEntries(stdout: string): CronEntry[] {
+  let parsed: unknown;
+  try { parsed = JSON.parse(stdout || "[]"); } catch { throw new Error("smithers cron list returned invalid JSON"); }
+  if (Array.isArray(parsed)) return parsed;
+  if (parsed !== null && typeof parsed === "object" && "crons" in parsed && Array.isArray(parsed.crons)) {
+    return parsed.crons;
+  }
+  throw new Error("smithers cron list returned an unexpected JSON shape");
+}
+
 export function installReviewGateCron(): void {
   const cwd = new URL("..", import.meta.url).pathname;
   const listed = spawnSync("smithers", ["cron", "list", "--format", "json"], { encoding: "utf8", cwd, timeout: 10_000 });
   if (listed.status !== 0) throw new Error(`smithers cron list failed: ${listed.status ?? "unknown"}`);
-  let entries: Array<{ id?: string; workflow?: string }>;
-  try { entries = JSON.parse(listed.stdout || "[]"); } catch { throw new Error("smithers cron list returned invalid JSON"); }
+  const entries = parseCronEntries(listed.stdout);
   for (const entry of entries) {
-    if (entry.workflow === reviewGateLauncher.workflow && entry.id) {
-      const removed = spawnSync("smithers", ["cron", "rm", entry.id], { stdio: "inherit", cwd, timeout: 10_000 });
+    const workflow = entry.workflow ?? entry.workflowPath;
+    const id = entry.id ?? entry.cronId;
+    if (workflow === reviewGateLauncher.workflow && id) {
+      const removed = spawnSync("smithers", ["cron", "rm", id], { stdio: "inherit", cwd, timeout: 10_000 });
       if (removed.status !== 0) throw new Error(`smithers cron removal failed: ${removed.status ?? "unknown"}`);
     }
   }
