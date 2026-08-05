@@ -23,7 +23,22 @@ const schemas = {
   fix: z.object({ fixed: z.boolean() }),
   reviewGate: z.object({ ok: z.boolean() }),
   wake: z.object({ action: z.string(), signal: z.string() }),
-  poll: z.object({ signal: z.enum(["ci-fail", "actionable-comment", "decision-ask", "idle", "exhausted", "complete"]), reason: z.string() }),
+  poll: z.object({
+    signal: z.enum(["ci-fail", "actionable-comment", "decision-ask", "idle", "exhausted", "complete"]),
+    reason: z.string(),
+    prs: z.array(z.object({
+      number: z.number().int().positive(),
+      url: z.string(),
+      title: z.string(),
+      headSha: z.string(),
+      mergeable: z.boolean(),
+      mergeStateStatus: z.string(),
+      ci: z.enum(["green", "pending", "red"]),
+      reviewState: z.string(),
+      actionableComments: z.number().int().nonnegative(),
+      decisionAsk: z.boolean(),
+    })).optional(),
+  }),
   approval: approvalDecisionSchema,
   merge: z.object({ merged: z.boolean(), receipts: z.array(z.string()) }),
   result: z.object({ done: z.boolean(), summary: z.string() }),
@@ -86,14 +101,29 @@ export default smithers((ctx) => {
   }}</Task>;
   const poll = <Task id="poll-stack" output={outputs.poll} retries={2}>{async () => {
     const prs = ctx.latest(outputs.opened, "open-stack")?.prs ?? [];
-    if (dryRun) { const signal = input.fixtures?.ciFail ? "ci-fail" : "complete"; return { signal, reason: signal === "ci-fail" ? "fixture CI failure" : "fixture complete" }; }
+    if (dryRun) {
+      const signal = input.fixtures?.ciFail ? "ci-fail" : "complete";
+      const prs = (ctx.latest(outputs.opened, "open-stack")?.prs ?? []).map((pr) => ({
+        number: pr.number,
+        url: `https://github.com/${input.repo}/pull/${pr.number}`,
+        title: input.prompt,
+        headSha: "dryrun-head-sha",
+        mergeable: signal === "complete",
+        mergeStateStatus: signal === "complete" ? "clean" : "blocked",
+        ci: signal === "complete" ? "green" : "red" as const,
+        reviewState: signal === "complete" ? "APPROVED" : "CHANGES_REQUESTED",
+        actionableComments: 0,
+        decisionAsk: false,
+      }));
+      return { signal, prs, reason: signal === "ci-fail" ? "fixture CI failure" : "fixture complete" };
+    }
     const pollNo = (ctx.outputs.poll ?? []).length;
     if (!dryRun && pollNo > 0) await wait(pollSeconds * 1000);
     const result = await pollStack(bunExec, input.repo, prs.map((p) => p.number), gh);
     const exhausted = pollNo + 1 >= maxPolls && result.signal === "idle";
     const signal = exhausted ? "exhausted" : result.signal;
     produceWakeConditions({ taskId, ciFail: signal === "ci-fail", actionableComment: signal === "actionable-comment", decisionAsk: signal === "decision-ask" });
-    return { signal, reason: exhausted ? "Poll limit reached without a wake condition" : result.reason };
+    return { signal, prs: result.prs, reason: exhausted ? "Poll limit reached without a wake condition" : result.reason };
   }}</Task>;
   const watch = <Loop id="code-poll-loop" maxIterations={maxPolls} onMaxReached="return-last" skipIf={ctx.latest(outputs.reviewGate, "review-gate")?.ok === false} until={["complete", "ci-fail", "actionable-comment", "decision-ask", "exhausted"].includes(ctx.latest(outputs.poll, "poll-stack")?.signal ?? "")}>
     <Sequence>{poll}<Task id="wake-fix" output={outputs.wake} agent={undefined}>{async () => { const signal = ctx.latest(outputs.poll, "poll-stack")?.signal; if (signal === "idle" || signal === "exhausted") return { action: "wait", signal }; return { action: signal === "decision-ask" ? "escalate" : "fix", signal }; }}</Task></Sequence>
