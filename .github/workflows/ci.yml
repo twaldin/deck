@@ -7,6 +7,15 @@ on:
       - main
 
 jobs:
+  ops-tests:
+    name: ops tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Run ops tests
+        run: ./ops/resource-monitor.test.sh
+
   v2-tests:
     name: v2 tests
     runs-on: ubuntu-latest
