@@ -39,6 +39,7 @@ import {
 import { z } from "zod";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { assertAdoptable, cleanKnownScratchFiles, decideAdoptPush } from "./lib/adopt.ts";
 import { validateBrief } from "./lib/brief.ts";
@@ -472,6 +473,10 @@ function seat(ref: ModelSeat): { ref: string; reasoning?: string } {
 
 function makeAgent(ref: ModelSeat, cwd: string, timeoutMs: number, reasoning = "medium"): PiAgent {
 	const selected = seat(ref);
+	const configuredExtension = process.env.DECK_SUBAGENT_EXTENSION;
+	const bundledExtension = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../subagents/extension/index.ts");
+	const subagentExtension = configuredExtension ?? (fs.existsSync(bundledExtension) ? bundledExtension : undefined);
+	const extension = subagentExtension === undefined ? undefined : [subagentExtension];
 	const { provider, model } = parseModelRef(selected.ref);
 	const thinking = selected.reasoning ?? reasoning;
 	// Preserve the provider-native selector. If an older Smithers type does not
@@ -485,6 +490,7 @@ function makeAgent(ref: ModelSeat, cwd: string, timeoutMs: number, reasoning = "
 		timeoutMs,
 		thinking: thinking as never,
 		noSession: true,
+		...(extension === undefined ? {} : { extension }),
 	});
 }
 

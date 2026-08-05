@@ -9,6 +9,8 @@ import type { Brief } from "./types.ts";
 
 const RESULT_OBJECT_RULE =
 	"Return a result object with these keys, NOT the schema. do not include $schema, type, properties, or required.";
+const SUBAGENT_GUIDANCE =
+	"Subagents are a first-class capability. Use exact ids worker, worker-gpt, reviewer, reviewer-claude, and scout; aliases claude, codex, and gpt are accepted. Choose the opposite model family for adversarial review. For stack work, land the schema/base PR first, then fan out subagents for dependent pieces.";
 function resultContract(example: string): string[] {
 	return [
 		RESULT_OBJECT_RULE,
@@ -36,6 +38,7 @@ export function implementPrompt(brief: Brief, worktree: string, branch: string):
 		JSON.stringify(brief, null, 2),
 		"",
 		"Rules:",
+		`- ${SUBAGENT_GUIDANCE}`,
 		"- Implement exactly the brief. No scope creep; open questions were resolved before dispatch.",
 		"- Run the relevant tests locally and record what you ran.",
 		"- Commit your work as one or more plain commits on this branch. DO NOT push.",
@@ -68,6 +71,7 @@ export function localReviewPrompt(
 		"Brief the change claims to implement:",
 		JSON.stringify({ title: brief.title, acceptanceCriteria: brief.acceptanceCriteria }, null, 2),
 		"",
+		SUBAGENT_GUIDANCE,
 		"Hunt for: acceptance criteria not actually met, missing/weak tests, correctness bugs,",
 		"unhandled edge cases, migration hazards, blast-radius surprises, dead code.",
 		...(previous
@@ -94,6 +98,7 @@ export function localFixPrompt(blockingFindings: string[], worktree: string, aft
 	return [
 		"You are the IMPLEMENTER. An adversarial reviewer produced blocking findings on your change.",
 		`Worktree: ${worktree}. Fix them with plain commits on the current branch. DO NOT push.`,
+		SUBAGENT_GUIDANCE,
 		"",
 		"Blocking findings to resolve (all of them):",
 		JSON.stringify(blockingFindings, null, 2),
@@ -125,6 +130,7 @@ export function watchFixPrompt(args: {
 		"Current machine-checked poll state:",
 		args.pollJson,
 		"",
+		SUBAGENT_GUIDANCE,
 		"Do, in order:",
 		`1. If mergeability is CONFLICTING, or mergeStateStatus is DIRTY or BEHIND, run the deterministic rebase helper: fetch origin/${args.baseBranch}, rebase THIS PR branch onto origin/${args.baseBranch}, run relevant tests, then force-with-lease push. If the helper is unavailable, run exactly those git commands yourself.`,
 		"   Resolve conflicts, run relevant tests, then force-with-lease push the existing PR branch. Do not merge.",
@@ -167,6 +173,7 @@ export function falloutPrompt(args: {
 		`Watch window (anchored to deploy): ${args.windowStart} .. ${args.windowEnd}.`,
 		`NAMED break-signal from preflight (your primary probe): ${args.breakSignal}`,
 		`Kill-switch: ${args.killSwitch}`,
+		SUBAGENT_GUIDANCE,
 		args.probes.length > 0
 			? `Additional probe commands to run and interpret:\n${args.probes.map((probe) => `- ${probe}`).join("\n")}`
 			: "No additional probe commands configured.",

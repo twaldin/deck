@@ -3,6 +3,9 @@
 /** NEVER run any GitHub approve command. */
 import { Approval, Branch, ContinueAsNew, Loop, Parallel, PiAgent, Poller, Sequence, Task, Timer, Workflow, Worktree, createSmithers } from "smithers-orchestrator";
 import { z } from "zod";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { askIfAbsent, openQuestions, queueFile, readQuestionHistory, readQuestions } from "../../v2/src/questions-store.ts";
@@ -51,7 +54,12 @@ async function state(cli: string, repo: string, pr: number) {
   const ciGreen = checks.length === 0 || checkStates.every((state: string) => ["SUCCESS", "SKIPPED", "NEUTRAL"].includes(state));
   return { mergeable: v.mergeable === "MERGEABLE" && !["DIRTY", "BEHIND", "UNSTABLE"].includes(mergeStateStatus), ciGreen, ciPending, mergeStateStatus, headSha: String(v.headRefOid ?? ""), summary: `mergeable=${v.mergeable} mergeStateStatus=${mergeStateStatus} checks=${checks.length}` };
 }
-function agent(model: string, tools = true) { return new PiAgent({ provider: "deck", model, timeoutMs: 30 * 60_000, thinking: "medium", noSession: true, ...(tools ? { tools: ["read", "grep", "edit", "write", "bash"] } : { noTools: true }) }); }
+function agent(model: string, tools = true) {
+  const configured = process.env.DECK_SUBAGENT_EXTENSION;
+  const bundled = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../subagents/extension/index.ts");
+  const extension = configured ?? (fs.existsSync(bundled) ? bundled : undefined);
+  return new PiAgent({ provider: "deck", model, timeoutMs: 30 * 60_000, thinking: "medium", noSession: true, ...(tools ? { tools: ["read", "grep", "edit", "write", "bash"] } : { noTools: true }), ...(extension === undefined ? {} : { extension: [extension] }) });
+}
 function reviewComment(pr: Pr, blockers: string[]): string {
   return [`Review found ${blockers.length} blocker(s) on PR #${pr.number}.`, ...blockers.map((item, i) => `${i + 1}. ${item}`), "Fix each blocker, then push the branch.", "— Tim's agent"].join("\n");
 }

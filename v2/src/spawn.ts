@@ -12,8 +12,9 @@
 import { spawn as spawnProcess, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { appendStatus } from "./events";
-import { ensureTaskDirs, stateFiles, taskFiles } from "./home";
+import { deckV2Home, ensureTaskDirs, stateFiles, taskFiles } from "./home";
 import { bumpEpoch, readMeta, updateMeta, type TaskKind } from "./meta";
 import { findProfile, loadProfiles, type ModelSeat, type ProjectProfile } from "./projects";
 import { workerBrief } from "./prompts";
@@ -368,6 +369,7 @@ function launchRun(
 
 	const model = workerModelFor(request);
 	const sessionDir = stateFiles(request.taskId).sessions;
+	const subagentExtension = process.env.DECK_SUBAGENT_EXTENSION ?? path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../subagents/extension/index.ts");
 	fs.mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
 
 	// An allocated worktree is already on its branch; only an escape-hatch
@@ -398,7 +400,13 @@ function launchRun(
 		cwd: worktree,
 		detached: true,
 		stdio: ["pipe", "ignore", "ignore"],
-		env: { ...process.env, DECK_TASK_ID: request.taskId, DECK_RUN_EPOCH: String(epoch) },
+		env: {
+			...process.env,
+			PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR ?? path.join(deckV2Home(), ".pi"),
+			DECK_SUBAGENT_EXTENSION: subagentExtension,
+			DECK_TASK_ID: request.taskId,
+			DECK_RUN_EPOCH: String(epoch),
+		},
 	});
 	// A spawn failure (e.g. pi not on PATH) is emitted async on this event; with
 	// no listener it crashes the orchestrator process. The pid check below is the

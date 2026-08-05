@@ -76,6 +76,10 @@ printf 'export { default } from "./extension/index.ts";\n' > "$DEST/index.ts"
 
 printf 'installed deck-v2 pi extension in %s\n' "$DEST"
 
+# The orchestrator and its worker sessions share this pi agent directory. Install
+# the subagent primitive there so workflow and spawn agents receive the same tool.
+INSTALL_TARGET="$INSTALL_TARGET" "$REPO_V2/../subagents/install.sh"
+
 # CLI: a shim on PATH pointing at the repo bin, so both faces run one source.
 BIN_TARGET="${BIN_TARGET:-$HOME/.local/bin}"
 mkdir -p "$BIN_TARGET"
