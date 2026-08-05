@@ -1,45 +1,90 @@
-# Deck crew subagent rig
+# deck-subagents
 
-This package installs pi's shipped `subagent` extension together with Deck's cross-model crewmate definitions. The extension runs each crewmate in an isolated context window, so builders can construct and validate changes and report back without filling the supervisor's context with implementation detail.
+`deck-subagents` is Deck's single child-agent primitive for interactive pi sessions and Smithers workflow seats. It launches one ephemeral, headless `pi -p` process in the caller's current working directory, validates the requested agent and Deck broker model before spawning, bounds concurrency, kills silent children, and returns one structured result.
 
 ## Install
-
-The installer only modifies the pi agent directory. It is safe to rerun: files managed by this package are refreshed as symlinks pointing at this package (for definitions and the patched extension). Reruns do not remove files left by an older version of the package.
-
-Subagent calls have a 30-minute wall-clock limit by default. Set `DECK_SUBAGENT_TIMEOUT_MS` to override it. A child that produces no worktree writes, transcript growth, or CPU-time growth for 25 seconds is killed and returned as a structured failure. Set `DECK_SUBAGENT_LIVENESS_MS` to override the liveness window.
 
 ```bash
 ./subagents/install.sh
 ```
 
-The pi example path defaults to the installed package path required by this repository. Override it with `EXTENSION_SOURCE` when testing another pi installation. For a harmless temp-target test:
+The installer copies the extension, shared library, and Deck-owned agent registry to `~/.pi/agent/extensions/deck-subagents/`, links `broker/pi/deck-provider.ts` plus its zod dependency into the pi extension tree, and also links the definitions into `~/.pi/agent/agents` for direct pi selection. Spawn validation reads only the namespaced registry, so unrelated or stale ambient agents never become valid tool inputs. The installer removes the retired `extensions/subagent` copy. Rerun it after updating the repository so the installed code advances atomically; the focused installer test checks both extensions, rejects an ambient legacy alias, and loads the copied subagent extension through pi. For an isolated installer check:
 
 ```bash
 INSTALL_TARGET="$(mktemp -d)/agent" ./subagents/install.sh
 ```
 
-## Crew definitions
+The pi tool is named `subagent`. It accepts one task per call:
 
-| Agent | Role | Default |
+```json
+{
+  "agent": "worker",
+  "task": "Implement the requested change and verify the changed path.",
+  "model": "deck/gpt-5.6-luna",
+  "thinking": "high",
+  "stallTimeoutMs": 300000,
+  "maxRuntimeMs": 1800000
+}
+```
+
+`model`, `thinking`, and both timeouts are optional. The model defaults to the selected agent's frontmatter only after that default passes the same live broker validation.
+
+## Exact registries
+
+Agent names are exact and case-sensitive. The shipped registry is:
+
+| Agent | Role | Default model |
 | --- | --- | --- |
-| `worker` | Full-capability builder | `deck/claude-opus-5` |
-| `worker-gpt` | Full-capability family alternative | `deck/gpt-5.6-terra` |
-| `reviewer` | Adversarial review with inspection tools; choose the **opposite model family** from the producer | `deck/gpt-5.6-terra` |
-| `reviewer-claude` | Adversarial review with inspection tools for GPT-produced work | `deck/claude-opus-5` |
-| `scout` | Cheap read-only reconnaissance | `deck/claude-sonnet-5` |
+| `worker` | Full-capability Claude-family builder | `deck/claude-opus-5` |
+| `worker-gpt` | Full-capability GPT-family builder | `deck/gpt-5.6-terra` |
+| `reviewer` | Read-oriented GPT-family adversarial reviewer | `deck/gpt-5.6-terra` |
+| `reviewer-claude` | Read-oriented Claude-family adversarial reviewer | `deck/claude-opus-5` |
+| `scout` | Cheap read-only reconnaissance | `deck/gpt-5.4-mini` |
 
-Aliases are supported: `claude` resolves to `reviewer-claude`; `codex` and `gpt` resolve to `worker-gpt`. Unknown names list valid ids and suggest close matches.
+There are no `claude`, `codex`, or `gpt` aliases and no fuzzy correction. An unknown name returns `invalid-agent` plus the valid list without launching a child.
 
-Model values are Deck broker-qualified defaults. The dispatching agent may override any default for a specific task by selecting the other worker/reviewer definition (or maintaining a task-specific definition with the desired `model` frontmatter). The reviewer must still use the opposite model family from whoever produced the work under review.
+Model selectors are the intersection of the checked-in `broker/pi/deck-provider.ts` catalog and the live authenticated broker `/v1/models` response. An unknown or unavailable model returns `invalid-model` or `registry-unavailable` before spawn. `:fast` is accepted only for GPT models; it lowers latency at the broker's 2x cost and is not the cheap lane.
 
-## Brief language for firstmate
+Model guidance is embedded in the tool description and exported as `MODEL_PICK_GUIDANCE` from `lib/model-registry.ts`: use `deck/gpt-5.4-mini` or `deck/claude-haiku-4-5` for cheap bounded work, `deck/gpt-5.6-luna` for a fast capable builder, and `deck/gpt-5.6-sol`, `deck/claude-fable-5`, or `deck/claude-opus-5` for deep ambiguous reasoning. Review with the opposite family from the author; `deck/grok-4.5` is a third-family tie-breaker. The authoritative reasoning-level table remains `broker/pi/README.md`.
 
-Firstmate can copy this into a crew brief (substitute the task and any explicit model override):
+## Liveness and result contract
 
-> Use the Deck pi subagent rig. Start with `scout` for cheap read-only reconnaissance when the task needs it. Delegate implementation to `worker` (Claude default) or `worker-gpt` (GPT-family alternative); builders work in isolated context windows, construct and validate the change, then report back with completed work, validation, files changed, and notes so the supervisor context stays small. After a builder finishes, run an adversarial review in a fresh context using `reviewer` or `reviewer-claude`, and choose the OPPOSITE model family from whoever produced the work. Reviewers have read-oriented inspection tools plus `bash` for repository inspection; their prompt forbids mutation, and they must return prioritized findings with exact paths. This is a behavioral contract, not a kernel-enforced sandbox. Have the builder address valid findings, rerun validation, and report the final handoff.
+Liveness is output activity, not CPU use or filesystem mutation. Every stdout or stderr chunk updates `lastActivityAt`. If no output arrives for five minutes (`DECK_SUBAGENT_STALL_TIMEOUT_MS` or per-call `stallTimeoutMs`), the parent sends `SIGTERM`, sends `SIGKILL` after one second if needed, and returns a result with `exitStatus.status: "stalled"` and `error.kind: "stalled"`. A separate 30-minute wall limit is configurable with `DECK_SUBAGENT_MAX_RUNTIME_MS` or `maxRuntimeMs`.
 
-For larger builds, repeat builder/reviewer cycles across multiple context windows rather than putting the whole implementation and review in one conversation. For stack work, land the schema/base PR first, then fan out subagents for the dependent pieces.
+Concurrency is capped at four children per importing process (`DECK_SUBAGENT_MAX_CONCURRENCY`). The cap is shared by the pi tool and any workflow code importing the same module in that process.
 
-## Definition format
+A child must call the private `deck_subagent_yield` tool with `filesTouched` and `summary`. The parent tool result is JSON with this stable shape:
 
-Files under `agents/` use pi's markdown agent format. The supported frontmatter fields are `name`, `description`, optional `tools`, and optional `model`; this matches the installed extension's `agents.ts` discovery logic. Tool names are comma-separated. No additional frontmatter fields are used.
+```json
+{
+  "ok": true,
+  "agent": "worker",
+  "model": "deck/gpt-5.6-luna",
+  "cwd": "/absolute/worktree",
+  "filesTouched": ["src/example.ts"],
+  "summary": "Implemented and verified the change.",
+  "exitStatus": { "status": "succeeded", "code": 0, "signal": null },
+  "startedAt": "2026-08-05T00:00:00.000Z",
+  "lastActivityAt": "2026-08-05T00:01:00.000Z",
+  "durationMs": 60000
+}
+```
+
+Failures preserve the same fields and add `{ "error": { "kind", "reason", "valid"? } }`. A zero exit without a valid yield is `invalid-yield`, never success.
+
+## Workflow seats
+
+Workflow code imports the same bounded primitive; there is no workflow-specific launcher:
+
+```ts
+import { spawnSubagent } from "../../subagents/lib/spawn.ts";
+
+const result = await spawnSubagent({
+  agent: "reviewer",
+  task: "Review the implementation and return evidence-backed findings.",
+  cwd: process.cwd(),
+  model: "deck/gpt-5.6-terra",
+});
+```
+
+The CLI worktree allocator is intentionally not called from this library: it owns global Deck allocation state, effort manifests, branch allocation, dependency warming, and release. Interactive sessions bind the tool to the parent `ctx.cwd`; Smithers seats pass their already-allocated seat/worktree cwd.

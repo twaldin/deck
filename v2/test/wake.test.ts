@@ -831,14 +831,6 @@ describe("a live worker that stops making progress", () => {
 	});
 });
 
-describe("worker tool exclusions", () => {
-	test("REGRESSION: web_search is excluded, because a 429 is an infinite retry trap", async () => {
-		const { WORKER_EXCLUDED_TOOLS } = await import("../src/spawn");
-		expect(WORKER_EXCLUDED_TOOLS).toContain("web_search");
-		// And the single-channel rule stays enforced structurally.
-		expect(WORKER_EXCLUDED_TOOLS).toContain("ask_captain");
-	});
-});
 
 describe("outbox identity", () => {
 	// The id was `${taskId}:${raw}`, so two entries with identical text shared one

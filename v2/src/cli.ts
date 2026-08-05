@@ -1,9 +1,10 @@
 /**
- * The CLI face. A thin argv parser over the same exports the extension imports:
- * no subprocess hop, no duplicated logic, no second implementation to drift.
+ * The CLI face for durable Deck library operations.
  *
- * Crews and scripts use this from a shell. The orchestrator uses the extension
- * tools. Both are faces on @deck/v2.
+ * Long-running work enters through `ship`, where Smithers owns liveness. Bounded
+ * delegation uses the awaited `deck-subagents` primitive inside a pi session;
+ * this CLI deliberately has no fire-and-forget spawn or worker-authored status
+ * append.
  */
 import * as path from "node:path";
 import * as fs from "node:fs";
@@ -18,29 +19,23 @@ import {
 } from "./backlog";
 import { bootstrapHome, formatBootstrap } from "./bootstrap";
 import { homeSyncPull, homeSyncPush, homeSyncStatus } from "./home-sync";
-import { appendStatus, readStatus } from "./events";
+import { readStatus } from "./events";
 import { buildFrame, renderFrame } from "./monitor";
 import { projectFleet } from "./herdr";
 import { assertHomeIsNotACheckout, assertHomeIsNotAnotherFleet, deckV2Home, stateFiles } from "./home";
 import { readMeta } from "./meta";
 import { enqueue, pending } from "./queue";
 import { startShip } from "./ship";
-import { peekSession, startRun } from "./spawn";
-import { STATUS_VERBS, type StatusVerb } from "./status";
+import { peekSession } from "./spawn";
 import { evaluateTeardown, formatVerdict } from "./teardown";
 import { detectStale, foldBatched, reconcile } from "./wake";
 import { smithersWorkspaceRoot } from "./workspace";
 import { sessionDirForTask, tailSession } from "./tail";
 
-const REASONING_LEVELS = new Set(["low", "medium", "high", "xhigh", "max"]);
-function parseReasoning(value: string): "low" | "medium" | "high" | "xhigh" | "max" {
-	if (!REASONING_LEVELS.has(value)) throw new Error(`reasoning must be low, medium, high, xhigh, or max; received ${value}`);
-	return value as "low" | "medium" | "high" | "xhigh" | "max";
-}
 
 const USAGE = `deck-v2 — fleet primitives
 
-  bootstrap                        create the orchestrator home (not a checkout)
+  bootstrap                        create the Deck home (not a checkout)
   ship <ticket> --profile <id> --worktree <path> --branch <name>
              --title <text> --summary <text> --accept <a;b;c>
              [--base <branch>] [--break-signal <text>] [--kill-switch <name>]
@@ -52,13 +47,6 @@ const USAGE = `deck-v2 — fleet primitives
                                    park for the captain's word); --existing-pr
                                    adopts an already-open PR into the same
                                    watch/stamp loop (no second PR, no reimplement)
-  spawn <id> --task <text> --accept <text> (--repo <path|alias> | --worktree <path>)
-             [--kind ship|scout] [--base <branch>] [--desc <text>]
-             [--project <name>] [--branch <name>] [--model <deck/model>]
-             [--reasoning low|medium|high|xhigh|max]
-             [--no-pipeline]     workers inside a pipeline stage, scouts; bare
-                                 ship on a profiled project is refused without
-                                 --no-pipeline
   send <id> <message>              queue a message for the task's next run
   status <id> [--json]             the task's events and current reconciliation
   peek <id> [--limit N]            print recent transcript entries
@@ -68,12 +56,11 @@ const USAGE = `deck-v2 — fleet primitives
   wake [--json]                    one reconcile pass (T0 now, T1 folded, T2 silent)
   stale                            runs that vanished without a terminal status
   teardown <id> [--pr N]           evaluate the teardown guard (never destructive)
-  note <id> <verb> <text> [--epoch N]          append a status event as the orchestrator
   backlog ls|add|close|externalize|sweep|check
   home                             print the resolved home
   home sync [status|pull|push]      sync the private home repository (plain git)
 
-Every command reads and writes the same records the pi extension does.`;
+Every command reads and writes the factory's durable records.`;
 
 type Args = { _: string[]; flags: Record<string, string | boolean> };
 
@@ -205,43 +192,6 @@ export async function runCli(argv: string[]): Promise<number> {
 				return 0;
 			}
 
-			case "spawn": {
-				const id = args._[1];
-				if (id === undefined) throw new Error("spawn needs a task id");
-				const accept = str(args.flags, "accept");
-				const worktreeFlag = str(args.flags, "worktree");
-				// Validate before allocation so malformed reasoning cannot produce a
-				// worktree-side error and the CLI reports the actual argument failure.
-				const reasoning = str(args.flags, "reasoning") === undefined ? undefined : parseReasoning(need(args.flags, "reasoning"));
-				const result = startRun(
-					{
-						taskId: id,
-						task: need(args.flags, "task"),
-						acceptance: accept === undefined ? [] : accept.split(";").map((s) => s.trim()),
-						kind: str(args.flags, "kind") === "scout" ? "scout" : "ship",
-						...(args.flags["no-pipeline"] === true ? { noPipeline: true } : {}),
-						...(worktreeFlag === undefined ? {} : { worktree: path.resolve(worktreeFlag) }),
-						...(str(args.flags, "repo") === undefined ? {} : { repo: need(args.flags, "repo") }),
-						...(str(args.flags, "base") === undefined ? {} : { base: need(args.flags, "base") }),
-						...(str(args.flags, "desc") === undefined ? {} : { desc: need(args.flags, "desc") }),
-						...(str(args.flags, "project") === undefined
-							? {}
-							: { project: need(args.flags, "project") }),
-						...(str(args.flags, "branch") === undefined
-							? {}
-							: { branch: need(args.flags, "branch") }),
-						...(str(args.flags, "model") === undefined
-							? {}
-							: { model: need(args.flags, "model") }),
-						...(reasoning === undefined ? {} : { reasoning }),
-					},
-					deckV2Home(),
-				);
-				process.stdout.write(
-					`spawned ${result.taskId} epoch=${result.epoch} pid=${result.pid} model=${result.model}\nworktree: ${result.worktree}${result.wtId === undefined ? "" : ` (${result.wtId}, branch ${result.branch})`}\nbrief: ${result.briefPath}\n`,
-				);
-				return 0;
-			}
 
 			case "send": {
 				const id = args._[1];
@@ -354,36 +304,6 @@ export async function runCli(argv: string[]): Promise<number> {
 				return verdict.allowed ? 0 : 1;
 			}
 
-			case "note": {
-				const id = args._[1];
-				const verb = args._[2];
-				const text = args._.slice(3).join(" ");
-				if (id === undefined || verb === undefined || text.length === 0) {
-					throw new Error("note needs an id, a verb and text");
-				}
-				if (!STATUS_VERBS.includes(verb as StatusVerb)) {
-					throw new Error(`${verb} is not a status verb (${STATUS_VERBS.join(", ")})`);
-				}
-				// Epoch fence. A worker gets DECK_RUN_EPOCH in its environment and its
-				// brief tells it to use this command, so a superseded worker's late
-				// append is refused here rather than being believed. The raw
-				// `echo >> status` the brief used to document had no way to check
-				// this: a cancelled-and-respawned task's old process could still
-				// append `done:` and the orchestrator would act on it.
-				const epoch = str(args.flags, "epoch");
-				if (epoch !== undefined) {
-					const current = readMeta(id)?.run_epoch;
-					if (current !== undefined && Number(epoch) !== current) {
-						process.stderr.write(
-							`refusing a status append from epoch ${epoch}; task ${id} is now at epoch ${current}. ` +
-								"This run was superseded, so its status is no longer the task's truth.\n",
-						);
-						return 1;
-					}
-				}
-				process.stdout.write(`${appendStatus(id, verb as StatusVerb, text)}\n`);
-				return 0;
-			}
 
 			case "backlog":
 				return backlog(args);
