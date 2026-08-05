@@ -24,6 +24,7 @@ import { loadProfiles, type ProjectProfile } from "../lib/profiles.ts";
 import { falloutPrompt, localFixPrompt, localReviewPrompt, reviewersDecisionPrompt } from "../lib/prompts.ts";
 import { resolveAdversary } from "../lib/models.ts";
 import { isSchemaEcho, schemaEchoCorrection } from "../lib/schema-echo.ts";
+import { resolveHostPiBinary } from "../lib/host-pi.ts";
 
 const validBrief = {
 	ticket: "LIN-123",
@@ -288,11 +289,12 @@ describe("fallout prompt rendering contracts", () => {
 		// broker/test/validated-gateway.test.ts — do not import broker src here (CI has no broker deps).
 		const expectedThinking: Record<string, string> = { implement: "high", "local-review": "xhigh", "r0-watch-fix": "low", "fallout-watch": "max" };
 		for (const nodeId of ["implement", "local-review", "r0-watch-fix", "fallout-watch"]) {
-			const agent = agentsByNode.get(nodeId) as { opts: { provider: string; model: string; thinking: string }; buildArgs: (input: { prompt: string; cwd: string; mode: string }) => string[] };
+			const agent = agentsByNode.get(nodeId) as { opts: { provider: string; model: string; thinking: string }; buildArgs: (input: { prompt: string; cwd: string; mode: string }) => string[]; buildCommand: (input: { prompt: string; cwd: string }) => Promise<{ command: string }> };
 			const args = agent.buildArgs({ prompt: "broker-seat-probe", cwd: "/tmp/lindy-wt", mode: "text" });
 			expect(agent.opts.provider).toBe("deck");
 			expect(agent.opts.thinking).toBe(expectedThinking[nodeId]);
 			expect(args).toEqual(expect.arrayContaining(["--provider", "deck", "--model", agent.opts.model, "--thinking", agent.opts.thinking]));
+			expect(await agent.buildCommand({ prompt: "host-pi-probe", cwd: "/tmp/lindy-wt" })).toMatchObject({ command: resolveHostPiBinary() });
 		}
 		expect(rendered.toXml()).toContain("RATE_LIMIT_ENABLED flag");
 		expect(rendered.toXml()).toContain('{\\"verdict\\":\\"clean|regression\\"');
