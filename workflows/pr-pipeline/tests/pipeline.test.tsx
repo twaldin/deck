@@ -517,6 +517,80 @@ describe("adopt existing PR (input.existingPr)", () => {
 		expect(schema.safeParse(missingRequiredField).success).toBe(false);
 	});
 
+	test("REGRESSION: omitted base adopts the existing stacked PR base before push-pr", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "deck-adopt-base-"));
+		const log = path.join(dir, "git.log");
+		const git = path.join(dir, "git");
+		const gh = path.join(dir, "gh");
+		const watchSetPath = path.join(dir, "watch-set.jsonl");
+		fs.writeFileSync(git, `#!/bin/sh
+printf '%s\\n' "$*" >> ${JSON.stringify(log)}
+case "$1" in
+  ls-remote|status) ;;
+  rev-parse) if [ "$2" = "--abbrev-ref" ]; then printf 'fm/lin-123\\n'; else printf 'abc123\\n'; fi ;;
+  remote) printf 'git@github.com:lindy-ai/lindy.git\\n' ;;
+esac
+`);
+		fs.writeFileSync(gh, `#!/bin/sh
+printf '%s\\n' '${JSON.stringify({ number: 777, html_url: "https://github.com/lindy-ai/lindy/pull/777", state: "open", draft: false, head: { ref: "fm/lin-123", sha: "abc123", repo: { full_name: "lindy-ai/lindy" } }, base: { ref: "fm/stack-parent" } })}'
+`);
+		fs.chmodSync(git, 0o755);
+		fs.chmodSync(gh, 0o755);
+		try {
+			const rendered = await renderWorkflow(pipeline, {
+				input: {
+					...baseInput,
+					dryRun: false,
+					existingPr: 777,
+					worktree: dir,
+					watchSetPath,
+					github: { git, gh },
+				},
+				outputs: {
+					preflight: [{ nodeId: "preflight", ok: true, openQuestions: [], briefDigest: "", resolvedReviewerModel: "deck/claude-fable-5" }],
+					adoptBase: [{ nodeId: "adopt-base", baseBranch: "fm/stack-parent" }],
+					implementation: [{ nodeId: "implement", commits: [], summary: "adopted existing PR #777", testEvidence: "CI on the PR" }],
+					localReview: [{ nodeId: "local-review", round: 0, approved: true, blockingFindings: [], nits: [], summary: "approved" }],
+				},
+				workflowPath: path.join(import.meta.dir, "..", "pipeline.tsx"),
+			});
+			const pushTask = rendered.tasks.find((task) => task.nodeId === "push-pr");
+			const output = await pushTask!.computeFn!();
+			expect(output).toMatchObject({ baseBranch: "fm/stack-parent" });
+			expect(fs.readFileSync(log, "utf8")).toContain("ls-remote --exit-code --heads origin fm/stack-parent");
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("rejects an adopted PR retargeted to a different non-main base", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "deck-adopt-retarget-"));
+		const git = path.join(dir, "git");
+		const gh = path.join(dir, "gh");
+		fs.writeFileSync(git, "#!/bin/sh\ncase \"$1\" in rev-parse) if [ \"$2\" = \"--abbrev-ref\" ]; then printf 'fm/lin-123\\n'; else printf 'abc123\\n'; fi ;; remote) printf 'git@github.com:lindy-ai/lindy.git\\n' ;; esac\n");
+		fs.writeFileSync(gh, `#!/bin/sh
+printf '%s\\n' '${JSON.stringify({ number: 777, html_url: "https://github.com/lindy-ai/lindy/pull/777", state: "open", draft: false, head: { ref: "fm/lin-123", sha: "abc123", repo: { full_name: "lindy-ai/lindy" } }, base: { ref: "release-branch" } })}'
+`);
+		fs.chmodSync(git, 0o755);
+		fs.chmodSync(gh, 0o755);
+		try {
+			const rendered = await renderWorkflow(pipeline, {
+				input: { ...baseInput, baseBranch: "main", dryRun: false, existingPr: 777, worktree: dir, github: { git, gh } },
+				outputs: {
+					preflight: [{ nodeId: "preflight", ok: true, openQuestions: [], briefDigest: "", resolvedReviewerModel: "deck/claude-fable-5" }],
+					adoptBase: [{ nodeId: "adopt-base", baseBranch: "fm/stack-parent" }],
+					implementation: [{ nodeId: "implement", commits: [], summary: "adopted existing PR #777", testEvidence: "CI on the PR" }],
+					localReview: [{ nodeId: "local-review", round: 0, approved: true, blockingFindings: [], nits: [], summary: "approved" }],
+				},
+				workflowPath: path.join(import.meta.dir, "..", "pipeline.tsx"),
+			});
+			const pushTask = rendered.tasks.find((task) => task.nodeId === "push-pr");
+			await expect(pushTask!.computeFn!()).rejects.toThrow('declared baseBranch "fm/stack-parent"');
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	test("implement is stubbed, local adversarial review runs, prRecord seeded, and the SAME watch loop reaches done", async () => {
 		const { sim, error } = await run({
 			...baseInput,

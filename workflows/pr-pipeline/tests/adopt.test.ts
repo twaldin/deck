@@ -72,8 +72,12 @@ describe("assertAdoptable", () => {
 		expect(() => assertAdoptable({ ...goodOverview, baseRefName: baseBranch }, { ...goodExpectation, baseBranch })).not.toThrow();
 	});
 
-	test("rejects every explicit base that differs from the PR base", () => {
-		expect(() => reconcileAdoptBaseBranch("main", "fm/stack-parent")).toThrow(/declared baseBranch "main"/);
+	test("reconciles the default main base to a stacked PR base", () => {
+		expect(reconcileAdoptBaseBranch("main", "fm/stack-parent")).toBe("fm/stack-parent");
+	});
+
+	test("reconciles a PR retargeted to main, but rejects different non-main bases", () => {
+		expect(reconcileAdoptBaseBranch("release-1.2", "main")).toBe("main");
 		expect(() => reconcileAdoptBaseBranch("release-1.2", "fm/stack-parent")).toThrow(/declared baseBranch "release-1.2"/);
 	});
 

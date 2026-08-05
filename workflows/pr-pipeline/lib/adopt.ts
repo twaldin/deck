@@ -48,14 +48,22 @@ export function cleanKnownScratchFiles(worktree: string, remove: (file: string) 
 }
 
 /**
- * An omitted base may reconcile to the live base of a stack child. An explicit
- * base, including main, must match exactly.
+ * Reconcile an adopted PR to the base GitHub reports. `main` is the default
+ * run base, so a stack child may replace it with its actual non-main base.
+ * Two different non-main bases remain unsafe to reconcile.
  */
 export function reconcileAdoptBaseBranch(declaredBaseBranch: string | undefined, actualBaseBranch: string): string {
 	if (actualBaseBranch === "") {
 		throw new Error("[escalate] cannot adopt PR: GitHub did not report a base branch.");
 	}
-	if (declaredBaseBranch === undefined || declaredBaseBranch === actualBaseBranch) return actualBaseBranch;
+	if (
+		declaredBaseBranch === undefined ||
+		declaredBaseBranch === actualBaseBranch ||
+		declaredBaseBranch === "main" ||
+		actualBaseBranch === "main"
+	) {
+		return actualBaseBranch;
+	}
 	throw new Error(
 		`[escalate] cannot adopt PR: it targets base "${actualBaseBranch}" but the run declared baseBranch "${declaredBaseBranch}".`,
 	);

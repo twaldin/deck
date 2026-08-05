@@ -971,7 +971,10 @@ export default smithers((ctx) => {
 										};
 									}
 									let overview = await fetchPrOverview(ghCtx, prNumber);
-									const adoptedBaseBranch = reconcileAdoptBaseBranch(declaredBaseBranch, overview.baseRefName);
+									const adoptedBaseBranch = reconcileAdoptBaseBranch(
+										adoptedBase?.baseBranch ?? input.baseBranch,
+										overview.baseRefName,
+									);
 									await execOrThrow(
 										bunExec,
 										[github.git, "ls-remote", "--exit-code", "--heads", "origin", adoptedBaseBranch],
@@ -1909,7 +1912,7 @@ prNumber: pr.prNumber,
 					<Task id="landing-exhausted" output={outputs.landingPoll} retries={0}>
 						{() => {
 							throw new Error(
-								`[escalate] merge submitted but squash commit (#${pr?.prNumber}) never appeared on ${baseBranch} after ${landingRows.length} polls. Check the GitHub merge queue; resume when resolved.`,
+								`[escalate] merge submitted but squash commit (#${pr?.prNumber}) never appeared on ${latestQueue?.baseBranch || baseBranch} after ${landingRows.length} polls. Check the GitHub merge queue; resume when resolved.`,
 							);
 						}}
 					</Task>
