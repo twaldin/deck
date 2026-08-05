@@ -186,12 +186,35 @@ describe("standing-rules seat injection", () => {
 			expect(prompt).toContain(
 				"Never run OptMem from a worker or subagent. Route decisions through the workflow's question result.",
 			);
+			expect(prompt).toContain("[CHAT SESSION] **Precedence:**");
 			expect(prompt).toContain(
 				"Use only exact registered ids: worker, worker-gpt, reviewer, reviewer-claude, and scout.",
 			);
 			expect(prompt).toContain("Aliases such as claude, codex, and gpt are invalid.");
+			expect(prompt).toContain("OUTPUT-FACING BOUNDARY:");
+			expect(prompt).toContain(
+				"Internal paths, worktrees, workflow node names, run or task ids, model labels, and workflow or factory vocabulary are tool-context ONLY.",
+			);
+			expect(prompt).toContain(
+				"PR text, comments, review replies, and queued question text must never expose that tool context.",
+			);
 		}
-		expect(Buffer.byteLength(standingRulesDigest(), "utf8")).toBeLessThanOrEqual(4_300);
+		expect(Buffer.byteLength(standingRulesDigest(), "utf8")).toBeLessThanOrEqual(8 * 1024);
+	});
+
+	test("labels every committed standing-rule obligation by actor", () => {
+		const fallback = fs.readFileSync(new URL("../seed/standing-rules.md", import.meta.url), "utf8");
+		const ruleBullets = fallback.split("\n").filter((line) => line.startsWith("- "));
+		expect(ruleBullets.length).toBeGreaterThan(0);
+		for (const rule of ruleBullets) {
+			expect(rule).toMatch(/^- \[(?:CHAT SESSION|WORKFLOW SEAT)\]/);
+		}
+		expect(fallback).toContain(
+			"[CHAT SESSION] **Precedence:** the plain pi chat session discharges build,",
+		);
+		expect(fallback).toContain(
+			"[WORKFLOW SEAT] Execute the delivery middle: implement in a worktree,",
+		);
 	});
 
 	test("re-reads the live standing rules for every prompt build", () => {
@@ -203,10 +226,62 @@ describe("standing-rules seat injection", () => {
 		fs.writeFileSync(live, "live doctrine alpha\n");
 		expect(implementPrompt(validBrief, "/tmp/wt", "feature")).toContain("live doctrine alpha");
 		expect(implementPrompt(validBrief, "/tmp/wt", "feature")).toContain(
+			"ACTOR BOUNDARY (binding even when live standing rules predate actor labels)",
+		);
+		expect(implementPrompt(validBrief, "/tmp/wt", "feature")).toContain(
+			"[CHAT SESSION] Discharge build, review, and deploy obligations only through ship, adopt, status, and queued questions",
+		);
+		expect(implementPrompt(validBrief, "/tmp/wt", "feature")).toContain(
 			"Never run OptMem from a worker or subagent. Route decisions through the workflow's question result.",
 		);
 		fs.writeFileSync(live, "live doctrine beta\n");
 		expect(implementPrompt(validBrief, "/tmp/wt", "feature")).toContain("live doctrine beta");
+	});
+
+	test("selects whole priority sections and names omitted sections when the live rules exceed budget", () => {
+		const home = fs.mkdtempSync(path.join(os.tmpdir(), "deck-standing-curated-"));
+		tempRoots.push(home);
+		process.env.HOME = home;
+		const live = path.join(home, ".deck", "data", "ref", "distill", "STANDING-RULES.md");
+		fs.mkdirSync(path.dirname(live), { recursive: true });
+		fs.writeFileSync(
+			live,
+			[
+				"## 12. Auth doctrine",
+				`OMITTED-RULE-START ${"x".repeat(10_000)} OMITTED-RULE-END`,
+				'## 1. The "make PR" flow (captain\'s target, binding)',
+				"PRIORITY-RULE-COMPLETE",
+			].join("\n"),
+		);
+
+		const digest = standingRulesDigest();
+		expect(digest).toContain("PRIORITY-RULE-COMPLETE");
+		expect(digest).toContain("TRUNCATED");
+		expect(digest).toContain("Omitted sections: 12. Auth doctrine.");
+		expect(digest).toContain("no rule was cut mid-rule");
+		expect(digest).not.toContain("OMITTED-RULE-START");
+		expect(digest).not.toContain("OMITTED-RULE-END");
+	});
+
+	test("bounds the truncation marker when omitted section names are numerous and long", () => {
+		const home = fs.mkdtempSync(path.join(os.tmpdir(), "deck-standing-marker-"));
+		tempRoots.push(home);
+		process.env.HOME = home;
+		const live = path.join(home, ".deck", "data", "ref", "distill", "STANDING-RULES.md");
+		fs.mkdirSync(path.dirname(live), { recursive: true });
+		fs.writeFileSync(
+			live,
+			Array.from(
+				{ length: 200 },
+				(_, index) =>
+					`## ${100 + index}. ${"long-section-name-".repeat(10)}${index}\ncomplete rule ${index}`,
+			).join("\n"),
+		);
+
+		const digest = standingRulesDigest();
+		expect(Buffer.byteLength(digest, "utf8")).toBeLessThanOrEqual(8 * 1024);
+		expect(digest).toContain("TRUNCATED");
+		expect(digest).toContain("additional omitted section(s)");
 	});
 
 	test("forbids raw watcher pushes and removes the manual git escape hatch", () => {
@@ -217,13 +292,26 @@ describe("standing-rules seat injection", () => {
 			repo: "lindy-ai/lindy",
 			prNumber: 42,
 			gh: "gh",
-			pollJson: "{}",
+			pollJson: '{"unresolvedThreads":1}',
 			round: 0,
 			afterPoll: 0,
 		});
 		expect(prompt).toContain("Return every commit you created as a full");
 		expect(prompt).toContain("Pushes outside rebaseAndPush() are forbidden");
 		expect(prompt).toContain("Never run git push");
+		expect(prompt).toContain("Resolve the thread only after a plain commit on THIS branch addresses it");
+		expect(prompt).toContain("reviewer/captain agreement to the no-code disposition");
+		expect(prompt).toContain("Never infer agreement from silence");
+		expect(prompt).toContain(
+			"DECISION-CLASS BLOCKER: thread=<stable thread id or URL> | decision=<missing decision>",
+		);
+		expect(prompt).toContain("<REVIEW_COMMENT_ID>");
+		expect(prompt).toContain("numeric `databaseId`");
+		expect(prompt).toContain("Never run the review-reply template with the placeholder or with comment id 0");
+		expect(prompt).not.toContain("post-review-reply.ts '' 'lindy-ai/lindy' 0");
+		expect(prompt).toContain("Shape-only blocker result example");
+		expect(prompt).toContain("An empty actions array is invalid");
+		expect(prompt).not.toContain('"actions":[],"commits":[],"pushed":false,"reRequested":[],"summary":"No action required."');
 		expect(prompt).not.toContain("If the helper is unavailable");
 	});
 	test("routes watch publication through a deterministic node and rejects a direct-push receipt", async () => {
