@@ -19,7 +19,7 @@ import * as path from "node:path";
 // Smithers testing is optional in minimal checkouts; workflow tests run when the pinned package is installed.
 import { renderWorkflow, simulate } from "smithers-orchestrator/testing";
 
-import pipeline, { buildModelPolicy, DEFAULT_GITHUB } from "../pipeline.tsx";
+import pipeline, { buildModelPolicy, DEFAULT_GITHUB, schemas } from "../pipeline.tsx";
 import { loadProfiles, type ProjectProfile } from "../lib/profiles.ts";
 import { falloutPrompt, localFixPrompt, localReviewPrompt, reviewersDecisionPrompt } from "../lib/prompts.ts";
 import { resolveAdversary } from "../lib/models.ts";
@@ -242,7 +242,7 @@ describe("fallout prompt rendering contracts", () => {
 				preflight: [{ nodeId: "preflight", ok: true, openQuestions: [], briefDigest: "", resolvedReviewerModel: "deck/claude-fable-5" }],
 				implementation: [{ nodeId: "implement", commits: ["fix"], summary: "fixed", testEvidence: "green" }],
 				localReview: [{ nodeId: "local-review", round: 0, approved: true, blockingFindings: [], nits: [] }],
-				prRecord: [{ nodeId: "push-pr", prNumber: 80, url: "https://github.com/lindy-ai/lindy/pull/80", headSha: "abc123", watchSetRegistered: true, watchSetPath: "", receipt: "", createdAt: "2026-08-01T00:00:00.000Z" }],
+				prRecord: [{ nodeId: "push-pr", prNumber: 80, url: "https://github.com/lindy-ai/lindy/pull/80", headSha: "abc123", baseBranch: "main", watchSetRegistered: true, watchSetPath: "", receipt: "", createdAt: "2026-08-01T00:00:00.000Z" }],
 				reviewerRequest: [{ nodeId: "request-reviewers", skipped: false, requested: ["reviewer"], verified: ["reviewer"], source: "test", at: "2026-08-01T00:00:00.000Z", reviewerPrompt: "" }],
 				watchPoll: [{ nodeId: "r0-watch-poll", round: 0, poll: 0, headSha: "abc123", exitOk: false, disposition: "fix", actionable: true, ci: "red", unresolvedThreads: 1, unansweredComments: 1, reviewersToReRequest: ["reviewer"], reasons: ["unresolved thread"] }],
 				readyPoll: [{ nodeId: "r0-ready-poll", round: 0, poll: 0, ready: true, regressed: false, approvedBy: "reviewer", ci: "green", headSha: "abc123", reasons: [], migrationDetected: false, migrationFiles: [], at: "2026-08-01T00:00:00.000Z" }],
@@ -519,9 +519,83 @@ describe("adopt existing PR (input.existingPr)", () => {
 		expect(output).toMatchObject({ runId });
 		const schema = pushTask!.outputSchema!;
 		expect(schema.safeParse(output).success).toBe(true);
-		const missingRequiredField = { ...output } as Record<string, unknown>;
+		const missingRequiredField = { ...(output as Record<string, unknown>) };
 		delete missingRequiredField.createdAt;
 		expect(schema.safeParse(missingRequiredField).success).toBe(false);
+	});
+
+	test("REGRESSION: omitted base adopts the existing stacked PR base before push-pr", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "deck-adopt-base-"));
+		const log = path.join(dir, "git.log");
+		const git = path.join(dir, "git");
+		const gh = path.join(dir, "gh");
+		const watchSetPath = path.join(dir, "watch-set.jsonl");
+		fs.writeFileSync(git, `#!/bin/sh
+printf '%s\\n' "$*" >> ${JSON.stringify(log)}
+case "$1" in
+  ls-remote|status) ;;
+  rev-parse) if [ "$2" = "--abbrev-ref" ]; then printf 'fm/lin-123\\n'; else printf 'abc123\\n'; fi ;;
+  remote) printf 'git@github.com:lindy-ai/lindy.git\\n' ;;
+esac
+`);
+		fs.writeFileSync(gh, `#!/bin/sh
+printf '%s\\n' '${JSON.stringify({ number: 777, html_url: "https://github.com/lindy-ai/lindy/pull/777", state: "open", draft: false, head: { ref: "fm/lin-123", sha: "abc123", repo: { full_name: "lindy-ai/lindy" } }, base: { ref: "fm/stack-parent" } })}'
+`);
+		fs.chmodSync(git, 0o755);
+		fs.chmodSync(gh, 0o755);
+		try {
+			const rendered = await renderWorkflow(pipeline, {
+				input: {
+					...baseInput,
+					dryRun: false,
+					existingPr: 777,
+					worktree: dir,
+					watchSetPath,
+					github: { git, gh },
+				},
+				outputs: {
+					preflight: [{ nodeId: "preflight", ok: true, openQuestions: [], briefDigest: "", resolvedReviewerModel: "deck/claude-fable-5" }],
+					adoptBase: [{ nodeId: "adopt-base", baseBranch: "fm/stack-parent" }],
+					implementation: [{ nodeId: "implement", commits: [], summary: "adopted existing PR #777", testEvidence: "CI on the PR" }],
+					localReview: [{ nodeId: "local-review", round: 0, approved: true, blockingFindings: [], nits: [], summary: "approved" }],
+				},
+				workflowPath: path.join(import.meta.dir, "..", "pipeline.tsx"),
+			});
+			const pushTask = rendered.tasks.find((task) => task.nodeId === "push-pr");
+			const output = await pushTask!.computeFn!();
+			expect(output).toMatchObject({ baseBranch: "fm/stack-parent" });
+			expect(fs.readFileSync(log, "utf8")).toContain("ls-remote --exit-code --heads origin fm/stack-parent");
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("rejects an adopted PR retargeted to a different non-main base", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "deck-adopt-retarget-"));
+		const git = path.join(dir, "git");
+		const gh = path.join(dir, "gh");
+		fs.writeFileSync(git, "#!/bin/sh\ncase \"$1\" in rev-parse) if [ \"$2\" = \"--abbrev-ref\" ]; then printf 'fm/lin-123\\n'; else printf 'abc123\\n'; fi ;; remote) printf 'git@github.com:lindy-ai/lindy.git\\n' ;; esac\n");
+		fs.writeFileSync(gh, `#!/bin/sh
+printf '%s\\n' '${JSON.stringify({ number: 777, html_url: "https://github.com/lindy-ai/lindy/pull/777", state: "open", draft: false, head: { ref: "fm/lin-123", sha: "abc123", repo: { full_name: "lindy-ai/lindy" } }, base: { ref: "release-branch" } })}'
+`);
+		fs.chmodSync(git, 0o755);
+		fs.chmodSync(gh, 0o755);
+		try {
+			const rendered = await renderWorkflow(pipeline, {
+				input: { ...baseInput, baseBranch: "main", dryRun: false, existingPr: 777, worktree: dir, github: { git, gh } },
+				outputs: {
+					preflight: [{ nodeId: "preflight", ok: true, openQuestions: [], briefDigest: "", resolvedReviewerModel: "deck/claude-fable-5" }],
+					adoptBase: [{ nodeId: "adopt-base", baseBranch: "fm/stack-parent" }],
+					implementation: [{ nodeId: "implement", commits: [], summary: "adopted existing PR #777", testEvidence: "CI on the PR" }],
+					localReview: [{ nodeId: "local-review", round: 0, approved: true, blockingFindings: [], nits: [], summary: "approved" }],
+				},
+				workflowPath: path.join(import.meta.dir, "..", "pipeline.tsx"),
+			});
+			const pushTask = rendered.tasks.find((task) => task.nodeId === "push-pr");
+			await expect(pushTask!.computeFn!()).rejects.toThrow('declared baseBranch "fm/stack-parent"');
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
 	});
 
 	test("implement is stubbed, local adversarial review runs, prRecord seeded, and the SAME watch loop reaches done", async () => {
@@ -609,6 +683,73 @@ describe("approval parks (no bypass)", () => {
 		expect(sim.executed).toContain("migration-check");
 		expect(sim.executed).not.toContain("migration-stg-run");
 		expect(sim.executed).not.toContain("enqueue-merge");
+	});
+});
+
+describe("enqueue-merge regressions", () => {
+	function mergeTaskOutputs(baseBranch: string, prNumber = 42) {
+		return {
+			preflight: [{ nodeId: "preflight", ok: true, openQuestions: [], briefDigest: "", resolvedReviewerModel: "deck/claude-fable-5" }],
+			implementation: [{ nodeId: "implement", commits: ["abc"], summary: "done", testEvidence: "green" }],
+			localReview: [{ nodeId: "local-review", round: 0, approved: true, blockingFindings: [], nits: [], summary: "approved" }],
+			prRecord: [{ nodeId: "push-pr", prNumber, url: `https://github.com/lindy-ai/lindy/pull/${prNumber}`, headSha: "abc123", baseBranch, watchSetRegistered: true, watchSetPath: "", receipt: "", createdAt: "2026-08-01T00:00:00.000Z" }],
+			approvals: [{ nodeId: "r0-stamp", approved: true, note: "ok", decidedBy: "test", decidedAt: "2026-08-01T00:00:00.000Z" }],
+			stampValidity: [{ nodeId: "r0-stamp-validity", round: 0, stampedHead: "abc123", currentHead: "abc123", valid: true, checkedAt: "2026-08-01T00:00:00.000Z" }],
+			mergeHeadCheck: [{ nodeId: "r0-merge-head-check", round: 0, expectedHead: "abc123", currentHead: "abc123", ok: true, checkedAt: "2026-08-01T00:00:00.000Z" }],
+		};
+	}
+
+	async function renderMergeTask(baseBranch: string, log: string, landed = false) {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "deck-merge-task-"));
+		const git = path.join(dir, "git");
+		const gh = path.join(dir, "gh");
+		fs.writeFileSync(git, `#!/bin/sh\nprintf '%s\\n' \"$*\" >> ${JSON.stringify(log)}\ncase \"$1\" in log) ${landed ? "printf 'squash\\tfix: landed (#42)\\n'" : ":"};; rev-parse) printf 'fm/lin-123\\n';; esac\n`);
+		fs.writeFileSync(gh, `#!/bin/sh
+if [ "$1" = api ] && [ "$3" = --jq ]; then printf 'abc123\\n'
+elif [ "$1" = api ]; then printf '%s\\n' '${JSON.stringify({ number: 42, html_url: "https://github.com/lindy-ai/lindy/pull/42", state: "open", draft: false, head: { ref: "fm/lin-123", sha: "abc123", repo: { full_name: "lindy-ai/lindy" } }, base: { ref: baseBranch } })}'
+else printf 'queued\\n'; fi
+`);
+		fs.chmodSync(git, 0o755);
+		fs.chmodSync(gh, 0o755);
+		const rendered = await renderWorkflow(pipeline, {
+			input: { ...baseInput, worktree: dir, dryRun: false, github: { git, gh } },
+			outputs: mergeTaskOutputs(baseBranch),
+			workflowPath: path.join(import.meta.dir, "..", "pipeline.tsx"),
+		});
+		return { dir, task: rendered.tasks.find((task) => task.nodeId === "enqueue-merge")! };
+	}
+
+	test("accepts the native GitHub merge queue receipt", () => {
+		const receipt = { round: 0, submittedAt: "2026-08-01T00:00:00.000Z", receipt: "queued", alreadyLanded: false, mergePath: "github-merge-queue" };
+		expect(schemas.mergeReceipt.safeParse(receipt).success).toBe(true);
+	});
+
+	test("runs the bound native merge helper and emits its valid receipt", async () => {
+		const log = path.join(os.tmpdir(), `deck-merge-${crypto.randomUUID()}.log`);
+		const { dir, task } = await renderMergeTask("main", log);
+		try {
+			expect(fs.existsSync(path.join(dir, "git"))).toBe(true);
+			const receipt = await task.computeFn!();
+			expect(receipt).toMatchObject({ mergePath: "github-merge-queue", alreadyLanded: false });
+			expect(task.outputSchema!.safeParse(receipt).success).toBe(true);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+			fs.rmSync(log, { force: true });
+		}
+	});
+
+	test("detects an already landed stack PR by its squash commit on its actual base", async () => {
+		const log = path.join(os.tmpdir(), `deck-landing-${crypto.randomUUID()}.log`);
+		const { dir, task } = await renderMergeTask("fm/stack-parent", log, true);
+		try {
+			expect(fs.existsSync(path.join(dir, "git"))).toBe(true);
+			const receipt = await task.computeFn!();
+			expect(receipt).toMatchObject({ mergePath: "already-landed", alreadyLanded: true });
+			expect(fs.readFileSync(log, "utf8")).toContain("log origin/fm/stack-parent");
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+			fs.rmSync(log, { force: true });
+		}
 	});
 });
 

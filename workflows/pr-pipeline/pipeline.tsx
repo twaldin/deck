@@ -41,7 +41,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { assertAdoptable, cleanKnownScratchFiles, decideAdoptPush } from "./lib/adopt.ts";
+import { assertAdoptable, cleanKnownScratchFiles, decideAdoptPush, reconcileAdoptBaseBranch } from "./lib/adopt.ts";
 import { validateBrief } from "./lib/brief.ts";
 import { evaluateDone } from "./lib/done.ts";
 import {
@@ -50,7 +50,7 @@ import {
 	fetchChangedFiles,
 	fetchCodeowners,
 	fetchHeadSha,
-	fetchMainCommitSubjects,
+	fetchBaseCommitSubjects,
 	fetchBranchCheckRuns,
 	fetchPrLifecycle,
 	fetchPrApprovalsAndCi,
@@ -259,13 +259,16 @@ export const localReviewSchema = z.object({
 	summary: z.string(),
 });
 
-const schemas = {
+export const schemas = {
 	input: inputSchema,
 	preflight: z.object({
 		ok: z.boolean(),
 		openQuestions: z.array(z.string()),
 		briefDigest: z.string(),
 		resolvedReviewerModel: z.string(),
+	}),
+	adoptBase: z.object({
+		baseBranch: z.string().min(1),
 	}),
 	implementation: z.object({
 		commits: z.array(z.string()),
@@ -292,6 +295,7 @@ const schemas = {
 		prNumber: z.number().int(),
 		url: z.string(),
 		headSha: z.string(),
+		baseBranch: z.string().min(1),
 		watchSetRegistered: z.boolean(),
 		watchSetPath: z.string(),
 		receipt: z.string(),
@@ -365,11 +369,12 @@ const schemas = {
 		submittedAt: z.string(),
 		receipt: z.string(),
 		alreadyLanded: z.boolean(),
-		mergePath: z.enum(["graphite", "gh-fallback", "dry-run", "already-landed"]),
+		mergePath: z.enum(["github-merge-queue", "dry-run", "already-landed"]),
 	}),
 	queuePoll: z.object({
 		poll: z.number().int(),
 		state: z.enum(["open", "closed"]),
+		baseBranch: z.string().min(1),
 		autoMergeRequest: z.boolean(),
 		ejected: z.boolean(),
 		reason: z.string(),
@@ -553,7 +558,7 @@ export default smithers((ctx) => {
 	const fixtures = { ...DEFAULT_FIXTURES, ...(input.fixtures ?? {}) };
 	const github = { ...DEFAULT_GITHUB, ...(input.github ?? {}) };
 	const commands = { ...DEFAULT_COMMANDS, ...(input.commands ?? {}) };
-	const baseBranch = input.baseBranch ?? "main";
+	const declaredBaseBranch = input.baseBranch ?? "main";
 	const adopt = input.existingPr != null;
 	// Resolved once per render; yolo=false (stamp behavior) when omitted.
 	const profile: ProjectProfile | null =
@@ -579,7 +584,11 @@ export default smithers((ctx) => {
 	const latestLocalFix = ctx.latest(outputs.localFix, "local-fix");
 	const localReviewRows = (ctx.outputs.localReview ?? []) as Array<{ round: number }>;
 	const reviewEscalation = ctx.latest(outputs.approvals, "review-escalation");
+	const adoptedBase = ctx.latest(outputs.adoptBase, "adopt-base");
 	const pr = ctx.latest(outputs.prRecord, "push-pr");
+	// An adopted stack child resolves its live GitHub base before review. Every
+	// later review, rebase, CI, and landing check uses that same branch.
+	const baseBranch = adoptedBase?.baseBranch ?? pr?.baseBranch ?? declaredBaseBranch;
 	const reviewerRequest = ctx.latest(outputs.reviewerRequest, "request-reviewers");
 	const migCheck = ctx.latest(outputs.migrationCheck, "migration-check");
 	const migGate = ctx.latest(outputs.approvals, "migration-gate");
@@ -685,6 +694,7 @@ export default smithers((ctx) => {
 	const queueRows = (ctx.outputs.queuePoll ?? []) as Array<{
 		poll: number;
 		state: string;
+		baseBranch: string;
 		autoMergeRequest: boolean;
 		ejected: boolean;
 	}>;
@@ -827,11 +837,22 @@ export default smithers((ctx) => {
 					</Task>
 				) : null}
 
+				{preflight?.ok === true && adopt && !dryRun ? (
+					<Task id="adopt-base" output={outputs.adoptBase} retries={1}>
+						{() => (async () => {
+							const overview = await fetchPrOverview(ghCtx, input.existingPr as number);
+							const baseBranch = reconcileAdoptBaseBranch(input.baseBranch, overview.baseRefName);
+							await execOrThrow(bunExec, [github.git, "ls-remote", "--exit-code", "--heads", "origin", baseBranch], { cwd: input.worktree });
+							return { baseBranch };
+						})()}
+					</Task>
+				) : null}
+
 				{/* ------------------------------------------------ stage 1: implement */}
 				{/* Adopt path: the code already lives on the PR. The implement node
 				    still runs (downstream gates key off its row) but as a stub compute
 				    task — no agent, no greenfield work. */}
-				{preflight?.ok === true && brief !== null && adopt ? (
+				{preflight?.ok === true && brief !== null && adopt && (dryRun || adoptedBase !== undefined) ? (
 					<Task id="implement" output={outputs.implementation} retries={0}>
 						{() => ({
 							commits: [],
@@ -947,6 +968,7 @@ export default smithers((ctx) => {
 											prNumber,
 											url: `https://github.com/${input.repo}/pull/${prNumber}`,
 											headSha: "dryrun-head-sha",
+											baseBranch: declaredBaseBranch,
 											watchSetRegistered: true,
 											watchSetPath: "(dry-run: not written)",
 											receipt: `dry-run: adopted existing PR #${prNumber}`,
@@ -955,6 +977,15 @@ export default smithers((ctx) => {
 										};
 									}
 									let overview = await fetchPrOverview(ghCtx, prNumber);
+									const adoptedBaseBranch = reconcileAdoptBaseBranch(
+										adoptedBase?.baseBranch ?? input.baseBranch,
+										overview.baseRefName,
+									);
+									await execOrThrow(
+										bunExec,
+										[github.git, "ls-remote", "--exit-code", "--heads", "origin", adoptedBaseBranch],
+										{ cwd: input.worktree },
+									);
 									// The local and watch fixers commit/push, and enqueue-merge runs
 									// in THIS worktree. Verify the branch, repository, and clean state;
 									// a clean descendant is allowed when local review fixed the PR.
@@ -991,7 +1022,7 @@ export default smithers((ctx) => {
 									assertAdoptable(overview, {
 										repo: input.repo,
 										branch: input.branch,
-										baseBranch,
+										baseBranch: adoptedBaseBranch,
 										worktreeBranch,
 										worktreeHead,
 										worktreeStatus,
@@ -1055,6 +1086,7 @@ export default smithers((ctx) => {
 										prNumber,
 										url: overview.url,
 										headSha: overview.headSha,
+										baseBranch: adoptedBaseBranch,
 										watchSetRegistered: true,
 										watchSetPath,
 										receipt: `adopted existing PR #${prNumber} (head ${overview.headSha})`,
@@ -1067,6 +1099,7 @@ export default smithers((ctx) => {
 										prNumber: fixtures.prNumber,
 										url: `https://github.com/${input.repo}/pull/${fixtures.prNumber}`,
 										headSha: "dryrun-head-sha",
+										baseBranch: declaredBaseBranch,
 										watchSetRegistered: true,
 										watchSetPath: "(dry-run: not written)",
 										receipt: "dry-run push receipt",
@@ -1139,6 +1172,7 @@ export default smithers((ctx) => {
 									prNumber,
 									url,
 									headSha,
+									baseBranch: declaredBaseBranch,
 									watchSetRegistered: true,
 									watchSetPath,
 									receipt: `pushed ${input.branch}; PR #${prNumber}`,
@@ -1734,9 +1768,10 @@ prNumber: pr.prNumber,
 										mergePath: "dry-run",
 									};
 								}
-								// Idempotency: if the squash commit is already on main
+								// Idempotency: if the squash commit is already on this PR's base
 								// (crash after submit), do not submit again.
-								const commits = await fetchMainCommitSubjects(github.git, input.worktree);
+								const mergeBaseBranch = (await fetchPrOverview(ghCtx, pr.prNumber)).baseRefName;
+								const commits = await fetchBaseCommitSubjects(github.git, input.worktree, mergeBaseBranch);
 								const landed = findLandingCommit(commits, pr.prNumber);
 								if (landed !== null) {
 									return {
@@ -1807,7 +1842,7 @@ prNumber: pr.prNumber,
 								if (!dryRun && pollNo > 0) await sleepSeconds(limits.landingPollSeconds * 2);
 								const fixtureLifecycle = fixtures.queueLifecycle[pollNo];
 								const lifecycle = dryRun
-									? { state: fixtureLifecycle?.state ?? "closed" as const, merged: false, autoMergeRequest: fixtureLifecycle?.autoMergeRequest ?? false }
+									? { state: fixtureLifecycle?.state ?? "closed" as const, merged: false, autoMergeRequest: fixtureLifecycle?.autoMergeRequest ?? false, baseBranch }
 									: await fetchPrLifecycle(ghCtx, pr.prNumber);
 								const prior = queueRows[queueRows.length - 1];
 								const ejected = lifecycle.state === "open" && prior?.autoMergeRequest === true && !lifecycle.autoMergeRequest;
@@ -1830,7 +1865,7 @@ prNumber: pr.prNumber,
 										await runMerge({ exec: bunExec, gh: github.gh, prNumber: pr.prNumber, cwd: input.worktree, args: ["--auto", "--squash"] });
 									}
 								}
-								return { poll: pollNo, state: lifecycle.state, autoMergeRequest: ejected ? true : lifecycle.autoMergeRequest, ejected, reason: ejected ? "PR ejected; auto-merge re-submitted" : lifecycle.state === "closed" ? "PR closed; verify squash on base" : "waiting in merge queue" };
+								return { poll: pollNo, state: lifecycle.state, baseBranch: lifecycle.baseBranch || baseBranch, autoMergeRequest: ejected ? true : lifecycle.autoMergeRequest, ejected, reason: ejected ? "PR ejected; auto-merge re-submitted" : lifecycle.state === "closed" ? "PR closed; verify squash on base" : "waiting in merge queue" };
 							})()}
 						</Task>
 					</Loop>
@@ -1856,9 +1891,10 @@ prNumber: pr.prNumber,
 										};
 									}
 									if (pollNo > 0) await sleepSeconds(limits.landingPollSeconds);
-									// NEVER rely on the merged flag. Search main for "(#N)" to
-									// confirm the squash landed.
-									const commits = await fetchMainCommitSubjects(github.git, input.worktree);
+									// NEVER rely on the merged flag. Search the live PR base for "(#N)"
+									// to confirm the squash landed.
+									const landingBaseBranch = latestQueue?.baseBranch || baseBranch;
+									const commits = await fetchBaseCommitSubjects(github.git, input.worktree, landingBaseBranch);
 									const landed = findLandingCommit(commits, pr.prNumber);
 									return {
 										poll: pollNo,
@@ -1882,7 +1918,7 @@ prNumber: pr.prNumber,
 					<Task id="landing-exhausted" output={outputs.landingPoll} retries={0}>
 						{() => {
 							throw new Error(
-								`[escalate] merge submitted but squash commit (#${pr?.prNumber}) never appeared on main after ${landingRows.length} polls. Check the GitHub merge queue; resume when resolved.`,
+								`[escalate] merge submitted but squash commit (#${pr?.prNumber}) never appeared on ${latestQueue?.baseBranch || baseBranch} after ${landingRows.length} polls. Check the GitHub merge queue; resume when resolved.`,
 							);
 						}}
 					</Task>

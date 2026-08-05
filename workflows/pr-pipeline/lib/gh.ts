@@ -482,17 +482,19 @@ export interface PrLifecycle {
 	state: "open" | "closed";
 	merged: boolean;
 	autoMergeRequest: boolean;
+	baseBranch: string;
 }
 
 /** Read queue state. `merged` is intentionally not used to prove landing. */
 export async function fetchPrLifecycle(ctx: GhContext, prNumber: number): Promise<PrLifecycle> {
 	const exec = ctx.exec ?? bunExec;
 	const out = await execOrThrow(exec, [ctx.gh, "api", `repos/${ctx.repo}/pulls/${prNumber}`]);
-	const payload = JSON.parse(out) as { state?: unknown; merged?: unknown; auto_merge?: unknown };
+	const payload = JSON.parse(out) as { state?: unknown; merged?: unknown; auto_merge?: unknown; base?: { ref?: unknown } };
 	return {
 		state: payload.state === "closed" ? "closed" : "open",
 		merged: payload.merged === true,
 		autoMergeRequest: payload.auto_merge !== null && payload.auto_merge !== undefined,
+		baseBranch: str(payload.base?.ref),
 	};
 }
 
@@ -504,17 +506,18 @@ export async function fetchHeadSha(ctx: GhContext, prNumber: number): Promise<st
 	return out.trim();
 }
 
-/** Recent commit subjects on origin/main (landing verification). */
-export async function fetchMainCommitSubjects(
+/** Recent commit subjects on the PR base branch (landing verification). */
+export async function fetchBaseCommitSubjects(
 	git: string,
 	worktree: string,
+	baseBranch: string,
 	limit = 200,
 	exec: ExecFn = bunExec,
 ): Promise<Array<{ sha: string; subject: string }>> {
-	await execOrThrow(exec, [git, "fetch", "origin", "main"], { cwd: worktree });
+	await execOrThrow(exec, [git, "fetch", "origin", baseBranch], { cwd: worktree });
 	const out = await execOrThrow(
 		exec,
-		[git, "log", "origin/main", `--max-count=${limit}`, "--format=%H%x09%s"],
+		[git, "log", `origin/${baseBranch}`, `--max-count=${limit}`, "--format=%H%x09%s"],
 		{ cwd: worktree },
 	);
 	return out

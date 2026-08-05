@@ -7,7 +7,7 @@
 
 import { describe, expect, test } from "bun:test";
 
-import { assertAdoptable, cleanKnownScratchFiles, decideAdoptPush, KNOWN_SCRATCH_FILES, repoFromRemoteUrl, type PrOverview } from "../lib/adopt.ts";
+import { assertAdoptable, cleanKnownScratchFiles, decideAdoptPush, KNOWN_SCRATCH_FILES, reconcileAdoptBaseBranch, repoFromRemoteUrl, type PrOverview } from "../lib/adopt.ts";
 import { fetchPrOverview, type ExecFn } from "../lib/gh.ts";
 
 const goodOverview: PrOverview = {
@@ -66,10 +66,23 @@ describe("assertAdoptable", () => {
 		).toThrow(/head branch is "other-branch"/);
 	});
 
-	test("rejects a base-branch mismatch (PR targets a different base than the run declares)", () => {
-		expect(() =>
-			assertAdoptable({ ...goodOverview, baseRefName: "release-1.2" }, goodExpectation),
-		).toThrow(/targets base "release-1.2"/);
+	test("reconciles an omitted base to a stacked PR base", () => {
+		const baseBranch = reconcileAdoptBaseBranch(undefined, "fm/stack-parent");
+		expect(baseBranch).toBe("fm/stack-parent");
+		expect(() => assertAdoptable({ ...goodOverview, baseRefName: baseBranch }, { ...goodExpectation, baseBranch })).not.toThrow();
+	});
+
+	test("reconciles the default main base to a stacked PR base", () => {
+		expect(reconcileAdoptBaseBranch("main", "fm/stack-parent")).toBe("fm/stack-parent");
+	});
+
+	test("reconciles a PR retargeted to main, but rejects different non-main bases", () => {
+		expect(reconcileAdoptBaseBranch("release-1.2", "main")).toBe("main");
+		expect(() => reconcileAdoptBaseBranch("release-1.2", "fm/stack-parent")).toThrow(/declared baseBranch "release-1.2"/);
+	});
+
+	test("rejects a base-branch mismatch after a live PR re-fetch", () => {
+		expect(() => assertAdoptable({ ...goodOverview, baseRefName: "release-1.2" }, goodExpectation)).toThrow(/targets base "release-1.2"/);
 	});
 
 	test("rejects a worktree checked out on a different branch", () => {
