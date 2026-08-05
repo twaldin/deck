@@ -86,13 +86,10 @@ const PROXY_AUTH_TIMEOUT_MS = 5_000;
 const MAX_PROXY_PAYLOAD_BYTES = 4 * 1024 * 1024;
 
 function bearerFromRequest(req: Request): string | null {
-  const smithersKey = req.headers.get("x-smithers-key");
-  if (smithersKey) return smithersKey;
   const authorization = req.headers.get("authorization");
-  if (!authorization) return null;
-  return authorization.slice(0, 7).toLowerCase() === "bearer "
-    ? authorization.slice(7)
-    : authorization;
+  if (!authorization || authorization.slice(0, 7).toLowerCase() !== "bearer ") return null;
+  const token = authorization.slice(7);
+  return token ? token : null;
 }
 
 function clearProxyAuthTimer(data: ProxySocketData): void {
@@ -258,7 +255,16 @@ function createAuthenticatedProxy(internalPort: number): Bun.Server<ProxySocketD
         return new Response("WebSocket upgrade failed\n", { status: 500 });
       }
 
-      if (url.pathname !== "/health" && bearerFromRequest(req) !== bearer) {
+      if (url.pathname === "/health") {
+        try {
+          const upstream = await fetch(`http://${internalHost}:${internalPort}/health`);
+          const payload = (await upstream.json()) as { ok?: unknown };
+          return Response.json({ ok: upstream.ok && payload.ok === true }, { status: upstream.status });
+        } catch {
+          return Response.json({ ok: false }, { status: 502 });
+        }
+      }
+      if (bearerFromRequest(req) !== bearer) {
         return Response.json(
           {
             ok: false,
@@ -271,11 +277,7 @@ function createAuthenticatedProxy(internalPort: number): Bun.Server<ProxySocketD
       const headers = new Headers(req.headers);
       headers.set("host", `${internalHost}:${internalPort}`);
       headers.delete("x-smithers-key");
-      if (url.pathname === "/health") {
-        headers.delete("authorization");
-      } else {
-        headers.set("authorization", `Bearer ${bearer}`);
-      }
+      headers.set("authorization", `Bearer ${bearer}`);
       try {
         return await fetch(`http://${internalHost}:${internalPort}${url.pathname}${url.search}`, {
           method: req.method,
@@ -377,6 +379,8 @@ function armGatewayExpiry() {
     }
     console.error("Smithers Gateway token expired; closing authenticated sessions");
     process.exitCode = 1;
+    const forceExit = setTimeout(() => process.exit(1), 5_000);
+    forceExit.unref();
     void closeGatewayServers().catch((error) => {
       console.error(`Failed to close expired Gateway: ${error instanceof Error ? error.message : String(error)}`);
     });

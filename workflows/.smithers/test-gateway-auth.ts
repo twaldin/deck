@@ -414,19 +414,15 @@ try {
   await assertIdleSocketTimesOut();
   const publicHealth = await fetch(`${baseUrl}/health`);
   const publicHealthPayload = (await publicHealth.json()) as Record<string, unknown>;
-  const allowedHealthKeys = [
-    "ok",
-    "protocol",
-    "features",
-    "stateVersion",
-    "identity",
-    "workflowsLoaded",
-    "workflowsTotal",
-  ];
+  const allowedHealthKeys = ["ok"];
   const leakedHealthKeys = Object.keys(publicHealthPayload).filter(
     (key) => !allowedHealthKeys.includes(key),
   );
-  if (publicHealth.status !== 200 || leakedHealthKeys.length > 0) {
+  if (
+    publicHealth.status !== 200 ||
+    publicHealthPayload.ok !== true ||
+    leakedHealthKeys.length > 0
+  ) {
     throw new Error(
       `public /health leaked unexpected fields: ${JSON.stringify(leakedHealthKeys)}`,
     );
@@ -442,6 +438,15 @@ try {
     ] as const),
   )) {
     assertRejected(response, `unauthenticated GET ${path}`);
+  }
+
+  for (const [label, headers] of [
+    ["raw Authorization token", { authorization: token }],
+    ["Basic Authorization", { authorization: `Basic ${token}` }],
+    ["x-smithers-key", { "x-smithers-key": token }],
+  ] as const) {
+    const response = await fetch(`${baseUrl}/v1/api/runs`, { headers });
+    assertRejected(response, label);
   }
 
   const rpcRequest = JSON.stringify({ method: "listRuns", params: {} });

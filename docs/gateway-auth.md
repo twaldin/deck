@@ -1,6 +1,6 @@
 # Smithers Gateway authentication
 
-Deck's Gateway fails closed unless `SMITHERS_GATEWAY_TOKEN` is set. The same bearer is required by HTTP RPC/API calls, Gateway UI reads, and the WebSocket `connect` frame. `GET /health` remains public by Smithers design and must contain no run data.
+Deck's Gateway fails closed unless `SMITHERS_GATEWAY_TOKEN` is set. `Authorization: Bearer <token>` is required by every HTTP RPC/API/UI/metadata route, and the same token is required in the WebSocket `connect` frame. The proxy owns public `GET /health` and returns only a sanitized readiness boolean.
 
 ## Issue and install a token
 
@@ -71,7 +71,7 @@ curl -fsS \
 
 Both checks must pass. Immediately before any tailnet exposure, repeat them from the intended client against the exact tailnet-facing URL; do not treat the ephemeral test or loopback check alone as permission to expose the listener.
 
-Smithers 0.30.0 serves `GET /metrics` and `GET /workflows` before its auth router. Deck therefore publishes a thin authenticated HTTP proxy and keeps the native Gateway on an OS-assigned loopback-only internal port. The proxy requires the same bearer on every HTTP route except intentionally public `/health`.
+Smithers 0.30.0 serves `GET /metrics` and `GET /workflows` before its auth router. Deck therefore publishes a thin authenticated HTTP proxy and keeps the native Gateway on an OS-assigned loopback-only internal port. The proxy accepts only the standard bearer scheme on every HTTP route except its sanitized public `/health`.
 
 Smithers upgrades a WebSocket before authenticating its mandatory `connect` frame. Rejecting the HTTP upgrade would break its browser client because the browser WebSocket API cannot set an `Authorization` header, so Deck accepts the upgrade but gates the protocol: before Smithers confirms `connect`, the proxy forwards only one `connect` request, locally validates its token, directly rejects every read/mutation, allowlists only a safe challenge and the matching connect response from upstream, and caps connections, frames, queues, and authentication time. A missing or wrong-token client receives only `connect.challenge`, then the proxy's deterministic `UNAUTHORIZED` and policy close; no run read or mutation is dispatched. Direct browser navigation to the embedded UI still cannot attach the required HTTP bearer, so a phone UI needs a separate authentication bootstrap.
 
