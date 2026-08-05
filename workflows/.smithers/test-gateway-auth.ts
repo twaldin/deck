@@ -221,6 +221,7 @@ type WsResult = {
   unexpectedEvents: unknown[];
   closed: Promise<void>;
   elapsedMs: number;
+  request(method: string, params: Record<string, unknown>): Promise<WsResponse>;
 };
 
 async function requestWebSocket(
@@ -233,6 +234,32 @@ async function requestWebSocket(
   return await new Promise<WsResult>((resolveRequest, rejectRequest) => {
     const socket = new WebSocket(`ws://${host}:${port}/`);
     const id = `${method}-${crypto.randomUUID()}`;
+    const pendingRequests = new Map<
+      string,
+      {
+        resolve: (result: WsResponse) => void;
+        reject: (error: Error) => void;
+        timeout: ReturnType<typeof setTimeout>;
+      }
+    >();
+    const request = (requestMethod: string, params: Record<string, unknown>): Promise<WsResponse> =>
+      new Promise<WsResponse>((resolveResponse, rejectResponse) => {
+        if (socket.readyState !== WebSocket.OPEN) {
+          rejectResponse(new Error(`WebSocket is not open for ${requestMethod}`));
+          return;
+        }
+        const requestId = `${requestMethod}-${crypto.randomUUID()}`;
+        const requestTimeout = setTimeout(() => {
+          pendingRequests.delete(requestId);
+          rejectResponse(new Error(`Timed out waiting for ${requestMethod}`));
+        }, 5_000);
+        pendingRequests.set(requestId, {
+          resolve: resolveResponse,
+          reject: rejectResponse,
+          timeout: requestTimeout,
+        });
+        socket.send(JSON.stringify({ type: "req", id: requestId, method: requestMethod, params }));
+      });
     const startedAtMs = Date.now();
     let resolveClosed!: () => void;
     const closed = new Promise<void>((resolve) => {
@@ -254,7 +281,13 @@ async function requestWebSocket(
       if ((expectChallenge && challengeCount !== 1) || (!expectChallenge && challengeCount !== 0)) {
         unexpectedEvents.push({ invalidChallengeCount: challengeCount });
       }
-      resolveRequest({ response, unexpectedEvents, closed, elapsedMs: Date.now() - startedAtMs });
+      resolveRequest({
+        response,
+        unexpectedEvents,
+        closed,
+        elapsedMs: Date.now() - startedAtMs,
+        request,
+      });
     };
     const fail = (error: Error) => {
       if (settled) return;
@@ -301,6 +334,15 @@ async function requestWebSocket(
         fail(new Error("Gateway returned invalid WebSocket JSON"));
         return;
       }
+      if (frame.type === "res" && frame.id) {
+        const pending = pendingRequests.get(frame.id);
+        if (pending) {
+          pendingRequests.delete(frame.id);
+          clearTimeout(pending.timeout);
+          pending.resolve(frame);
+          return;
+        }
+      }
       if (frame.type === "event") {
         if (frame.event === "connect.challenge") {
           challengeCount += 1;
@@ -330,6 +372,11 @@ async function requestWebSocket(
       }
     });
     socket.addEventListener("close", () => {
+      for (const [requestId, pending] of pendingRequests) {
+        clearTimeout(pending.timeout);
+        pending.reject(new Error(`WebSocket closed before ${requestId} completed`));
+      }
+      pendingRequests.clear();
       resolveClosed();
       if (expectServerClose && response) {
         finish();
@@ -340,9 +387,31 @@ async function requestWebSocket(
   });
 }
 
+async function assertIdleSocketTimesOut(): Promise<void> {
+  await new Promise<void>((resolveTimeout, rejectTimeout) => {
+    const socket = new WebSocket(`ws://${host}:${port}/`);
+    const timeout = setTimeout(() => {
+      socket.close();
+      rejectTimeout(new Error("Idle pre-auth WebSocket did not time out"));
+    }, 7_000);
+    socket.addEventListener("close", (event) => {
+      clearTimeout(timeout);
+      if (event.code !== 1008) {
+        rejectTimeout(new Error(`Idle pre-auth WebSocket closed with ${event.code}, not 1008`));
+        return;
+      }
+      resolveTimeout();
+    });
+    socket.addEventListener("error", () => {
+      // The policy close is the assertion; Bun may also surface it as an error.
+    });
+  });
+}
+
 let failure: unknown;
 try {
   await waitUntilReady();
+  await assertIdleSocketTimesOut();
   const publicHealth = await fetch(`${baseUrl}/health`);
   const publicHealthPayload = (await publicHealth.json()) as Record<string, unknown>;
   const allowedHealthKeys = [
@@ -469,6 +538,21 @@ try {
   if (authenticatedWs.response.ok !== true) {
     throw new Error(`authenticated WebSocket connect failed: ${JSON.stringify(authenticatedWs.response)}`);
   }
+  const authenticatedRuns = await authenticatedWs.request("listRuns", {});
+  if (authenticatedRuns.ok !== true) {
+    throw new Error(`authenticated WebSocket listRuns failed: ${JSON.stringify(authenticatedRuns)}`);
+  }
+  const authenticatedCancel = await authenticatedWs.request("cancelRun", {
+    runId: `gateway-auth-missing-${crypto.randomUUID()}`,
+  });
+  if (
+    authenticatedCancel.error?.code === "UNAUTHORIZED" ||
+    authenticatedCancel.error?.code === "FORBIDDEN"
+  ) {
+    throw new Error(
+      `authenticated WebSocket mutation did not pass the proxy gate: ${JSON.stringify(authenticatedCancel)}`,
+    );
+  }
 
   let expiryTimedOut = false;
   const expiryTimeout = setTimeout(() => {
@@ -497,8 +581,8 @@ try {
   console.log("  GET /, /metrics, /workflows, /v1/api/runs without bearer: rejected");
   console.log("  POST /rpc without bearer: rejected");
   console.log("  POST /rpc with wrong bearer: rejected");
-  console.log("  WebSocket pre-connect reads/mutations and missing/wrong bearers: UNAUTHORIZED, no data leaked");
-  console.log("  authenticated UI, metadata, HTTP RPC/API, and WebSocket connect: accepted");
+  console.log("  idle and pre-connect WebSockets: policy-closed; reads/mutations and bad bearers: UNAUTHORIZED");
+  console.log("  authenticated UI, metadata, HTTP RPC/API, WS read, and controlled WS mutation: forwarded");
   console.log("  issued grant expiry: Gateway stopped and closed authenticated sessions");
 } catch (error) {
   failure = error;

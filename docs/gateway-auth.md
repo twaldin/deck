@@ -49,7 +49,7 @@ The repository launchd template does not provision secrets. Do not load its Keep
 
 ## Approve from a phone
 
-Tailnet reachability is transport, not authentication. Exposure is allowed only after the repository test passes against the live Smithers home from the machine that will serve it:
+Tailnet reachability is transport, not authentication. The repository test is the first gate; run it against the live Smithers workspace from the machine that will serve the Gateway:
 
 ```sh
 cd ~/dev/deck
@@ -57,7 +57,19 @@ SMITHERS_AUTH_TEST_WORKSPACE_ROOT="$HOME/.deck/state/smithers" \
   bun workflows/.smithers/test-gateway-auth.ts
 ```
 
-The test starts a separate Gateway on an OS-assigned ephemeral loopback port, issues its bearer with the pinned CLI into a temporary token store, and always stops the process. It verifies missing, unissued, and revoked tokens fail startup; anonymous and wrong-token root/UI, metrics, workflow metadata, HTTP RPC/API, and WebSocket requests are rejected; pre-connect WS reads and mutations are denied; the challenge contains only a nonce and timestamp; no application data leaks through rejection/close; issued-token requests succeed; and grant expiry closes an active authenticated socket and stops the Gateway.
+The test starts a separate Gateway on an OS-assigned ephemeral loopback port, issues its bearer with the pinned CLI into a temporary token store, and always stops the process. It verifies missing, unissued, and revoked tokens fail startup; anonymous and wrong-token root/UI, metadata, HTTP RPC/API, and WebSocket requests are rejected; idle sockets time out; pre-connect WS reads and mutations are denied; the challenge contains only a nonce and timestamp; no application data leaks; issued-token HTTP and post-connect WS read/mutation traffic is forwarded; and grant expiry closes an active authenticated socket and stops the Gateway.
+
+This ephemeral test proves the checked-in code path against live workspace data; it does **not** prove that launchd loaded the provisioned secret or that the live listener runs this configuration. During live cutover, restart `ai.deck.smithers-gateway`, load `SMITHERS_GATEWAY_TOKEN` from the secret store without printing it, and verify the actual service:
+
+```sh
+GATEWAY_URL=http://127.0.0.1:7331
+test "$(curl -sS -o /dev/null -w '%{http_code}' "$GATEWAY_URL/v1/api/runs")" = 401
+curl -fsS \
+  -H "Authorization: Bearer $SMITHERS_GATEWAY_TOKEN" \
+  "$GATEWAY_URL/v1/api/runs"
+```
+
+Both checks must pass. Immediately before any tailnet exposure, repeat them from the intended client against the exact tailnet-facing URL; do not treat the ephemeral test or loopback check alone as permission to expose the listener.
 
 Smithers 0.30.0 serves `GET /metrics` and `GET /workflows` before its auth router. Deck therefore publishes a thin authenticated HTTP proxy and keeps the native Gateway on an OS-assigned loopback-only internal port. The proxy requires the same bearer on every HTTP route except intentionally public `/health`.
 

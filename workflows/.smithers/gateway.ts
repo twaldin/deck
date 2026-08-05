@@ -74,6 +74,7 @@ type ProxySocketData = {
   failed: boolean;
   authState: "awaiting-connect" | "authenticating" | "authenticated" | "rejected";
   connectId: string | null;
+  authTimer?: ReturnType<typeof setTimeout>;
   connectTokenValid: boolean;
 };
 
@@ -81,6 +82,7 @@ let publicServer: Bun.Server<ProxySocketData> | null = null;
 let proxyConnections = 0;
 const MAX_PROXY_CONNECTIONS = 128;
 const MAX_PRE_AUTH_QUEUE = 4;
+const PROXY_AUTH_TIMEOUT_MS = 5_000;
 const MAX_PROXY_PAYLOAD_BYTES = 4 * 1024 * 1024;
 
 function bearerFromRequest(req: Request): string | null {
@@ -93,10 +95,16 @@ function bearerFromRequest(req: Request): string | null {
     : authorization;
 }
 
+function clearProxyAuthTimer(data: ProxySocketData): void {
+  clearTimeout(data.authTimer);
+  data.authTimer = undefined;
+}
+
 function rejectPreAuthRequest(
   client: Bun.ServerWebSocket<ProxySocketData>,
   id: string,
 ): void {
+  clearProxyAuthTimer(client.data);
   client.data.authState = "rejected";
   client.send(
     JSON.stringify({
@@ -136,6 +144,12 @@ function createAuthenticatedProxy(internalPort: number): Bun.Server<ProxySocketD
           connectId: null,
           connectTokenValid: false,
         };
+        data.authTimer = setTimeout(() => {
+          if (data.authState === "authenticated" || data.authState === "rejected") return;
+          data.authState = "rejected";
+          data.upstream.close(1008, "authentication timed out");
+          data.client?.close(1008, "authentication timed out");
+        }, PROXY_AUTH_TIMEOUT_MS);
         data.upstream.addEventListener("open", () => {
           data.upstreamReady = true;
           for (const message of data.pendingUpstream) data.upstream.send(message);
@@ -153,9 +167,11 @@ function createAuthenticatedProxy(internalPort: number): Bun.Server<ProxySocketD
               if (frame.type === "res" && frame.id === data.connectId) {
                 data.authState =
                   frame.ok === true && data.connectTokenValid ? "authenticated" : "rejected";
+                clearProxyAuthTimer(data);
               }
             } catch {
               data.failed = true;
+              data.client?.close(1011, "Gateway proxy received invalid JSON");
             }
           }
           if (data.client) {
@@ -168,10 +184,12 @@ function createAuthenticatedProxy(internalPort: number): Bun.Server<ProxySocketD
           }
         });
         data.upstream.addEventListener("close", (event) => {
+          clearProxyAuthTimer(data);
           data.failed = true;
           data.client?.close(event.code || 1000, event.reason);
         });
         data.upstream.addEventListener("error", () => {
+          clearProxyAuthTimer(data);
           data.failed = true;
           data.client?.close(1011, "Gateway proxy upstream failed");
         });
@@ -179,6 +197,7 @@ function createAuthenticatedProxy(internalPort: number): Bun.Server<ProxySocketD
           proxyConnections += 1;
           return;
         }
+        clearProxyAuthTimer(data);
         data.upstream.close();
         return new Response("WebSocket upgrade failed\n", { status: 500 });
       }
@@ -228,7 +247,9 @@ function createAuthenticatedProxy(internalPort: number): Bun.Server<ProxySocketD
       },
       message(client, message) {
         if (typeof message !== "string") {
+          clearProxyAuthTimer(client.data);
           client.data.authState = "rejected";
+          client.data.upstream.close(1003, "Gateway protocol requires text frames");
           client.close(1003, "Gateway protocol requires text frames");
           return;
         }
@@ -275,6 +296,7 @@ function createAuthenticatedProxy(internalPort: number): Bun.Server<ProxySocketD
         }
       },
       close(client) {
+        clearProxyAuthTimer(client.data);
         proxyConnections = Math.max(0, proxyConnections - 1);
         client.data.upstream.close();
       },
