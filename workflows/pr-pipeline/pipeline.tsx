@@ -1096,7 +1096,7 @@ export default smithers((ctx) => {
 										"--repo", input.repo,
 										"--head", input.branch,
 										"--base", baseBranch,
-										"--title", `${input.ticket}: ${brief?.title ?? input.ticket}`,
+										"--title", `${brief?.title ?? input.ticket}`,
 										"--body",
 										generatePullRequestDescription({
 											brief: brief ?? { summary: "", acceptanceCriteria: [] },
