@@ -1,12 +1,11 @@
 # Contributing to deck
 
-This guide is for agents that change the deck repository. It is not the
-operator contract for a deck home. The seeded home contract is
-`v2/seed/orchestrator-contract.md`.
+This guide is for agents that change the deck repository. The public seed for a
+plain pi home is `v2/seed/AGENTS.md`.
 
 ## Package map
 
-- `v2/`: deck-v2 library, CLI, extension, bootstrap, and tests.
+- `v2/`: deck-v2 library, CLI, home bootstrap, and tests.
 - `broker/`: model broker and provider login tools.
 - `cli/`: isolated worktree allocation.
 - `intake/`: incoming work poller.
@@ -50,9 +49,9 @@ library task.
 
 ## Documentation split
 
-Repository contributor guidance lives here. The seeded home contract lives in
-`v2/seed/orchestrator-contract.md` and uses `~/.deck/data/captain.md` for user
-preferences and `~/.deck/data/learnings.md` for operational facts.
+Repository contributor guidance lives here. `v2/seed/AGENTS.md` is copied into
+the private deck home. Global memory lives in OptMem; per-effort depth lives in
+dossiers, and `STANDING-RULES.md` remains the Lindy seat-injection source.
 
 ## Maintaining this file
 

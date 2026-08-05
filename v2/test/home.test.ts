@@ -1,11 +1,8 @@
 /**
- * The orchestrator home is a plain directory, not a code checkout.
+ * The deck home is a plain runtime directory, not a code checkout.
  *
- * This is the fm2 flaw the captain named: FM_HOME was the repo you also
- * developed the tooling in, so the orchestrator loaded the repo's AGENTS.md
- * (project memory) instead of an operating contract, and its live state sat in a
- * working tree a crew could rebase. The guard here is what stops the natural
- * drift back to that shape.
+ * The guard prevents project instructions and disposable worktree operations
+ * from capturing private home state.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
@@ -100,30 +97,28 @@ describe("home is not a checkout", () => {
 });
 
 describe("bootstrap", () => {
-	test("creates the home and copies the contract seed", async () => {
+	test("creates the plain pi home and copies the public contract seed", async () => {
 		const home = path.join(sandbox, "home");
 		process.env.DECK_V2_HOME = home;
 		const { bootstrapHome } = await import("../src/bootstrap");
-		const result = bootstrapHome({ repoV2Dir: REPO_V2, home });
+		const result = bootstrapHome({ repoV2Dir: REPO_V2, home, optMem: false });
 
 		expect(fs.existsSync(path.join(home, "data"))).toBe(true);
 		expect(fs.existsSync(path.join(home, "state"))).toBe(true);
-		// COPIED, not linked: the captain owns this file and edits it in place, so a
-		// link would make his edits a repo diff and a reinstall would clobber them.
 		const contract = path.join(home, "AGENTS.md");
 		expect(fs.lstatSync(contract).isSymbolicLink()).toBe(false);
-		// And it is the ORCHESTRATOR contract, not deck's project memory.
 		const body = fs.readFileSync(contract, "utf8");
-		expect(body).toContain("You are the captain's single point of contact");
-		expect(body).not.toContain("Project agent memory");
+		expect(body).toContain("You are a plain pi session");
+		expect(body).toContain("Run `~/.optmem/memo wake` before any other tool call");
+		expect(body).not.toContain("single point of contact");
 		expect(result.created.length).toBeGreaterThan(0);
 	});
 
 	test("is idempotent", async () => {
 		const home = path.join(sandbox, "home");
 		const { bootstrapHome } = await import("../src/bootstrap");
-		bootstrapHome({ repoV2Dir: REPO_V2, home });
-		const second = bootstrapHome({ repoV2Dir: REPO_V2, home });
+		bootstrapHome({ repoV2Dir: REPO_V2, home, optMem: false });
+		const second = bootstrapHome({ repoV2Dir: REPO_V2, home, optMem: false });
 		expect(second.created).toHaveLength(0);
 		expect(second.linked).toHaveLength(0);
 	});
@@ -133,20 +128,17 @@ describe("bootstrap", () => {
 		fs.mkdirSync(home, { recursive: true });
 		fs.writeFileSync(path.join(home, "AGENTS.md"), "# mine\n");
 		const { bootstrapHome } = await import("../src/bootstrap");
-		const result = bootstrapHome({ repoV2Dir: REPO_V2, home });
+		const result = bootstrapHome({ repoV2Dir: REPO_V2, home, optMem: false });
 		expect(fs.readFileSync(path.join(home, "AGENTS.md"), "utf8")).toBe("# mine\n");
 		expect(result.notes.join(" ")).toContain("yours to edit");
 	});
 
-	test("seeds memory files once, then leaves them alone", async () => {
+	test("does not recreate the retired markdown memory stores", async () => {
 		const home = path.join(sandbox, "home");
-		process.env.DECK_V2_HOME = home;
 		const { bootstrapHome } = await import("../src/bootstrap");
-		bootstrapHome({ repoV2Dir: REPO_V2, home });
-		const learnings = path.join(home, "data", "learnings.md");
-		fs.appendFileSync(learnings, "- something we learned\n");
-		bootstrapHome({ repoV2Dir: REPO_V2, home });
-		expect(fs.readFileSync(learnings, "utf8")).toContain("something we learned");
+		bootstrapHome({ repoV2Dir: REPO_V2, home, optMem: false });
+		expect(fs.existsSync(path.join(home, "data", "captain.md"))).toBe(false);
+		expect(fs.existsSync(path.join(home, "data", "learnings.md"))).toBe(false);
 	});
 });
 
@@ -186,12 +178,7 @@ describe("symlink escape", () => {
 });
 
 describe("prompt isolation in the checkout", () => {
-	// pi discovers AGENTS.md in the working directory and its ancestors. The
-	// orchestrator contract therefore must not be committed under that name
-	// anywhere in this repo: a worker running here would load "you are the
-	// captain's single point of contact, you never write code" as its own
-	// instructions.
-	test("REGRESSION: no AGENTS.md in the repo carries operator doctrine", () => {
+	test("the only nested AGENTS.md is the mandated public home seed", () => {
 		const repoRoot = path.resolve(REPO_V2, "..");
 		const found = execFileSync("git", ["ls-files", "*AGENTS.md", "AGENTS.md"], {
 			cwd: repoRoot,
@@ -200,38 +187,24 @@ describe("prompt isolation in the checkout", () => {
 			.split("\n")
 			.filter((line) => line.length > 0);
 
-		for (const file of found) {
-			const body = fs.readFileSync(path.join(repoRoot, file), "utf8");
-			expect(body).not.toContain("You are the captain's single point of contact");
-		}
-		// And the seed exists under a name pi does not auto-load.
-		expect(fs.existsSync(path.join(REPO_V2, "seed", "orchestrator-contract.md"))).toBe(true);
+		expect(found.filter((file) => file !== "AGENTS.md")).toEqual(["v2/seed/AGENTS.md"]);
+		const seed = fs.readFileSync(path.join(REPO_V2, "seed", "AGENTS.md"), "utf8");
+		expect(seed).toContain("You are a plain pi session");
+		expect(seed).not.toContain("single point of contact");
 	});
 });
 
 describe("the seeded contract is clean", () => {
-	test("build guidance does not ship into the captain's contract", async () => {
+	test("is a compact, public-safe plain-session contract", async () => {
 		const home = path.join(sandbox, "home");
 		const { bootstrapHome } = await import("../src/bootstrap");
-		bootstrapHome({ repoV2Dir: REPO_V2, home });
+		bootstrapHome({ repoV2Dir: REPO_V2, home, optMem: false });
 		const contract = fs.readFileSync(path.join(home, "AGENTS.md"), "utf8");
-		// Build guidance is removed, but first-session onboarding remains.
-		expect(contract).not.toContain("This is the SEED for ~/.deck/AGENTS.md");
-		expect(contract).toStartWith("# Orchestrator");
-		expect(contract).toContain("<!-- ONBOARDING-START");
-		expect(contract).toContain("only agent that asks him anything");
-	});
-
-	test("onboarding block can be removed after answers are written", async () => {
-		const home = path.join(sandbox, "home");
-		const { bootstrapHome, removeOnboardingBlock } = await import("../src/bootstrap");
-		bootstrapHome({ repoV2Dir: REPO_V2, home });
-		const target = path.join(home, "AGENTS.md");
-		const answered = `${fs.readFileSync(target, "utf8")}\n## User preferences\n- Name: Example\n`;
-		fs.writeFileSync(target, removeOnboardingBlock(answered));
-		const body = fs.readFileSync(target, "utf8");
-		expect(body).toContain("User preferences");
-		expect(body).not.toContain("ONBOARDING-START");
+		expect(contract).toStartWith("# Deck home");
+		expect(contract).toContain("## THE FACTORY");
+		expect(contract).toContain("## QUESTIONS DISCIPLINE");
+		expect(contract).toContain("## THIS SESSION NEVER");
+		expect(Buffer.byteLength(contract, "utf8")).toBeLessThan(12 * 1024);
 	});
 });
 
