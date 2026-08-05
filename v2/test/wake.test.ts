@@ -418,6 +418,19 @@ describe("fleet board component", () => {
 	});
 });
 
+describe("CPU time parsing", () => {
+	test("parses ps time formats and rejects malformed values", async () => {
+		const { parseCpuTimeMs } = await import("../src/wake");
+		expect(parseCpuTimeMs("01:02.34")).toBe(62_340);
+		expect(parseCpuTimeMs("01:02:03.45")).toBe(3_723_450);
+		expect(parseCpuTimeMs("2-01:02:03.45")).toBe(176_523_450);
+		expect(parseCpuTimeMs("")).toBeUndefined();
+		expect(parseCpuTimeMs(":")).toBeUndefined();
+		expect(parseCpuTimeMs("::")).toBeUndefined();
+		expect(parseCpuTimeMs("not-a-time")).toBeUndefined();
+	});
+});
+
 describe("a live worker that stops making progress", () => {
 	// Found by running a real worker, not by a test. It fixed the code correctly,
 	// wrote its test, then retried a rate-limited web search nine times and was
@@ -478,6 +491,79 @@ describe("a live worker that stops making progress", () => {
 		expect(verdicts).toHaveLength(1);
 		expect(verdicts[0]?.reason).toContain("child pid 777");
 		expect(verdicts[0]?.reason).toContain("subagent");
+	});
+
+	test("REGRESSION: CPU activity alone keeps a silent worker working", async () => {
+		const { wake } = await mods();
+		const { updateMeta } = await import("../src/meta");
+		const start = Date.now();
+		updateMeta("t1", { run_pid: 4242, run_started: start, worktree: worktreeWith({ "src/a.ts": 20 }) });
+		let sample = 1_000;
+		const sampleCpu = () => ({ parentMs: sample, children: [{ pid: 777, cpuMs: sample }] });
+		// Establish the first CPU sample. The old two-signal detector reports stale on the next call.
+		expect(wake.detectStale(["t1"], { runAlive: () => true, sampleCpu, silenceMs: 1, now: start })).toHaveLength(0);
+		sample = 1_100;
+		// No file writes or transcript growth, but the parent used CPU during the interval.
+		expect(
+			wake.detectStale(["t1"], {
+				runAlive: () => true,
+				sampleCpu,
+				listChildren: () => [{ pid: 777, command: "pi" }],
+				silenceMs: 1,
+				now: start + 20_000,
+			}),
+		).toHaveLength(0);
+	});
+
+	test("CPU sampling survives wake cycles shorter than the sample interval", async () => {
+		const { wake } = await mods();
+		const { updateMeta } = await import("../src/meta");
+		const start = Date.now();
+		updateMeta("t1", { run_pid: 4242, run_started: start, worktree: worktreeWith({ "src/a.ts": 20 }) });
+		let sample = 1_000;
+		const sampleCpu = () => ({ parentMs: sample, children: [] });
+		const options = { runAlive: () => true, sampleCpu, silenceMs: 60_000 };
+		const staleAt = start + 60_000;
+		expect(wake.detectStale(["t1"], { ...options, now: staleAt })).toHaveLength(1);
+		for (const seconds of [3, 6, 9]) {
+			sample += 10;
+			expect(wake.detectStale(["t1"], { ...options, now: staleAt + seconds * 1_000 })).toHaveLength(0);
+		}
+		sample += 100;
+		expect(wake.detectStale(["t1"], { ...options, now: staleAt + 20_000 })).toHaveLength(0);
+	});
+
+	test("a small CPU drip does not hide a genuinely hung worker", async () => {
+		const { wake } = await mods();
+		const { updateMeta } = await import("../src/meta");
+		const start = Date.now();
+		updateMeta("t1", { run_pid: 4242, run_started: start - 20 * MINUTE, worktree: worktreeWith({ "src/a.ts": 20 }) });
+		let sample = 1_000;
+		const sampleCpu = () => ({ parentMs: sample, children: [] });
+		const options = { runAlive: () => true, sampleCpu, silenceMs: 1 };
+		expect(wake.detectStale(["t1"], { ...options, now: start })).toHaveLength(1);
+		sample += 50;
+		expect(wake.detectStale(["t1"], { ...options, now: start + 20_000 })).toHaveLength(0);
+		// A later silence must still be eligible for a new verdict after the CPU drip.
+		expect(wake.detectStale(["t1"], { ...options, now: start + 21 * MINUTE })).toHaveLength(1);
+	});
+
+	test("all three silent signals alert and name a zero-CPU child", async () => {
+		const { wake } = await mods();
+		const { updateMeta } = await import("../src/meta");
+		const start = Date.now();
+		updateMeta("t1", { run_pid: 4242, worktree: worktreeWith({ "src/a.ts": 20 }) });
+		const sampleCpu = () => ({ parentMs: 1_000, children: [{ pid: 777, cpuMs: 500 }] });
+		const options = {
+			runAlive: () => true,
+			listChildren: () => [{ pid: 777, command: "pi --model deck/sonnet" }],
+			sampleCpu,
+		};
+		expect(wake.detectStale(["t1"], { ...options, now: start })).toHaveLength(1);
+		const verdicts = wake.detectStale(["t1"], { ...options, now: start + 11 * MINUTE });
+		expect(verdicts).toHaveLength(1);
+		expect(verdicts[0]?.reason).toContain("child pid 777");
+		expect(verdicts[0]?.reason).toContain("CPU delta 0.00s");
 	});
 
 	// detectStale runs every cycle; without suppression the same standing silence
