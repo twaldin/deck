@@ -62,7 +62,7 @@ import {
 	resolveReviewerLogin,
 } from "./lib/gh.ts";
 import { findLandingCommit } from "./lib/landing.ts";
-import { runMerge, runMergeWithFallback } from "./lib/merge.ts";
+import { runMerge } from "./lib/merge.ts";
 import { detectMigrations, MIGRATION_STAGES, migrationEvidenceComplete } from "./lib/migrations.ts";
 import { generatePullRequestDescription, sanitizeDescriptionInput } from "./lib/description.ts";
 import {

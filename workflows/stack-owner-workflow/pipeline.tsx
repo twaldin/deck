@@ -1,8 +1,9 @@
 /** @jsxImportSource smithers-orchestrator */
 /** One run owns a prompt, its ordered PR stack, review loop, and delivery. */
-import { Loop, PiAgent, Sequence, Task, Workflow, createSmithers } from "smithers-orchestrator";
+import { Approval, Loop, PiAgent, Sequence, Task, Workflow, approvalDecisionSchema, createSmithers } from "smithers-orchestrator";
 import { z } from "zod";
 import { execOrThrow, bunExec } from "../pr-pipeline/lib/gh.ts";
+import { runMerge } from "../pr-pipeline/lib/merge.ts";
 import { executeReviewerRequest } from "../pr-pipeline/lib/reviewers.ts";
 import { fetchChangedFiles, fetchCodeowners, fetchRecentAuthors, resolveReviewerLogin, isCollaborator, requestReviewers, fetchRequestedReviewers } from "../pr-pipeline/lib/gh.ts";
 import { pollStack } from "./lib/poll.ts";
@@ -22,7 +23,24 @@ const schemas = {
   fix: z.object({ fixed: z.boolean() }),
   reviewGate: z.object({ ok: z.boolean() }),
   wake: z.object({ action: z.string(), signal: z.string() }),
-  poll: z.object({ signal: z.enum(["ci-fail", "actionable-comment", "decision-ask", "idle", "exhausted", "complete"]), reason: z.string() }),
+  poll: z.object({
+    signal: z.enum(["ci-fail", "actionable-comment", "decision-ask", "idle", "exhausted", "complete"]),
+    reason: z.string(),
+    prs: z.array(z.object({
+      number: z.number().int().positive(),
+      url: z.string(),
+      title: z.string(),
+      headSha: z.string(),
+      mergeable: z.boolean(),
+      mergeStateStatus: z.string(),
+      ci: z.enum(["green", "pending", "red"]),
+      reviewState: z.string(),
+      actionableComments: z.number().int().nonnegative(),
+      decisionAsk: z.boolean(),
+    })).optional(),
+  }),
+  approval: approvalDecisionSchema,
+  merge: z.object({ merged: z.boolean(), receipts: z.array(z.string()) }),
   result: z.object({ done: z.boolean(), summary: z.string() }),
 };
 const { outputs, smithers } = createSmithers(schemas);
@@ -83,23 +101,66 @@ export default smithers((ctx) => {
   }}</Task>;
   const poll = <Task id="poll-stack" output={outputs.poll} retries={2}>{async () => {
     const prs = ctx.latest(outputs.opened, "open-stack")?.prs ?? [];
-    if (dryRun) { const signal = input.fixtures?.ciFail ? "ci-fail" : "complete"; return { signal, reason: signal === "ci-fail" ? "fixture CI failure" : "fixture complete" }; }
+    if (dryRun) {
+      const signal = input.fixtures?.ciFail ? "ci-fail" : "complete";
+      const prs = (ctx.latest(outputs.opened, "open-stack")?.prs ?? []).map((pr) => ({
+        number: pr.number,
+        url: `https://github.com/${input.repo}/pull/${pr.number}`,
+        title: input.prompt,
+        headSha: "dryrun-head-sha",
+        mergeable: signal === "complete",
+        mergeStateStatus: signal === "complete" ? "clean" : "blocked",
+        ci: signal === "complete" ? "green" : "red" as const,
+        reviewState: signal === "complete" ? "APPROVED" : "CHANGES_REQUESTED",
+        actionableComments: 0,
+        decisionAsk: false,
+      }));
+      return { signal, prs, reason: signal === "ci-fail" ? "fixture CI failure" : "fixture complete" };
+    }
     const pollNo = (ctx.outputs.poll ?? []).length;
     if (!dryRun && pollNo > 0) await wait(pollSeconds * 1000);
     const result = await pollStack(bunExec, input.repo, prs.map((p) => p.number), gh);
     const exhausted = pollNo + 1 >= maxPolls && result.signal === "idle";
     const signal = exhausted ? "exhausted" : result.signal;
     produceWakeConditions({ taskId, ciFail: signal === "ci-fail", actionableComment: signal === "actionable-comment", decisionAsk: signal === "decision-ask" });
-    return { signal, reason: exhausted ? "Poll limit reached without a wake condition" : result.reason };
+    return { signal, prs: result.prs, reason: exhausted ? "Poll limit reached without a wake condition" : result.reason };
   }}</Task>;
   const watch = <Loop id="code-poll-loop" maxIterations={maxPolls} onMaxReached="return-last" skipIf={ctx.latest(outputs.reviewGate, "review-gate")?.ok === false} until={["complete", "ci-fail", "actionable-comment", "decision-ask", "exhausted"].includes(ctx.latest(outputs.poll, "poll-stack")?.signal ?? "")}>
     <Sequence>{poll}<Task id="wake-fix" output={outputs.wake} agent={undefined}>{async () => { const signal = ctx.latest(outputs.poll, "poll-stack")?.signal; if (signal === "idle" || signal === "exhausted") return { action: "wait", signal }; return { action: signal === "decision-ask" ? "escalate" : "fix", signal }; }}</Task></Sequence>
   </Loop>;
-  return <Workflow name="lindy-stack-owner"><Sequence>{implementation}{reviewLoop}{reviewGate}{open}{watch}<Task id="done" output={outputs.result}>{() => {
+  const opened = ctx.latest(outputs.opened, "open-stack");
+  const latestPoll = ctx.latest(outputs.poll, "poll-stack");
+  const approval = ctx.latest(outputs.approval, "merge-stack-approval");
+  // The gate node stays rendered after it resolves: dropping it once a decision
+  // exists would remove the node the merge below reads, and break resume.
+  const stackReady = latestPoll?.signal === "complete";
+  const stack = opened?.prs ?? [];
+  // Only facts the "complete" poll signal actually establishes: every PR is
+  // CI-green and mergeable, with no unresolved comment and no decision ask.
+  const stackSummary = stack.map((pr) => {
+    const evidence = latestPoll?.prs?.find((candidate) => candidate.number === pr.number);
+    return [
+      `PR #${pr.number} https://github.com/${input.repo}/pull/${pr.number}`,
+      evidence ? `  CI: ${evidence.ci}; review: ${evidence.reviewState}; mergeability: ${evidence.mergeable ? "MERGEABLE" : "NOT MERGEABLE"} (${evidence.mergeStateStatus})` : "  Evidence: poll data unavailable",
+    ].join("\n");
+  }).join("\n");
+  const mergeApproval = stackReady ? (dryRun ? <Task id="merge-stack-approval" output={outputs.approval}>{() => ({ approved: true, note: "dry-run stack approval", decidedBy: "dry-run", decidedAt: new Date().toISOString() })}</Task> : <Approval id="merge-stack-approval" output={outputs.approval} request={{ title: `Approve ordered stack merge: ${input.repo} (${stack.length} PRs)`, summary: `Ordered stack:\n${stackSummary}\n\nEvery PR is CI-green and mergeable, with no unresolved review comment and no open decision ask. Approving submits the Gateway decision; the workflow then re-polls the stack and its own merge node submits each PR to the GitHub merge queue in order. Denying stops the run.` }} onDeny="fail" />) : null;
+  const merged = approval?.approved === true ? <Task id="merge-stack" output={outputs.merge} retries={1}>{async () => {
+    if (dryRun) return { merged: true, receipts: stack.map((pr) => `dry-run: PR #${pr.number}`) };
+    const verified = await pollStack(bunExec, input.repo, stack.map((pr) => pr.number), gh);
+    if (verified.signal !== "complete") throw new Error(`stack changed after approval: ${verified.reason}`);
+    const receipts: string[] = [];
+    for (const pr of stack) {
+      const result = await runMerge({ exec: bunExec, gh, prNumber: pr.number, cwd: input.worktree, args: ["--auto", "--squash"] });
+      receipts.push(`PR #${pr.number}: ${result.output.slice(-1000)}`);
+    }
+    return { merged: true, receipts };
+  }}</Task> : null;
+  return <Workflow name="lindy-stack-owner"><Sequence>{implementation}{reviewLoop}{reviewGate}{open}{watch}{mergeApproval}{merged}<Task id="done" output={outputs.result}>{() => {
     const blockers = ctx.latest(outputs.review, "adversarial-review")?.blockers ?? [];
     const signal = ctx.latest(outputs.poll, "poll-stack")?.signal;
-    const ok = blockers.length === 0 && signal === "complete";
+    const ok = blockers.length === 0 && signal === "complete" && ctx.latest(outputs.merge, "merge-stack")?.merged === true;
     produceWakeConditions({ taskId, terminal: ok, maxAdversarial: !ok && blockers.length > 0, ciFail: !ok && signal === "ci-fail", actionableComment: !ok && signal === "actionable-comment", decisionAsk: !ok && signal === "decision-ask" });
-    return ok ? { done: true, summary: input.profile === "lindy-full" ? "green stack parked for captain stamp" : "green stack ready for yolo merge" } : { done: false, summary: `stack owner stopped with unresolved ${blockers.length ? "review blockers" : `${signal ?? "unknown"} poll signal`}` };
+    return ok ? { done: true, summary: input.profile === "lindy-full" ? "stack merged after captain approval" : "stack merged" } : { done: false, summary: `stack owner stopped with unresolved ${blockers.length ? "review blockers" : `${signal ?? "unknown"} poll signal`}` };
   }}</Task></Sequence></Workflow>;
 });

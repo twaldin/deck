@@ -9,6 +9,9 @@ BUN_BIN_DIR=""
 LAUNCHD_DIR="${SCRIPT_DIR}/launchd"
 AGENT_DIR="${HOME}/Library/LaunchAgents"
 LOG_DIR="${HOME}/.deck/logs"
+# The gateway serves the LIVE run workspace, which is separate from the source
+# checkout it loads workflow modules from.
+GATEWAY_WORKSPACE="${HOME}/.deck/state/smithers"
 USER_UID="$(id -u)"
 DOMAIN="gui/${USER_UID}"
 BROKER_SOCKET="${HOME}/.deck/run/broker.sock"
@@ -16,10 +19,12 @@ BROKER_SOCKET="${HOME}/.deck/run/broker.sock"
 LABELS=(
 	"ai.deck.broker"
 	"ai.deck.resource-monitor"
+	"ai.deck.smithers-gateway"
 )
 ENTRYPOINTS=(
 	"${DECK_ROOT}/broker/src/main.ts"
 	"${DECK_ROOT}/ops/resource-monitor"
+	"${DECK_ROOT}/workflows/.smithers/gateway.ts"
 )
 
 usage() {
@@ -184,6 +189,7 @@ render_plist() {
 		-e "s|@DECK_ROOT@|${DECK_ROOT}|g" \
 		-e "s|@LOG_DIR@|${LOG_DIR}|g" \
 		-e "s|@BUN_PATH@|${BUN_BIN_DIR}|g" \
+		-e "s|@GATEWAY_WORKSPACE@|${GATEWAY_WORKSPACE}|g" \
 		"${source}" > "${rendered}"
 }
 
