@@ -1,4 +1,6 @@
+import { readSmithersTokenStore } from "@smithers-orchestrator/cli/token-store";
 import { Gateway, mdxPlugin } from "smithers-orchestrator";
+import { writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -12,10 +14,296 @@ const workflowsRoot = resolve(here, "..");
 const workspaceRoot = resolve(process.env.SMITHERS_WORKSPACE_ROOT ?? process.cwd());
 process.chdir(workspaceRoot);
 
-const parsedPort = Number(process.env.PORT ?? "7331");
-const port = Number.isInteger(parsedPort) && parsedPort > 0 ? parsedPort : 7331;
+const portValue = process.env.PORT?.trim();
+const parsedPort = Number(portValue || "7331");
+const port = Number.isInteger(parsedPort) && parsedPort >= 0 ? parsedPort : 7331;
 const host = process.env.HOST ?? "127.0.0.1";
-const gateway = new Gateway({ heartbeatMs: 15_000, workspaceRoot });
+const bearer = process.env.SMITHERS_GATEWAY_TOKEN?.trim();
+if (!bearer) {
+  throw new Error("SMITHERS_GATEWAY_TOKEN is required");
+}
+
+const issuedGrant = readSmithersTokenStore().tokens[bearer];
+if (!issuedGrant) {
+  throw new Error("SMITHERS_GATEWAY_TOKEN must be issued by `smithers token issue`");
+}
+if (issuedGrant.revokedAtMs !== undefined) {
+  throw new Error("SMITHERS_GATEWAY_TOKEN has been revoked");
+}
+const expiresAtMs = issuedGrant.expiresAtMs;
+if (expiresAtMs === undefined || expiresAtMs <= Date.now()) {
+  throw new Error("SMITHERS_GATEWAY_TOKEN has expired or has no expiry");
+}
+if (!issuedGrant.scopes.includes("*")) {
+  throw new Error("SMITHERS_GATEWAY_TOKEN must grant the `*` scope");
+}
+
+const gateway = new Gateway({
+  heartbeatMs: 15_000,
+  workspaceRoot,
+  // Smithers 0.30 defaults to an all-powerful unauthenticated operator unless
+  // auth is explicit. This one config gates HTTP RPC/API, UI reads, and the
+  // WebSocket connect frame through the same token grant.
+  auth: {
+    mode: "token",
+    tokens: {
+      [bearer]: {
+        role: issuedGrant.role ?? "operator",
+        scopes: issuedGrant.scopes,
+        ...(issuedGrant.userId ? { userId: issuedGrant.userId } : {}),
+        tokenId: issuedGrant.tokenId,
+        ...(issuedGrant.issuedAtMs !== undefined ? { issuedAtMs: issuedGrant.issuedAtMs } : {}),
+        expiresAtMs,
+      },
+    },
+  },
+  // The default root redirects before UI authorization. Mounting the built-in
+  // operator UI at `/` makes the required negative GET / probe pass through
+  // Smithers' UI auth gate too.
+  operatorUi: { path: "/" },
+});
+
+const internalHost = "127.0.0.1";
+
+type ProxySocketData = {
+  upstream: WebSocket;
+  client: Bun.ServerWebSocket<ProxySocketData> | null;
+  pendingUpstream: string[];
+  pendingClient: string[];
+  upstreamReady: boolean;
+  failed: boolean;
+  authState: "awaiting-connect" | "authenticating" | "authenticated" | "rejected";
+  connectId: string | null;
+  connectTokenValid: boolean;
+};
+
+let publicServer: Bun.Server<ProxySocketData> | null = null;
+let proxyConnections = 0;
+const MAX_PROXY_CONNECTIONS = 128;
+const MAX_PRE_AUTH_QUEUE = 4;
+const MAX_PROXY_PAYLOAD_BYTES = 4 * 1024 * 1024;
+
+function bearerFromRequest(req: Request): string | null {
+  const smithersKey = req.headers.get("x-smithers-key");
+  if (smithersKey) return smithersKey;
+  const authorization = req.headers.get("authorization");
+  if (!authorization) return null;
+  return authorization.slice(0, 7).toLowerCase() === "bearer "
+    ? authorization.slice(7)
+    : authorization;
+}
+
+function rejectPreAuthRequest(
+  client: Bun.ServerWebSocket<ProxySocketData>,
+  id: string,
+): void {
+  client.data.authState = "rejected";
+  client.send(
+    JSON.stringify({
+      type: "res",
+      id,
+      ok: false,
+      error: { code: "UNAUTHORIZED", message: "Connect first" },
+    }),
+  );
+  client.data.upstream.close(1008, "authentication required");
+}
+
+async function closeGatewayServers(): Promise<void> {
+  const server = publicServer;
+  publicServer = null;
+  await Promise.all([gateway.close(), server?.stop(true) ?? Promise.resolve()]);
+}
+
+function createAuthenticatedProxy(internalPort: number): Bun.Server<ProxySocketData> {
+  return Bun.serve<ProxySocketData>({
+    hostname: host,
+    port,
+    async fetch(req, server) {
+      const url = new URL(req.url);
+      if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
+        if (proxyConnections >= MAX_PROXY_CONNECTIONS) {
+          return new Response("Gateway connection limit reached\n", { status: 503 });
+        }
+        const data: ProxySocketData = {
+          upstream: new WebSocket(`ws://${internalHost}:${internalPort}${url.pathname}${url.search}`),
+          client: null,
+          pendingUpstream: [],
+          pendingClient: [],
+          upstreamReady: false,
+          failed: false,
+          authState: "awaiting-connect",
+          connectId: null,
+          connectTokenValid: false,
+        };
+        data.upstream.addEventListener("open", () => {
+          data.upstreamReady = true;
+          for (const message of data.pendingUpstream) data.upstream.send(message);
+          data.pendingUpstream.length = 0;
+        });
+        data.upstream.addEventListener("message", (event) => {
+          if (typeof event.data !== "string") {
+            data.failed = true;
+            data.client?.close(1011, "Gateway proxy received a non-text frame");
+            return;
+          }
+          if (data.authState === "authenticating") {
+            try {
+              const frame = JSON.parse(event.data) as { type?: string; id?: string; ok?: boolean };
+              if (frame.type === "res" && frame.id === data.connectId) {
+                data.authState =
+                  frame.ok === true && data.connectTokenValid ? "authenticated" : "rejected";
+              }
+            } catch {
+              data.failed = true;
+            }
+          }
+          if (data.client) {
+            data.client.send(event.data);
+          } else if (data.pendingClient.length < MAX_PRE_AUTH_QUEUE) {
+            data.pendingClient.push(event.data);
+          } else {
+            data.failed = true;
+            data.upstream.close(1009, "Gateway proxy queue limit exceeded");
+          }
+        });
+        data.upstream.addEventListener("close", (event) => {
+          data.failed = true;
+          data.client?.close(event.code || 1000, event.reason);
+        });
+        data.upstream.addEventListener("error", () => {
+          data.failed = true;
+          data.client?.close(1011, "Gateway proxy upstream failed");
+        });
+        if (server.upgrade(req, { data })) {
+          proxyConnections += 1;
+          return;
+        }
+        data.upstream.close();
+        return new Response("WebSocket upgrade failed\n", { status: 500 });
+      }
+
+      if (url.pathname !== "/health" && bearerFromRequest(req) !== bearer) {
+        return Response.json(
+          {
+            ok: false,
+            error: { code: "UNAUTHORIZED", message: "A valid bearer token is required" },
+          },
+          { status: 401 },
+        );
+      }
+
+      const headers = new Headers(req.headers);
+      headers.set("host", `${internalHost}:${internalPort}`);
+      headers.delete("x-smithers-key");
+      if (url.pathname === "/health") {
+        headers.delete("authorization");
+      } else {
+        headers.set("authorization", `Bearer ${bearer}`);
+      }
+      try {
+        return await fetch(`http://${internalHost}:${internalPort}${url.pathname}${url.search}`, {
+          method: req.method,
+          headers,
+          body: req.method === "GET" || req.method === "HEAD" ? undefined : req.body,
+          redirect: "manual",
+        });
+      } catch (error) {
+        return new Response(
+          `Gateway proxy error: ${error instanceof Error ? error.message : String(error)}\n`,
+          { status: 502 },
+        );
+      }
+    },
+    websocket: {
+      open(client) {
+        const data = client.data;
+        data.client = client;
+        if (data.failed) {
+          client.close(1011, "Gateway proxy upstream failed");
+          return;
+        }
+        for (const message of data.pendingClient) client.send(message);
+        data.pendingClient.length = 0;
+      },
+      message(client, message) {
+        if (typeof message !== "string") {
+          client.data.authState = "rejected";
+          client.close(1003, "Gateway protocol requires text frames");
+          return;
+        }
+        const data = client.data;
+        if (data.authState === "authenticated") {
+          data.upstream.send(message);
+          return;
+        }
+        if (data.authState === "rejected") {
+          client.close(1008, "authentication required");
+          return;
+        }
+
+        let frame: {
+          type?: string;
+          id?: string;
+          method?: string;
+          params?: { auth?: { token?: unknown } };
+        };
+        try {
+          frame = JSON.parse(message);
+        } catch {
+          rejectPreAuthRequest(client, "invalid-request");
+          return;
+        }
+        if (data.authState !== "awaiting-connect") {
+          rejectPreAuthRequest(client, frame.id ?? "pre-auth-request");
+          return;
+        }
+        if (frame.type !== "req" || frame.method !== "connect" || typeof frame.id !== "string") {
+          rejectPreAuthRequest(client, frame.id ?? "pre-auth-request");
+          return;
+        }
+
+        data.authState = "authenticating";
+        data.connectId = frame.id;
+        data.connectTokenValid = frame.params?.auth?.token === bearer;
+        if (data.upstreamReady) {
+          data.upstream.send(message);
+        } else if (data.pendingUpstream.length < MAX_PRE_AUTH_QUEUE) {
+          data.pendingUpstream.push(message);
+        } else {
+          rejectPreAuthRequest(client, frame.id);
+        }
+      },
+      close(client) {
+        proxyConnections = Math.max(0, proxyConnections - 1);
+        client.data.upstream.close();
+      },
+      maxPayloadLength: MAX_PROXY_PAYLOAD_BYTES,
+      backpressureLimit: MAX_PROXY_PAYLOAD_BYTES,
+      closeOnBackpressureLimit: true,
+    },
+  });
+}
+
+// Smithers caches auth on an established WebSocket and does not re-check token
+// expiry per frame. Stop both listeners at grant expiry so launchd closes every
+// cached session before attempting a fail-closed restart.
+const MAX_TIMER_DELAY_MS = 2_147_000_000;
+function armGatewayExpiry() {
+  const remainingMs = expiresAtMs - Date.now();
+  const delayMs = Math.min(Math.max(remainingMs, 0), MAX_TIMER_DELAY_MS);
+  setTimeout(() => {
+    if (Date.now() < expiresAtMs) {
+      armGatewayExpiry();
+      return;
+    }
+    console.error("Smithers Gateway token expired; closing authenticated sessions");
+    process.exitCode = 1;
+    void closeGatewayServers().catch((error) => {
+      console.error(`Failed to close expired Gateway: ${error instanceof Error ? error.message : String(error)}`);
+    });
+  }, delayMs);
+}
 
 /**
  * `ui` is set only for workflows whose UI cannot be found by convention.
@@ -67,5 +355,21 @@ console.log(`Workspace: ${workspaceRoot}`);
 console.log("Workflow UIs:");
 for (const mount of mounts) await mountWorkflow(mount);
 
-await gateway.listen({ host, port });
-console.log(`Smithers Gateway listening on http://${host}:${port}`);
+const internalServer = await gateway.listen({ host: internalHost, port: 0 });
+const internalAddress = internalServer.address();
+if (!internalAddress || typeof internalAddress === "string") {
+  await gateway.close();
+  throw new Error("Smithers Gateway could not allocate its internal listener");
+}
+
+try {
+  const externalServer = createAuthenticatedProxy(internalAddress.port);
+  publicServer = externalServer;
+  armGatewayExpiry();
+  const portFile = process.env.SMITHERS_GATEWAY_PORT_FILE?.trim();
+  if (portFile) await writeFile(resolve(portFile), `${externalServer.port}\n`, { mode: 0o600 });
+  console.log(`Smithers Gateway listening on http://${host}:${externalServer.port}`);
+} catch (error) {
+  await closeGatewayServers();
+  throw error;
+}
