@@ -38,7 +38,10 @@ describe("reasoning command model", () => {
 		expect(output).toContain("reasoning_effort xhigh");
 		expect(output).toContain("demo/reviewer  high");
 		expect(output).toContain("budget_tokens 16384");
-		const clamped = renderReasoning("high", [profile({ fallout: "deck/gpt-5.6-sol", reasoningFallout: "max" })], theme, null);
+		const supportedMax = renderReasoning("high", [profile({ fallout: "deck/gpt-5.6-sol", reasoningFallout: "max" })], theme, null);
+		expect(supportedMax).toContain("max · deck/gpt-5.6-sol · reasoning_effort max");
+		expect(supportedMax).not.toContain("max→");
+		const clamped = renderReasoning("high", [profile({ fallout: "deck/gpt-5.5", reasoningFallout: "max" })], theme, null);
 		expect(clamped).toContain("max→xhigh");
 		expect(clamped).toContain("reasoning_effort xhigh");
 	});
@@ -57,10 +60,14 @@ describe("reasoning command model", () => {
 	});
 
 	test("clamps unsupported levels for display but persists the requested level", () => {
-		writeProfiles([profile({ implementer: "deck/gpt-5.6-luna", fallout: "deck/gpt-5.6-sol", future: "kept" } as any)]);
+		writeProfiles([profile({ implementer: "deck/gpt-5.6-luna", fallout: "deck/gpt-5.5", future: "kept" } as any)]);
 		const result = setSeatReasoning("fallout", "max", home);
 		expect(result.rows[0]?.level).toBe("xhigh");
 		expect(result.warnings[0]).toContain("unsupported");
+		writeProfiles([profile({ fallout: "deck/gpt-5.6-sol", future: "kept" } as any)]);
+		const supported = setSeatReasoning("fallout", "max", home);
+		expect(supported.rows[0]?.level).toBe("max");
+		expect(supported.warnings).toHaveLength(0);
 		expect(clampLevel("max", ["low", "high"])).toBe("high");
 		const stored = JSON.parse(fs.readFileSync(profilesFile(home), "utf8"))[0];
 		expect(stored.models.reasoningFallout).toBe("max");
