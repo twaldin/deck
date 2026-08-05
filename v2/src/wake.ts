@@ -762,6 +762,20 @@ export function detectStale(
 		}
 
 		if (alive(pid)) {
+			// A `resolved:` milestone is a WAIT announcement. The observer maps every
+			// pipeline milestone to this verb (push-pr, landing-poll, fallout-wait),
+			// and each one hands off to a node that deliberately writes nothing while
+			// it polls CI or waits out fallout. Judged on silence, a healthy pipeline
+			// in exactly the state it should be in reports as stuck.
+			//
+			// Scoped to the LIVE branch on purpose. `resolved` is not terminal
+			// (TERMINAL_VERBS is done/failed), so a task whose process is GONE here
+			// still falls through to the vanished-run verdict below — that case is a
+			// pipeline that died holding an open PR, which must never go unreported.
+			if (currentVerb === "resolved") {
+				forget(taskId);
+				continue;
+			}
 			// A LIVE worker that is WRITING is working, however overdue. A live worker
 			// writing nothing is the class that motivated this: observed live, a worker
 			// finished its task then retried a rate-limited search nine times, alive and
