@@ -253,6 +253,7 @@ export async function startShip(
 				SMITHERS_SPEC,
 				"up",
 				path.join(dir, "pipeline.tsx"),
+				"--no-post-failure",
 				"--input",
 				JSON.stringify(input),
 				"--run-id",
@@ -266,7 +267,8 @@ export async function startShip(
 					...process.env,
 					PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR ?? path.join(home, ".pi"),
 					DECK_SUBAGENT_EXTENSION:
-						process.env.DECK_SUBAGENT_EXTENSION ?? path.join(home, ".pi", "extensions", "subagent", "index.ts"),
+						process.env.DECK_SUBAGENT_EXTENSION ??
+						path.join(home, ".pi", "agent", "extensions", "deck-subagents", "index.ts"),
 				},
 			},
 		);

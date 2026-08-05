@@ -1,16 +1,13 @@
 /**
- * Durable captain-question queue, owned by the ORCHESTRATOR session only.
+ * Append-only question queue shared by Deck's plain pi sessions.
  *
- * Storage is one append-only JSONL log of events (`ask`, `answer`, `deliver`)
- * folded into current state on read. Append-only is the point: several pi
- * processes write this file concurrently, and a single `appendFileSync` of one
- * line under 4KB is atomic on the platforms pi runs on, whereas a
- * read-modify-write of a records file would silently drop a concurrent ask.
+ * Storage is one JSONL log of `ask`, `answer`, and `deliver` events folded on
+ * read. A single bounded append stays atomic when several sessions write at
+ * once; a read-modify-write records file would lose concurrent asks.
  *
- * The queue lives under the deck home (`~/.deck/questions/`), NOT under
- * `~/.pi/agent`: the pi home is shared by every pi session on the machine, and
- * a queue there collected ghost questions from long-dead worker sessions that
- * nobody would ever deliver answers to.
+ * The queue lives under the Deck home (`~/.deck/questions/`), not the global pi
+ * agent home. The standalone deck-questions extension is installed only in
+ * `~/.deck/.pi`; Smithers pipeline seats do not load a competing surface.
  */
 import { appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -437,10 +434,10 @@ function eventLines(entry: Question): string[] {
 }
 
 /**
- * Purge answered + stale questions from the live queue, archiving what is
- * dropped to `archive.jsonl` beside it. Rewrite-in-place is safe here because
- * only the orchestrator session owns this queue; there is no concurrent writer
- * to race with, and the write itself goes through a temp file + rename.
+ * Purge answered + stale questions while the caller has exclusive queue access.
+ *
+ * Plain Deck sessions MUST NOT call this during normal operation: they append
+ * concurrently, and a rewrite could discard an event appended after the read.
  */
 export function compact(file: string, now = Date.now()): { kept: number; archived: number } {
 	const all = readQuestions(file);

@@ -50,17 +50,16 @@ for stale in "$EXTENSIONS_DIR/deck-idle-compaction.ts" "$EXTENSIONS_DIR/idle-com
   fi
 done
 
-# The questions extension moved into deck-v2 (v2/install.sh), which installs
-# into the ORCHESTRATOR home's own .pi — a global install here put ask_captain
-# and /questions into every pi session on the machine, including worker `pi -p`
-# sessions, each one a competing question surface. Remove an install of ours;
-# leave anything we cannot prove is ours.
+# Questions belong in Deck's own pi home, installed by v2/install.sh from the
+# standalone extensions-pi pack. A global install here gives unrelated sessions
+# a competing question surface. Remove an install of ours; leave anything we
+# cannot prove is ours.
 QUESTIONS_DEST="$EXTENSIONS_DIR/deck-questions"
 if [ -L "$QUESTIONS_DEST/index.ts" ]; then
   case "$(readlink "$QUESTIONS_DEST/index.ts")" in
     */extensions/src/questions.ts)
       rm -rf "$QUESTIONS_DEST"
-      printf 'removed retired deck-questions extension from %s (now part of deck-v2)\n' "$EXTENSIONS_DIR"
+      printf 'removed retired global deck-questions extension from %s\n' "$EXTENSIONS_DIR"
       ;;
     *)
       printf 'warning: %s is not ours; leaving it in place\n' "$QUESTIONS_DEST" >&2

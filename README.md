@@ -1,40 +1,37 @@
 # deck
 
-**One chat session runs your software factory.**
+**Plain pi sessions use a durable software factory.**
 
-You talk to an orchestrator. It starts durable [Smithers](https://github.com/smithers-ai/smithers) workflows per effort. Each workflow owns the menial loop end to end:
-
-```
-idea → implement → adversarial review → PR → reviewers
-     → watch CI + human + bot comments → stamp or auto-merge on green
-```
-
-Models share a broker pool of your own subscriptions. Connect from any laptop over your private network (Tailscale or equivalent). The orchestrator stays on a durable host; glass is just a remote shell into that session.
+Start any number of pi sessions in `~/.deck`. OptMem carries global identity,
+decisions, preferences, and lessons across sessions. Effort dossiers carry the
+deeper brief and decision history. Shipping work goes through durable
+[Smithers](https://github.com/smithers-ai/smithers) workflows:
 
 ```
-you  ←→  orch (pi)
-              │
-              │  ship
-              ▼
-       smithers pr-pipeline  × N     ← one run owns each PR
-              │
-              seats: implement · adversarial · fix
-              poll:  CI · review bots · humans
-              park:  your merge stamp (or yolo on green)
+plain pi session
+      │  ship · adopt · status
+      ▼
+smithers pr-pipeline
+      │  implement → adversarial review → PR → reviewers
+      └→ watch CI → explicit stamp when required → merge → deploy/fallout proof
 ```
+
+The conversation session shapes work and surfaces queued decisions. The engine
+owns progress, retries, CI/review watch, merge mechanics, and liveness.
 
 ## What it is
 
 | Piece | Job |
 |---|---|
-| **Orch** | Your face on the factory. Ideas, stamps, rare judgment. Does not babysit N PRs. |
-| **`ship`** | Default path for profiled projects. Starts pr-pipeline. |
-| **pr-pipeline** | Encoded habits: adversarial loop, reviewers, CI/review watch, stamp or yolo. |
-| **Broker** | Multi-account OAuth pool for models. Usage in-session. |
-| **Profiles** | Stamp-at-merge vs merge-on-green. **Same quality gates** either way. |
-| **Fleet** | Attention board: what is running, waiting, and on what. |
+| **Plain pi session** | Understand the issue, inspect evidence, and call factory tools. |
+| **`ship` / `adopt` / `status`** | The only shipment interface: start, take over, or inspect durable work. |
+| **pr-pipeline** | Encoded implementation, adversarial review, reviewers, CI, merge, and fallout gates. |
+| **Questions** | Durable, decision-shaped asks that do not block unrelated work. |
+| **OptMem + dossiers** | Global continuity plus per-effort depth. |
+| **Broker** | Multi-account model access using the operator's own subscriptions. |
 
-Yolo does **not** skip adversarial review. It skips only the human stamp park at merge time.
+Profiles choose the merge posture. Every profile keeps the same implementation,
+adversarial-review, CI, review, and evidence gates.
 
 ## Quick start (personal host)
 
@@ -51,14 +48,15 @@ cd ~/dev/deck && git checkout main
 # interactive once — personal accounts only
 bun ~/dev/deck/broker/src/cli.ts login anthropic
 
-# glass from a laptop (SSH to your durable host over your tailnet)
-herdr --remote <user>@<host>
-source ~/.deck/enter.sh && pi
+# enter a plain session
+cd ~/.deck && pi
 ```
 
-Inside the session: fleet, usage, questions, wake, calm, plus `ship` / `spawn`.
+Inside the session use `ship`, `adopt`, `status`, questions, `recall_effort`, and
+`subagent`. There is no fleet-supervision or wake-loop command surface.
 
-**Laptop agents** (not the orch): see [`docs/LAPTOP-AGENTS.md`](docs/LAPTOP-AGENTS.md) — drop handoffs the orch will pick up.
+**Laptop agents:** see [`docs/LAPTOP-AGENTS.md`](docs/LAPTOP-AGENTS.md) for
+handoffs that a deck session can route into the factory.
 
 ## Project profiles
 
@@ -72,10 +70,12 @@ Keep company work and personal OAuth on separate hosts. Never put company secret
 ## Layout
 
 ```
-~/dev/deck/          code (git)
-~/.deck/             orch home (NOT a checkout) — contract, state, data, broker store
-~/.deck/.pi/         deck extension (fleet, ship, spawn, …)
-~/.pi/agent/         user skills + model provider + usage
+~/dev/deck/          code and factory definitions (git)
+~/.deck/             private plain-pi home (NOT a checkout)
+~/.optmem/           global append-only memory and summary tree
+~/.deck/efforts/     per-effort dossiers
+~/.deck/.pi/         Deck-scoped extensions, skills, and model configuration
+~/.pi/agent/         Global deck-subagents extension and shared pi skills
 ```
 
 Sync code with git. **Never rsync `~/.deck` between hosts** (credentials + state).
@@ -85,14 +85,14 @@ Sync code with git. **Never rsync `~/.deck` between hosts** (credentials + state
 | Doc | For |
 |---|---|
 | [`docs/personal-home.md`](docs/personal-home.md) | Bootstrap a durable personal host |
-| [`docs/LAPTOP-AGENTS.md`](docs/LAPTOP-AGENTS.md) | Laptop agents handing work to the orch host |
+| [`docs/LAPTOP-AGENTS.md`](docs/LAPTOP-AGENTS.md) | Laptop agents handing work to a deck home |
 | [`workflows/pr-pipeline/README.md`](workflows/pr-pipeline/README.md) | Pipeline stages |
-| [`v2/seed/orchestrator-contract.md`](v2/seed/orchestrator-contract.md) | Seed for `~/.deck/AGENTS.md` |
+| [`v2/seed/AGENTS.md`](v2/seed/AGENTS.md) | Public seed for plain sessions in `~/.deck` |
+| [`docs/home-cutover.md`](docs/home-cutover.md) | Locked v4 home cutover checklist |
 
 ## Layout details
 
 - `cli/` allocates isolated deck worktrees and is linked by `v2/install.sh`.
-- `intake/` is consumed by the `v2` wake loop.
 - `ops/` contains launchd installers and the resource monitor.
 - `subagents/` contains crew agent definitions.
 

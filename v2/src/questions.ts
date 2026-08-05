@@ -1,10 +1,9 @@
 /**
- * Captain-facing pending-questions queue. ORCHESTRATOR-ONLY by placement: this
- * registers from the deck-v2 extension, which installs into the deck home's
- * own `.pi/extensions`, so worker `pi -p` sessions never load it and never
- * surface a competing questions UI. Workers that need a decision report
- * `needs-decision:` through their status file; the orchestrator relays it here
- * with `ask_captain`, and the captain clears the backlog with `/questions`.
+ * Durable question queue surface shared by plain Deck pi sessions.
+ *
+ * The standalone deck-questions entrypoint registers this module only in
+ * ~/.deck/.pi. Smithers pipeline seats do not load it, so there is one
+ * captain-facing queue rather than a competing question channel per worker.
  */
 import { Type } from "typebox";
 import { Box, SelectList, Text } from "@earendil-works/pi-tui";
@@ -14,7 +13,6 @@ import { promisify } from "node:util";
 import {
 	answer as recordAnswer,
 	ask,
-	compact,
 	formatAge,
 	importLegacyQueue,
 	legacyQueueFile,
@@ -556,26 +554,25 @@ export function registerQuestions(
 	};
 
 	pi.on("session_start", (_event, ctx) => {
-		// Hygiene before anything reads the queue: pull still-open questions out of
-		// the legacy pi-home queue once, then purge answered + stale entries. Both
-		// are best-effort — a hygiene failure must never break session start.
+		// Before anything reads the queue, pull still-open questions out of the
+		// legacy pi-home queue once. Never compact the live queue here: plain Deck
+		// sessions are concurrent appenders, so startup must remain append-only.
 		//
 		// The import is gated: it renames the legacy file under the PI HOME, which
 		// is live state. It runs only when the caller explicitly points at a pi
-		// home (PI_CONFIG_DIR, tests) or when nothing at all is overridden (the
-		// real orchestrator). A partially-overridden env — a test that redirects
+		// home (PI_CONFIG_DIR, tests) or when nothing at all is overridden (a
+		// normal Deck session). A partially-overridden env — a test that redirects
 		// the deck side but not the pi side — must never reach the live ~/.pi.
 		const importSafe =
 			env.PI_CONFIG_DIR !== undefined ||
 			(env.DECK_QUESTIONS_FILE === undefined && process.env.DECK_V2_HOME === undefined);
 		try {
 			if (importSafe) importLegacyQueue(file, legacyQueueFile(env), runtime.now());
-			compact(file, runtime.now());
 		} catch {
-			// the queue stays usable unhygienic
+			// Legacy import is best-effort; the live queue remains usable.
 		}
-		// deck-v2 registers several session_start handlers; a test or RPC ctx may
-		// not carry a session manager, and hygiene above already ran.
+		// More than one questions hook runs at session start; a test or RPC ctx
+		// may not carry a session manager, and hygiene above already ran.
 		if (ctx?.sessionManager === undefined) return;
 		// Refreshed on every session event so the poll never holds a dead ctx.
 		latestSessionId = ctx.sessionManager.getSessionId();

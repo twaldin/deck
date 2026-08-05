@@ -1,14 +1,9 @@
 /**
- * Installer tests. These exist because BOTH shipped deck extensions have broken
- * in ~/.pi while their sources were fine, so what matters is the INSTALLED shape,
- * not the source.
+ * Installed-shape tests for the three standalone pi extensions.
  *
- * Two traps are asserted here, both of which bit during this build:
- *   1. pi resolves an extension's relative imports against the symlink's
- *      directory, so a flat `index.ts -> src/extension/index.ts` cannot find
- *      `../events`.
- *   2. Writing the entrypoint shim over a symlink follows the link and destroys
- *      the repo's own src/index.ts.
+ * Source entrypoints import ../v2/src/*. Their directory symlinks and the
+ * shared v2/src symlink tree must preserve that relative layout without
+ * exposing a support module as another pi entrypoint.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
@@ -57,55 +52,73 @@ function install(): void {
 	});
 }
 
-const extDir = () => path.join(target, "agent", "extensions", "deck-v2");
+const extensionDir = (name: string) => path.join(target, "agent", "extensions", name);
 
 describe("installer layout", () => {
-	test("installs a directory extension with exactly one entrypoint", () => {
+	test("installs three directory extensions with one entrypoint each", () => {
 		install();
-		expect(fs.existsSync(path.join(extDir(), "index.ts"))).toBe(true);
-		// pi discovers extensions/*.ts too; a flat sibling would load as its own
-		// extension and be rejected.
-		expect(fs.existsSync(path.join(target, "agent", "extensions", "deck-v2.ts"))).toBe(false);
-	});
-
-	// Trap 1: the failure mode observed live ("Cannot find module '../events'").
-	test("the entrypoint's relative sibling imports resolve inside the install dir", () => {
-		install();
-		const entry = fs.readFileSync(path.join(extDir(), "index.ts"), "utf8");
-		expect(entry).toContain("./extension/index.ts");
-		// extension/index.ts imports ../events, ../fleet, ... — each must exist
-		// one level up from it, i.e. at the install root.
-		const real = fs.readFileSync(path.join(REPO_V2, "src", "extension", "index.ts"), "utf8");
-		const siblings = [...real.matchAll(/from "\.\.\/([a-z-]+)"/g)].map((m) => m[1]);
-		expect(siblings.length).toBeGreaterThan(3);
-		for (const sibling of siblings) {
-			expect(fs.existsSync(path.join(extDir(), `${sibling}.ts`))).toBe(true);
+		for (const name of ["deck-questions", "deck-ship", "deck-recall"]) {
+			const entry = path.join(extensionDir(name), "index.ts");
+			expect(fs.lstatSync(entry).isSymbolicLink()).toBe(true);
+			expect(fs.realpathSync(entry)).toBe(
+				path.join(REPO_V2, "..", "extensions-pi", `${name}.ts`),
+			);
+			expect(fs.existsSync(path.join(target, "agent", "extensions", `${name}.ts`))).toBe(false);
 		}
+		expect(fs.existsSync(extensionDir("deck-v2"))).toBe(false);
 	});
 
-	// Trap 2: the bug this build actually hit. The shim must never be written
-	// through a symlink into the repo.
+	test("entrypoint imports resolve through the shared v2 source tree", () => {
+		install();
+		const lib = path.join(target, "agent", "extensions", "v2", "src");
+		for (const module of ["questions-store", "questions", "ship", "smithers", "workspace", "hydrate", "home", "meta"]) {
+			const installed = path.join(lib, `${module}.ts`);
+			expect(fs.lstatSync(installed).isSymbolicLink()).toBe(true);
+			expect(fs.realpathSync(installed)).toBe(path.join(REPO_V2, "src", `${module}.ts`));
+		}
+		expect(fs.existsSync(path.join(lib, "index.ts"))).toBe(false);
+	});
+
+	test("refuses a foreign shared v2 support directory", () => {
+		const foreign = path.join(target, "agent", "extensions", "v2");
+		fs.mkdirSync(foreign, { recursive: true });
+		fs.writeFileSync(path.join(foreign, "keep.txt"), "not Deck\n");
+		expect(() => install()).toThrow();
+		expect(fs.readFileSync(path.join(foreign, "keep.txt"), "utf8")).toBe("not Deck\n");
+		expect(fs.existsSync(path.join(foreign, "src"))).toBe(false);
+	});
+
+	test("removes a provably owned retired deck-v2 extension", () => {
+		const retired = extensionDir("deck-v2");
+		fs.mkdirSync(path.join(retired, "extension"), { recursive: true });
+		fs.symlinkSync(
+			path.join(REPO_V2, "src", "extension", "index.ts"),
+			path.join(retired, "extension", "index.ts"),
+		);
+		fs.writeFileSync(
+			path.join(retired, "index.ts"),
+			'export { default } from "./extension/index.ts";\n',
+		);
+		install();
+		expect(fs.existsSync(retired)).toBe(false);
+	});
+
 	test("REGRESSION: installing does not overwrite the repo's own src/index.ts", () => {
 		const before = fs.readFileSync(path.join(REPO_V2, "src", "index.ts"), "utf8");
 		install();
-		install(); // reruns must converge, not corrupt
-		const after = fs.readFileSync(path.join(REPO_V2, "src", "index.ts"), "utf8");
-		expect(after).toBe(before);
-		// The lib entrypoint re-exports the modules; it is NOT the extension shim.
-		expect(after).toContain("./status");
-		expect(after).not.toBe('export { default } from "./extension/index.ts";\n');
-	});
-
-	test("the installed entrypoint is a real file, not a symlink", () => {
 		install();
-		expect(fs.lstatSync(path.join(extDir(), "index.ts")).isSymbolicLink()).toBe(false);
+		expect(fs.readFileSync(path.join(REPO_V2, "src", "index.ts"), "utf8")).toBe(before);
 	});
 
 	test("reruns converge", () => {
 		install();
-		const first = fs.readdirSync(extDir()).sort();
+		const first = ["deck-questions", "deck-ship", "deck-recall"].map((name) =>
+			fs.realpathSync(path.join(extensionDir(name), "index.ts"))
+		);
 		install();
-		expect(fs.readdirSync(extDir()).sort()).toEqual(first);
+		expect(["deck-questions", "deck-ship", "deck-recall"].map((name) =>
+			fs.realpathSync(path.join(extensionDir(name), "index.ts"))
+		)).toEqual(first);
 	});
 
 	test("installs the CLI shim", () => {
@@ -203,9 +216,9 @@ describe("installer layout", () => {
 			encoding: "utf8",
 			stdio: ["ignore", "pipe", "pipe"],
 		});
-		expect(
-			fs.existsSync(path.join(target, ".deck", ".pi", "extensions", "deck-v2", "index.ts")),
-		).toBe(true);
+		for (const name of ["deck-questions", "deck-ship", "deck-recall"]) {
+			expect(fs.existsSync(path.join(target, ".deck", ".pi", "extensions", name, "index.ts"))).toBe(true);
+		}
 	});
 
 	test("refuses a foreign flat entry rather than deleting it", () => {

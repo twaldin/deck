@@ -260,6 +260,8 @@ export const localReviewSchema = z.object({
 	nits: z.array(z.string()),
 	summary: z.string(),
 });
+export const mergePathSchema = z.enum(["github-merge-queue", "dry-run", "already-landed"]);
+
 
 export const schemas = {
 	input: inputSchema,
@@ -321,6 +323,22 @@ export const schemas = {
 		round: z.number().int(),
 		afterPoll: z.number().int(),
 		actions: z.array(z.string()),
+		commits: z.array(z.string().regex(/^[0-9a-f]{40,64}$/i)),
+		pushed: z.boolean(),
+		reRequested: z.array(z.string()),
+		summary: z.string(),
+	}),
+	watchBaseline: z.object({
+		round: z.number().int(),
+		afterPoll: z.number().int(),
+		headSha: z.string(),
+		valid: z.boolean(),
+		reason: z.string(),
+	}),
+	watchPublish: z.object({
+		round: z.number().int(),
+		afterPoll: z.number().int(),
+		actions: z.array(z.string()),
 		pushed: z.boolean(),
 		reRequested: z.array(z.string()),
 		summary: z.string(),
@@ -364,14 +382,19 @@ export const schemas = {
 		expectedHead: z.string(),
 		currentHead: z.string(),
 		ok: z.boolean(),
+		diffSummary: z.string(),
 		checkedAt: z.string(),
+		submittedAt: z.string().nullable(),
+		receipt: z.string().nullable(),
+		alreadyLanded: z.boolean(),
+		mergePath: mergePathSchema.nullable(),
 	}),
 	mergeReceipt: z.object({
 		round: z.number().int(),
 		submittedAt: z.string(),
 		receipt: z.string(),
 		alreadyLanded: z.boolean(),
-		mergePath: z.enum(["github-merge-queue", "dry-run", "already-landed"]),
+		mergePath: mergePathSchema,
 	}),
 	queuePoll: z.object({
 		poll: z.number().int(),
@@ -440,6 +463,108 @@ async function runTests(command: string, cwd: string): Promise<string> {
 function nowIso(): string {
 	return new Date().toISOString();
 }
+export interface ApprovalStampMetadata {
+	headSha: string;
+	prNumber: number;
+	stackTopology?: {
+		headBranch: string;
+		baseBranch: string;
+	};
+}
+
+export function buildApprovalStampMetadata(args: {
+	headSha: string;
+	prNumber: number;
+	headBranch: string;
+	baseBranch: string;
+}): ApprovalStampMetadata {
+	return {
+		headSha: args.headSha,
+		prNumber: args.prNumber,
+		...(args.baseBranch === "main"
+			? {}
+			: {
+					stackTopology: {
+						headBranch: args.headBranch,
+						baseBranch: args.baseBranch,
+					},
+				}),
+	};
+}
+
+export interface StampComparison {
+	expectedHead: string;
+	currentHead: string;
+	ok: boolean;
+	diffSummary: string;
+}
+
+/**
+ * Fetch the PR head at the merge boundary. A mismatch is a normal invalidation
+ * result, not a thrown merge failure, so the round state machine can re-enter
+ * watch/review with useful evidence.
+ */
+export async function compareApprovalStamp(args: {
+	exec: typeof bunExec;
+	gh: string;
+	repo: string;
+	prNumber: number;
+	expectedHead: string;
+}): Promise<StampComparison> {
+	const currentHead = (
+		await execOrThrow(
+			args.exec,
+			[args.gh, "api", `repos/${args.repo}/pulls/${args.prNumber}`, "--jq", ".head.sha"],
+		)
+	).trim();
+	if (currentHead === args.expectedHead) {
+		return {
+			expectedHead: args.expectedHead,
+			currentHead,
+			ok: true,
+			diffSummary: "head unchanged since approval",
+		};
+	}
+
+	let diffSummary = `head changed ${args.expectedHead} -> ${currentHead}`;
+	try {
+		const raw = await execOrThrow(args.exec, [
+			args.gh,
+			"api",
+			`repos/${args.repo}/compare/${args.expectedHead}...${currentHead}`,
+		]);
+		const comparison = JSON.parse(raw) as {
+			status?: unknown;
+			ahead_by?: unknown;
+			behind_by?: unknown;
+			total_commits?: unknown;
+			files?: Array<{ filename?: unknown }>;
+		};
+		const files = Array.isArray(comparison.files)
+			? comparison.files
+					.map((file) => (typeof file.filename === "string" ? file.filename : ""))
+					.filter(Boolean)
+					.slice(0, 10)
+			: [];
+		diffSummary = [
+			diffSummary,
+			`status=${String(comparison.status ?? "unknown")}`,
+			`ahead=${String(comparison.ahead_by ?? "unknown")}`,
+			`behind=${String(comparison.behind_by ?? "unknown")}`,
+			`commits=${String(comparison.total_commits ?? "unknown")}`,
+			`files=${files.length > 0 ? files.join(", ") : "unknown"}`,
+		].join("; ");
+	} catch (error) {
+		diffSummary = `${diffSummary}; compare summary unavailable: ${String(error).slice(0, 300)}`;
+	}
+	return {
+		expectedHead: args.expectedHead,
+		currentHead,
+		ok: false,
+		diffSummary,
+	};
+}
+
 
 function seat(ref: ModelSeat): { ref: string; reasoning?: string } {
 	return typeof ref === "string" ? { ref } : { ref: ref.model, reasoning: ref.reasoning };
@@ -448,7 +573,7 @@ function seat(ref: ModelSeat): { ref: string; reasoning?: string } {
 function makeAgent(ref: ModelSeat, cwd: string, timeoutMs: number, reasoning = "medium"): PiAgent {
 	const selected = seat(ref);
 	const configuredExtension = process.env.DECK_SUBAGENT_EXTENSION;
-	const bundledExtension = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../subagents/extension/index.ts");
+	const bundledExtension = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../subagents/deck-subagents.ts");
 	const subagentExtension = configuredExtension ?? (fs.existsSync(bundledExtension) ? bundledExtension : undefined);
 	const extension = subagentExtension === undefined ? undefined : [subagentExtension];
 	const { provider, model } = parseModelRef(selected.ref);
@@ -456,6 +581,11 @@ function makeAgent(ref: ModelSeat, cwd: string, timeoutMs: number, reasoning = "
 	// Preserve the provider-native selector. If an older Smithers type does not
 	// yet include `max`, the compatibility cast is local and does not rewrite the
 	// value sent to Pi.
+
+	// PiAgent's current tool policy is whole-tool allowlisting; the watcher
+	// needs bash for tests and gh, so it cannot deny only `git push`. Until Pi
+	// exposes command-level policies, the prompt forbids push and the workflow
+	// rejects remote-head drift before its deterministic publish node.
 
 	return new PiAgent({
 		provider,
@@ -640,9 +770,9 @@ export default smithers((ctx) => {
 	})();
 
 	// -- merge authorization -----------------------------------------------------
-	// A round authorizes the merge only with: approved stamp + valid post-stamp
-	// validity + passing PRE-MERGE head re-check (closes the stamp->merge TOCTOU
-	// window). A failed head check ends the round instead.
+	// A round authorizes the receipt node only after its approved stamp has
+	// survived the merge attempt's last-instant head comparison. A mismatch is
+	// persisted as ok=false and ends the round before any MQ command runs.
 	const stampedRound = (() => {
 		for (let k = 0; k <= currentRound && k < limits.stampRounds; k++) {
 			const stamp = ctx.latest(outputs.approvals, `r${k}-stamp`);
@@ -656,7 +786,11 @@ export default smithers((ctx) => {
 	})();
 	const authorizedRound =
 		stampedRound !== null && stampedRound.headCheck?.ok === true
-			? { round: stampedRound.round, headSha: stampedRound.headSha }
+			? {
+					round: stampedRound.round,
+					headSha: stampedRound.headSha,
+					headCheck: stampedRound.headCheck,
+				}
 			: null;
 
 	const mergeReceipt = ctx.latest(outputs.mergeReceipt, "enqueue-merge");
@@ -692,7 +826,7 @@ export default smithers((ctx) => {
 			};
 
 	// -- approval gate helper (bypass only allowed with dryRun; preflight enforces) --
-	const Gate = (props: { id: string; title: string; summary: string }) => {
+	const Gate = (props: { id: string; title: string; summary: string; metadata?: Record<string, unknown> }) => {
 		if (bypass) {
 			return (
 				<Task id={props.id} output={outputs.approvals}>
@@ -709,7 +843,7 @@ export default smithers((ctx) => {
 			<Approval
 				id={props.id}
 				output={outputs.approvals}
-				request={{ title: props.title, summary: props.summary }}
+				request={{ title: props.title, summary: props.summary, metadata: props.metadata }}
 				onDeny="fail"
 			/>
 		);
@@ -1082,6 +1216,48 @@ export default smithers((ctx) => {
 								// 1. push the branch (idempotent).
 								await execOrThrow(
 									bunExec,
+									[github.git, "fetch", "origin", baseBranch],
+									{ cwd: input.worktree },
+								);
+								const [publishedLocalHead, actualCommitText] = await Promise.all([
+									execOrThrow(bunExec, [github.git, "rev-parse", "HEAD"], {
+										cwd: input.worktree,
+									}).then((value) => value.trim()),
+									execOrThrow(
+										bunExec,
+										[
+											github.git,
+											"rev-list",
+											"--reverse",
+											`origin/${baseBranch}..HEAD`,
+										],
+										{ cwd: input.worktree },
+									),
+								]);
+								const actualCommits = actualCommitText
+									.split("\n")
+									.map((sha) => sha.trim())
+									.filter(Boolean);
+								const reportedCommits = await Promise.all(
+									implementation.commits.map((sha) =>
+										execOrThrow(
+											bunExec,
+											[github.git, "rev-parse", "--verify", `${sha}^{commit}`],
+											{ cwd: input.worktree },
+										).then((value) => value.trim()),
+									),
+								);
+								if (
+									actualCommits.length !== reportedCommits.length ||
+									actualCommits.some((sha, index) => sha !== reportedCommits[index])
+								) {
+									throw new Error(
+										`[escalate] implementation reported commits ${JSON.stringify(reportedCommits)}, ` +
+											`but origin/${baseBranch}..HEAD is ${JSON.stringify(actualCommits)}; refusing initial publication.`,
+									);
+								}
+								await execOrThrow(
+									bunExec,
 									[github.git, "push", "-u", "origin", input.branch],
 									{ cwd: input.worktree },
 								);
@@ -1126,6 +1302,12 @@ export default smithers((ctx) => {
 									prNumber = Number(match[1]);
 								}
 								const headSha = await fetchHeadSha(ghCtx, prNumber);
+								if (headSha !== publishedLocalHead) {
+									throw new Error(
+										`[escalate] PR #${prNumber} head moved to ${headSha} after publishing ` +
+											`local HEAD ${publishedLocalHead}; refusing to register an unattributed PR state.`,
+									);
+								}
 								// 3. register in the watch-set (side effect of THIS node; nothing untracked).
 								const fs = await import("node:fs");
 								const path = await import("node:path");
@@ -1332,6 +1514,8 @@ export default smithers((ctx) => {
 								const watchSettled =
 									latestWatch?.exitOk === true || watchEscalation?.approved === true;
 								const latestFix = ctx.latest(outputs.watchFix, `r${k}-watch-fix`);
+								const latestBaseline = ctx.latest(outputs.watchBaseline, `r${k}-watch-baseline`);
+								const latestPublish = ctx.latest(outputs.watchPublish, `r${k}-watch-publish`);
 
 								const readyNode = `r${k}-ready-poll`;
 								const latestReady = ctx.latest(outputs.readyPoll, readyNode);
@@ -1427,44 +1611,287 @@ export default smithers((ctx) => {
 												{latestWatch !== undefined &&
 												!latestWatch.exitOk &&
 												latestWatch.actionable &&
-												(latestFix === undefined || latestFix.afterPoll < latestWatch.poll) ? (
+												(latestFix === undefined || latestFix.afterPoll < latestWatch.poll)
+													? latestWatch.rebaseRequired
+														? (
+																<Task
+																	id={`r${k}-watch-fix`}
+																	output={outputs.watchFix}
+																	retries={1}
+																>
+																	{async () => {
+																		const [remoteHead, branch, localHead] =
+																			await Promise.all([
+																				fetchHeadSha(ghCtx, pr.prNumber),
+																				execOrThrow(
+																					bunExec,
+																					[github.git, "branch", "--show-current"],
+																					{ cwd: input.worktree },
+																				).then((value) => value.trim()),
+																				execOrThrow(
+																					bunExec,
+																					[github.git, "rev-parse", "HEAD"],
+																					{ cwd: input.worktree },
+																				).then((value) => value.trim()),
+																			]);
+																		if (
+																			remoteHead !== latestWatch.headSha ||
+																			branch !== input.branch ||
+																			localHead !== remoteHead
+																		) {
+																			throw new Error(
+																				`[escalate] rebase baseline rejected: poll=${latestWatch.headSha}, remote=${remoteHead}, local=${localHead}, branch=${branch || "detached"}; refusing to rebase or push stale/out-of-band state.`,
+																			);
+																		}
+																		const actions = await rebaseAndPush(bunExec, {
+																			git: github.git,
+																			worktree: input.worktree,
+																			branch: input.branch,
+																			baseBranch,
+																			expectedRemoteHead: latestWatch.headSha,
+																			// No fixer can have run for this poll: the Sequence blocks it behind
+																			// this rebase-required task, and the live local==remote check above
+																			// rejects commits from any other source.
+																			testCommand: commands.test,
+																			runCommitShas: [],
+																		});
+																		const reviewers = latestWatch.reviewersToReRequest;
+																		if (reviewers.length > 0) {
+																			await requestReviewers(ghCtx, pr.prNumber, reviewers);
+																		}
+																		return {
+																			round: k,
+																			afterPoll: latestWatch.poll,
+																			actions: [
+																				...actions,
+																				...reviewers.map((reviewer) => `re-requested ${reviewer}`),
+																			],
+																			pushed: true,
+																			reRequested: reviewers,
+																			commits: [],
+																			summary:
+																				"Rebased through the bounded helper, tested, pushed, and re-requested review.",
+																		};
+																	}}
+																</Task>
+															)
+														: latestBaseline === undefined ||
+																latestBaseline.afterPoll < latestWatch.poll
+															? (
+																	<Task
+																		id={`r${k}-watch-baseline`}
+																		output={outputs.watchBaseline}
+																		retries={1}
+																	>
+																		{() =>
+																			dryRun
+																				? {
+																						round: k,
+																						afterPoll: latestWatch.poll,
+																						headSha: latestWatch.headSha,
+																						valid: true,
+																						reason: "dry-run worktree matches polled head",
+																					}
+																				: (async () => {
+																						const [remoteHead, branch, localHead] =
+																							await Promise.all([
+																								fetchHeadSha(ghCtx, pr.prNumber),
+																								execOrThrow(
+																									bunExec,
+																									[github.git, "branch", "--show-current"],
+																									{ cwd: input.worktree },
+																								).then((value) => value.trim()),
+																								execOrThrow(
+																									bunExec,
+																									[github.git, "rev-parse", "HEAD"],
+																									{ cwd: input.worktree },
+																								).then((value) => value.trim()),
+																							]);
+																						const valid =
+																							remoteHead === latestWatch.headSha &&
+																							branch === input.branch &&
+																							localHead === remoteHead;
+																						return {
+																							round: k,
+																							afterPoll: latestWatch.poll,
+																							headSha: remoteHead,
+																							valid,
+																							reason: valid
+																								? "worktree and remote PR branch match the polled head"
+																								: `publish baseline rejected: poll=${latestWatch.headSha}, remote=${remoteHead}, local=${localHead}, branch=${branch || "detached"}`,
+																						};
+																					})()
+																		}
+																	</Task>
+																)
+															: latestBaseline.valid
+																? (
+																		<Task
+																			id={`r${k}-watch-fix`}
+																			output={outputs.watchFix}
+																			agent={dryRun ? undefined : agents?.watcher}
+																			retries={1}
+																		>
+																			{dryRun
+																				? () => ({
+																						round: k,
+																						afterPoll: latestWatch.poll,
+																						actions: ["dry-run: answered thread"],
+																						commits: [],
+																						pushed: false,
+																						reRequested: [],
+																						summary: "dry-run: feedback addressed locally",
+																					})
+																				: watchFixPrompt({
+																						worktree: input.worktree,
+																						branch: input.branch,
+																						baseBranch,
+																						repo: input.repo,
+																						project,
+																						prNumber: pr.prNumber,
+																						gh: github.gh,
+																						pollJson: JSON.stringify(latestWatch, null, 2),
+																						round: k,
+																						afterPoll: latestWatch.poll,
+																					})}
+																		</Task>
+																	)
+																: null
+													: null}
+												{latestWatch !== undefined &&
+												latestFix !== undefined &&
+												latestFix.afterPoll === latestWatch.poll &&
+												!latestWatch.rebaseRequired &&
+												(latestPublish === undefined ||
+													latestPublish.afterPoll < latestWatch.poll) ? (
 													<Task
-														id={`r${k}-watch-fix`}
-														output={outputs.watchFix}
-														agent={dryRun ? undefined : agents?.watcher}
+														id={`r${k}-watch-publish`}
+														output={outputs.watchPublish}
 														retries={1}
 													>
-														{dryRun
-															? () => ({
-																	round: k,
-																	afterPoll: latestWatch.poll,
-																	actions: [
-																		"dry-run: answered thread",
-																		"dry-run: re-requested dry-reviewer",
-																	],
-																	pushed: false,
-																	reRequested: ["dry-reviewer"],
-																	summary: "dry-run: feedback addressed",
-																})
-															: latestWatch.rebaseRequired
-															? async () => {
-																	const actions = await rebaseAndPush(bunExec, { git: github.git, worktree: input.worktree, branch: input.branch, baseBranch, testCommand: commands.test });
-																	const reviewers = latestWatch.reviewersToReRequest;
-																			if (reviewers.length > 0) await requestReviewers(ghCtx, pr.prNumber, reviewers);
-																			return { round: k, afterPoll: latestWatch.poll, actions: [...actions, "answered review feedback", ...reviewers.map((reviewer) => `re-requested ${reviewer}`)], pushed: true, reRequested: reviewers, summary: "Rebased, addressed review feedback, tested, pushed, and re-requested review." };
-																}
-															: watchFixPrompt({
-																	worktree: input.worktree,
-																	branch: input.branch,
-																	baseBranch,
-																	repo: input.repo,
-																	project,
-prNumber: pr.prNumber,
-																	gh: github.gh,
-																	pollJson: JSON.stringify(latestWatch, null, 2),
-																	round: k,
-																	afterPoll: latestWatch.poll,
-																})}
+														{() =>
+															dryRun
+																? {
+																		round: k,
+																		afterPoll: latestWatch.poll,
+																		actions: ["dry-run: bounded publish completed"],
+																		pushed: false,
+																		reRequested: [],
+																		summary: "dry-run: no local commits to publish",
+																	}
+																: (async () => {
+																		if (
+																			latestFix.pushed ||
+																			latestFix.reRequested.length > 0
+																		) {
+																			throw new Error(
+																				"[escalate] watch fixer reported a direct push or reviewer re-request; both are forbidden outside the deterministic publish node.",
+																			);
+																		}
+																		if (
+																			latestBaseline === undefined ||
+																			!latestBaseline.valid ||
+																			latestBaseline.afterPoll !== latestWatch.poll
+																		) {
+																			throw new Error(
+																				"[escalate] watch publish has no valid worktree/remote baseline for this poll.",
+																			);
+																		}
+																		const remoteHead = await fetchHeadSha(
+																			ghCtx,
+																			pr.prNumber,
+																		);
+																		if (remoteHead !== latestBaseline.headSha) {
+																			throw new Error(
+																				`[escalate] remote PR head moved from ${latestBaseline.headSha} to ${remoteHead} during watch-fix; refusing to publish or trust an out-of-band push.`,
+																			);
+																		}
+																		const ancestry = await bunExec(
+																			[
+																				github.git,
+																				"merge-base",
+																				"--is-ancestor",
+																				latestBaseline.headSha,
+																				"HEAD",
+																			],
+																			{ cwd: input.worktree },
+																		);
+																		if (ancestry.code !== 0) {
+																			throw new Error(
+																				`[escalate] local HEAD is not descended from the trusted watch baseline ${latestBaseline.headSha}; refusing to publish.`,
+																			);
+																		}
+																		const runCommitShas = latestFix.commits;
+																		const actualRunCommits = (
+																			await execOrThrow(
+																				bunExec,
+																				[
+																					github.git,
+																					"rev-list",
+																					"--reverse",
+																					`${latestBaseline.headSha}..HEAD`,
+																				],
+																				{ cwd: input.worktree },
+																			)
+																		)
+																			.split("\n")
+																			.map((sha) => sha.trim())
+																			.filter(Boolean);
+																		if (
+																			actualRunCommits.length !== runCommitShas.length ||
+																			actualRunCommits.some(
+																				(sha, index) => sha !== runCommitShas[index],
+																			)
+																		) {
+																			throw new Error(
+																				`[escalate] watch fixer reported commits ${JSON.stringify(runCommitShas)}, but the trusted baseline-to-HEAD range is ${JSON.stringify(actualRunCommits)}; refusing to allowlist or push unreported local commits.`,
+																			);
+																		}
+																		const reviewers = latestWatch.reviewersToReRequest;
+																		if (runCommitShas.length === 0) {
+																			if (reviewers.length > 0) {
+																				await requestReviewers(ghCtx, pr.prNumber, reviewers);
+																			}
+																			return {
+																				round: k,
+																				afterPoll: latestWatch.poll,
+																				actions: reviewers.map(
+																					(reviewer) => `re-requested ${reviewer}`,
+																				),
+																				pushed: false,
+																				reRequested: reviewers,
+																				summary:
+																					"Feedback handled without local commits; eligible reviewers re-requested.",
+																			};
+																		}
+																		const actions = await rebaseAndPush(bunExec, {
+																			git: github.git,
+																			worktree: input.worktree,
+																			branch: input.branch,
+																			baseBranch,
+																			expectedRemoteHead: latestBaseline.headSha,
+																			testCommand: commands.test,
+																			runCommitShas,
+																		});
+																		if (reviewers.length > 0) {
+																			await requestReviewers(ghCtx, pr.prNumber, reviewers);
+																		}
+																		return {
+																			round: k,
+																			afterPoll: latestWatch.poll,
+																			actions: [
+																				...actions,
+																				...reviewers.map(
+																					(reviewer) => `re-requested ${reviewer}`,
+																				),
+																			],
+																			pushed: true,
+																			reRequested: reviewers,
+																			summary:
+																				"Published local fixes through the bounded helper and re-requested eligible reviewers.",
+																		};
+																	})()
+														}
 													</Task>
 												) : null}
 											</Sequence>
@@ -1639,6 +2066,12 @@ prNumber: pr.prNumber,
 											<Gate
 												id={`r${k}-stamp`}
 												title={`STAMP + merge word: ${input.ticket} PR #${pr.prNumber} (round ${k})`}
+												metadata={buildApprovalStampMetadata({
+													headSha: latestReady.headSha,
+													prNumber: pr.prNumber,
+													headBranch: input.branch,
+													baseBranch,
+												})}
 												summary={[
 													`Original issue: ${brief?.summary ?? input.ticket}`,
 													`Fix: ${implementation?.summary ?? "(see PR)"}`,
@@ -1646,6 +2079,16 @@ prNumber: pr.prNumber,
 													`PR: ${pr.url}`,
 																									`Head at ready: ${latestReady.headSha}`,
 												`Human review approval: ${latestReady.approvedBy ?? "n/a"}`,
+													...(k > 0
+														? [
+																`Prior stamp invalidation: ${
+																	ctx.latest(
+																		outputs.mergeHeadCheck,
+																		`r${k - 1}-merge-head-check`,
+																	)?.diffSummary ?? "head changed after approval"
+																}`,
+															]
+														: []),
 												`CI: ${latestReady.ci} (green-or-will-be-green per approval ruling)`,
 												`Migration gate: ${migRequired ? `TRIGGERED (evidence ${migEvidenceOk ? "complete" : "INCOMPLETE"})` : "not triggered"}`, 
 													``,
@@ -1702,7 +2145,9 @@ prNumber: pr.prNumber,
 					</Task>
 				) : null}
 
-				{/* -------------- pre-merge head re-check (stamp->merge TOCTOU guard) */}
+				{/* The round-scoped merge attempt owns both the last-instant stamp
+				    comparison and MQ enqueue. A mismatch persists ok=false so the
+				    next render starts a fresh watch/approval round. */}
 				{stampedRound !== null && stampedRound.headCheck === undefined && pr !== undefined && !migStale ? (
 					<Task
 						id={`r${stampedRound.round}-merge-head-check`}
@@ -1712,85 +2157,114 @@ prNumber: pr.prNumber,
 						{() =>
 							(async () => {
 								const expectedHead = stampedRound.headSha;
-								const currentHead = dryRun
-									? expectedHead // fixtures move the head via stamp-validity, not here
-									: await fetchHeadSha(ghCtx, pr.prNumber);
-								return {
-									round: stampedRound.round,
-									expectedHead,
-									currentHead,
-									ok: currentHead === expectedHead,
-									checkedAt: nowIso(),
-								};
-							})()
-						}
-					</Task>
-				) : null}
-
-				{/* ------------------------------------------------ stage 8: MQ merge */}
-				{authorizedRound !== null && pr !== undefined && !migStale ? (
-					<Task id="enqueue-merge" output={outputs.mergeReceipt} retries={1}>
-						{() =>
-							(async () => {
 								if (dryRun) {
 									return {
-										round: authorizedRound.round,
+										round: stampedRound.round,
+										expectedHead,
+										currentHead: expectedHead,
+										ok: true,
+										diffSummary: "dry-run head unchanged since approval",
+										checkedAt: nowIso(),
 										submittedAt: nowIso(),
-										receipt: `dry-run: submitted PR #${pr.prNumber} to merge queue at head ${authorizedRound.headSha}`,
+										receipt: `dry-run: submitted PR #${pr.prNumber} to merge queue at head ${expectedHead}`,
 										alreadyLanded: false,
-										mergePath: "dry-run",
+										mergePath: "dry-run" as const,
 									};
 								}
-								// Idempotency: if the squash commit is already on this PR's base
-								// (crash after submit), do not submit again.
+								const initialComparison = await compareApprovalStamp({
+									exec: bunExec,
+									gh: github.gh,
+									repo: input.repo,
+									prNumber: pr.prNumber,
+									expectedHead,
+								});
+								if (!initialComparison.ok) {
+									return {
+										round: stampedRound.round,
+										...initialComparison,
+										checkedAt: nowIso(),
+										submittedAt: null,
+										receipt: null,
+										alreadyLanded: false,
+										mergePath: null,
+									};
+								}
+
+
+								// Idempotency after a crash: if this PR's squash is already
+								// on its live base, record it without issuing another command.
 								const mergeBaseBranch = (await fetchPrOverview(ghCtx, pr.prNumber)).baseRefName;
-								const commits = await fetchBaseCommitSubjects(github.git, input.worktree, mergeBaseBranch);
+								const commits = await fetchBaseCommitSubjects(
+									github.git,
+									input.worktree,
+									mergeBaseBranch,
+								);
 								const landed = findLandingCommit(commits, pr.prNumber);
 								if (landed !== null) {
 									return {
-										round: authorizedRound.round,
+										round: stampedRound.round,
+										...initialComparison,
+										diffSummary:
+											"approved head unchanged; merge already landed, so no enqueue command was issued",
+										checkedAt: nowIso(),
 										submittedAt: nowIso(),
 										receipt: `already landed as ${landed.sha} ("${landed.subject}") - no resubmit`,
 										alreadyLanded: true,
-										mergePath: "already-landed",
+										mergePath: "already-landed" as const,
 									};
 								}
-								// Last-instant head re-check INSIDE the submit node: the
-								// r{N}-merge-head-check node closed most of the stamp->merge
-								// window; this closes the scheduler gap between that node and
-								// this one. Throwing BEFORE submit is safe (nothing was
-								// enqueued; retry/resume re-checks).
-								const headNow = await fetchHeadSha(ghCtx, pr.prNumber);
-								if (headNow !== authorizedRound.headSha) {
-									throw new Error(
-										`[escalate] PR head moved to ${headNow} after the stamp (stamped ${authorizedRound.headSha}) - refusing to submit to the merge queue. The next render re-enters watch-ci via the head-check round guard.`,
-									);
+
+
+								// Nothing runs between this live comparison and runMerge:
+								// a moved head becomes a durable invalidation, never a failed
+								// node that strands the workflow after approval.
+								const finalComparison = await compareApprovalStamp({
+									exec: bunExec,
+									gh: github.gh,
+									repo: input.repo,
+									prNumber: pr.prNumber,
+									expectedHead,
+								});
+								if (!finalComparison.ok) {
+									return {
+										round: stampedRound.round,
+										...finalComparison,
+										checkedAt: nowIso(),
+										submittedAt: null,
+										receipt: null,
+										alreadyLanded: false,
+										mergePath: null,
+									};
 								}
-								// The merge command runs against the worktree's CURRENT
-								// branch (the merge command is scoped to the PR) - refuse if the worktree
-								// drifted off the PR branch, or the wrong PR gets merged.
-								const mergeBranch = (
-									await execOrThrow(
+								const [mergeBranch, mergeHead] = await Promise.all([
+									execOrThrow(
 										bunExec,
 										[github.git, "rev-parse", "--abbrev-ref", "HEAD"],
 										{ cwd: input.worktree },
-									)
-								).trim();
-								if (mergeBranch !== input.branch) {
+									).then((value) => value.trim()),
+									execOrThrow(bunExec, [github.git, "rev-parse", "HEAD"], {
+										cwd: input.worktree,
+									}).then((value) => value.trim()),
+								]);
+								if (mergeBranch !== input.branch || mergeHead !== finalComparison.currentHead) {
 									throw new Error(
-										`[escalate] worktree is on branch "${mergeBranch}", not "${input.branch}" - refusing to run the merge command there (it acts on the current branch and would merge the wrong PR).`,
+										`[escalate] merge worktree is ${mergeBranch || "detached"}@${mergeHead}, ` +
+											`not approved PR state ${input.branch}@${finalComparison.currentHead}; refusing to enqueue.`,
 									);
 								}
+
+
 								const merge = await runMerge({
 									args: ["--auto", "--squash"],
 									exec: bunExec,
 									gh: github.gh,
 									prNumber: pr.prNumber,
 									cwd: input.worktree,
-									// GitHub's merge queue is the only landing path.
 								});
 								return {
-									round: authorizedRound.round,
+									round: stampedRound.round,
+									...finalComparison,
+									checkedAt: nowIso(),
 									submittedAt: nowIso(),
 									receipt: merge.output.slice(-2000),
 									alreadyLanded: false,
@@ -1798,6 +2272,32 @@ prNumber: pr.prNumber,
 								};
 							})()
 						}
+					</Task>
+				) : null}
+
+				{/* Normalize the successful round-scoped attempt into the stable
+				    receipt row consumed by queue and landing verification. */}
+				{authorizedRound !== null && pr !== undefined && !migStale ? (
+					<Task id="enqueue-merge" output={outputs.mergeReceipt} retries={1}>
+						{() => {
+							const attempt = authorizedRound.headCheck;
+							if (
+								attempt.submittedAt === null ||
+								attempt.receipt === null ||
+								attempt.mergePath === null
+							) {
+								throw new Error(
+									"[escalate] merge attempt was marked valid without a complete enqueue receipt.",
+								);
+							}
+							return {
+								round: authorizedRound.round,
+								submittedAt: attempt.submittedAt,
+								receipt: attempt.receipt,
+								alreadyLanded: attempt.alreadyLanded,
+								mergePath: attempt.mergePath,
+							};
+						}}
 					</Task>
 				) : null}
 
@@ -1823,16 +2323,44 @@ prNumber: pr.prNumber,
 									// GitHub removes auto-merge when a queued PR is ejected. Re-submit it
 									// through GitHub's native merge queue.
 									if (!dryRun) {
-										const mergeBranch = (
-											await execOrThrow(
+										const approvedHead = ctx.latest(
+											outputs.stampValidity,
+											`r${mergeReceipt.round}-stamp-validity`,
+										)?.stampedHead;
+										if (!approvedHead) {
+											throw new Error(
+												"[escalate] merge queue re-submit has no commit-bound stamp; refusing to enqueue.",
+											);
+										}
+										const comparison = await compareApprovalStamp({
+											exec: bunExec,
+											gh: github.gh,
+											repo: input.repo,
+											prNumber: pr.prNumber,
+											expectedHead: approvedHead,
+										});
+										if (!comparison.ok) {
+											throw new Error(
+												`[escalate] merge queue re-submit invalidated by a moved head; refusing to enqueue. ${comparison.diffSummary}`,
+											);
+										}
+										const [mergeBranch, mergeHead] = await Promise.all([
+											execOrThrow(
 												bunExec,
 												[github.git, "rev-parse", "--abbrev-ref", "HEAD"],
 												{ cwd: input.worktree },
-											)
-										).trim();
-										if (mergeBranch !== input.branch) {
+											).then((value) => value.trim()),
+											execOrThrow(bunExec, [github.git, "rev-parse", "HEAD"], {
+												cwd: input.worktree,
+											}).then((value) => value.trim()),
+										]);
+										if (
+											mergeBranch !== input.branch ||
+											mergeHead !== comparison.currentHead
+										) {
 											throw new Error(
-													`[escalate] worktree is on branch "${mergeBranch}", not "${input.branch}" - refusing to re-submit the merge command there (it acts on the current branch and would merge the wrong PR).`,
+												`[escalate] merge queue re-submit worktree is ${mergeBranch || "detached"}@${mergeHead}, ` +
+													`not approved PR state ${input.branch}@${comparison.currentHead}; refusing to enqueue.`,
 											);
 										}
 										await runMerge({ exec: bunExec, gh: github.gh, prNumber: pr.prNumber, cwd: input.worktree, args: ["--auto", "--squash"] });

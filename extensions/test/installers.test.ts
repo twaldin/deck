@@ -200,8 +200,8 @@ describe("idle-compaction installer", () => {
 });
 
 describe("questions retirement", () => {
-	// The questions extension moved into deck-v2: a global install put
-	// ask_captain and /questions into every pi session, including workers.
+	// Questions moved to the standalone Deck-home pack: a global install put
+	// ask_captain and /questions into unrelated pi sessions.
 	test("a previously installed deck-questions of ours is removed", () => {
 		const target = freshTarget();
 		const old = path.join(target, "extensions", "deck-questions");

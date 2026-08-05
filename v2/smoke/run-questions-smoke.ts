@@ -17,13 +17,12 @@ import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { readQuestions } from "../src/questions-store";
 
-// The questions module is loaded STANDALONE here (its own default export), not
-// through the whole deck-v2 extension: this smoke exercises the queue
-// round-trip, and the full extension would drag the wake loop and smithers
-// probing into a check about questions.
+// Load the shipped standalone deck-questions entrypoint. This smoke exercises
+// the same ask + answer-delivery path installed into ~/.deck/.pi without
+// bringing in factory dispatch or recall.
 const extensionPath = process.env.SMOKE_EXTENSION_PATH
 	? resolve(process.env.SMOKE_EXTENSION_PATH)
-	: resolve(import.meta.dir, "../src/questions.ts");
+	: resolve(import.meta.dir, "../../extensions-pi/deck-questions.ts");
 const sessionDir = resolve(import.meta.dir, ".sessions");
 const evidenceDir = resolve(import.meta.dir, "evidence");
 mkdirSync(sessionDir, { recursive: true });

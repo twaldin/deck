@@ -20,15 +20,15 @@ What is left is small:
 
 - **status files** — append-only, one line per event, `verb: one short line`
 - **receipts** — for anything irreversible, written *before* the act
-- **an event loop in the orchestrator's own process** — not a daemon, so it cannot
-  die silently while everything else keeps running
+- **Smithers' detached pr-pipeline** — owns delivery progress and liveness
+- **three standalone pi extensions** — questions, factory dispatch, and recall
 
-## Two faces, one library
+## Library, CLI, and pi tools
 
-Everything lives in `src/`. The pi extension (`src/extension/`) imports it
-directly, and the CLI (`bin/deck-v2`) is a thin argument parser over the same
-functions. Neither is a wrapper around the other: no subprocess hop when the
-orchestrator spawns a worker, and no second copy of the logic to keep in sync.
+The headless implementation lives in `src/`. The CLI (`bin/deck-v2`) calls it
+directly, and the standalone entrypoints in `../extensions-pi/` import the same
+functions. `ship` and `adopt` therefore dispatch through `src/ship.ts` exactly
+as `deck-v2 ship` does; there is no orchestrator extension or duplicate engine.
 
 ```
 deck-v2 bootstrap          # create ~/.deck
@@ -49,40 +49,33 @@ REFUSED without `--no-pipeline` (`assertShipGoesThroughPipeline` in
 `src/spawn.ts`) — spawn is for workers inside a pipeline stage and scouts. See
 `workflows/pr-pipeline/README.md` "This is the DEFAULT ship path".
 
-## Roles
+## Plain sessions and external memory
 
-There is one **orchestrator** — the agent I talk to. It dispatches work, judges
-what comes back, and is the only thing that asks me questions. **Workers** do the
-actual work in isolated worktrees and never talk to me directly; if a worker hits
-a decision, it says so in its status file and the orchestrator relays it.
+Any number of plain pi sessions can start in `~/.deck`. They shape work and use
+the factory tools; Smithers owns delivery progress and liveness. Decisions are
+queued once instead of being asked through competing channels.
 
-That last rule is not politeness, it is a race fix. When both could ask me
-things, I answered one agent's question while the orchestrator independently
-authorized another, and the two orders conflicted. Now workers spawn with the
-question tool excluded, so the second channel cannot exist.
-
-The orchestrator's operating contract lives in `~/.deck/AGENTS.md`, seeded from
-`seed/orchestrator-contract.md`. It stays under the contract size cap on purpose: the previous version was 500
-lines, always loaded, and its rules decayed within days — one was violated three
-days after being written.
+The public home contract is copied from `seed/AGENTS.md`. OptMem holds global
+identity, decisions, preferences, and durable lessons. Effort dossiers hold
+briefs, rationale, rejected alternatives, and checkpoints. Lindy's
+`STANDING-RULES.md` remains a separate seat-injection source.
 
 ## The questions queue
 
-`src/questions.ts` + `src/questions-store.ts`: the durable captain-facing
-decision queue — the `ask_captain` tool and the `/questions` review command.
-It registers from the deck-v2 extension only, so it exists exactly where the
-orchestrator runs and nowhere else; worker `pi -p` sessions never surface a
-competing question dialog. (Its previous life as a globally installed
-extension put it in every pi session on the machine, and the queue filled
-with ghost questions from dead sessions.)
+`src/questions.ts` + `src/questions-store.ts` provide the durable
+captain-facing decision queue. `../extensions-pi/deck-questions.ts` registers
+the non-blocking `ask_captain` tool, read-only `list_questions`,
+first-answer-wins `answer_question`, and the interactive `/questions` command.
+`v2/install.sh` installs that extension into `~/.deck/.pi`, so plain Deck
+sessions share one queue while pr-pipeline seats do not load a competing
+question surface.
 
 The queue lives at `~/.deck/questions/queue.jsonl` (`DECK_QUESTIONS_FILE`
-overrides it for tests). One append-only JSONL event log, folded on read;
-first answer wins; delivery sends before it marks. On session start the store
-imports still-open questions from the legacy `~/.pi/agent/questions/` queue
-once, then purges answered and stale (>7d) entries to `archive.jsonl` beside
-the queue. Open questions show in the statusline as `Nq` next to the task
-count, and in the `/fleet` overlay header.
+overrides it for tests). It is one append-only JSONL event log, folded on read;
+first answer wins, and delivery sends before it marks. Session start imports
+still-open questions from the legacy `~/.pi/agent/questions/` queue once. Live
+Deck sessions never rewrite the shared log; archival compaction is exclusive
+offline maintenance. The statusline chip is `N?` while questions are open.
 
 The opt-in real smoke spans two pi processes sharing only the queue file:
 
@@ -128,9 +121,9 @@ rebased out from under a running fleet.
 
 ## Status
 
-Works, and I use it. The pieces here cover spawning, status, wakes, the fleet
-view, teardown safety, and the backlog. It runs alongside the old system rather
-than replacing it outright, with an owner marker deciding which one owns a task.
+The headless libraries back the CLI and standalone extension pack. Plain pi
+sessions have no fleet overlay, wake loop, calm mode, or privileged orchestrator
+surface; durable shipment progress belongs to Smithers.
 
 `bun test` from this directory. Tests are deliberately not one-per-change: each is
 supposed to go red on the behavior it replaced, and several were written by

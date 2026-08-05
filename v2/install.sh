@@ -1,41 +1,50 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Install the deck-v2 pi extension and the deck-v2 CLI.
-# INSTALL_TARGET is overridable so tests never touch live ~/.pi.
+# Install Deck's three standalone pi extensions and the deck-v2 CLI.
+# INSTALL_TARGET is overridable so tests never touch live ~/.deck.
 #
-# The extension is a DIRECTORY, not a flat symlink. pi discovers both
-# `extensions/*.ts` and `extensions/*/index.ts`; a flat symlink resolves its
-# relative sibling imports next to the SYMLINK rather than the real source, so
-# the imports fail, and a flat sibling dropped beside it gets loaded as its own
-# extension and rejected. The whole extension must live inside one directory
-# where only index.ts is an entrypoint.
+# Each extension is a DIRECTORY entrypoint. pi discovers both extensions/*.ts
+# and extensions/*/index.ts; keeping one index.ts per surface prevents support
+# libraries from being mistaken for extensions.
 #
-# deck-v2's extension imports ../*.ts from the v2 package, so the directory
-# holds a symlink to the repo source tree instead of copies: one source of
-# truth, and an edit is live without reinstalling.
-# Default target is the ORCHESTRATOR HOME's own .pi, not the global ~/.pi/agent:
-# these tools operate one home's fleet, so scoping them there keeps an unrelated
-# pi session in another directory from loading a fleet-control extension.
-# Override INSTALL_TARGET=$HOME/.pi/agent for a global install.
-# Must match deckV2Home() in src/home.ts (~/.deck), or the extension installs
-# into a pi home no orchestrator session ever starts from.
+# The source entrypoints live at repo-root/extensions-pi/*.ts and import
+# ../v2/src/*. When index.ts is symlinked into extensions/deck-*/index.ts, that
+# same relative path resolves through extensions/v2/src/*. The shared symlink
+# tree below deliberately preserves that layout.
 DECK_V2_HOME_DIR="${DECK_V2_HOME:-$HOME/.deck}"
 INSTALL_TARGET="${INSTALL_TARGET:-$DECK_V2_HOME_DIR/.pi}"
 REPO_V2="$(cd "$(dirname "$0")" && pwd)"
+EXTENSION_SOURCE="$REPO_V2/../extensions-pi"
 EXTENSIONS_DIR="$INSTALL_TARGET/extensions"
-DEST="$EXTENSIONS_DIR/deck-v2"
+LIB_ROOT="$EXTENSIONS_DIR/v2"
+LIB_DEST="$LIB_ROOT/src"
+LIB_MARKER="$LIB_ROOT/.deck-v2-lib"
+OLD_DEST="$EXTENSIONS_DIR/deck-v2"
 
 mkdir -p "$EXTENSIONS_DIR"
 
-# Refuse to clobber anything we cannot prove is ours.
-if [ -e "$DEST" ] && [ ! -L "$DEST" ] && [ ! -d "$DEST" ]; then
-  printf 'error: %s exists and is neither our directory nor a symlink.\n' "$DEST" >&2
-  exit 1
+# Retire only an installation whose entrypoint is provably the old Deck
+# extension. Never silently delete a same-named user extension.
+if [ -e "$OLD_DEST" ] || [ -L "$OLD_DEST" ]; then
+  old_owned=false
+  if [ -L "$OLD_DEST/extension/index.ts" ]; then
+    case "$(readlink "$OLD_DEST/extension/index.ts")" in
+      "$REPO_V2"/src/extension/index.ts) old_owned=true ;;
+    esac
+  elif [ -f "$OLD_DEST/index.ts" ] && grep -q 'export { default } from "./extension/index.ts";' "$OLD_DEST/index.ts"; then
+    old_owned=true
+  fi
+  if [ "$old_owned" != true ]; then
+    printf 'error: %s exists but is not the retired Deck extension.\n' "$OLD_DEST" >&2
+    exit 1
+  fi
+  rm -rf "$OLD_DEST"
+  printf 'removed retired deck-v2 orchestrator extension from %s\n' "$OLD_DEST"
 fi
 
-# A stale flat entry keeps failing even after a good directory exists beside it,
-# because pi discovers extensions/*.ts too. Only remove one we can prove is ours.
+# A stale flat entry is still independently discovered by pi. Remove only one
+# that resolves into this repository.
 stale="$EXTENSIONS_DIR/deck-v2.ts"
 if [ -L "$stale" ]; then
   resolved="$(readlink "$stale")"
@@ -48,36 +57,61 @@ elif [ -e "$stale" ]; then
   exit 1
 fi
 
-# pi resolves an extension's relative imports against the SYMLINK's directory,
-# not the real file, so `index.ts -> .../src/extension/index.ts` cannot find
-# `../events`. Verified: it fails with "Cannot find module '../events'".
-#
-# So the installed directory reproduces the source layout one level down:
-#   deck-v2/extension/index.ts -> real src/extension/index.ts
-#   deck-v2/<module>.ts        -> real src/<module>.ts
-# `../events` from extension/index.ts then resolves to deck-v2/events.ts, which
-# is the real module. Only extension/index.ts is nested, so pi finds exactly one
-# entrypoint: pi discovers `*/index.ts`, not `*/*/index.ts`.
-rm -rf "$DEST"
-mkdir -p "$DEST/extension"
-ln -sfn "$REPO_V2/src/extension/index.ts" "$DEST/extension/index.ts"
+# `v2` is a generic name in an extension directory. Claim it with an explicit
+# source marker before writing any support-module symlink, and refuse collisions.
+if [ -e "$LIB_ROOT" ] || [ -L "$LIB_ROOT" ]; then
+  if [ -L "$LIB_ROOT" ] || [ ! -d "$LIB_ROOT" ]; then
+    printf 'error: %s exists and is not Deck'\''s support directory.\n' "$LIB_ROOT" >&2
+    exit 1
+  fi
+  owner=""
+  if [ -f "$LIB_MARKER" ]; then IFS= read -r owner < "$LIB_MARKER" || true; fi
+  if [ "$owner" != "$REPO_V2" ]; then
+    printf 'error: %s exists without Deck'\''s matching ownership marker.\n' "$LIB_ROOT" >&2
+    exit 1
+  fi
+else
+  mkdir -p "$LIB_ROOT"
+  printf '%s\n' "$REPO_V2" > "$LIB_MARKER"
+fi
+mkdir -p "$LIB_DEST"
 for module in "$REPO_V2"/src/*.ts; do
   name="$(basename "$module")"
-  # index.ts is deliberately skipped: DEST/index.ts is the generated entrypoint
-  # shim below, and symlinking it here would make the shim's redirect write
-  # straight through the link into the repo's own src/index.ts.
+  # Nothing imports the v2 barrel, and leaving it out keeps the support tree
+  # unambiguously non-loadable as a pi extension.
   [ "$name" = "index.ts" ] && continue
-  ln -sfn "$module" "$DEST/$name"
+  ln -sfn "$module" "$LIB_DEST/$name"
 done
-# The entrypoint pi loads. Re-exporting keeps the single-entrypoint rule while
-# the real code stays in extension/index.ts next to its siblings.
-rm -f "$DEST/index.ts"
-printf 'export { default } from "./extension/index.ts";\n' > "$DEST/index.ts"
 
-printf 'installed deck-v2 pi extension in %s\n' "$DEST"
+for extension in deck-questions deck-ship deck-recall; do
+  source="$EXTENSION_SOURCE/$extension.ts"
+  dest="$EXTENSIONS_DIR/$extension"
+  flat="$EXTENSIONS_DIR/$extension.ts"
+  if [ ! -f "$source" ]; then
+    printf 'error: missing extension source %s\n' "$source" >&2
+    exit 1
+  fi
+  if [ -e "$flat" ] || [ -L "$flat" ]; then
+    printf 'error: stale flat extension entry %s must be removed by hand.\n' "$flat" >&2
+    exit 1
+  fi
+  if [ -L "$dest" ] || { [ -e "$dest" ] && [ ! -d "$dest" ]; }; then
+    printf 'error: %s exists and is not an extension directory.\n' "$dest" >&2
+    exit 1
+  fi
+  mkdir -p "$dest"
+  if [ -e "$dest/index.ts" ] || [ -L "$dest/index.ts" ]; then
+    if [ ! -L "$dest/index.ts" ] || [ "$(readlink "$dest/index.ts")" != "$source" ]; then
+      printf 'error: %s exists but is not Deck'\''s extension entrypoint.\n' "$dest/index.ts" >&2
+      exit 1
+    fi
+  fi
+  ln -sfn "$source" "$dest/index.ts"
+  printf 'installed %s pi extension in %s\n' "$extension" "$dest"
+done
 
-# The orchestrator and its worker sessions share this pi agent directory. Install
-# the subagent primitive there so workflow and spawn agents receive the same tool.
+# Plain Deck pi sessions share this pi agent directory. Install the subagent
+# primitive there as its own independent extension.
 INSTALL_TARGET="$INSTALL_TARGET" "$REPO_V2/../subagents/install.sh"
 
 # CLI: a shim on PATH pointing at the repo bin, so both faces run one source.

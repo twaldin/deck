@@ -15,7 +15,6 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import * as PiTui from "@earendil-works/pi-tui";
-import deckV2 from "../src/extension/index";
 import {
 	DECK_OPERATIONAL_PREFIX,
 	calmPreferencePath,
@@ -294,24 +293,6 @@ describe("tool-shell adapter", () => {
 		expect(lines.join(" ")).toContain("started pid 123");
 	});
 
-	test("deck orchestrator tool rows hide under Calm and export overrides", () => {
-		installCalmToolShellLayout();
-		const pi = fakePi();
-		deckV2(pi.api);
-		const spawn = pi.tools.find((tool) => tool.name === "spawn")!;
-		expect(spawn).toBeDefined();
-		const row = toolRow(spawn, { task_id: "t1" });
-
-		setCalmPresentation(true);
-		expect(row.render(60)).toEqual([]);
-
-		setCalmStockExportRendering(true);
-		expect(row.render(60).join(" ")).toContain("spawn");
-		setCalmStockExportRendering(false);
-
-		setCalmPresentation(false);
-		expect(row.render(60).join(" ")).toContain("spawn");
-	});
 });
 
 describe("operational-user adapter", () => {

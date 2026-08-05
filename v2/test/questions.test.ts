@@ -285,8 +285,8 @@ describe("compact", () => {
 	});
 
 	test("REGRESSION: an old answered-but-undelivered question survives compaction and still delivers", async () => {
-		// Compaction runs on session_start BEFORE delivery. Aging these out by
-		// askedAt would destroy a captain answer the asker never saw.
+		// Even exclusive maintenance must preserve an answered question until it
+		// has been delivered to the asking session.
 		const file = freshFile();
 		const asked = ask(file, { question: "old but answered", sessionId: "s", cwd: "/", now: 0 });
 		answer(file, asked.id, "the word", "answered", 1000);

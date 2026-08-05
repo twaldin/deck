@@ -1,17 +1,19 @@
-# Laptop agents → orch-host handoff
+# Laptop agents → Deck-host handoff
 
-For agents running on a **glass laptop**. You are **not** the deck orchestrator. You prepare work and drop files the orch will read. The orch lives on a durable host and owns pipelines.
+For agents running on a **glass laptop**. Prepare work and drop files that any
+plain pi session on the durable Deck host can pick up. Smithers owns pipelines
+and delivery state on that host.
 
-## Reach the orch host
+## Reach the Deck host
 
 ```sh
 # Prefer a hosts-file or MagicDNS name; fall back to the host's tailnet address.
-ssh <user>@<orch-host>
+ssh <user>@<deck-host>
 ```
 
 Use the host's own login user. Do not assume the laptop username.
 
-## What you may put on the orch host
+## What you may put on the Deck host
 
 | OK | Never |
 |---|---|
@@ -22,7 +24,7 @@ Use the host's own login user. Do not assume the laptop username.
 ## Install or update a personal project
 
 ```sh
-ssh <user>@<orch-host> 'bash -s' <<'EOF'
+ssh <user>@<deck-host> 'bash -s' <<'EOF'
 set -euo pipefail
 # example: clone or pull a personal repo
 REPO_URL="https://github.com/YOU/PROJECT.git"
@@ -63,12 +65,12 @@ EOF
 
 Edit `repo` / paths to match reality. Pipeline stays **`yolo-ship`** on personal hosts unless the captain says otherwise.
 
-## Drop work for the orch (inbox)
+## Drop work for Deck (inbox)
 
 ```sh
-ssh <user>@<orch-host> 'mkdir -p ~/.deck/data/inbox'
+ssh <user>@<deck-host> 'mkdir -p ~/.deck/data/inbox'
 # copy a handoff
-scp ./HANDOFF-my-feature.md <user>@<orch-host>:~/.deck/data/inbox/
+scp ./HANDOFF-my-feature.md <user>@<deck-host>:~/.deck/data/inbox/
 ```
 
 ### Handoff file shape
@@ -95,26 +97,27 @@ Links, prior PRs, constraints. No secrets.
 yolo-ship | (only if captain said stamp)
 ```
 
-Captain (or orch when he says “drain inbox”) turns these into `ship` runs. **Do not** start smithers yourself from the laptop unless asked.
+The captain opens any plain Deck session, reviews these, and turns them into
+`ship` runs. **Do not** start Smithers yourself from the laptop unless asked.
 
 ## Update deck code on the box
 
 ```sh
-ssh <user>@<orch-host> '~/dev/deck/update.sh'
+ssh <user>@<deck-host> '~/dev/deck/update.sh'
 ```
 
 ## Glass in (human)
 
 ```sh
-herdr --remote <user>@<orch-host>
+herdr --remote <user>@<deck-host>
 # remote shell:
-source ~/.deck/enter.sh && pi
+cd ~/.deck && pi
 ```
 
-Then talk to the orch: describe work, point at inbox files, stamp when asked.
+Then use the plain Deck session: describe work, point at inbox files, and stamp when asked.
 
 ## One-liner the laptop agent can cat first
 
 ```sh
-ssh <user>@<orch-host> 'cat ~/dev/deck/docs/LAPTOP-AGENTS.md'
+ssh <user>@<deck-host> 'cat ~/dev/deck/docs/LAPTOP-AGENTS.md'
 ```

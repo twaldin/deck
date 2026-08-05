@@ -8,12 +8,11 @@
 Installed by `./extensions/install.sh`; inert until pi loads it (new process or
 `/reload`). Native compaction is off by default.
 
-The questions extension (`ask_captain` + `/questions`) moved into deck-v2
-(`v2/src/questions.ts`), which installs into the orchestrator home's own `.pi`.
-Globally installed here, every pi session on the machine — including worker
-`pi -p` sessions — registered its own competing question surface, and the queue
-under `~/.pi/agent/questions/` collected ghost questions from dead sessions.
-The installer now removes a previously installed `deck-questions` of ours.
+The questions surface (`ask_captain`, `list_questions`, `answer_question`, and
+`/questions`) lives in the standalone `extensions-pi/deck-questions.ts` pack.
+`v2/install.sh` installs it into `~/.deck/.pi` rather than the global pi agent
+directory. The installer here removes the retired global `deck-questions`
+entry, which otherwise gives unrelated pi sessions a competing queue surface.
 
 ## Native compaction
 
