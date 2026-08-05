@@ -537,7 +537,7 @@ describe("adopt existing PR (input.existingPr)", () => {
 		expect(output).toMatchObject({ runId });
 		const schema = pushTask!.outputSchema!;
 		expect(schema.safeParse(output).success).toBe(true);
-		const missingRequiredField = { ...output } as Record<string, unknown>;
+		const missingRequiredField = { ...(output as Record<string, unknown>) };
 		delete missingRequiredField.createdAt;
 		expect(schema.safeParse(missingRequiredField).success).toBe(false);
 	});
