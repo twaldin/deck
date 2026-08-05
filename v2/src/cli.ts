@@ -312,7 +312,9 @@ export async function runCli(argv: string[]): Promise<number> {
 			}
 
 			case "stale": {
-				const verdicts = detectStale();
+				// Read-only: looking at the fleet must not mark a verdict emitted, or the
+				// orchestrator's own cycle silently skips reporting it.
+				const verdicts = detectStale(undefined, { record: false });
 				for (const verdict of verdicts) {
 					process.stdout.write(`${verdict.taskId}: ${verdict.reason}\n`);
 				}

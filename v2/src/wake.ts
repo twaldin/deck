@@ -19,6 +19,7 @@
  * Because `.status` is append-only and the cursor is identity-aware, a missed
  * event is LATE, never LOST.
  */
+import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {
@@ -30,7 +31,7 @@ import {
 	readStatusSince,
 	saveCursors,
 } from "./events";
-import { intakeFiles, stateDir, wakeFiles } from "./home";
+import { intakeFiles, stateDir, stateFiles, wakeFiles } from "./home";
 import { readMeta } from "./meta";
 import { type StatusEvent, type WakeTier, tierFor } from "./status";
 
@@ -423,31 +424,252 @@ export type StaleVerdict = {
 	reason: string;
 };
 
+/** Silence before a live worker is called stuck. Overridable per call and by env. */
+export const DEFAULT_SILENCE_MS = 10 * 60 * 1000;
+/** Suppression ceiling: a standing silent verdict repeats at most this often. */
+const MAX_BACKOFF_MS = 60 * 60 * 1000;
+/** Bound on the worktree walk, so one huge tree cannot stall a reconcile cycle. */
+const MAX_WALK_ENTRIES = 20_000;
+
+function configuredSilenceMs(override?: number): number {
+	if (typeof override === "number" && override > 0) return override;
+	const fromEnv = Number.parseInt(process.env.DECK_STALE_SILENCE_MS ?? "", 10);
+	return Number.isInteger(fromEnv) && fromEnv > 0 ? fromEnv : DEFAULT_SILENCE_MS;
+}
+
+/**
+ * Newest mtime under `root`, ignoring node_modules/.git and never leaving the
+ * tree (dirents are typed, so a symlink is never descended into).
+ *
+ * Returns as soon as something newer than `cutoff` is seen: the question is
+ * "has this worker written anything lately", and the first yes answers it.
+ *
+ * Mtimes after `limit` (now) are IGNORED, not clamped. A file dated in the
+ * future (clock skew, a restored archive, a generator that writes ahead) would
+ * otherwise read as fresh on every cycle and hide a real wedge forever, and
+ * clamping it to now has exactly the same effect.
+ *
+ * `truncated` means the walk hit its entry budget without finding anything
+ * fresh, so the tree was not fully searched. The caller still judges — the
+ * transcript signal is complete on its own — but says so in the reason,
+ * because the worktree half of the evidence is partial.
+ */
+function newestMtimeMs(
+	root: string,
+	cutoff: number,
+	limit: number,
+): { newest: number; truncated: boolean } {
+	let newest = 0;
+	let visited = 0;
+	const stack = [root];
+	while (stack.length > 0) {
+		const dir = stack.pop();
+		if (dir === undefined) break;
+		let entries: fs.Dirent[];
+		try {
+			entries = fs.readdirSync(dir, { withFileTypes: true });
+		} catch {
+			continue;
+		}
+		for (const entry of entries) {
+			if (visited++ > MAX_WALK_ENTRIES) return { newest, truncated: true };
+			if (entry.name === "node_modules" || entry.name === ".git") continue;
+			const full = path.join(dir, entry.name);
+			if (entry.isDirectory()) {
+				stack.push(full);
+				continue;
+			}
+			// Only regular files. A symlink is neither followed nor stat'd, which is
+			// what keeps the scan inside the worktree.
+			if (!entry.isFile()) continue;
+			let mtime: number;
+			try {
+				mtime = fs.statSync(full).mtimeMs;
+			} catch {
+				continue;
+			}
+			if (mtime > newest && mtime <= limit) newest = mtime;
+			if (newest > cutoff) return { newest, truncated: false };
+		}
+	}
+	return { newest, truncated: false };
+}
+
+/** Transcript signal: newest session mtime and total bytes written so far. */
+function sessionSignal(dir: string): { mtimeMs: number; bytes: number } {
+	let entries: fs.Dirent[];
+	try {
+		entries = fs.readdirSync(dir, { withFileTypes: true });
+	} catch {
+		return { mtimeMs: 0, bytes: 0 };
+	}
+	let mtimeMs = 0;
+	let bytes = 0;
+	for (const entry of entries) {
+		if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
+		try {
+			const stat = fs.statSync(path.join(dir, entry.name));
+			bytes += stat.size;
+			if (stat.mtimeMs > mtimeMs) mtimeMs = stat.mtimeMs;
+		} catch {
+			continue;
+		}
+	}
+	return { mtimeMs, bytes };
+}
+
+/**
+ * Per-task activity watermark and verdict suppression.
+ *
+ * `bytes` makes transcript GROWTH a signal in its own right: an appended
+ * session whose mtime a coarse filesystem has not moved still proves the worker
+ * is alive. `emitted`/`nextEmitAt` are why the same silent verdict is not
+ * re-sent every cycle.
+ */
+type ActivityRecord = {
+	bytes: number;
+	lastSignalMs: number;
+	/**
+	 * The run this watermark belongs to. A respawn bumps run_epoch, and without
+	 * this the replacement run inherits the dead run's silence and is reported
+	 * as stuck the moment it starts.
+	 */
+	epoch?: number;
+	emitted?: string;
+	nextEmitAt?: number;
+	backoffMs?: number;
+	/**
+	 * Earliest cycle that re-runs the worktree walk for this task. While a silent
+	 * verdict is suppressed the walk cannot change what is reported, so it runs at
+	 * most once per silence window instead of on every cycle.
+	 */
+	nextScanAt?: number;
+};
+
+type ActivityStore = Record<string, ActivityRecord>;
+
+function loadActivity(): ActivityStore {
+	try {
+		const parsed: unknown = JSON.parse(fs.readFileSync(wakeFiles().activity, "utf8"));
+		if (parsed !== null && typeof parsed === "object") return parsed as ActivityStore;
+		return {};
+	} catch {
+		return {};
+	}
+}
+
+function saveActivity(store: ActivityStore): void {
+	const file = wakeFiles().activity;
+	const tmp = `${file}.${process.pid}.tmp`;
+	fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+	fs.writeFileSync(tmp, `${JSON.stringify(store, null, 2)}\n`, { mode: 0o600 });
+	fs.renameSync(tmp, file);
+}
+
+export type ChildProcessRow = { pid: number; command: string };
+
+/**
+ * A short, safe label for a child process.
+ *
+ * The raw `ps` command line is attacker-influenced text (a worker chooses what it
+ * runs) that ends up in an orchestrator message: it can be kilobytes long and can
+ * carry control characters, including newlines that forge extra report lines.
+ * The executable's basename answers "what is it waiting on" without any of that.
+ */
+function childLabel(command: string): string {
+	const executable = command.trim().split(/\s+/)[0] ?? "";
+	const safe = path
+		.basename(executable)
+		// Printable ASCII only, so no newline, tab, or escape survives into a message.
+		.replace(/[^\x20-\x7e]/g, "")
+		.slice(0, 40);
+	return safe.length > 0 ? safe : "unknown";
+}
+
+/** Direct children of `pid`. Used only to name what a silent worker is waiting on. */
+function defaultChildren(pid: number): ChildProcessRow[] {
+	try {
+		const out = spawnSync("ps", ["-axo", "pid=,ppid=,command="], { encoding: "utf8" });
+		if (out.status !== 0 || typeof out.stdout !== "string") return [];
+		const rows: ChildProcessRow[] = [];
+		for (const line of out.stdout.split("\n")) {
+			const match = line.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/);
+			if (match === null) continue;
+			if (Number(match[2]) !== pid) continue;
+			rows.push({ pid: Number(match[1]), command: match[3] ?? "" });
+		}
+		return rows;
+	} catch {
+		return [];
+	}
+}
+
 /**
  * Staleness, redefined as a FACT rather than a heuristic.
  *
- * There is no pane to be idle, so the only real stale conditions are: a run was
- * recorded and its process is gone with no terminal status, or a workflow row is
- * running with no transition past a threshold. A `paused:` task is never stale —
- * that alone removes fm2's 1844 absorbed-stale records.
+ * A recorded run whose process is gone with no terminal status is stale. A LIVE
+ * run is judged on ACTIVITY, not on its deadline: a deadline says the budget is
+ * spent, which is a planning fact, while writing files and appending to its
+ * transcript is proof the worker is still doing the work. Alerting on the
+ * deadline alone reported every long-but-productive run as stuck; alerting on
+ * silence reports only the class that motivated the deadline — a worker looping
+ * on a retry, alive, writing nothing.
+ *
+ * A `paused:` task is never stale — that alone removes fm2's 1844 absorbed-stale
+ * records.
  */
 export function detectStale(
 	taskIds?: string[],
-	options: { runAlive?: (pid: number) => boolean } = {},
+	options: {
+		runAlive?: (pid: number) => boolean;
+		/** Silence before a live worker is called stuck. Default 10 minutes. */
+		silenceMs?: number;
+		/** Injected for tests; defaults to a `ps` scan for direct children. */
+		listChildren?: (pid: number) => ChildProcessRow[];
+		now?: number;
+		/**
+		 * Persist the activity watermark and mark verdicts emitted. Default true.
+		 *
+		 * A read-only caller (the CLI's `stale`, a human looking) must pass false:
+		 * otherwise looking at the fleet marks the verdict as delivered and the
+		 * orchestrator's own cycle never reports it. false is read-only in BOTH
+		 * directions — it neither writes suppression nor obeys it, so an inspection
+		 * always answers with the current verdict.
+		 */
+		record?: boolean;
+	} = {},
 ): StaleVerdict[] {
 	const alive = options.runAlive ?? defaultAlive;
+	const listChildren = options.listChildren ?? defaultChildren;
+	const silenceMs = configuredSilenceMs(options.silenceMs);
+	const now = options.now ?? Date.now();
+	const persist = options.record ?? true;
 	const ids = taskIds ?? deckOwnedTasks();
+	const activity = loadActivity();
+	let activityDirty = false;
+	/** A task with no live run has no watermark to keep. */
+	const forget = (taskId: string): void => {
+		if (activity[taskId] === undefined) return;
+		delete activity[taskId];
+		activityDirty = true;
+	};
 	const verdicts: StaleVerdict[] = [];
 	for (const taskId of ids) {
 		const meta = readMeta(taskId);
-		if (meta === null) continue;
+		if (meta === null) {
+			forget(taskId);
+			continue;
+		}
 		// An empty `run_pid=` line parses to NaN; NaN and non-positive values mean
 		// no live run is recorded, and a task with no recorded run cannot be stale.
 		const pid =
 			typeof meta.run_pid === "number" && Number.isInteger(meta.run_pid) && meta.run_pid > 0
 				? meta.run_pid
 				: undefined;
-		if (pid === undefined) continue;
+		if (pid === undefined) {
+			forget(taskId);
+			continue;
+		}
 
 		const { lastEventVerb: currentVerb } = lastVerb(taskId);
 		// A parked task already reported its state: paused and needs-decision wait on
@@ -460,30 +682,142 @@ export function detectStale(
 			currentVerb === "blocked" ||
 			currentVerb === "needs-decision"
 		) {
+			forget(taskId);
 			continue;
 		}
 
 		if (alive(pid)) {
-			// A LIVE worker past its deadline is stuck, not working. Liveness alone
-			// cannot tell the difference: a looping worker writes no status and never
-			// exits, so it is invisible forever without this. Observed live — a worker
-			// finished its task, then retried a rate-limited search nine times.
-			const deadline = typeof meta.run_deadline === "number" ? meta.run_deadline : undefined;
-			if (deadline === undefined) continue;
-			if (Date.now() < deadline) continue;
-			const overdueMin = Math.max(1, Math.round((Date.now() - deadline) / 60000));
-			verdicts.push({
-				taskId,
-				reason: `still running ${overdueMin} minute(s) past its budget with no result — likely stuck, not working`,
-			});
+			// A LIVE worker that is WRITING is working, however overdue. A live worker
+			// writing nothing is the class that motivated this: observed live, a worker
+			// finished its task then retried a rate-limited search nine times, alive and
+			// silent, invisible to a liveness probe.
+			const cutoff = now - silenceMs;
+			// A new run starts with a clean watermark: the previous run's silence and
+			// suppression say nothing about this one.
+			const epoch = typeof meta.run_epoch === "number" ? meta.run_epoch : 0;
+			const stored = activity[taskId];
+			const respawned = stored !== undefined && (stored.epoch ?? 0) !== epoch;
+			const previous = respawned ? undefined : stored;
+			// Suppression key excludes the minute count AND the child pid: a standing
+			// silence would otherwise look like a new verdict on every cycle, and a
+			// parent respawning short-lived children would bypass backoff entirely.
+			const fingerprint = `silent:${pid}`;
+			// A suppressed verdict is muted until nextEmitAt, so re-walking the worktree
+			// before then cannot change the outcome — scan once per silence window and
+			// skip the rest. A read-only caller is never throttled, because it does not
+			// apply suppression either and must see the current verdict.
+			if (
+				persist &&
+				previous?.emitted === fingerprint &&
+				now < (previous.nextEmitAt ?? 0) &&
+				now < (previous.nextScanAt ?? 0)
+			) {
+				continue;
+			}
+			const session = sessionSignal(
+				typeof meta.session_dir === "string" ? meta.session_dir : stateFiles(taskId).sessions,
+			);
+			// Only worktree writes and transcript activity count. A status line is a
+			// report ABOUT the work, not the work: a worker looping on a retry can keep
+			// appending `working:` while writing nothing, and counting that mtime as
+			// activity is exactly what hides the wedge this check exists to find.
+			let newest = session.mtimeMs <= now ? session.mtimeMs : 0;
+			let truncated = false;
+			// Skip the walk when a cheap signal already proves recent activity: the
+			// verdict cannot change, and this is the common case for a healthy run.
+			if (newest <= cutoff && (previous?.lastSignalMs ?? 0) <= cutoff && typeof meta.worktree === "string" && meta.worktree.length > 0) {
+				const walk = newestMtimeMs(meta.worktree, cutoff, now);
+				newest = Math.max(newest, walk.newest);
+				truncated = walk.truncated;
+			}
+			// Transcript growth is activity even when the mtime looks old, which is what
+			// a coarse filesystem timestamp or a restored mtime can make it look like.
+			const grew = previous !== undefined && session.bytes > previous.bytes;
+			const observed = grew ? now : newest;
+			// A run cannot have been silent for longer than it has existed. The worktree
+			// and transcript of a REPLACEMENT run still hold the dead run's files, so
+			// without this anchor the new run is judged by the old run's mtimes and is
+			// called stuck the moment it starts — including on the very first sight,
+			// where there is no stored record to notice the respawn from.
+			const runStarted =
+				typeof meta.run_started === "number" &&
+				Number.isFinite(meta.run_started) &&
+				meta.run_started > 0 &&
+				meta.run_started <= now
+					? meta.run_started
+					: 0;
+			const lastSignalMs = Math.max(
+				runStarted,
+				previous !== undefined
+					? Math.max(observed, previous.lastSignalMs)
+					: respawned
+						// A replacement run's clock starts when we first see it. Its worktree
+						// still holds the dead run's files, and judging the new run by those
+						// mtimes reports it as stuck before it has had a chance to write.
+						? now
+						// First sight ever: an existing old mtime IS this run's last signal,
+						// so an already-wedged worker is caught on the first pass rather than
+						// granted a fresh silence window.
+						: (observed === 0 ? now : observed),
+			);
+			const record: ActivityRecord = { ...previous, epoch, bytes: session.bytes, lastSignalMs };
+
+			if (lastSignalMs > cutoff) {
+				// Active. Clear suppression so the next real silence alerts at once.
+				delete record.emitted;
+				delete record.nextEmitAt;
+				delete record.backoffMs;
+				delete record.nextScanAt;
+				activity[taskId] = record;
+				activityDirty = true;
+				continue;
+			}
+
+			// Persisted suppression is a DELIVERY policy for the recording cycle. A
+			// read-only caller (record:false) must not apply it: a human inspecting the
+			// fleet has to see the current verdict even when the recording caller
+			// already muted it.
+			const suppressed =
+				persist && record.emitted === fingerprint && now < (record.nextEmitAt ?? 0);
+			if (!suppressed) {
+				const silentMin = Math.max(1, Math.round((now - lastSignalMs) / 60000));
+				// Named only on a verdict that is actually emitted: `ps` on every cycle of a
+				// standing silence buys nothing.
+				const child = listChildren(pid)[0];
+				// A truncated walk still alerts. The transcript signal is complete on its
+				// own, and a pi worker doing anything appends to its transcript — so
+				// staying quiet here would hide a real wedge in every worktree big enough
+				// to exhaust the walk budget, forever. The reason says the worktree
+				// evidence is partial.
+				const partial = truncated ? "; worktree scan was incomplete" : "";
+				verdicts.push({
+					taskId,
+					reason:
+						child === undefined
+							? `alive as pid ${pid} but has written nothing for ${silentMin} minute(s)${partial} — likely stuck, not working`
+							: `alive as pid ${pid} but has written nothing for ${silentMin} minute(s); child pid ${child.pid} (${childLabel(child.command)}) is still running${partial} — likely a stuck subagent`,
+				});
+				const backoffMs =
+					record.emitted === fingerprint
+						? Math.min((record.backoffMs ?? silenceMs) * 2, MAX_BACKOFF_MS)
+						: silenceMs;
+				record.emitted = fingerprint;
+				record.backoffMs = backoffMs;
+				record.nextEmitAt = now + backoffMs;
+			}
+			record.nextScanAt = now + silenceMs;
+			activity[taskId] = record;
+			activityDirty = true;
 			continue;
 		}
 		// Process gone. Stale only if the task never reached a terminal event.
+		forget(taskId);
 		verdicts.push({
 			taskId,
 			reason: `run pid ${pid} is gone and the task never reported a terminal state (last: ${currentVerb ?? "no events"})`,
 		});
 	}
+	if (activityDirty && persist) saveActivity(activity);
 	return verdicts;
 }
 

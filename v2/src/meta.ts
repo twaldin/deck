@@ -35,13 +35,20 @@ export type TaskMeta = {
 	/** pid of the live run, when one is running. */
 	run_pid?: number;
 	/**
-	 * Epoch-ms wall-clock deadline for the live run.
+	 * Epoch-ms wall-clock budget for the live run, recorded for readers.
 	 *
-	 * A worker that loops stays alive and writes nothing, so pid-liveness alone
-	 * cannot detect it — observed live: a worker retried a rate-limited search nine
-	 * times after finishing its actual work, and would have run forever.
+	 * It is NOT the stale trigger: a run that is still writing is working, however
+	 * overdue. Stale detection reads activity (see wake.ts detectStale).
 	 */
 	run_deadline?: number;
+	/**
+	 * Epoch-ms launch time of the live run.
+	 *
+	 * Stale detection anchors on it: a run cannot have been silent for longer than
+	 * it has existed. Without it a replacement run inherits the dead run's leftover
+	 * worktree and transcript mtimes and is called stuck before it can write.
+	 */
+	run_started?: number;
 	/**
 	 * Which system owns this task.
 	 *
@@ -64,7 +71,7 @@ export type TaskMeta = {
 };
 
 /** Keys stored as integers. Everything else round-trips as a string. */
-const NUMERIC_KEYS = new Set(["run_epoch", "run_pid", "run_deadline"]);
+const NUMERIC_KEYS = new Set(["run_epoch", "run_pid", "run_deadline", "run_started"]);
 
 /**
  * Strict integer parse. parseInt accepts partial garbage ("123abc" -> 123), and

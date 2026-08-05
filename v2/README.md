@@ -109,6 +109,18 @@ rebased out from under a running fleet.
   the merged flag can discard work that had actually shipped.
 - Statuses are events, not state. `working:` is not progress, silence is not
   failure, and `paused:` means deliberately waiting.
+- A live run is judged stuck by SILENCE, not by its budget. The signals are the
+  newest write in the task worktree (node_modules/.git excluded) and the session
+  transcript's mtime and byte growth. A status line is a report about the work,
+  not the work, so its mtime is not activity: a worker looping on a retry can
+  keep appending `working:` while writing nothing. A run still writing is
+  working, however overdue. `DECK_STALE_SILENCE_MS` moves the 10-minute default;
+  the verdict is suppressed with backoff so a standing wedge is not re-reported
+  every cycle, and a suppressed task is rescanned at most once per silence window.
+  `deck-v2 stale` is read-only in both directions: it neither writes suppression
+  nor obeys it, so an inspection always answers with the current verdict. Silence is measured from `run_started`, never from files the
+  previous run left behind: a respawn reuses the worktree, so without that anchor
+  a replacement run inherits the dead run's mtimes and is called stuck at launch.
 - Wake delivery is at-least-once through a durable outbox. Reading the status file
   advances a cursor, so if that read were also the acknowledgement, a failed
   injection would lose the event permanently — and a dropped `blocked:` is the

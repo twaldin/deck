@@ -101,6 +101,8 @@ export function wakeFiles() {
 		cursors: path.join(stateDir(), ".wake-cursors.json"),
 		baseline: path.join(stateDir(), ".wake-baseline.json"),
 		queue: path.join(stateDir(), ".wake-queue.jsonl"),
+		/** Per-task activity watermark + stale-verdict suppression. */
+		activity: path.join(stateDir(), ".wake-activity.json"),
 	} as const;
 }
 
