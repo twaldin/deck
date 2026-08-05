@@ -1,8 +1,9 @@
 /** @jsxImportSource smithers-orchestrator */
 /** One run owns a prompt, its ordered PR stack, review loop, and delivery. */
-import { Loop, PiAgent, Sequence, Task, Workflow, createSmithers } from "smithers-orchestrator";
+import { Approval, Loop, PiAgent, Sequence, Task, UI, Workflow, approvalDecisionSchema, createSmithers } from "smithers-orchestrator";
 import { z } from "zod";
 import { execOrThrow, bunExec } from "../pr-pipeline/lib/gh.ts";
+import { runMerge } from "../pr-pipeline/lib/merge.ts";
 import { executeReviewerRequest } from "../pr-pipeline/lib/reviewers.ts";
 import { fetchChangedFiles, fetchCodeowners, fetchRecentAuthors, resolveReviewerLogin, isCollaborator, requestReviewers, fetchRequestedReviewers } from "../pr-pipeline/lib/gh.ts";
 import { pollStack } from "./lib/poll.ts";
@@ -23,6 +24,8 @@ const schemas = {
   reviewGate: z.object({ ok: z.boolean() }),
   wake: z.object({ action: z.string(), signal: z.string() }),
   poll: z.object({ signal: z.enum(["ci-fail", "actionable-comment", "decision-ask", "idle", "exhausted", "complete"]), reason: z.string() }),
+  approval: approvalDecisionSchema,
+  merge: z.object({ merged: z.boolean(), receipts: z.array(z.string()) }),
   result: z.object({ done: z.boolean(), summary: z.string() }),
 };
 const { outputs, smithers } = createSmithers(schemas);
@@ -95,11 +98,29 @@ export default smithers((ctx) => {
   const watch = <Loop id="code-poll-loop" maxIterations={maxPolls} onMaxReached="return-last" skipIf={ctx.latest(outputs.reviewGate, "review-gate")?.ok === false} until={["complete", "ci-fail", "actionable-comment", "decision-ask", "exhausted"].includes(ctx.latest(outputs.poll, "poll-stack")?.signal ?? "")}>
     <Sequence>{poll}<Task id="wake-fix" output={outputs.wake} agent={undefined}>{async () => { const signal = ctx.latest(outputs.poll, "poll-stack")?.signal; if (signal === "idle" || signal === "exhausted") return { action: "wait", signal }; return { action: signal === "decision-ask" ? "escalate" : "fix", signal }; }}</Task></Sequence>
   </Loop>;
-  return <Workflow name="lindy-stack-owner"><Sequence>{implementation}{reviewLoop}{reviewGate}{open}{watch}<Task id="done" output={outputs.result}>{() => {
+  const opened = ctx.latest(outputs.opened, "open-stack");
+  const latestPoll = ctx.latest(outputs.poll, "poll-stack");
+  const approval = ctx.latest(outputs.approval, "merge-stack-approval");
+  const stackReady = latestPoll?.signal === "complete" && approval === undefined;
+  const stack = opened?.prs ?? [];
+  const stackSummary = stack.map((pr) => `PR #${pr.number} https://github.com/${input.repo}/pull/${pr.number} title "${input.prompt.slice(0, 80)}"; CI ${latestPoll?.signal === "complete" ? "green" : "not green"}; reviews clear; mergeability ${latestPoll?.signal === "complete" ? "mergeable" : "must be rechecked"}`).join("\n");
+  const mergeApproval = stackReady ? (dryRun ? <Task id="merge-stack-approval" output={outputs.approval}>{() => ({ approved: true, note: "dry-run stack approval", decidedBy: "dry-run", decidedAt: new Date().toISOString() })}</Task> : <Approval id="merge-stack-approval" output={outputs.approval} request={{ title: `Approve ordered stack merge: ${input.repo}`, summary: `Stack: ${stackSummary}. CI is green and every PR is mergeable. Approving submits the Gateway decision; the workflow then re-checks the stack and its merge compute node submits each PR to the GitHub merge queue. Denying stops the run.` }} onDeny="fail" />) : null;
+  const merged = approval?.approved === true ? <Task id="merge-stack" output={outputs.merge} retries={1}>{async () => {
+    if (dryRun) return { merged: true, receipts: stack.map((pr) => `dry-run: PR #${pr.number}`) };
+    const verified = await pollStack(bunExec, input.repo, stack.map((pr) => pr.number), gh);
+    if (verified.signal !== "complete") throw new Error(`stack changed after approval: ${verified.reason}`);
+    const receipts: string[] = [];
+    for (const pr of stack) {
+      const result = await runMerge({ exec: bunExec, gh, prNumber: pr.number, cwd: input.worktree, args: ["--auto", "--squash"] });
+      receipts.push(`PR #${pr.number}: ${result.output.slice(-1000)}`);
+    }
+    return { merged: true, receipts };
+  }}</Task> : null;
+  return <Workflow name="lindy-stack-owner"><Sequence>{implementation}{reviewLoop}{reviewGate}{open}{watch}{mergeApproval}{merged}<Task id="done" output={outputs.result}>{() => {
     const blockers = ctx.latest(outputs.review, "adversarial-review")?.blockers ?? [];
     const signal = ctx.latest(outputs.poll, "poll-stack")?.signal;
-    const ok = blockers.length === 0 && signal === "complete";
+    const ok = blockers.length === 0 && signal === "complete" && ctx.latest(outputs.merge, "merge-stack")?.merged === true;
     produceWakeConditions({ taskId, terminal: ok, maxAdversarial: !ok && blockers.length > 0, ciFail: !ok && signal === "ci-fail", actionableComment: !ok && signal === "actionable-comment", decisionAsk: !ok && signal === "decision-ask" });
-    return ok ? { done: true, summary: input.profile === "lindy-full" ? "green stack parked for captain stamp" : "green stack ready for yolo merge" } : { done: false, summary: `stack owner stopped with unresolved ${blockers.length ? "review blockers" : `${signal ?? "unknown"} poll signal`}` };
-  }}</Task></Sequence></Workflow>;
+    return ok ? { done: true, summary: input.profile === "lindy-full" ? "stack merged after captain approval" : "stack merged" } : { done: false, summary: `stack owner stopped with unresolved ${blockers.length ? "review blockers" : `${signal ?? "unknown"} poll signal`}` };
+  }}</Task></Sequence><UI entry="../.smithers/ui/stack-owner.tsx" title="Stack Owner approvals" /></Workflow>;
 });

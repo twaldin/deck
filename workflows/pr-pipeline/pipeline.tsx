@@ -29,6 +29,7 @@
 
 import {
 	Approval,
+	UI,
 	Loop,
 	Parallel,
 	PiAgent,
@@ -62,7 +63,7 @@ import {
 	resolveReviewerLogin,
 } from "./lib/gh.ts";
 import { findLandingCommit } from "./lib/landing.ts";
-import { runMerge, runMergeWithFallback } from "./lib/merge.ts";
+import { runMerge } from "./lib/merge.ts";
 import { detectMigrations, MIGRATION_STAGES, migrationEvidenceComplete } from "./lib/migrations.ts";
 import { generatePullRequestDescription, sanitizeDescriptionInput } from "./lib/description.ts";
 import {
@@ -540,7 +541,15 @@ export function buildModelPolicy(
 }
 
 export default smithers((ctx) => {
-	const input = ctx.input;
+	const input = {
+		ticket: "gateway-ui-registration",
+		repo: "owner/repo",
+		worktree: process.cwd(),
+		branch: "gateway-ui-registration",
+		baseBranch: "main",
+		dryRun: true,
+		...(ctx.input ?? {}),
+	} as typeof ctx.input;
 	const dryRun = input.dryRun !== false;
 	const bypass = input.bypassApprovals === true;
 	const limits = { ...DEFAULT_LIMITS, ...(input.limits ?? {}) };
@@ -564,7 +573,7 @@ export default smithers((ctx) => {
 	const policy = buildModelPolicy(profile, profileRepoMismatch, input.models);
 
 	const ghCtx = { gh: github.gh, repo: input.repo, exec: bunExec };
-	const project = input.profile ?? input.repo.split("/").at(-1);
+	const project = input.profile ?? input.repo?.split("/").at(-1) ?? "pr-pipeline";
 
 	// -- persisted state reads ------------------------------------------------
 	const preflight = ctx.latest(outputs.preflight, "preflight");
@@ -2001,6 +2010,7 @@ prNumber: pr.prNumber,
 					</Task>
 				) : null}
 			</Parallel>
+			<UI entry="../.smithers/ui/pr-pipeline.tsx" title="PR Pipeline approvals" />
 		</Workflow>
 	);
 });
