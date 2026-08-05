@@ -1,12 +1,18 @@
 /** Ensure exactly one durable captain review-request poller is active. */
-import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
-import { homedir } from "node:os";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+export const LIVE_SMITHERS_WORKSPACE = "/Users/twaldin/.deck/state/smithers";
 
 export const reviewGateLauncher = {
-  workflow: "review-gate/pipeline.tsx",
+  workflow: fileURLToPath(new URL("./pipeline.tsx", import.meta.url)),
 };
+
+const packManifest = fileURLToPath(new URL("../.smithers/smithers.toon", import.meta.url));
+const ACTIVE_STATUSES = ["running", "waiting-approval", "waiting-event", "waiting-timer"] as const;
+const LOCK_STALE_MS = 5 * 60_000;
 
 type CronEntry = { id?: string; workflow?: string; cronId?: string; workflowPath?: string };
 export type RunEntry = {
@@ -20,31 +26,36 @@ export type RunEntry = {
 };
 export type SmithersResult = { status: number | null; stdout: string; stderr: string };
 export type SmithersRunner = (args: string[], cwd: string) => SmithersResult;
-type GatewayStarter = (cwd: string) => void;
 
-const ACTIVE_STATUSES = new Set(["running", "waiting-approval", "waiting-event", "waiting-timer"]);
-const LOCK_STALE_MS = 5 * 60_000;
+export type EnsureResult = {
+  started: boolean;
+  runId: string | null;
+  removedLegacyCrons: number;
+  cancelledDuplicatePollers: number;
+  cancelledPostFailureRuns: number;
+  removedStalePostFailureWorkflow: boolean;
+  updatedInstalledManifest: boolean;
+};
 
 const defaultRunner: SmithersRunner = (args, cwd) => {
   const result = spawnSync("smithers", args, { cwd, encoding: "utf8", timeout: 30_000 });
   return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
 };
 
-const defaultGatewayStarter: GatewayStarter = (cwd) => {
-  const child = spawn("smithers", ["gateway", "--idle-timeout", "0"], {
-    cwd,
-    detached: true,
-    stdio: "ignore",
-  });
-  child.on("error", () => {});
-  child.unref();
-};
-
 function parseArrayEnvelope<T>(stdout: string, key: string, label: string): T[] {
   let parsed: unknown;
-  try { parsed = JSON.parse(stdout || "[]"); } catch { throw new Error(`smithers ${label} returned invalid JSON`); }
+  try {
+    parsed = JSON.parse(stdout || "[]");
+  } catch {
+    throw new Error(`smithers ${label} returned invalid JSON`);
+  }
   if (Array.isArray(parsed)) return parsed as T[];
-  if (parsed !== null && typeof parsed === "object" && key in parsed && Array.isArray((parsed as Record<string, unknown>)[key])) {
+  if (
+    parsed !== null
+    && typeof parsed === "object"
+    && key in parsed
+    && Array.isArray((parsed as Record<string, unknown>)[key])
+  ) {
     return (parsed as Record<string, T[]>)[key];
   }
   throw new Error(`smithers ${label} returned an unexpected JSON shape`);
@@ -62,12 +73,30 @@ function isReviewGateRun(run: RunEntry): boolean {
   return run.workflow === "lindy-review-gate" || run.workflowId === "review-gate";
 }
 
+function isPostFailureRun(run: RunEntry): boolean {
+  return run.workflow === "post-failure" || run.workflowId === "post-failure";
+}
+
 function runStatus(run: RunEntry): string {
   return run.status ?? run.dbStatus ?? run.state ?? "unknown";
 }
 
+function runId(run: RunEntry): string {
+  const id = run.id ?? run.runId;
+  if (!id) throw new Error("active Smithers run has no id");
+  return id;
+}
+
+function checked(runner: SmithersRunner, args: string[], cwd: string, label: string): SmithersResult {
+  const result = runner(args, cwd);
+  if (result.status !== 0) {
+    throw new Error(`${label} failed (${result.status ?? "unknown"}): ${result.stderr.trim()}`);
+  }
+  return result;
+}
+
 function activeRuns(runner: SmithersRunner, workspace: string): RunEntry[] {
-  return [...ACTIVE_STATUSES].flatMap((status) => parseRuns(checked(
+  return ACTIVE_STATUSES.flatMap((status) => parseRuns(checked(
     runner,
     ["ps", "--status", status, "--limit", "10000", "--format", "json"],
     workspace,
@@ -84,18 +113,10 @@ export function summarizeRunCounts(runs: RunEntry[]): {
   const reviewGate = runs.filter(isReviewGateRun);
   return {
     reviewGate: reviewGate.length,
-    activeReviewGate: reviewGate.filter((run) => ACTIVE_STATUSES.has(runStatus(run))).length,
+    activeReviewGate: reviewGate.filter((run) => ACTIVE_STATUSES.includes(runStatus(run) as typeof ACTIVE_STATUSES[number])).length,
     continuedReviewGate: reviewGate.filter((run) => run.dbStatus === "continued" || run.status === "continued").length,
-    postFailure: runs.filter((run) => run.workflow === "post-failure" || run.workflowId === "post-failure").length,
+    postFailure: runs.filter(isPostFailureRun).length,
   };
-}
-
-export function reviewGateWorkspace(
-  env: NodeJS.ProcessEnv = process.env,
-  userHome: string = homedir(),
-): string {
-  const deckHome = env.DECK_V2_HOME?.trim() || join(userHome, ".deck");
-  return join(deckHome, "state", "smithers");
 }
 
 function isLegacyReviewGateCron(entry: CronEntry): boolean {
@@ -103,43 +124,13 @@ function isLegacyReviewGateCron(entry: CronEntry): boolean {
   return workflow === "review-gate/pipeline.tsx" || workflow.endsWith("/review-gate/pipeline.tsx");
 }
 
-function checked(runner: SmithersRunner, args: string[], cwd: string, label: string): SmithersResult {
-  const result = runner(args, cwd);
-  if (result.status !== 0) {
-    throw new Error(`${label} failed (${result.status ?? "unknown"}): ${result.stderr.trim()}`);
-  }
-  return result;
-}
-
-function gatewayRunning(stdout: string, workspace: string): boolean {
+function gatewayHealthy(stdout: string, workspace: string): boolean {
   try {
     const parsed = JSON.parse(stdout) as { running?: unknown; workspace?: unknown };
-    return parsed.running === true && (parsed.workspace === undefined || parsed.workspace === workspace);
+    return parsed.running === true && parsed.workspace === workspace;
   } catch {
     return false;
   }
-}
-
-function waitBriefly(ms: number): void {
-  const signal = new Int32Array(new SharedArrayBuffer(4));
-  Atomics.wait(signal, 0, 0, ms);
-}
-
-function ensureGateway(
-  workspace: string,
-  runner: SmithersRunner,
-  startGateway: GatewayStarter,
-): void {
-  const statusArgs = ["gateway", "status", "--format", "json"];
-  const initial = runner(statusArgs, workspace);
-  if (initial.status === 0 && gatewayRunning(initial.stdout, workspace)) return;
-  startGateway(workspace);
-  for (let attempt = 0; attempt < 50; attempt += 1) {
-    waitBriefly(100);
-    const status = runner(statusArgs, workspace);
-    if (status.status === 0 && gatewayRunning(status.stdout, workspace)) return;
-  }
-  throw new Error(`smithers gateway did not become healthy for ${workspace}`);
 }
 
 function acquireLock(workspace: string): string {
@@ -159,24 +150,57 @@ function acquireLock(workspace: string): string {
       } catch {
         continue;
       }
-      waitBriefly(100);
+      const signal = new Int32Array(new SharedArrayBuffer(4));
+      Atomics.wait(signal, 0, 0, 100);
     }
   }
   throw new Error(`timed out waiting for review-gate launcher lock in ${workspace}`);
 }
 
+function removePostFailurePackSurface(workspace: string): {
+  removedStalePostFailureWorkflow: boolean;
+  updatedInstalledManifest: boolean;
+} {
+  const canonicalManifest = readFileSync(packManifest, "utf8");
+  if (canonicalManifest.includes("post-failure")) {
+    throw new Error("canonical Smithers pack still includes post-failure");
+  }
+
+  const staleWorkflow = join(workspace, ".smithers", "workflows", "post-failure.tsx");
+  const installedManifest = join(workspace, ".smithers", "smithers.toon");
+  const removedStalePostFailureWorkflow = existsSync(staleWorkflow);
+  if (removedStalePostFailureWorkflow) rmSync(staleWorkflow);
+
+  const installed = existsSync(installedManifest) ? readFileSync(installedManifest, "utf8") : "";
+  const updatedInstalledManifest = installed !== canonicalManifest;
+  if (updatedInstalledManifest) {
+    mkdirSync(join(workspace, ".smithers"), { recursive: true });
+    writeFileSync(installedManifest, canonicalManifest);
+  }
+
+  return { removedStalePostFailureWorkflow, updatedInstalledManifest };
+}
+
 export function ensureReviewGatePoller(options: {
   workspace?: string;
   runner?: SmithersRunner;
-  startGateway?: GatewayStarter;
-} = {}): { started: boolean; runId: string | null; removedLegacyCrons: number } {
-  const workspace = options.workspace ?? reviewGateWorkspace();
+  workflowPath?: string;
+} = {}): EnsureResult {
   const runner = options.runner ?? defaultRunner;
-  const startGateway = options.startGateway ?? defaultGatewayStarter;
+  const workspace = options.runner ? (options.workspace ?? LIVE_SMITHERS_WORKSPACE) : LIVE_SMITHERS_WORKSPACE;
+  const workflowPath = options.workflowPath ?? reviewGateLauncher.workflow;
   if (!existsSync(workspace)) throw new Error(`Smithers workspace does not exist: ${workspace}`);
+  if (!existsSync(workflowPath)) throw new Error(`review-gate workflow does not exist: ${workflowPath}`);
+
   const lock = acquireLock(workspace);
   try {
-    const cronRows = parseCronEntries(checked(runner, ["cron", "list", "--format", "json"], workspace, "smithers cron list").stdout);
+    const packCleanup = removePostFailurePackSurface(workspace);
+    const cronRows = parseCronEntries(checked(
+      runner,
+      ["cron", "list", "--format", "json"],
+      workspace,
+      "smithers cron list",
+    ).stdout);
     const legacyCrons = cronRows.filter(isLegacyReviewGateCron);
     for (const entry of legacyCrons) {
       const id = entry.id ?? entry.cronId;
@@ -184,27 +208,61 @@ export function ensureReviewGatePoller(options: {
       checked(runner, ["cron", "rm", id], workspace, `smithers cron rm ${id}`);
     }
 
-    ensureGateway(workspace, runner, startGateway);
     const runs = activeRuns(runner, workspace);
-    const healthy = runs.find((run) => isReviewGateRun(run) && ACTIVE_STATUSES.has(runStatus(run)));
-    if (healthy) {
-      return { started: false, runId: healthy.id ?? healthy.runId ?? null, removedLegacyCrons: legacyCrons.length };
+    const postFailureRuns = runs.filter(isPostFailureRun);
+    for (const run of postFailureRuns) {
+      checked(runner, ["cancel", runId(run)], workspace, `smithers cancel ${runId(run)}`);
+    }
+
+    const pollers = runs.filter(isReviewGateRun);
+    const keeper = pollers[0];
+    const duplicates = pollers.slice(1);
+    for (const run of duplicates) {
+      checked(runner, ["cancel", runId(run)], workspace, `smithers cancel ${runId(run)}`);
+    }
+
+    const gateway = checked(
+      runner,
+      ["gateway", "status", "--format", "json"],
+      workspace,
+      "smithers gateway status",
+    );
+    if (!gatewayHealthy(gateway.stdout, workspace)) {
+      throw new Error(`Smithers Gateway is not healthy for ${workspace}`);
+    }
+
+    if (keeper) {
+      return {
+        started: false,
+        runId: runId(keeper),
+        removedLegacyCrons: legacyCrons.length,
+        cancelledDuplicatePollers: duplicates.length,
+        cancelledPostFailureRuns: postFailureRuns.length,
+        ...packCleanup,
+      };
     }
 
     const launched = checked(
       runner,
-      ["up", join(workspace, reviewGateLauncher.workflow), "--detach", "--no-post-failure", "--format", "json"],
+      ["up", workflowPath, "--detach", "--no-post-failure", "--format", "json"],
       workspace,
       "smithers review-gate launch",
     );
-    let runId: string | null = null;
+    let launchedRunId: string | null = null;
     try {
       const parsed = JSON.parse(launched.stdout) as { runId?: unknown };
-      if (typeof parsed.runId === "string") runId = parsed.runId;
+      if (typeof parsed.runId === "string") launchedRunId = parsed.runId;
     } catch {
-      // A successful human-format launch is still admitted; the next ensure reads it through ps.
+      // A successful human-format launch is still admitted; the next ensure discovers it through ps.
     }
-    return { started: true, runId, removedLegacyCrons: legacyCrons.length };
+    return {
+      started: true,
+      runId: launchedRunId,
+      removedLegacyCrons: legacyCrons.length,
+      cancelledDuplicatePollers: 0,
+      cancelledPostFailureRuns: postFailureRuns.length,
+      ...packCleanup,
+    };
   } finally {
     rmSync(lock, { recursive: true, force: true });
   }

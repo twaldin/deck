@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { existsSync, readFileSync, mkdtempSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { renderWorkflow } from "smithers-orchestrator/testing";
@@ -8,9 +8,10 @@ import { reviewCommand, shouldSubmitReview } from "../decision.ts";
 import workflow from "../pipeline.tsx";
 import {
   ensureReviewGatePoller,
+  LIVE_SMITHERS_WORKSPACE,
   parseCronEntries,
   parseRuns,
-  reviewGateWorkspace,
+  reviewGateLauncher,
   summarizeRunCounts,
   type SmithersRunner,
 } from "../launch.ts";
@@ -33,6 +34,9 @@ test("rejects an unexpected cron list shape", () => {
 
 test("a healthy durable poller is ensure-only and legacy cron rows are removed", () => {
   const workspace = mkdtempSync(join(tmpdir(), "review-gate-workspace-"));
+  mkdirSync(join(workspace, ".smithers", "workflows"), { recursive: true });
+  writeFileSync(join(workspace, ".smithers", "smithers.toon"), "post-failure\n");
+  writeFileSync(join(workspace, ".smithers", "workflows", "post-failure.tsx"), "stale\n");
   const calls: string[][] = [];
   const runner: SmithersRunner = (args) => {
     calls.push(args);
@@ -49,16 +53,22 @@ test("a healthy durable poller is ensure-only and legacy cron rows are removed",
       };
     }
     if (args[0] === "cron" && args[1] === "rm") return { status: 0, stdout: "", stderr: "" };
+    if (args[0] === "cancel") return { status: 0, stdout: "", stderr: "" };
     if (args[0] === "gateway" && args[1] === "status") {
       return { status: 0, stdout: JSON.stringify({ running: true, workspace }), stderr: "" };
     }
     if (args[0] === "ps") {
+      const status = args[2];
       return {
         status: 0,
         stdout: JSON.stringify({
-          runs: args[2] === "waiting-timer"
-            ? [{ id: "poller", workflow: "lindy-review-gate", status: "waiting-timer" }]
-            : [],
+          runs: status === "running"
+            ? [{ id: "poller", workflow: "lindy-review-gate", status }]
+            : status === "waiting-approval"
+              ? [{ id: "autopsy", workflow: "post-failure", status }]
+              : status === "waiting-timer"
+                ? [{ id: "duplicate-poller", workflow: "lindy-review-gate", status }]
+                : [],
         }),
         stderr: "",
       };
@@ -70,14 +80,23 @@ test("a healthy durable poller is ensure-only and legacy cron rows are removed",
     started: false,
     runId: "poller",
     removedLegacyCrons: 2,
+    cancelledDuplicatePollers: 1,
+    cancelledPostFailureRuns: 1,
+    removedStalePostFailureWorkflow: true,
+    updatedInstalledManifest: true,
   });
   expect(calls.filter((args) => args[0] === "cron" && args[1] === "rm")).toHaveLength(2);
+  expect(calls.filter((args) => args[0] === "cancel")).toEqual([
+    ["cancel", "autopsy"],
+    ["cancel", "duplicate-poller"],
+  ]);
   expect(calls.filter((args) => args[0] === "ps").map((args) => args[2])).toEqual([
     "running",
     "waiting-approval",
     "waiting-event",
     "waiting-timer",
   ]);
+  expect(calls.some((args) => args[0] === "cron" && args[1] === "add")).toBe(false);
   expect(calls.some((args) => args[0] === "up")).toBe(false);
 });
 
@@ -87,25 +106,36 @@ test("an unhealthy workspace launches one poller from the live Smithers workspac
   const runner: SmithersRunner = (args, cwd) => {
     calls.push({ args, cwd });
     if (args[0] === "cron") return { status: 0, stdout: JSON.stringify({ crons: [] }), stderr: "" };
+    if (args[0] === "cancel") return { status: 0, stdout: "", stderr: "" };
     if (args[0] === "gateway") return { status: 0, stdout: JSON.stringify({ running: true, workspace }), stderr: "" };
     if (args[0] === "ps") return { status: 0, stdout: JSON.stringify({ runs: [] }), stderr: "" };
     if (args[0] === "up") return { status: 0, stdout: JSON.stringify({ runId: "new-poller" }), stderr: "" };
     throw new Error(`unexpected smithers invocation: ${args.join(" ")}`);
   };
 
-  expect(ensureReviewGatePoller({ workspace, runner })).toEqual({ started: true, runId: "new-poller", removedLegacyCrons: 0 });
+  expect(ensureReviewGatePoller({ workspace, runner })).toEqual({
+    started: true,
+    runId: "new-poller",
+    removedLegacyCrons: 0,
+    cancelledDuplicatePollers: 0,
+    cancelledPostFailureRuns: 0,
+    removedStalePostFailureWorkflow: false,
+    updatedInstalledManifest: true,
+  });
   const launches = calls.filter(({ args }) => args[0] === "up");
   expect(launches).toHaveLength(1);
   expect(launches[0]?.cwd).toBe(workspace);
-  expect(launches[0]?.args[1]).toBe(join(workspace, "review-gate", "pipeline.tsx"));
+  expect(launches[0]?.args[1]).toBe(reviewGateLauncher.workflow);
   expect(launches[0]?.args).toContain("--no-post-failure");
-  expect(reviewGateWorkspace({}, "/Users/twaldin")).toBe("/Users/twaldin/.deck/state/smithers");
+  expect(LIVE_SMITHERS_WORKSPACE).toBe("/Users/twaldin/.deck/state/smithers");
 });
 
 test("the production launcher uses public Smithers commands instead of opening its database", () => {
   expect(launcherSource).not.toMatch(/sqlite|smithers\.db|openSmithersStore|findAndOpenDb/);
   expect(launcherSource).toContain('["cron", "list", "--format", "json"]');
   expect(launcherSource).toContain('["ps", "--status", status, "--limit", "10000", "--format", "json"]');
+  expect(launcherSource).not.toContain('["cron", "add"');
+  expect(launcherSource).not.toContain('spawn("smithers", ["gateway"');
 });
 
 test("run-count evidence distinguishes the old per-poll explosion from one active poller", () => {
