@@ -9,3 +9,6 @@ tmp
 *.db
 *.sqlite
 pg/
+
+# Generated local engine templates are external Smithers workspace state.
+/agents/

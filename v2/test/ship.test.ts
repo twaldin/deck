@@ -276,6 +276,7 @@ describe("startShip", () => {
 		expect(command).toBe("bunx");
 		expect(options?.cwd).toBe(path.join(home, "state", "smithers"));
 		expect(args[2]).toBe(path.join(fakeDir, "pipeline.tsx"));
+		expect(args).toContain("--no-post-failure");
 	});
 
 	test("REGRESSION: a launch that never starts REJECTS instead of reporting started", async () => {

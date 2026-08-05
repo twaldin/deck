@@ -463,7 +463,7 @@ describe("watch helpers", () => {
 });
 
 describe("watch fix worker boundary", () => {
-	test("a fix worker returns after push and never owns the wait", () => {
+	test("a fix worker commits locally while the deterministic publisher owns push and wait", () => {
 		const prompt = watchFixPrompt({
 			worktree: "/tmp/wt",
 			branch: "fix/ci",
@@ -475,14 +475,14 @@ describe("watch fix worker boundary", () => {
 			round: 0,
 			afterPoll: 1,
 		});
-		expect(prompt).toContain("return the receipt and exit immediately");
-		expect(prompt).toContain("rebase THIS PR branch");
-		expect(prompt).toContain("DIRTY or BEHIND");
-		expect(prompt).toContain("fetch origin/main");
-		expect(prompt).toContain("force-with-lease");
+		expect(prompt).toContain("Return pushed=false and reRequested=[]");
+		expect(prompt).toContain("pipeline owns publication through rebaseAndPush()");
+		expect(prompt).toContain("bounded-ancestry check");
+		expect(prompt).toContain("force-with-lease push");
+		expect(prompt).toContain("Never run git push");
 		expect(prompt).toContain("Never sleep-poll CI or review state");
 		expect(prompt).toContain("reviewersToReRequest list");
-		expect(prompt).toContain("Never re-request a reviewer whose latest state is APPROVED");
+		expect(prompt).not.toContain("If the helper is unavailable");
 		expect(prompt).not.toContain("re-request every prior human reviewer");
 		expect(prompt).toContain("persisted Smithers poll owns the wait");
 	});

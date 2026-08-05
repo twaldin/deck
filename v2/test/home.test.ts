@@ -185,7 +185,10 @@ describe("prompt isolation in the checkout", () => {
 			encoding: "utf8",
 		})
 			.split("\n")
-			.filter((line) => line.length > 0);
+			.filter((line) => line.length > 0)
+			// Only files literally named AGENTS.md are auto-loaded as agent
+			// context; suffix matches like docs/LAPTOP-AGENTS.md are docs.
+			.filter((line) => path.basename(line) === "AGENTS.md");
 
 		expect(found.filter((file) => file !== "AGENTS.md")).toEqual(["v2/seed/AGENTS.md"]);
 		const seed = fs.readFileSync(path.join(REPO_V2, "seed", "AGENTS.md"), "utf8");

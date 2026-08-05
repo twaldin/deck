@@ -463,14 +463,14 @@ async function runTests(command: string, cwd: string): Promise<string> {
 function nowIso(): string {
 	return new Date().toISOString();
 }
-export interface ApprovalStampMetadata {
+export type ApprovalStampMetadata = {
 	headSha: string;
 	prNumber: number;
 	stackTopology?: {
 		headBranch: string;
 		baseBranch: string;
 	};
-}
+};
 
 export function buildApprovalStampMetadata(args: {
 	headSha: string;

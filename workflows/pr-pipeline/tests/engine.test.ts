@@ -17,13 +17,17 @@ import { agents, providers } from "../../.smithers/agents.ts";
 import { assertDeckModel, DECK_AGENT_CATALOG, DECK_PROVIDER } from "../lib/models.ts";
 
 const workflowsDir = join(import.meta.dir, "..", "..");
+const generatedSmithersAgentsDir = join(workflowsDir, ".smithers", "agents");
 
 /** Every .ts/.tsx source in the workspace except generated pack internals. */
 function sourceFiles(dir: string): string[] {
 	const out: string[] = [];
 	for (const entry of readdirSync(dir, { withFileTypes: true })) {
-		if (entry.name === "node_modules" || entry.name === "executions") continue;
 		const full = join(dir, entry.name);
+		if (entry.name === "node_modules" || entry.name === "executions") continue;
+		// smithers init may recreate local per-engine templates here. They are
+		// external workspace state, not Deck-authored or shipped workflow source.
+		if (full === generatedSmithersAgentsDir) continue;
 		if (entry.isDirectory()) out.push(...sourceFiles(full));
 		else if (/\.tsx?$/.test(entry.name)) out.push(full);
 	}

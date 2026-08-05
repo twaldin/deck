@@ -24,10 +24,11 @@ a single mono-account and inherit whatever ambient local CLI config happens to
 exist on the host, which is neither attributable nor quota-aware.
 
 - Pack seats: `.smithers/agents.ts` (`providers` + `agents`). Deck-owned, no
-  longer regenerated content; `.smithers/agents/` (the per-engine
-  `codex.ts` / `claude-code.ts` config wrappers) is deliberately deleted. If
-  `smithers init` recreates that directory, delete it again rather than wiring
-  it up.
+  longer regenerated content. `smithers init` may recreate per-engine templates
+  under `.smithers/agents/`; that directory is ignored as external workspace
+  state and excluded from the source scan because Deck neither imports nor ships
+  it. The tracked `.smithers/agents.ts` and every Deck-authored workflow remain
+  guarded.
 - Model catalog and the `deck/` provider guard: `pr-pipeline/lib/models.ts`
   (`DECK_PROVIDER`, `DECK_AGENT_CATALOG`, `assertDeckModel`). Seats validate at
   import time, so an off-catalog or non-`deck/` model fails before a run starts.

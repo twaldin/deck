@@ -14,6 +14,7 @@ import {
 	standingRulesDigest,
 	watchFixPrompt,
 } from "../lib/prompts.ts";
+import type { OutputRows, PipelineOutputFixtures } from "./output-fixtures.ts";
 
 const validBrief = {
 	ticket: "LIN-123",
@@ -47,7 +48,19 @@ afterEach(() => {
 	for (const root of tempRoots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
 
-function approvalReadyOutputs(baseBranch = "main", prNumber = 42) {
+type ApprovalReadyOutputFixtures = {
+	[K in
+		| "preflight"
+		| "implementation"
+		| "localReview"
+		| "prRecord"
+		| "reviewerRequest"
+		| "watchPoll"
+		| "readyPoll"]: OutputRows<K>;
+};
+
+
+function approvalReadyOutputs(baseBranch = "main", prNumber = 42): ApprovalReadyOutputFixtures {
 	return {
 		preflight: [
 			{
@@ -259,7 +272,7 @@ describe("standing-rules seat injection", () => {
 					summary: "violated boundary",
 				},
 			],
-		};
+		} satisfies PipelineOutputFixtures;
 		const rendered = await renderWorkflow(pipeline, {
 			input: baseInput,
 			outputs: guardedOutputs,
@@ -329,7 +342,7 @@ describe("standing-rules seat injection", () => {
 						summary: "omitted a commit",
 					},
 				],
-			},
+			} satisfies PipelineOutputFixtures,
 			workflowPath: path.join(import.meta.dir, "..", "pipeline.tsx"),
 		});
 		const publish = rendered.tasks.find((task) => task.nodeId === "r0-watch-publish");
@@ -398,7 +411,7 @@ describe("standing-rules seat injection", () => {
 						summary: "no code change",
 					},
 				],
-			},
+			} satisfies PipelineOutputFixtures,
 			workflowPath: path.join(import.meta.dir, "..", "pipeline.tsx"),
 		});
 		const publish = rendered.tasks.find((task) => task.nodeId === "r0-watch-publish");
@@ -506,7 +519,7 @@ describe("commit-bound stamp", () => {
 						checkedAt: "2026-08-01T00:00:00.000Z",
 					},
 				],
-			},
+			} satisfies PipelineOutputFixtures,
 			workflowPath: path.join(import.meta.dir, "..", "pipeline.tsx"),
 		});
 		const attempt = rendered.tasks.find((task) => task.nodeId === "r0-merge-head-check");
@@ -554,7 +567,7 @@ describe("commit-bound stamp", () => {
 					checkedAt: "2026-08-01T00:00:00.000Z",
 				},
 			],
-		};
+		} satisfies PipelineOutputFixtures;
 		const rendered = await renderWorkflow(pipeline, {
 			input: { ...baseInput, worktree: dir, github: { git, gh } },
 			outputs,
@@ -576,7 +589,7 @@ describe("commit-bound stamp", () => {
 			outputs: {
 				...outputs,
 				mergeHeadCheck: [{ nodeId: "r0-merge-head-check", ...invalidation }],
-			},
+			} satisfies PipelineOutputFixtures,
 			workflowPath: path.join(import.meta.dir, "..", "pipeline.tsx"),
 		});
 		expect(rerendered.tasks.some((task) => task.nodeId === "r1-watch-poll")).toBe(true);
@@ -627,7 +640,7 @@ describe("commit-bound stamp", () => {
 						reason: "queued",
 					},
 				],
-			},
+			} satisfies PipelineOutputFixtures,
 			workflowPath: path.join(import.meta.dir, "..", "pipeline.tsx"),
 		});
 		const queuePoll = queueRendered.tasks.find((task) => task.nodeId === "queue-poll");

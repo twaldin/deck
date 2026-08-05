@@ -24,6 +24,7 @@ import { loadProfiles, type ProjectProfile } from "../lib/profiles.ts";
 import { falloutPrompt, localFixPrompt, localReviewPrompt, reviewersDecisionPrompt } from "../lib/prompts.ts";
 import { resolveAdversary } from "../lib/models.ts";
 import { isSchemaEcho, schemaEchoCorrection } from "../lib/schema-echo.ts";
+import type { PipelineOutputFixtures } from "./output-fixtures.ts";
 
 const validBrief = {
 	ticket: "LIN-123",
@@ -64,8 +65,8 @@ const baseInput = {
 	branch: "fm/lin-123",
 	brief: validBrief,
 	dryRun: true,
+	wakeDryRun: true,
 };
-
 const fixtureProfiles: ProjectProfile[] = [
 	{
 		id: "deck",
@@ -163,7 +164,7 @@ describe("workflow rendering contracts", () => {
 							resolvedReviewerModel: "deck/claude-fable-5",
 						},
 					],
-				},
+				} satisfies PipelineOutputFixtures,
 				workflowPath: path.join(import.meta.dir, "..", "pipeline.tsx"),
 			});
 			const seats: Record<string, { model: string; thinking: string }> = {};
@@ -253,21 +254,22 @@ describe("fallout prompt rendering contracts", () => {
 			outputs: {
 				preflight: [{ nodeId: "preflight", ok: true, openQuestions: [], briefDigest: "", resolvedReviewerModel: "deck/claude-fable-5" }],
 				implementation: [{ nodeId: "implement", commits: ["fix"], summary: "fixed", testEvidence: "green" }],
-				localReview: [{ nodeId: "local-review", round: 0, approved: true, blockingFindings: [], nits: [] }],
+				localReview: [{ nodeId: "local-review", round: 0, approved: true, blockingFindings: [], nits: [], summary: "approved" }],
 				prRecord: [{ nodeId: "push-pr", prNumber: 80, url: "https://github.com/lindy-ai/lindy/pull/80", headSha: "abc123", baseBranch: "main", watchSetRegistered: true, watchSetPath: "", receipt: "", createdAt: "2026-08-01T00:00:00.000Z" }],
 				reviewerRequest: [{ nodeId: "request-reviewers", skipped: false, requested: ["reviewer"], verified: ["reviewer"], source: "test", at: "2026-08-01T00:00:00.000Z", reviewerPrompt: "" }],
-				watchPoll: [{ nodeId: "r0-watch-poll", round: 0, poll: 0, headSha: "abc123", exitOk: false, disposition: "fix", actionable: true, ci: "red", unresolvedThreads: 1, unansweredComments: 1, reviewersToReRequest: ["reviewer"], reasons: ["unresolved thread"] }],
+				watchPoll: [{ nodeId: "r0-watch-poll", round: 0, poll: 0, headSha: "abc123", exitOk: false, disposition: "fix", actionable: true, ci: "red", unresolvedThreads: 1, unansweredComments: 1, reviewersToReRequest: ["reviewer"], reasons: ["unresolved thread"], rebaseRequired: false }],
+				watchBaseline: [{ nodeId: "r0-watch-baseline", round: 0, afterPoll: 0, headSha: "abc123", valid: true, reason: "test worktree matches polled head" }],
 				readyPoll: [{ nodeId: "r0-ready-poll", round: 0, poll: 0, ready: true, regressed: false, approvedBy: "reviewer", ci: "green", headSha: "abc123", reasons: [], migrationDetected: false, migrationFiles: [], at: "2026-08-01T00:00:00.000Z" }],
 				approvals: [{ nodeId: "r0-stamp", approved: true, note: "ok", decidedBy: "test", decidedAt: "2026-08-01T00:00:00.000Z" }],
 				stampValidity: [{ nodeId: "r0-stamp-validity", round: 0, stampedHead: "abc123", currentHead: "abc123", valid: true, checkedAt: "2026-08-01T00:00:00.000Z" }],
-				mergeHeadCheck: [{ nodeId: "r0-merge-head-check", round: 0, expectedHead: "abc123", currentHead: "abc123", ok: true, checkedAt: "2026-08-01T00:00:00.000Z" }],
+				mergeHeadCheck: [{ nodeId: "r0-merge-head-check", round: 0, expectedHead: "abc123", currentHead: "abc123", ok: true, diffSummary: "head unchanged", checkedAt: "2026-08-01T00:00:00.000Z", submittedAt: "2026-08-01T00:00:00.000Z", receipt: "queued", alreadyLanded: false, mergePath: "dry-run" }],
 				mergeReceipt: [{ nodeId: "enqueue-merge", round: 0, submittedAt: "2026-08-01T00:00:00.000Z", receipt: "queued", alreadyLanded: false, mergePath: "dry-run" }],
-				queuePoll: [{ nodeId: "queue-poll", poll: 0, state: "closed", autoMergeRequest: true, ejected: false, reason: "landed" }],
+				queuePoll: [{ nodeId: "queue-poll", poll: 0, state: "closed", baseBranch: "main", autoMergeRequest: true, ejected: false, reason: "landed" }],
 				landingPoll: [{ nodeId: "landing-poll", poll: 0, landed: true, sha: "squash-sha", subject: "landed" }],
 				deployEvidence: [{ nodeId: "deploy-evidence", evidence: "deployed", deployedAt: "2026-08-01T00:00:00.000Z" }],
 				falloutWindow: [{ nodeId: "fallout-window", windowStart: "2026-08-01T00:00:00.000Z", windowEnd: "2026-08-01T01:00:00.000Z" }],
 				falloutWait: [{ nodeId: "fallout-wait", complete: true, waitedUntil: "2026-08-01T01:00:00.000Z" }],
-			},
+			} satisfies PipelineOutputFixtures,
 			workflowPath: path.join(import.meta.dir, "..", "pipeline.tsx"),
 		});
 		const falloutTask = rendered.tasks.find((task) => task.nodeId === "fallout-watch");
@@ -536,7 +538,7 @@ describe("adopt existing PR (input.existingPr)", () => {
 				preflight: [{ nodeId: "preflight", ok: true, openQuestions: [], briefDigest: "", resolvedReviewerModel: "deck/claude-fable-5" }],
 				implementation: [{ nodeId: "implement", commits: [], summary: "adopted existing PR #777", testEvidence: "dry-run" }],
 				localReview: [{ nodeId: "local-review", round: 0, approved: true, blockingFindings: [], nits: [], summary: "approved" }],
-			},
+			} satisfies PipelineOutputFixtures,
 		});
 		const pushTask = rendered.tasks.find((task) => task.nodeId === "push-pr");
 		expect(pushTask).toBeDefined();
@@ -583,7 +585,7 @@ printf '%s\\n' '${JSON.stringify({ number: 777, html_url: "https://github.com/li
 					adoptBase: [{ nodeId: "adopt-base", baseBranch: "fm/stack-parent" }],
 					implementation: [{ nodeId: "implement", commits: [], summary: "adopted existing PR #777", testEvidence: "CI on the PR" }],
 					localReview: [{ nodeId: "local-review", round: 0, approved: true, blockingFindings: [], nits: [], summary: "approved" }],
-				},
+				} satisfies PipelineOutputFixtures,
 				workflowPath: path.join(import.meta.dir, "..", "pipeline.tsx"),
 			});
 			const pushTask = rendered.tasks.find((task) => task.nodeId === "push-pr");
@@ -613,7 +615,7 @@ printf '%s\\n' '${JSON.stringify({ number: 777, html_url: "https://github.com/li
 					adoptBase: [{ nodeId: "adopt-base", baseBranch: "fm/stack-parent" }],
 					implementation: [{ nodeId: "implement", commits: [], summary: "adopted existing PR #777", testEvidence: "CI on the PR" }],
 					localReview: [{ nodeId: "local-review", round: 0, approved: true, blockingFindings: [], nits: [], summary: "approved" }],
-				},
+				} satisfies PipelineOutputFixtures,
 				workflowPath: path.join(import.meta.dir, "..", "pipeline.tsx"),
 			});
 			const pushTask = rendered.tasks.find((task) => task.nodeId === "push-pr");
@@ -720,15 +722,14 @@ describe("enqueue-merge regressions", () => {
 			prRecord: [{ nodeId: "push-pr", prNumber, url: `https://github.com/lindy-ai/lindy/pull/${prNumber}`, headSha: "abc123", baseBranch, watchSetRegistered: true, watchSetPath: "", receipt: "", createdAt: "2026-08-01T00:00:00.000Z" }],
 			approvals: [{ nodeId: "r0-stamp", approved: true, note: "ok", decidedBy: "test", decidedAt: "2026-08-01T00:00:00.000Z" }],
 			stampValidity: [{ nodeId: "r0-stamp-validity", round: 0, stampedHead: "abc123", currentHead: "abc123", valid: true, checkedAt: "2026-08-01T00:00:00.000Z" }],
-			mergeHeadCheck: [{ nodeId: "r0-merge-head-check", round: 0, expectedHead: "abc123", currentHead: "abc123", ok: true, checkedAt: "2026-08-01T00:00:00.000Z" }],
-		};
+		} satisfies PipelineOutputFixtures;
 	}
 
 	async function renderMergeTask(baseBranch: string, log: string, landed = false) {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "deck-merge-task-"));
 		const git = path.join(dir, "git");
 		const gh = path.join(dir, "gh");
-		fs.writeFileSync(git, `#!/bin/sh\nprintf '%s\\n' \"$*\" >> ${JSON.stringify(log)}\ncase \"$1\" in log) ${landed ? "printf 'squash\\tfix: landed (#42)\\n'" : ":"};; rev-parse) printf 'fm/lin-123\\n';; esac\n`);
+		fs.writeFileSync(git, `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(log)}\ncase "$1" in log) ${landed ? "printf 'squash\\tfix: landed (#42)\\n'" : ":"};; rev-parse) if [ "$2" = "--abbrev-ref" ]; then printf 'fm/lin-123\\n'; else printf 'abc123\\n'; fi;; esac\n`);
 		fs.writeFileSync(gh, `#!/bin/sh
 if [ "$1" = api ] && [ "$3" = --jq ]; then printf 'abc123\\n'
 elif [ "$1" = api ]; then printf '%s\\n' '${JSON.stringify({ number: 42, html_url: "https://github.com/lindy-ai/lindy/pull/42", state: "open", draft: false, head: { ref: "fm/lin-123", sha: "abc123", repo: { full_name: "lindy-ai/lindy" } }, base: { ref: baseBranch } })}'
@@ -741,7 +742,7 @@ else printf 'queued\\n'; fi
 			outputs: mergeTaskOutputs(baseBranch),
 			workflowPath: path.join(import.meta.dir, "..", "pipeline.tsx"),
 		});
-		return { dir, task: rendered.tasks.find((task) => task.nodeId === "enqueue-merge")! };
+		return { dir, task: rendered.tasks.find((task) => task.nodeId === "r0-merge-head-check")! };
 	}
 
 	test("accepts the native GitHub merge queue receipt", () => {
