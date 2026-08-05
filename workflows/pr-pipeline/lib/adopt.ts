@@ -20,7 +20,7 @@ export interface PrOverview {
 export interface AdoptExpectation {
 	repo: string; // owner/name the run declared
 	branch: string; // head branch the run declared
-	baseBranch: string; // base branch the run declared
+	baseBranch: string; // base branch used by this run
 	worktreeBranch: string; // git branch currently checked out in the worktree
 	worktreeHead: string; // git rev-parse HEAD in the worktree
 	worktreeStatus: string; // git status --porcelain output for the worktree
@@ -47,6 +47,20 @@ export function cleanKnownScratchFiles(worktree: string, remove: (file: string) 
 	for (const file of KNOWN_SCRATCH_FILES) remove(path.join(worktree, file));
 }
 
+/**
+ * An omitted base may reconcile to the live base of a stack child. An explicit
+ * base, including main, must match exactly.
+ */
+export function reconcileAdoptBaseBranch(declaredBaseBranch: string | undefined, actualBaseBranch: string): string {
+	if (actualBaseBranch === "") {
+		throw new Error("[escalate] cannot adopt PR: GitHub did not report a base branch.");
+	}
+	if (declaredBaseBranch === undefined || declaredBaseBranch === actualBaseBranch) return actualBaseBranch;
+	throw new Error(
+		`[escalate] cannot adopt PR: it targets base "${actualBaseBranch}" but the run declared baseBranch "${declaredBaseBranch}".`,
+	);
+}
+
 export function assertAdoptable(overview: PrOverview, expected: AdoptExpectation): void {
 	const pr = `PR #${overview.number}`;
 	if (overview.state !== "open") {
@@ -69,7 +83,7 @@ export function assertAdoptable(overview: PrOverview, expected: AdoptExpectation
 	}
 	if (overview.baseRefName !== expected.baseBranch) {
 		throw new Error(
-			`[escalate] cannot adopt ${pr}: it targets base "${overview.baseRefName}" but the run declared baseBranch "${expected.baseBranch}" — landing verification and merge would act on the wrong base.`,
+			`[escalate] cannot adopt ${pr}: it targets base "${overview.baseRefName}" but this run uses baseBranch "${expected.baseBranch}" — landing verification and merge would act on the wrong base.`,
 		);
 	}
 	if (expected.worktreeBranch !== expected.branch) {
