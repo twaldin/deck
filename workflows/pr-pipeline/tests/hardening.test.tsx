@@ -173,6 +173,10 @@ describe("standing-rules seat injection", () => {
 			expect(prompt).toContain(
 				"Never run OptMem from a worker or subagent. Route decisions through the workflow's question result.",
 			);
+			expect(prompt).toContain(
+				"Use only exact registered ids: worker, worker-gpt, reviewer, reviewer-claude, and scout.",
+			);
+			expect(prompt).toContain("Aliases such as claude, codex, and gpt are invalid.");
 		}
 		expect(Buffer.byteLength(standingRulesDigest(), "utf8")).toBeLessThanOrEqual(4_300);
 	});

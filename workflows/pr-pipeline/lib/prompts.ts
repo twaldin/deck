@@ -14,7 +14,7 @@ import type { Brief } from "./types.ts";
 const RESULT_OBJECT_RULE =
 	"Return a result object with these keys, NOT the schema. do not include $schema, type, properties, or required.";
 const SUBAGENT_GUIDANCE =
-	"Subagents are a first-class capability. Use exact ids worker, worker-gpt, reviewer, reviewer-claude, and scout; aliases claude, codex, and gpt are accepted. Choose the opposite model family for adversarial review. For stack work, land the schema/base PR first, then fan out subagents for dependent pieces.";
+	"Subagents are a first-class capability. Use only exact registered ids: worker, worker-gpt, reviewer, reviewer-claude, and scout. Aliases such as claude, codex, and gpt are invalid. Follow the subagent tool's model-pick guidance; for adversarial review choose the opposite model family. For stack work, land the schema/base PR first, then fan out subagents for dependent pieces.";
 const WORKER_MEMORY_CONTRACT =
 	"Never run OptMem from a worker or subagent. Route decisions through the workflow's question result.";
 const STANDING_RULES_MAX_BYTES = 4 * 1024;
