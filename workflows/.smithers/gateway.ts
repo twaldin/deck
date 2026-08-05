@@ -79,11 +79,14 @@ type ProxySocketData = {
   connectId: string | null;
   authTimer?: ReturnType<typeof setTimeout>;
   connectTokenValid: boolean;
+  countedPreAuth: boolean;
 };
 
 let publicServer: Bun.Server<ProxySocketData> | null = null;
 let proxyConnections = 0;
+let preAuthConnections = 0;
 const MAX_PROXY_CONNECTIONS = 128;
+const MAX_PRE_AUTH_CONNECTIONS = 8;
 const MAX_PRE_AUTH_QUEUE = 4;
 const PROXY_AUTH_TIMEOUT_MS = 5_000;
 const MAX_PROXY_PAYLOAD_BYTES = 4 * 1024 * 1024;
@@ -112,6 +115,12 @@ function sendProxyClient(data: ProxySocketData, message: string): boolean {
   data.failed = true;
   data.upstream.close(1009, "Gateway proxy queue limit exceeded");
   return false;
+}
+
+function releasePreAuthSlot(data: ProxySocketData): void {
+  if (!data.countedPreAuth) return;
+  data.countedPreAuth = false;
+  preAuthConnections = Math.max(0, preAuthConnections - 1);
 }
 
 function rejectPreAuthRequest(
@@ -144,7 +153,10 @@ function createAuthenticatedProxy(internalPort: number): Bun.Server<ProxySocketD
     async fetch(req, server) {
       const url = new URL(req.url);
       if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
-        if (proxyConnections >= MAX_PROXY_CONNECTIONS) {
+        if (
+          proxyConnections >= MAX_PROXY_CONNECTIONS ||
+          preAuthConnections >= MAX_PRE_AUTH_CONNECTIONS
+        ) {
           return new Response("Gateway connection limit reached\n", { status: 503 });
         }
         const data: ProxySocketData = {
@@ -157,6 +169,7 @@ function createAuthenticatedProxy(internalPort: number): Bun.Server<ProxySocketD
           authState: "awaiting-connect",
           connectId: null,
           connectTokenValid: false,
+          countedPreAuth: false,
         };
         data.authTimer = setTimeout(() => {
           if (data.authState === "authenticated" || data.authState === "rejected") return;
@@ -222,6 +235,7 @@ function createAuthenticatedProxy(internalPort: number): Bun.Server<ProxySocketD
               clearProxyAuthTimer(data);
               if (frame.ok === true && data.connectTokenValid) {
                 data.authState = "authenticated";
+                releasePreAuthSlot(data);
               } else {
                 data.authState = "rejected";
                 outbound = JSON.stringify({
@@ -251,6 +265,8 @@ function createAuthenticatedProxy(internalPort: number): Bun.Server<ProxySocketD
         });
         if (server.upgrade(req, { data })) {
           proxyConnections += 1;
+          preAuthConnections += 1;
+          data.countedPreAuth = true;
           return;
         }
         clearProxyAuthTimer(data);
@@ -359,6 +375,7 @@ function createAuthenticatedProxy(internalPort: number): Bun.Server<ProxySocketD
       close(client) {
         clearProxyAuthTimer(client.data);
         proxyConnections = Math.max(0, proxyConnections - 1);
+        releasePreAuthSlot(client.data);
         client.data.upstream.close();
       },
       maxPayloadLength: MAX_PROXY_PAYLOAD_BYTES,

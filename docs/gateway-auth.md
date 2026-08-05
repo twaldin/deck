@@ -30,9 +30,8 @@ Smithers 0.30.0 does not load CLI grants into an embedded `new Gateway(...)` by 
 3. Run the negative test, then verify the restarted service accepts the replacement:
 
    ```sh
-   curl -fsS \
-     -H "Authorization: Bearer $SMITHERS_GATEWAY_TOKEN" \
-     http://127.0.0.1:7331/v1/api/runs
+   printf 'Authorization: Bearer %s\n' "$SMITHERS_GATEWAY_TOKEN" |
+     curl -fsS --header @- http://127.0.0.1:7331/v1/api/runs
    ```
 
 4. Record revocation of the old grant by its non-secret token id, not by putting the bearer in argv:
@@ -64,9 +63,8 @@ This ephemeral test proves the checked-in code path against live workspace data;
 ```sh
 GATEWAY_URL=http://127.0.0.1:7331
 test "$(curl -sS -o /dev/null -w '%{http_code}' "$GATEWAY_URL/v1/api/runs")" = 401
-curl -fsS \
-  -H "Authorization: Bearer $SMITHERS_GATEWAY_TOKEN" \
-  "$GATEWAY_URL/v1/api/runs"
+printf 'Authorization: Bearer %s\n' "$SMITHERS_GATEWAY_TOKEN" |
+  curl -fsS --header @- "$GATEWAY_URL/v1/api/runs"
 ```
 
 Both checks must pass. Immediately before any tailnet exposure, repeat them from the intended client against the exact tailnet-facing URL; do not treat the ephemeral test or loopback check alone as permission to expose the listener.

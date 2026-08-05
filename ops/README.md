@@ -80,9 +80,8 @@ cd ~/dev/deck
 Verify that both workflows are served:
 
 ```sh
-curl -s \
-  -H "Authorization: Bearer $SMITHERS_GATEWAY_TOKEN" \
-  http://127.0.0.1:7331/workflows
+printf 'Authorization: Bearer %s\n' "$SMITHERS_GATEWAY_TOKEN" |
+  curl -sS --header @- http://127.0.0.1:7331/workflows
 ```
 
 Both `pr-pipeline` and `stack-owner` must appear with `"hasUi":true`.
