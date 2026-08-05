@@ -110,6 +110,11 @@ describe("bootstrap", () => {
 		const body = fs.readFileSync(contract, "utf8");
 		expect(body).toContain("You are a plain pi session");
 		expect(body).toContain("Run `~/.optmem/memo wake` before any other tool call");
+		expect(body).toContain("Attempt `memo wake` exactly once");
+		expect(body).toContain("DEGRADED MEMORY — OptMem wake failed");
+		expect(body).toContain("Queue one operational-defect question");
+		expect(body).toContain("do not retry, loop, or wait in the background");
+		expect(body).toMatch(/do not claim durable\s+memory, remembered identity, or remembered decisions/);
 		expect(body).not.toContain("single point of contact");
 		expect(result.created.length).toBeGreaterThan(0);
 	});
@@ -207,6 +212,10 @@ describe("the seeded contract is clean", () => {
 		expect(contract).toContain("## THE FACTORY");
 		expect(contract).toContain("## QUESTIONS DISCIPLINE");
 		expect(contract).toContain("## THIS SESSION NEVER");
+		expect(contract).toContain(
+			"this plain pi chat session discharges\n" +
+				"them only through `ship`, `adopt`, `status`, and queued questions",
+		);
 		expect(Buffer.byteLength(contract, "utf8")).toBeLessThan(12 * 1024);
 	});
 });
