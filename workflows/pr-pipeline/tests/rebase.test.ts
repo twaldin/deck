@@ -108,6 +108,33 @@ describe("assertBoundedRebase", () => {
 		).toBe(0);
 	});
 
+	test("rejects a local branch that does not descend from the trusted PR head", async () => {
+		const repo = await fixture();
+		const expectedRemoteHead = (await git(repo.worktree, "rev-parse", "origin/feature")).trim();
+		await git(repo.worktree, "checkout", "--orphan", "rewritten");
+		await git(repo.worktree, "rm", "-rf", ".");
+		const unrelated = await commitFile(
+			repo.worktree,
+			"unrelated.txt",
+			"unrelated\n",
+			"unrelated root",
+		);
+		await git(repo.worktree, "branch", "-D", "feature");
+		await git(repo.worktree, "branch", "-m", "feature");
+
+		await expect(
+			rebaseAndPush(bunExec, {
+				git: "git",
+				worktree: repo.worktree,
+				branch: "feature",
+				baseBranch: "main",
+				expectedRemoteHead,
+				testCommand: "true",
+				runCommitShas: [unrelated],
+			}),
+		).rejects.toThrow(/is not an ancestor of local HEAD/);
+	});
+
 
 	test("rejects a local commit that was neither on the PR branch nor attributed to this run", async () => {
 		const repo = await fixture();

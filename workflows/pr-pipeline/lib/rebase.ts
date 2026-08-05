@@ -30,12 +30,23 @@ async function commitIds(exec: ExecFn, args: BoundedRebaseArgs, range: string): 
 		.filter(Boolean);
 }
 
-async function patchFingerprint(exec: ExecFn, args: BoundedRebaseArgs, commit: string): Promise<string> {
-	const patch = await execOrThrow(
-		exec,
-		[args.git, "show", "--format=", "--binary", "--no-ext-diff", commit],
-		{ cwd: args.worktree },
-	);
+async function provenanceFingerprint(
+	exec: ExecFn,
+	args: BoundedRebaseArgs,
+	commit: string,
+): Promise<string> {
+	const [patch, authoredMetadata] = await Promise.all([
+		execOrThrow(
+			exec,
+			[args.git, "show", "--format=", "--binary", "--no-ext-diff", commit],
+			{ cwd: args.worktree },
+		),
+		execOrThrow(
+			exec,
+			[args.git, "show", "-s", "--format=%an%x1f%ae%x1f%aI%x1f%B", commit],
+			{ cwd: args.worktree },
+		),
+	]);
 	const patchId = (
 		await execOrThrow(exec, [args.git, "patch-id", "--stable"], {
 			cwd: args.worktree,
@@ -44,10 +55,12 @@ async function patchFingerprint(exec: ExecFn, args: BoundedRebaseArgs, commit: s
 	)
 		.trim()
 		.split(/\s+/, 1)[0];
-	// An empty commit has no patch-id. It is safe only when its exact object id
-	// was allowlisted (an empty commit rewritten by rebase therefore fails
-	// closed instead of becoming an untraceable extra commit).
-	return patchId ? `patch:${patchId}` : `commit:${commit}`;
+	// A rebase preserves the patch plus author identity/date and message while
+	// necessarily changing the parent and committer metadata. Empty commits
+	// have no patch-id, so only their exact object id is trusted.
+	return patchId
+		? `authored:${patchId}\u0000${authoredMetadata}`
+		: `commit:${commit}`;
 }
 
 async function fingerprints(
@@ -58,7 +71,7 @@ async function fingerprints(
 	return Promise.all(
 		commits.map(async (commit) => ({
 			commit,
-			fingerprint: await patchFingerprint(exec, args, commit),
+			fingerprint: await provenanceFingerprint(exec, args, commit),
 		})),
 	);
 }
@@ -67,8 +80,9 @@ async function fingerprints(
  * Fail closed unless every commit about to be force-pushed is either already
  * on the remote PR branch or explicitly attributed to this workflow run.
  *
- * Stable patch ids survive a rebase's SHA rewrites. A multiset (rather than a
- * Set) also prevents one allowlisted patch from authorizing duplicate commits.
+ * The fingerprint combines stable patch-id with rebase-preserved author
+ * identity/date and message. A multiset also prevents one allowlisted logical
+ * commit from authorizing duplicates.
  */
 export async function assertBoundedRebase(exec: ExecFn, args: BoundedRebaseArgs): Promise<void> {
 	const currentBranch = (
@@ -162,6 +176,29 @@ export async function rebaseAndPush(
 		throw new Error(
 			`[escalate] rebase baseline: origin/${args.branch} moved from trusted head ` +
 				`${args.expectedRemoteHead} to ${remoteHead}; refusing stale publication.`,
+		);
+	}
+	const trustedAncestor = await exec(
+		[args.git, "merge-base", "--is-ancestor", args.expectedRemoteHead, localHead],
+		{ cwd: args.worktree },
+	);
+	if (trustedAncestor.code !== 0) {
+		throw new Error(
+			`[escalate] rebase baseline: trusted PR head ${args.expectedRemoteHead} ` +
+				`is not an ancestor of local HEAD ${localHead}.`,
+		);
+	}
+	const localMerges = (
+		await run([
+			args.git,
+			"rev-list",
+			"--merges",
+			`${args.expectedRemoteHead}..${localHead}`,
+		])
+	).trim();
+	if (localMerges !== "") {
+		throw new Error(
+			`[escalate] rebase baseline: merge commits are not allowed in the run range: ${localMerges}.`,
 		);
 	}
 	const actualRunCommits = await commitIds(
