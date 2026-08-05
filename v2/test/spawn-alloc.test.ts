@@ -182,11 +182,14 @@ describe("spawn worktree allocation", () => {
 		expect(state.entries[0].state).toBe("free");
 	});
 
-	test("repo aliases resolve via project-profile primary paths", () => {
-		// No config file in this test home: the seeds answer.
-		const seeds = seedProfiles();
-		expect(resolveRepo("lindy")).toBe(seeds.find((p) => p.id === "lindy")?.primary as string);
-		expect(resolveRepo("deck")).toBe(seeds.find((p) => p.id === "deck")?.primary as string);
+	test("repo aliases resolve from the home config", () => {
+		const file = profilesFile(process.env.DECK_V2_HOME!);
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		fs.writeFileSync(file, JSON.stringify([{
+			id: "example-project", repo: "example-org/example-project", primary: "/opt/example-project",
+			pipeline: "yolo-ship", yolo: true, stamp: false, knowledge: [], depsWarm: true,
+		}]));
+		expect(resolveRepo("example-project")).toBe("/opt/example-project");
 		expect(resolveRepo("/abs/path")).toBe("/abs/path");
 		expect(() => resolveRepo("nope")).toThrow(/unknown repo alias/);
 	});
@@ -199,8 +202,8 @@ describe("spawn worktree allocation", () => {
 			file,
 			JSON.stringify([
 				{
-					id: "deck",
-					repo: "twaldin/deck",
+					id: "example-project",
+					repo: "example-org/example-project",
 					primary: "/somewhere/else/deck",
 					pipeline: "yolo-ship",
 					yolo: true,
@@ -209,8 +212,8 @@ describe("spawn worktree allocation", () => {
 				},
 			]),
 		);
-		expect(resolveRepo("deck")).toBe("/somewhere/else/deck");
+		expect(resolveRepo("example-project")).toBe("/somewhere/else/deck");
 		// Wholesale replacement: an alias absent from the file no longer resolves.
-		expect(() => resolveRepo("lindy")).toThrow(/unknown repo alias/);
+		expect(() => resolveRepo("review-project")).toThrow(/unknown repo alias/);
 	});
 });

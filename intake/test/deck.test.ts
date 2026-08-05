@@ -33,10 +33,10 @@ function writeMeta(taskId: string, lines: string[]): void {
 
 function makeItem(overrides: Partial<PrItem> & { url: string }): PrItem {
 	return {
-		repo: "lindy-ai/lindy",
+		repo: "example-org/review-project",
 		number: 1,
 		title: "a change",
-		author: "twaldin",
+		author: "example-user",
 		state: "open",
 		isDraft: false,
 		buckets: ["my-pr"],
@@ -173,7 +173,7 @@ describe("the GitHub trust boundary", () => {
 
 describe("buildIntakeEvents", () => {
 	const url = "https://github.com/o/r/pull/7";
-	const refs = [{ taskId: "t1", branch: "feat", repo: "lindy-ai/lindy" }];
+	const refs = [{ taskId: "t1", branch: "feat", repo: "example-org/review-project" }];
 
 	test("new review request carries signal=true", () => {
 		const changes: DiffChange[] = [

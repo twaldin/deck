@@ -39,8 +39,8 @@ afterEach(() => {
 });
 
 const deckOverride = {
-	id: "deck",
-	repo: "twaldin/deck",
+	id: "example-project",
+	repo: "example-org/example-project",
 	primary: "/opt/deck",
 	pipeline: "yolo-ship",
 	yolo: true,
@@ -55,26 +55,9 @@ function writeConfig(profiles: unknown): void {
 }
 
 describe("seeds", () => {
-	test("carry the captain's written merge policy: lindy stamp always, deck yolo", () => {
-		const lindy = findProfile("lindy");
-		expect(lindy?.pipeline).toBe("lindy-full");
-		expect(lindy?.yolo).toBe(false);
-		expect(lindy?.stamp).toBe(true);
-		expect(lindy?.knowledge.some((k) => k.endsWith("lindy-domain.md"))).toBe(true);
-		// The frozen traps ride in the profile, not in a prompts.ts fork.
-		expect(lindy?.doctrine).toContain("squash commit");
-		expect(lindy?.models?.implementer).toBe("deck/gpt-5.6-luna");
-		expect(lindy?.models?.reviewer).toBeUndefined();
-		expect(lindy?.models?.oppositionDefaults?.openai).toBe("deck/claude-fable-5");
-
-		const deck = findProfile("deck");
-		expect(deck?.pipeline).toBe("yolo-ship");
-		expect(deck?.yolo).toBe(true);
-		expect(deck?.stamp).toBe(false);
-	});
-
-	test("resolve by repo name too", () => {
-		expect(findProfile("lindy-ai/lindy")?.id).toBe("lindy");
+	test("contain no personal project defaults", () => {
+		expect(seedProfiles()).toEqual([]);
+		expect(findProfile("example-project")).toBeNull();
 		expect(findProfile("unknown-thing")).toBeNull();
 	});
 });
@@ -82,8 +65,8 @@ describe("seeds", () => {
 describe("config file", () => {
 	test("replaces the seeds wholesale", () => {
 		writeConfig([deckOverride]);
-		expect(findProfile("deck")?.primary).toBe("/opt/deck");
-		expect(findProfile("lindy")).toBeNull();
+		expect(findProfile("example-project")?.primary).toBe("/opt/deck");
+		expect(findProfile("review-project")).toBeNull();
 		expect(loadProfiles()).toHaveLength(1);
 	});
 
@@ -127,7 +110,7 @@ describe("seeding", () => {
 		const result = bootstrapHome({ repoV2Dir: "" });
 		expect(result.created).toContain(profilesFile(home));
 		const loaded = loadProfiles();
-		expect(loaded.map((p) => p.id).sort()).toEqual(["deck", "lindy"]);
+		expect(loaded).toEqual([]);
 
 		// The captain's edit survives a re-bootstrap.
 		writeConfig([deckOverride]);
@@ -138,27 +121,23 @@ describe("seeding", () => {
 });
 
 describe("briefs branch on the profile", () => {
-	test("doctrine carries the profile's knowledge paths and merge posture", () => {
-		const lindy = buildStandingDoctrine("lindy");
-		expect(lindy).toContain("lindy-domain.md");
-		expect(lindy).toContain("Per-PR captain stamp");
-		expect(lindy).not.toContain("yolo ON");
-
-		const deck = buildStandingDoctrine("deck");
-		expect(deck).toContain("yolo ON for green work");
-		expect(deck).not.toContain("Per-PR captain stamp");
+	test("use a configured profile's merge posture", () => {
+		writeConfig([{ ...deckOverride, pipeline: "lindy-full", yolo: false, stamp: true }]);
+		const review = buildStandingDoctrine("example-project");
+		expect(review).toContain("Per-PR captain stamp");
+		expect(review).not.toContain("yolo ON");
 	});
 
 	test("a config edit changes the brief without a code change", () => {
 		// Flip lindy's knowledge pack down to one file; the brief follows the file.
 		writeConfig([
 			{
-				...seedProfiles(home).find((p) => p.id === "lindy"),
+				...deckOverride,
 				knowledge: ["/custom/only-file.md"],
 				doctrine: "Custom doctrine line.",
 			},
 		]);
-		const doctrine = buildStandingDoctrine("lindy");
+		const doctrine = buildStandingDoctrine("example-project");
 		expect(doctrine).toContain("/custom/only-file.md");
 		expect(doctrine).toContain("Custom doctrine line.");
 		expect(doctrine).not.toContain("lindy-ops.md");

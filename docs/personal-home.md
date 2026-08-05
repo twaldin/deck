@@ -30,16 +30,17 @@ Run everything below **on the personal host**, as your own user.
 3. **One-shot install**:
 
    ```sh
-   git clone https://github.com/twaldin/deck.git ~/dev/deck
+   export DECK_REPO_URL="https://github.com/<owner>/deck.git"
+   git clone "$DECK_REPO_URL" ~/dev/deck
    cd ~/dev/deck && git checkout main
-   ./install-personal.sh
+   ./install.sh
    ```
 
-   Keep updated later (works on an already-installed host): `~/dev/deck/scripts/update-home.sh`.
+   Keep updated later (works on an already-installed host): `~/dev/deck/update.sh`.
 
 Create the private home repository once from two reviewed profile directories. The
-second directory must be a filtered copy. The script refuses Lindy material in
-it and creates both branches. Do not create the personal branch by deleting
+second directory must be a filtered copy. The script refuses restricted project
+material in it and creates both branches. Do not create the personal branch by deleting
 files from the full branch after the fact.
 
 ```sh
@@ -56,11 +57,11 @@ deck-v2 home push
 
 Pull is additive. It never deletes local home entries. Review the profile before
 pushing it. The laptop uses the `profile/full` tree. Deckbox uses `profile/personal`. The
-personal profile is built without Lindy files or the Lindy project entry. Never
-copy the full profile to deckbox. Runtime state, Smithers runs, questions,
+personal profile is built without restricted project files or entries. Never
+copy the full profile to an untrusted host. Runtime state, Smithers runs, questions,
 credentials, and `.env` are machine-local and are never synced.
 
-For a remote deckbox session, run `~/dev/deck/scripts/update-home.sh`, then
+For a remote operator session, run `~/dev/deck/update.sh`, then
 restart the session with `/reload` if the running pi does not reload the
 extension automatically. The updater is safe to run repeatedly and is the
 primary path for an existing installation. Private repo access requires an

@@ -4,7 +4,7 @@ import type { DiffChange, IntakeState } from "./schema";
 
 export interface PollConfig {
 	login: string;
-	/** GitHub search scope qualifiers, e.g. ["org:lindy-ai", "user:twaldin"]. */
+	/** GitHub search scope qualifiers, e.g. ["org:example-org", "user:example-user"]. */
 	scopes: string[];
 	tracked: Set<string> | null;
 }

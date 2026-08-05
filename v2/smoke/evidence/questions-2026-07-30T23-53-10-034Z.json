@@ -2,7 +2,7 @@
   "runAt": "2026-07-30T23:53:10.034Z",
   "piVersion": "0.82.0",
   "model": "deck/claude-haiku-4-5",
-  "extensionPath": "/Users/twaldin/.deck/wt/deck-4/v2/src/questions.ts",
+  "extensionPath": "/Users/example-user/.deck/wt/deck-4/v2/src/questions.ts",
   "queueFile": "queue.jsonl",
   "askerSessionId": "019fb571-ff90-7fe6-8434-eddb3e828eab",
   "queued": {
@@ -16,13 +16,13 @@
     "recommendation": "flag",
     "urgency": "high",
     "sessionId": "019fb571-ff90-7fe6-8434-eddb3e828eab",
-    "cwd": "/Users/twaldin/.deck/wt/deck-4/v2",
+    "cwd": "/Users/example-user/.deck/wt/deck-4/v2",
     "askedAt": 1785455579743,
     "status": "open",
     "delivered": false
   },
   "captainDialog": {
-    "title": "(1/1) [high] asked 5s ago by session 019fb571-ff90-7fe6-8434-eddb3e828eab\ncwd: /Users/twaldin/.deck/wt/deck-4/v2\n\nShip the questions extension behind a flag?\n\nagent recommends: flag",
+    "title": "(1/1) [high] asked 5s ago by session 019fb571-ff90-7fe6-8434-eddb3e828eab\ncwd: /Users/example-user/.deck/wt/deck-4/v2\n\nShip the questions extension behind a flag?\n\nagent recommends: flag",
     "options": [
       "1. flag",
       "2. unguarded",
@@ -45,7 +45,7 @@
     "recommendation": "flag",
     "urgency": "high",
     "sessionId": "019fb571-ff90-7fe6-8434-eddb3e828eab",
-    "cwd": "/Users/twaldin/.deck/wt/deck-4/v2",
+    "cwd": "/Users/example-user/.deck/wt/deck-4/v2",
     "askedAt": 1785455579743,
     "status": "answered",
     "delivered": true,

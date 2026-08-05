@@ -3,10 +3,10 @@ import { buildSearchQueries, mergeBuckets, pickSquashCommit, type RawPr } from "
 
 function makeRawPr(overrides: Partial<RawPr> & { url: string }): RawPr {
 	return {
-		repo: "lindy-ai/lindy",
+		repo: "example-org/review-project",
 		number: 1,
 		title: "t",
-		author: "twaldin",
+		author: "example-user",
 		isDraft: false,
 		ci: "passing",
 		reviewDecision: "none",
@@ -50,12 +50,12 @@ describe("pickSquashCommit", () => {
 
 describe("buildSearchQueries", () => {
 	test("builds author + review-requested queries over all scopes", () => {
-		const queries = buildSearchQueries("twaldin", ["org:lindy-ai", "user:twaldin"]);
+		const queries = buildSearchQueries("example-user", ["org:example-org", "user:example-user"]);
 		expect(queries).toEqual([
-			{ bucket: "my-pr", query: "is:pr is:open author:twaldin archived:false org:lindy-ai user:twaldin" },
+			{ bucket: "my-pr", query: "is:pr is:open author:example-user archived:false org:example-org user:example-user" },
 			{
 				bucket: "review-owed",
-				query: "is:pr is:open review-requested:twaldin archived:false org:lindy-ai user:twaldin",
+				query: "is:pr is:open review-requested:example-user archived:false org:example-org user:example-user",
 			},
 		]);
 	});
@@ -63,7 +63,7 @@ describe("buildSearchQueries", () => {
 
 describe("mergeBuckets", () => {
 	test("PR in both buckets gets both, once", () => {
-		const pr = makeRawPr({ url: "https://github.com/lindy-ai/lindy/pull/1" });
+		const pr = makeRawPr({ url: "https://github.com/example-org/review-project/pull/1" });
 		const items = mergeBuckets([
 			{ bucket: "my-pr", prs: [pr] },
 			{ bucket: "review-owed", prs: [pr] },
@@ -73,8 +73,8 @@ describe("mergeBuckets", () => {
 	});
 
 	test("distinct PRs keep their own bucket", () => {
-		const mine = makeRawPr({ url: "https://github.com/lindy-ai/lindy/pull/1" });
-		const owed = makeRawPr({ url: "https://github.com/lindy-ai/lindy/pull/2", number: 2, author: "other" });
+		const mine = makeRawPr({ url: "https://github.com/example-org/review-project/pull/1" });
+		const owed = makeRawPr({ url: "https://github.com/example-org/review-project/pull/2", number: 2, author: "other" });
 		const items = mergeBuckets([
 			{ bucket: "my-pr", prs: [mine] },
 			{ bucket: "review-owed", prs: [owed] },

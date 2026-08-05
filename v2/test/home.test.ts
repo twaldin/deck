@@ -215,11 +215,23 @@ describe("the seeded contract is clean", () => {
 		const { bootstrapHome } = await import("../src/bootstrap");
 		bootstrapHome({ repoV2Dir: REPO_V2, home });
 		const contract = fs.readFileSync(path.join(home, "AGENTS.md"), "utf8");
-		// The seed explains why it is not named AGENTS.md; that is for whoever works
-		// on deck, not an instruction for the agent reading its own contract.
-		expect(contract).not.toContain("<!--");
+		// Build guidance is removed, but first-session onboarding remains.
+		expect(contract).not.toContain("This is the SEED for ~/.deck/AGENTS.md");
 		expect(contract).toStartWith("# Orchestrator");
+		expect(contract).toContain("<!-- ONBOARDING-START");
 		expect(contract).toContain("only agent that asks him anything");
+	});
+
+	test("onboarding block can be removed after answers are written", async () => {
+		const home = path.join(sandbox, "home");
+		const { bootstrapHome, removeOnboardingBlock } = await import("../src/bootstrap");
+		bootstrapHome({ repoV2Dir: REPO_V2, home });
+		const target = path.join(home, "AGENTS.md");
+		const answered = `${fs.readFileSync(target, "utf8")}\n## User preferences\n- Name: Example\n`;
+		fs.writeFileSync(target, removeOnboardingBlock(answered));
+		const body = fs.readFileSync(target, "utf8");
+		expect(body).toContain("User preferences");
+		expect(body).not.toContain("ONBOARDING-START");
 	});
 });
 

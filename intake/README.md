@@ -20,12 +20,13 @@ cd intake && bun install   # once
 
 # single poll (cron / orchestrator timer owns cadence)
 ./bin/deck-intake --once \
-	--org lindy-ai \
+	--login "$DECK_INTAKE_LOGIN" \
+	--org "$DECK_INTAKE_ORG" \
 	--include-user-repos \
 	--tracked /path/to/fleet/data/tracked-prs.txt
 
 # or long-lived (run it under the process tool / launchd; restart-safe)
-./bin/deck-intake --loop 120 --org lindy-ai --include-user-repos
+DECK_INTAKE_LOGIN=your-login DECK_INTAKE_ORG=your-org ./bin/deck-intake --loop 120 --include-user-repos
 
 # list intake records with correlated deck task ids
 ./bin/deck-intake ls
@@ -36,8 +37,8 @@ cd intake && bun install   # once
 | `--once` | Single poll: fetch, diff, write, print, exit. | — |
 | `--loop <seconds>` | Long-lived mode: the same poll on a fixed cadence (>= 10s). Mutually exclusive with `--once`; one of the two is required. | — |
 | `--events <file>` | Durable event log (JSONL, append-only) | `$DECK_V2_HOME/intake/events.jsonl` |
-| `--login <login>` | GitHub login to poll for | `twaldin` |
-| `--org <org>` | Search scope org (repeatable) | `lindy-ai` |
+| `--login <login>` | GitHub login to poll for | `DECK_INTAKE_LOGIN` (required) |
+| `--org <org>` | Search scope org (repeatable) | `DECK_INTAKE_ORG` (required) |
 | `--include-user-repos` | Also scope to `user:<login>` (the login's own repos) | off |
 | `--state <file>` | Durable JSON state file | `$DECK_V2_HOME/intake/intake-prs.json` |
 | `--out <file>` | Rendered markdown path | `$DECK_V2_HOME/intake/intake-prs.md` |

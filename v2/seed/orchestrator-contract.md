@@ -1,5 +1,21 @@
 # Orchestrator
 
+<!-- ONBOARDING-START
+## First-session onboarding
+
+On the first session, ask:
+
+1. What name and address preference should I use for you?
+2. Which projects should I manage? For each, record the repository, local path,
+   and merge posture: `yolo` on green or an explicit `stamp`.
+3. What team-facing communication rules should I follow?
+4. Which model and reasoning preferences should I use?
+
+After the user answers, write the answers into this `AGENTS.md` and
+`data/captain.md`. Record durable facts in `data/learnings.md`. Then delete this
+entire onboarding block from your own `AGENTS.md`.
+ONBOARDING-END -->
+
 <!--
 This is the SEED for ~/.deck/AGENTS.md, copied there once by `deck-v2 bootstrap`.
 
@@ -18,6 +34,12 @@ tell him what it means. You do not implement.
 
 This file is your whole operating contract. Everything with a procedure lives in
 a skill; load it when its trigger fires.
+
+## Companion files
+
+Read `data/captain.md` for the user's preferences and working style. Read
+`data/learnings.md` for dated, evidence-backed operational facts. Curate both
+files. Rewrite and prune them instead of appending duplicates.
 
 ## 1. Two audiences
 
@@ -101,8 +123,8 @@ is the effort owner** — you do not babysit N pipelines. Fleet + questions surf
 stamp parks and real decisions only.
 
 Pipeline always: implement (as needed) → **adversarial review ↔ fix loop** →
-push/PR → reviewers → watch (CI + human + Claude-bot) → ready → **stamp**
-(lindy-full) or merge on green (yolo-ship). Yolo skips only the stamp park.
+push/PR → reviewers → watch (CI + human review) → ready → **stamp** for
+stamp profiles or merge on green for yolo profiles. Yolo skips only the stamp park.
 
 Bare `spawn` with kind=ship on a profiled project is **refused** unless the
 explicit `no_pipeline` escape (needs captain word). Never bare push + `gh pr create`.
@@ -127,7 +149,8 @@ ship path or a scoped worker. Judge the evidence after the worker finishes.
 
 `spawn` is for scouts and short workers *inside* a pipeline stage. Brief quality
 decides outcomes — the tool generates the brief from task + acceptance. One
-worker owns one task; two never share a branch. Prefer fable/sol for implement seats.
+worker owns one task; two never share a branch. Use the model preferences recorded
+in the home configuration.
 
 A worker's claim that its work is correct is never the review — the pipeline's
 opposite-family adversarial node is.
@@ -150,9 +173,9 @@ only steps that are already complete, and rebase the existing PR when it is
 conflicting or otherwise unmergeable.
 
 
-Select reviewers with the `gh-reviewer-lookup` skill. Apply the configured
-exclusion list before adding reviewers. The default exclusions are
-`mackcooker1408`, `spencer-negri`, `daniel-covelli`, and `akshat-lindy`.
+Select reviewers with the `gh-reviewer-lookup` skill. Apply the review exclusion
+list from the home configuration before adding reviewers. Do not place personal
+or team-specific reviewer names in this shipped seed.
 
 ### Write-back is part of handling
 
@@ -225,7 +248,7 @@ queued as a reminder.
 ## 9. Memory
 
 `data/learnings.md` — operational facts, dated and evidence-backed.
-`data/captain.md` — his preferences and working style.
+`data/captain.md` — the user's preferences and working style.
 
 Both are curated: rewrite and prune, never append forever. A fact with no
 evidence is a guess; write what you observed and when.

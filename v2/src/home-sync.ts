@@ -12,7 +12,9 @@ function runGit(cwd: string, args: string[]): string {
 }
 
 function remote(): string {
-	return process.env.DECK_HOME_GIT_REMOTE ?? "twaldin/deck-home";
+	const value = process.env.DECK_HOME_GIT_REMOTE?.trim();
+	if (!value) throw new Error("home sync refused: DECK_HOME_GIT_REMOTE is unset");
+	return value;
 }
 
 export function profileMarkerPath(home = deckV2Home()): string {
@@ -34,9 +36,8 @@ function gitRemote(value: string): string {
 
 function assertPersonalProfile(home: string, selectedProfile: HomeSyncProfile): void {
 	if (selectedProfile !== "personal") return;
-	const found = execFileSync("find", [home, "-type", "f", "(", "-name", "lindy-*", "-o", "-path", "*/secrets-map.md", ")", "-print", "-quit"], { encoding: "utf8" }).trim();
-	const projects = path.join(home, "config", "projects.json");
-	if (found || (fs.existsSync(projects) && /lindy/i.test(fs.readFileSync(projects, "utf8")))) throw new Error("Lindy material in personal home");
+	const found = execFileSync("find", [home, "-type", "f", "(", "-name", "restricted-*", "-o", "-path", "*/secrets-map.md", ")", "-print", "-quit"], { encoding: "utf8" }).trim();
+	if (found) throw new Error("restricted project material in personal home");
 } 
 
 function cloneHome(selectedProfile: HomeSyncProfile): { root: string; repo: string } {
@@ -103,6 +104,6 @@ export function homeSyncPush(home = deckV2Home()): string {
  * Install-time profile filtering is structural: callers clone only this tree.
  * A personal home must never be made by copying full and deleting files later.
  */
-export function homeProfilePath(profile: HomeSyncProfile, repo = "twaldin/deck-home"): string {
+export function homeProfilePath(profile: HomeSyncProfile): string {
 	return `profile/${profile}`;
 }
