@@ -235,6 +235,7 @@ export function startValidatedGateway(
 	const upstream = startUpstream({ ...options, bind: "127.0.0.1:0" });
 	const quotaAccounts = options.quotaAccounts;
 	const modelIndex = buildModelIndex();
+	const warnedReasoningClamps = new Set<string>();
 	const { hostname, port } = gatewayBind(options.bind ?? DEFAULT_GATEWAY_BIND);
 	const server = Bun.serve({
 		hostname,
@@ -281,7 +282,16 @@ export function startValidatedGateway(
 					if (effort !== undefined) {
 						const resolved = modelIndex.resolve(body.model ?? modelId) ?? modelIndex.resolve(modelId);
 						const capabilities = resolved?.thinking?.efforts as readonly ReasoningEffort[] | undefined;
-						const selector = provider === "anthropic" && effort.startsWith("budget:") ? effort : clampReasoning(effort, supportedReasoning(modelId, provider, capabilities));
+						const supported = supportedReasoning(modelId, provider, capabilities);
+						const selector = provider === "anthropic" && effort.startsWith("budget:") ? effort : clampReasoning(effort, supported);
+						if (selector !== effort) {
+							const sessionId = typeof body.prompt_cache_key === "string" ? body.prompt_cache_key : "default";
+							const warningKey = `${sessionId}:${modelId}:${effort}`;
+							if (!warnedReasoningClamps.has(warningKey)) {
+								warnedReasoningClamps.add(warningKey);
+								console.warn(`[reasoning] model=${modelId} requested=${effort} effective=${selector} session=${sessionId}`);
+							}
+						}
 						const native = nativeReasoning(provider, selector);
 						delete body.reasoning;
 						delete body.reasoning_effort;

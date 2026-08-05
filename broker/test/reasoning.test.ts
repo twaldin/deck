@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import registerDeckProvider from "../pi/deck-provider";
 import { clampReasoning, nativeReasoning, NATIVE_REASONING_LEVELS, supportedReasoning } from "../src/reasoning";
 
 describe("native reasoning passthrough", () => {
@@ -24,14 +25,26 @@ describe("native reasoning passthrough", () => {
 	});
 
 	test("clamps unsupported named levels down like Pi", () => {
-		expect(clampReasoning("medium", supportedReasoning("grok-4.5", "xai"))).toBe("low");
+		expect(clampReasoning("max", supportedReasoning("gpt-5.5", "openai"))).toBe("xhigh");
 		expect(clampReasoning("xhigh", ["low", "high"])).toBe("high");
-		expect(clampReasoning("max", supportedReasoning("gpt-5.6-sol", "openai"))).toBe("xhigh");
+		expect(clampReasoning("max", supportedReasoning("gpt-5.6-sol", "openai"))).toBe("max");
 		expect(() => clampReasoning("turbo", supportedReasoning("gpt-5.6-sol", "openai"))).toThrow("Unsupported reasoning effort");
 	});
 
+	test("Deck model maps preserve Codex max and pass Grok selectors to broker", () => {
+		let registered: { models: Array<{ id: string; thinkingLevelMap?: Record<string, string | null> }> } | undefined;
+		registerDeckProvider({ registerProvider: (_name, config) => { registered = config as typeof registered; } });
+		const sol = registered?.models.find(model => model.id === "gpt-5.6-sol");
+		const grok = registered?.models.find(model => model.id === "grok-4.5");
+		expect(sol?.thinkingLevelMap?.max).toBe("max");
+		expect(sol?.thinkingLevelMap?.max).not.toBe("xhigh");
+		expect(grok?.thinkingLevelMap?.xhigh).toBe("xhigh");
+		expect(supportedReasoning("grok-4.5", "xai")).toEqual(["low", "medium", "high"]);
+		expect(clampReasoning("xhigh", supportedReasoning("grok-4.5", "xai"))).toBe("high");
+	});
+
 	test("publishes the provider catalog surface", () => {
-		expect(NATIVE_REASONING_LEVELS.openai).toEqual(["minimal", "low", "medium", "high", "xhigh", "max"]);
-		expect(NATIVE_REASONING_LEVELS.xai).toEqual(["low", "high"]);
+		expect(NATIVE_REASONING_LEVELS.openai).toEqual(["low", "medium", "high", "xhigh", "max"]);
+		expect(NATIVE_REASONING_LEVELS.xai).toEqual(["low", "medium", "high"]);
 	});
 });

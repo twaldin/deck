@@ -28,6 +28,17 @@ async function withFakeUpstream(options: Partial<FastGatewayOptions> = {}, upstr
 }
 
 describe("validated gateway outbound requests", () => {
+	test("forwards codex max without rewriting it to high", async () => {
+		const { gateway, forwarded } = await withFakeUpstream();
+		const response = await fetch(`${gateway.url}/v1/responses`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ model: "gpt-5.6-sol", reasoning_effort: "max" }),
+		});
+		expect(response.status).toBe(200);
+		expect(forwarded[0]?.body).toEqual({ model: "gpt-5.6-sol", reasoning_effort: "max", reasoning: { effort: "max" } });
+	});
+
 	test("forwards OpenAI effort payloads", async () => {
 		const { gateway, forwarded } = await withFakeUpstream();
 		const response = await fetch(`${gateway.url}/v1/chat/completions`, {
@@ -70,6 +81,25 @@ describe("validated gateway outbound requests", () => {
 		});
 		expect(response.status).toBe(200);
 		expect(forwarded[0]?.body).toEqual({ model: "xai/grok-4.5", reasoning_effort: "medium" });
+	});
+
+	test("warns once per session when a requested level is clamped", async () => {
+		const warnings: string[] = [];
+		const originalWarn = console.warn;
+		console.warn = (...args: unknown[]) => warnings.push(args.join(" "));
+		try {
+			const { gateway } = await withFakeUpstream();
+			for (let i = 0; i < 2; i++) {
+				await fetch(`${gateway.url}/v1/chat/completions`, {
+					method: "POST",
+					body: JSON.stringify({ model: "xai/grok-4.5", reasoning_effort: "xhigh", prompt_cache_key: "session-warning" }),
+				});
+			}
+		} finally {
+			console.warn = originalWarn;
+		}
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]).toContain("requested=xhigh effective=high");
 	});
 
 	test("keeps Deck Claude models on OpenAI-compatible routing", async () => {
