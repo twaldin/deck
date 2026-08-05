@@ -64,7 +64,7 @@ import {
 import { findLandingCommit } from "./lib/landing.ts";
 import { runMerge, runMergeWithFallback } from "./lib/merge.ts";
 import { detectMigrations, MIGRATION_STAGES, migrationEvidenceComplete } from "./lib/migrations.ts";
-import { generatePullRequestDescription } from "./lib/description.ts";
+import { generatePullRequestDescription, sanitizeDescriptionInput } from "./lib/description.ts";
 import {
 	defaultModelPolicy,
 	parseModelRef,
@@ -1091,19 +1091,22 @@ export default smithers((ctx) => {
 									// Reviewers are NOT requested here: request-reviewers owns
 									// that (create --reviewer is the silent-no-op path with no
 									// verification read).
+									const descriptionInput = sanitizeDescriptionInput({
+										title: brief?.title ?? input.ticket,
+										summary: brief?.summary ?? "",
+										acceptanceCriteria: brief?.acceptanceCriteria ?? [],
+										testing: implementation.testEvidence,
+										reviewOutcome: latestLocalReview?.summary,
+										changedFiles: dryRun ? fixtures.changedFiles : await changedFilesForBranch(bunExec, input.worktree, baseBranch),
+									});
 									const createOut = await execOrThrow(bunExec, [
 										github.gh, "pr", "create",
 										"--repo", input.repo,
 										"--head", input.branch,
 										"--base", baseBranch,
-										"--title", `${brief?.title ?? input.ticket}`,
+										"--title", descriptionInput.title,
 										"--body",
-										generatePullRequestDescription({
-											brief: brief ?? { summary: "", acceptanceCriteria: [] },
-											testing: implementation.testEvidence,
-											reviewOutcome: latestLocalReview?.summary,
-											changedFiles: dryRun ? fixtures.changedFiles : await changedFilesForBranch(bunExec, input.worktree, baseBranch),
-										}),
+										generatePullRequestDescription(descriptionInput),
 									]);
 									url = createOut.trim().split("\n").pop() ?? "";
 									const match = url.match(/\/pull\/(\d+)/);
@@ -1630,8 +1633,8 @@ prNumber: pr.prNumber,
 													`PR: ${pr.url}`,
 																									`Head at ready: ${latestReady.headSha}`,
 												`Human review approval: ${latestReady.approvedBy ?? "n/a"}`,
-												`CI: ${latestReady.ci} (green-or-will-be-green per captain ruling)`,
-`Migration gate: ${migRequired ? `TRIGGERED (evidence ${migEvidenceOk ? "complete" : "INCOMPLETE"})` : "not triggered"}`,
+												`CI: ${latestReady.ci} (green-or-will-be-green per approval ruling)`,
+												`Migration gate: ${migRequired ? `TRIGGERED (evidence ${migEvidenceOk ? "complete" : "INCOMPLETE"})` : "not triggered"}`, 
 													``,
 													`Approving = stamp + the per-PR merge word. The workflow (not an agent)`,
 													`submits to the GitHub merge queue. Head change after this stamp`,

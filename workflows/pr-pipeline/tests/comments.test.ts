@@ -50,7 +50,9 @@ describe("agent comment signatures", () => {
 
 	test("does not sign pull request descriptions", () => {
 		const body = generatePullRequestDescription({
-			brief: { summary: "A change", acceptanceCriteria: ["It works"] },
+			title: "Change",
+			summary: "A change",
+			acceptanceCriteria: ["It works"],
 		});
 		expect(body).not.toContain(AGENT_COMMENT_SIGNATURE);
 	});
