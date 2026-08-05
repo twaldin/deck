@@ -1,4 +1,5 @@
 import { Gateway, mdxPlugin } from "smithers-orchestrator";
+import { execFileSync } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -11,6 +12,20 @@ const workflowsRoot = resolve(here, "..");
 // tree. Without this the gateway reads an empty workspace and lists no runs.
 const workspaceRoot = resolve(process.env.SMITHERS_WORKSPACE_ROOT ?? process.cwd());
 process.chdir(workspaceRoot);
+
+// Resolve Pi once when the host gateway boots. Smithers' PiAgent otherwise
+// spawns the `pi` command from its own runtime, which can be a bundled binary
+// without Deck's provider registration. The explicit path is inherited by
+// workflow seats and remains stable for the gateway lifetime.
+if (!process.env.DECK_PI_BINARY) {
+	try {
+		const hostPi = execFileSync("which", ["pi"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+		if (hostPi) process.env.DECK_PI_BINARY = hostPi;
+	} catch {
+		// Keep the gateway available for dry-run and graph operations. A real Pi
+		// seat reports the missing host executable when it is invoked.
+	}
+}
 
 const parsedPort = Number(process.env.PORT ?? "7331");
 const port = Number.isInteger(parsedPort) && parsedPort > 0 ? parsedPort : 7331;

@@ -95,6 +95,7 @@ import type { Brief, MigrationEvidenceEntry } from "./lib/types.ts";
 import { claimMainFailure, publishWakeProducer, releaseMainFailure } from "../../v2/src/wake-producers.ts";
 import { smithersWorkspaceCwd } from "../../v2/src/workspace.ts";
 import { runTestCommand } from "./lib/test-lane.ts";
+import { createHostPiAgent } from "./lib/host-pi.ts";
 
 // ---------------------------------------------------------------------------
 // Defaults (normalized in code, not via zod .default(), to keep semantics
@@ -455,9 +456,10 @@ function makeAgent(ref: ModelSeat, cwd: string, timeoutMs: number, reasoning = "
 	const thinking = selected.reasoning ?? reasoning;
 	// Preserve the provider-native selector. If an older Smithers type does not
 	// yet include `max`, the compatibility cast is local and does not rewrite the
-	// value sent to Pi.
+	// value sent to Pi. HostPiAgent also preserves all extension options while
+	// replacing Smithers' default `pi` command with the host-selected binary.
 
-	return new PiAgent({
+	return createHostPiAgent(PiAgent, {
 		provider,
 		model,
 		cwd,
