@@ -30,7 +30,7 @@ export function startSubagentWatchdog(proc: ChildProcess, options: WatchdogOptio
 		if (stopped || reported) return;
 		reported = true;
 		options.onFailure(failure);
-		proc.kill("SIGTERM");
+		if (proc.exitCode === null) proc.kill("SIGTERM");
 		setTimeout(() => {
 			if (proc.exitCode === null) proc.kill("SIGKILL");
 		}, 1000).unref();
@@ -45,12 +45,20 @@ export function startSubagentWatchdog(proc: ChildProcess, options: WatchdogOptio
 			fail({ kind: "dead", reason: `child produced no worktree, transcript, or CPU activity for ${options.livenessMs}ms`, pid: proc.pid });
 		}
 	}, Math.max(5, Math.min(options.livenessMs, 5_000)));
+	// The first sample is separate from the interval. This avoids charging
+	// process startup time against liveness and makes a short test window stable.
+	const initialSample = setTimeout(() => {
+		if (stopped || proc.exitCode !== null || proc.pid === undefined) return;
+		previous = sampleActivity(proc.pid, options.worktree, sessionDir);
+		lastActivityAt = Date.now();
+	}, 0);
 	return {
 		sessionDir,
 		stop: () => {
 			if (stopped) return;
 			stopped = true;
 			clearTimeout(timeout);
+			clearTimeout(initialSample);
 			clearInterval(liveness);
 			if (options.sessionDir === undefined) fs.rmSync(sessionDir, { recursive: true, force: true });
 		},

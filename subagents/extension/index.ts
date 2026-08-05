@@ -16,6 +16,7 @@ import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { Message } from "@earendil-works/pi-ai";
 import { StringEnum } from "@earendil-works/pi-ai";
@@ -309,7 +310,11 @@ async function runSingleAgent(
 			task,
 			exitCode: 1,
 			messages: [],
-			stderr: `Unknown agent: "${agentName}".${suggestion} Available agents: ${available}.`,
+			stderr: structuredSubagentError("unknown-agent", `Unknown agent: "${agentName}".${suggestion} Available agents: ${available}.`, {
+				requested: agentName,
+				available: validAgentNames(agents),
+				...(resolution.suggestion === undefined ? {} : { suggestion: resolution.suggestion }),
+			}),
 			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
 			step,
 		};
@@ -353,6 +358,7 @@ async function runSingleAgent(
 			args.push("--append-system-prompt", tmpPromptPath);
 		}
 
+		args.push("--extension", fileURLToPath(import.meta.url));
 		args.push(`Task: ${task}`);
 		let wasAborted = false;
 
@@ -367,17 +373,27 @@ async function runSingleAgent(
 			let buffer = "";
 			let settled = false;
 			let failure: SubagentFailure | undefined;
+			let watchdog: ReturnType<typeof startSubagentWatchdog>;
 			const timeoutMs = configuredTimeoutMs();
 			const livenessMs = Math.max(MIN_LIVENESS_SAMPLE_MS, Number.parseInt(process.env.DECK_SUBAGENT_LIVENESS_MS ?? "", 10) || DEFAULT_LIVENESS_MS);
 			const logFailure = (next: SubagentFailure) => {
 				failure = next;
 				console.error(`[subagent] ${next.kind}: ${next.reason}`);
 			};
-			const watchdog = startSubagentWatchdog(proc, {
+			watchdog = startSubagentWatchdog(proc, {
 				worktree: runCwd,
 				timeoutMs,
 				livenessMs,
-				onFailure: logFailure,
+				onFailure: (next) => {
+					logFailure(next);
+					if (!settled) {
+						settled = true;
+						currentResult.errorMessage = structuredFailure(next);
+						currentResult.stderr += `\n${currentResult.errorMessage}`;
+						watchdog.stop();
+						resolve(1);
+					}
+				},
 			});
 			const transcriptPath = path.join(watchdog.sessionDir, "child.jsonl");
 
@@ -432,6 +448,7 @@ async function runSingleAgent(
 			});
 
 			proc.on("close", (code) => {
+				if (settled) return;
 				if (buffer.trim()) processLine(buffer);
 				if (failure === undefined && code !== 0) {
 					logFailure({ kind: "exit", reason: `child exited with code ${code ?? "unknown"}`, pid: proc.pid });
@@ -448,7 +465,15 @@ async function runSingleAgent(
 			});
 
 			proc.on("error", (error) => {
-				logFailure({ kind: "dead", reason: `child process error: ${error.message}`, pid: proc.pid });
+				const next = { kind: "dead" as const, reason: `child process error: ${error.message}`, pid: proc.pid };
+				logFailure(next);
+				if (!settled) {
+					settled = true;
+					currentResult.errorMessage = structuredFailure(next);
+					currentResult.stderr += `\n${currentResult.errorMessage}`;
+					watchdog.stop();
+					resolve(1);
+				}
 			});
 
 			if (signal) {

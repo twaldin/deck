@@ -49,27 +49,41 @@ function cpuTimeMs(pid: number): number | null {
 	try {
 		const out = spawnSync("ps", ["-o", "cputime=", "-p", String(pid)], { encoding: "utf8" });
 		if (out.status !== 0 || typeof out.stdout !== "string") return null;
-		const match = out.stdout.trim().match(/^(?:(\d+)-)?(\d+):(\d+):(\d+)(?:\.(\d+))?$/);
-		if (match === null) return null;
-		const days = Number(match[1] ?? 0);
-		const hours = Number(match[2]);
-		const minutes = Number(match[3]);
-		const seconds = Number(match[4]);
-		return ((days * 24 + hours) * 60 + minutes) * 60_000 + (seconds + Number(`0.${match[5] ?? "0"}`)) * 1000;
+		const value = out.stdout.trim();
+		// macOS emits M:SS.hh while Linux usually emits HH:MM:SS. Parse both.
+		const dayMatch = value.match(/^(\d+)-(.*)$/);
+		const days = Number(dayMatch?.[1] ?? 0);
+		const parts = (dayMatch?.[2] ?? value).split(":");
+		if (parts.length !== 2 && parts.length !== 3) return null;
+		const secondsPart = parts.pop()!;
+		const seconds = Number(secondsPart);
+		const minutes = Number(parts.pop());
+		const hours = Number(parts.pop() ?? 0);
+		if (![days, hours, minutes, seconds].every(Number.isFinite)) return null;
+		return ((days * 24 + hours) * 60 + minutes) * 60_000 + seconds * 1000;
 	} catch { return null; }
 }
 
 export type ActivitySnapshot = {
 	worktreeMtimeMs: number;
+	worktreeTruncated: boolean;
 	transcriptMtimeMs: number;
 	transcriptBytes: number;
 	cpuTimeMs: number | null;
 };
 
-export function sampleActivity(pid: number, worktree: string, sessionDir: string, now = Date.now()): ActivitySnapshot {
+export function sampleActivity(
+	pid: number,
+	worktreeRoot: string,
+	sessionDir: string,
+	now = Date.now(),
+	cutoff = Number.POSITIVE_INFINITY,
+): ActivitySnapshot {
 	const transcript = sessionSignal(sessionDir);
+	const worktree = newestMtimeMs(worktreeRoot, cutoff, now);
 	return {
-		worktreeMtimeMs: newestMtimeMs(worktree, Number.POSITIVE_INFINITY, now).newest,
+		worktreeMtimeMs: worktree.newest,
+		worktreeTruncated: worktree.truncated,
 		transcriptMtimeMs: transcript.mtimeMs,
 		transcriptBytes: transcript.bytes,
 		cpuTimeMs: cpuTimeMs(pid),

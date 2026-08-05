@@ -350,6 +350,13 @@ describe("local review contracts", () => {
 		expect(prompt).toContain('Concrete valid result example: {"afterRound":2,"addressed":[],"summary":"All blocking findings addressed."}');
 		expect(prompt).toContain("Reply with ONLY the result object");
 	});
+
+	test("pipeline prompts name the valid subagent ids and stack fan-out pattern", () => {
+		const review = localReviewPrompt(validBrief, "/tmp/wt", "main", 1);
+		expect(review).toContain("worker, worker-gpt, reviewer, reviewer-claude, and scout");
+		expect(review).toContain("land the schema/base PR first");
+		expect(review).not.toContain("do not use subagents");
+	});
 });
 
 describe("preflight gate", () => {

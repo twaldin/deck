@@ -21,8 +21,6 @@
  */
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
-import { newestMtimeMs, sampleActivity, sessionSignal } from "./activity";
-export { activityAdvanced, sampleActivity, type ActivitySnapshot } from "./activity";
 import * as path from "node:path";
 import {
 	type CursorStore,
@@ -430,6 +428,8 @@ export type StaleVerdict = {
 export const DEFAULT_SILENCE_MS = 10 * 60 * 1000;
 /** Suppression ceiling: a standing silent verdict repeats at most this often. */
 const MAX_BACKOFF_MS = 60 * 60 * 1000;
+/** Bound on the worktree walk, so one huge tree cannot stall a reconcile cycle. */
+const MAX_WALK_ENTRIES = 20_000;
 
 function configuredSilenceMs(override?: number): number {
 	if (typeof override === "number" && override > 0) return override;
@@ -438,19 +438,102 @@ function configuredSilenceMs(override?: number): number {
 }
 
 /**
+ * Newest mtime under `root`, ignoring node_modules/.git and never leaving the
+ * tree (dirents are typed, so a symlink is never descended into).
+ *
+ * Returns as soon as something newer than `cutoff` is seen: the question is
+ * "has this worker written anything lately", and the first yes answers it.
+ *
+ * Mtimes after `limit` (now) are IGNORED, not clamped. A file dated in the
+ * future (clock skew, a restored archive, a generator that writes ahead) would
+ * otherwise read as fresh on every cycle and hide a real wedge forever, and
+ * clamping it to now has exactly the same effect.
+ *
+ * `truncated` means the walk hit its entry budget without finding anything
+ * fresh, so the tree was not fully searched. The caller still judges — the
+ * transcript signal is complete on its own — but says so in the reason,
+ * because the worktree half of the evidence is partial.
+ */
+function newestMtimeMs(
+	root: string,
+	cutoff: number,
+	limit: number,
+): { newest: number; truncated: boolean } {
+	let newest = 0;
+	let visited = 0;
+	const stack = [root];
+	while (stack.length > 0) {
+		const dir = stack.pop();
+		if (dir === undefined) break;
+		let entries: fs.Dirent[];
+		try {
+			entries = fs.readdirSync(dir, { withFileTypes: true });
+		} catch {
+			continue;
+		}
+		for (const entry of entries) {
+			if (visited++ > MAX_WALK_ENTRIES) return { newest, truncated: true };
+			if (entry.name === "node_modules" || entry.name === ".git") continue;
+			const full = path.join(dir, entry.name);
+			if (entry.isDirectory()) {
+				stack.push(full);
+				continue;
+			}
+			// Only regular files. A symlink is neither followed nor stat'd, which is
+			// what keeps the scan inside the worktree.
+			if (!entry.isFile()) continue;
+			let mtime: number;
+			try {
+				mtime = fs.statSync(full).mtimeMs;
+			} catch {
+				continue;
+			}
+			if (mtime > newest && mtime <= limit) newest = mtime;
+			if (newest > cutoff) return { newest, truncated: false };
+		}
+	}
+	return { newest, truncated: false };
+}
+
+/** Transcript signal: newest session mtime and total bytes written so far. */
+function sessionSignal(dir: string): { mtimeMs: number; bytes: number } {
+	let entries: fs.Dirent[];
+	try {
+		entries = fs.readdirSync(dir, { withFileTypes: true });
+	} catch {
+		return { mtimeMs: 0, bytes: 0 };
+	}
+	let mtimeMs = 0;
+	let bytes = 0;
+	for (const entry of entries) {
+		if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
+		try {
+			const stat = fs.statSync(path.join(dir, entry.name));
+			bytes += stat.size;
+			if (stat.mtimeMs > mtimeMs) mtimeMs = stat.mtimeMs;
+		} catch {
+			continue;
+		}
+	}
+	return { mtimeMs, bytes };
+}
+
+/**
  * Per-task activity watermark and verdict suppression.
  *
  * `bytes` makes transcript GROWTH a signal in its own right: an appended
  * session whose mtime a coarse filesystem has not moved still proves the worker
- * is alive. `emitted`/`nextEmitAt` are why the same silent verdict is not
- * re-sent every cycle.
+ * is alive. CPU samples provide a third signal for model/API work that writes no
+ * files. `emitted`/`nextEmitAt` are why the same silent verdict is not re-sent
+ * every cycle.
  */
-
-
 type ActivityRecord = {
 	bytes: number;
 	lastSignalMs: number;
-	cpuTimeMs?: number | null;
+	/** Latest accumulated CPU sample, keyed by process identity. */
+	cpuSampleAt?: number;
+	parentCpuMs?: number;
+	childCpuMs?: Record<string, number>;
 	/**
 	 * The run this watermark belongs to. A respawn bumps run_epoch, and without
 	 * this the replacement run inherits the dead run's silence and is reported
@@ -490,6 +573,86 @@ function saveActivity(store: ActivityStore): void {
 
 export type ChildProcessRow = { pid: number; command: string };
 
+/** CPU-time sample for a worker and its direct children. */
+export type ProcessCpuSample = {
+	parentMs?: number;
+	children: Array<{ pid: number; cpuMs: number }>;
+};
+
+/** CPU samples must be separated enough to distinguish scheduler noise. */
+const MIN_CPU_SAMPLE_INTERVAL_MS = 15_000;
+
+export function parseCpuTimeMs(raw: string): number | undefined {
+	const value = raw.trim();
+	if (value.length === 0) return undefined;
+	const [dayPart, clock] = value.includes("-") ? value.split(/-(.*)/s) : [undefined, value];
+	const segments = (clock ?? "").split(":");
+	if ((segments.length !== 2 && segments.length !== 3) || segments.some((part) => !/^\d+(?:\.\d+)?$/.test(part))) return undefined;
+	const parts = segments.map(Number);
+	if (parts.some((part) => !Number.isFinite(part))) return undefined;
+	const seconds = parts[parts.length - 1];
+	const minutes = parts[parts.length - 2];
+	const hours = parts.length === 3 ? (parts[0] ?? 0) : 0;
+	const days = dayPart === undefined ? 0 : Number(dayPart);
+	if (!Number.isFinite(days) || seconds === undefined || minutes === undefined) return undefined;
+	return (days * 86_400 + hours * 3_600 + minutes * 60 + seconds) * 1000;
+}
+
+type ProcessRow = { pid: number; ppid: number; cpuMs?: number };
+
+type ProcessSnapshot = {
+	rows: ProcessRow[];
+};
+
+/** One process-table pass serves CPU sampling and direct-child discovery. */
+function defaultProcessSnapshot(): ProcessSnapshot {
+	try {
+		// Keep worker-controlled command text out of the process table used for
+		// activity decisions. It is fetched separately only for an emitted label.
+		const out = spawnSync("ps", ["-axo", "pid=,ppid=,time="], { encoding: "utf8" });
+		if (out.status !== 0 || typeof out.stdout !== "string") return { rows: [] };
+		const rows: ProcessRow[] = [];
+		for (const line of out.stdout.split("\n")) {
+			const match = line.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/);
+			if (match === null) continue;
+			const rawCpu = parseCpuTimeMs(match[3] ?? "");
+			rows.push({
+				pid: Number(match[1]),
+				ppid: Number(match[2]),
+				...(rawCpu === undefined ? {} : { cpuMs: rawCpu }),
+			});
+		}
+		return { rows };
+	} catch {
+		return { rows: [] };
+	}
+}
+
+function cpuFromSnapshot(pid: number, snapshot: ProcessSnapshot): ProcessCpuSample {
+	const parent = snapshot.rows.find((row) => row.pid === pid);
+	return {
+		parentMs: parent?.cpuMs,
+		children: snapshot.rows
+			.filter((row) => row.ppid === pid && row.cpuMs !== undefined)
+			.map((row) => ({ pid: row.pid, cpuMs: row.cpuMs as number })),
+	};
+}
+
+function childCommand(pid: number): string {
+	try {
+		const out = spawnSync("ps", ["-o", "command=", "-p", String(pid)], { encoding: "utf8" });
+		return typeof out.stdout === "string" ? out.stdout.trim() : "";
+	} catch {
+		return "";
+	}
+}
+
+function childrenFromSnapshot(pid: number, snapshot: ProcessSnapshot): ChildProcessRow[] {
+	return snapshot.rows
+		.filter((row) => row.ppid === pid)
+		.map((row) => ({ pid: row.pid, command: childCommand(row.pid) }));
+}
+
 /**
  * A short, safe label for a child process.
  *
@@ -506,24 +669,6 @@ function childLabel(command: string): string {
 		.replace(/[^\x20-\x7e]/g, "")
 		.slice(0, 40);
 	return safe.length > 0 ? safe : "unknown";
-}
-
-/** Direct children of `pid`. Used only to name what a silent worker is waiting on. */
-function defaultChildren(pid: number): ChildProcessRow[] {
-	try {
-		const out = spawnSync("ps", ["-axo", "pid=,ppid=,command="], { encoding: "utf8" });
-		if (out.status !== 0 || typeof out.stdout !== "string") return [];
-		const rows: ChildProcessRow[] = [];
-		for (const line of out.stdout.split("\n")) {
-			const match = line.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/);
-			if (match === null) continue;
-			if (Number(match[2]) !== pid) continue;
-			rows.push({ pid: Number(match[1]), command: match[3] ?? "" });
-		}
-		return rows;
-	} catch {
-		return [];
-	}
 }
 
 /**
@@ -548,6 +693,8 @@ export function detectStale(
 		silenceMs?: number;
 		/** Injected for tests; defaults to a `ps` scan for direct children. */
 		listChildren?: (pid: number) => ChildProcessRow[];
+		/** Injected for tests; defaults to one `ps` process-table sample. */
+		sampleCpu?: (pid: number) => ProcessCpuSample;
 		now?: number;
 		/**
 		 * Persist the activity watermark and mark verdicts emitted. Default true.
@@ -562,7 +709,13 @@ export function detectStale(
 	} = {},
 ): StaleVerdict[] {
 	const alive = options.runAlive ?? defaultAlive;
-	const listChildren = options.listChildren ?? defaultChildren;
+	let processSnapshot: ProcessSnapshot | undefined;
+	const getProcessSnapshot = (): ProcessSnapshot => {
+		processSnapshot ??= defaultProcessSnapshot();
+		return processSnapshot;
+	};
+	const listChildren = options.listChildren ?? ((pid: number) => childrenFromSnapshot(pid, getProcessSnapshot()));
+	const sampleCpu = options.sampleCpu ?? ((pid: number) => cpuFromSnapshot(pid, getProcessSnapshot()));
 	const silenceMs = configuredSilenceMs(options.silenceMs);
 	const now = options.now ?? Date.now();
 	const persist = options.record ?? true;
@@ -628,23 +781,75 @@ export function detectStale(
 			// before then cannot change the outcome — scan once per silence window and
 			// skip the rest. A read-only caller is never throttled, because it does not
 			// apply suppression either and must see the current verdict.
-			if (
+			const cpuPrevious = previous;
+			const cpuIntervalElapsed =
+				cpuPrevious !== undefined && now - (cpuPrevious.cpuSampleAt ?? 0) >= MIN_CPU_SAMPLE_INTERVAL_MS;
+			let currentCpu: ProcessCpuSample = {
+				parentMs: cpuPrevious?.parentCpuMs,
+				children: Object.entries(cpuPrevious?.childCpuMs ?? {}).map(([childPid, cpuMs]) => ({ pid: Number(childPid), cpuMs })),
+			};
+			if (cpuPrevious === undefined || cpuIntervalElapsed) {
+				try {
+					currentCpu = sampleCpu(pid);
+				} catch {
+					currentCpu = { children: [] };
+				}
+			}
+			const previousParentCpuMs = cpuPrevious?.parentCpuMs;
+			const parentCpuDelta =
+				cpuIntervalElapsed && previousParentCpuMs !== undefined && currentCpu.parentMs !== undefined
+					? Math.max(0, currentCpu.parentMs - previousParentCpuMs)
+					: 0;
+			const previousChildren = cpuPrevious?.childCpuMs ?? {};
+			const childCpuDeltas = new Map<number, number>();
+			for (const child of currentCpu.children) {
+				const old = previousChildren[String(child.pid)];
+				if (cpuIntervalElapsed && old !== undefined) {
+					childCpuDeltas.set(child.pid, Math.max(0, child.cpuMs - old));
+				}
+			}
+			const cpuActive = parentCpuDelta > 0 || [...childCpuDeltas.values()].some((delta) => delta > 0);
+			const cpuFields = {
+				cpuSampleAt: cpuIntervalElapsed || cpuPrevious === undefined ? now : cpuPrevious.cpuSampleAt,
+				parentCpuMs: cpuIntervalElapsed || cpuPrevious === undefined ? currentCpu.parentMs : cpuPrevious.parentCpuMs,
+				childCpuMs: cpuIntervalElapsed || cpuPrevious === undefined
+					? Object.fromEntries(currentCpu.children.map((child) => [String(child.pid), child.cpuMs]))
+					: cpuPrevious.childCpuMs,
+			};
+			const suppressedScan =
 				persist &&
 				previous?.emitted === fingerprint &&
 				now < (previous.nextEmitAt ?? 0) &&
-				now < (previous.nextScanAt ?? 0)
-			) {
+				now < (previous.nextScanAt ?? 0);
+			if (cpuActive) {
+				if (persist) {
+					const session = sessionSignal(
+						typeof meta.session_dir === "string" ? meta.session_dir : stateFiles(taskId).sessions,
+					);
+					const activeRecord: ActivityRecord = {
+						...previous,
+						epoch,
+						bytes: session.bytes,
+						lastSignalMs: now,
+						...cpuFields,
+					};
+					delete activeRecord.emitted;
+					delete activeRecord.nextEmitAt;
+					delete activeRecord.backoffMs;
+					delete activeRecord.nextScanAt;
+					activity[taskId] = activeRecord;
+					activityDirty = true;
+				}
 				continue;
 			}
-			const sessionDir = typeof meta.session_dir === "string" ? meta.session_dir : stateFiles(taskId).sessions;
-			const session = sessionSignal(sessionDir);
-			const measured = typeof meta.worktree === "string" && meta.worktree.length > 0
-				? sampleActivity(pid, meta.worktree, sessionDir, now)
-				: undefined;
-			// Only worktree writes and transcript activity count. A status line is a
-			// report ABOUT the work, not the work: a worker looping on a retry can keep
-			// appending `working:` while writing nothing, and counting that mtime as
-			// activity is exactly what hides the wedge this check exists to find.
+			if (suppressedScan) continue;
+			const session = sessionSignal(
+				typeof meta.session_dir === "string" ? meta.session_dir : stateFiles(taskId).sessions,
+			);
+			// Worktree writes and transcript growth count alongside CPU time. A status
+			// line is a report ABOUT the work, not the work: a worker looping on a retry
+			// can keep appending `working:` while writing nothing, and counting that
+			// mtime as activity is exactly what hides the wedge this check exists to find.
 			let newest = session.mtimeMs <= now ? session.mtimeMs : 0;
 			let truncated = false;
 			// Skip the walk when a cheap signal already proves recent activity: the
@@ -657,12 +862,7 @@ export function detectStale(
 			// Transcript growth is activity even when the mtime looks old, which is what
 			// a coarse filesystem timestamp or a restored mtime can make it look like.
 			const grew = previous !== undefined && session.bytes > previous.bytes;
-			const cpuAdvanced = previous?.cpuTimeMs !== undefined
-				&& previous.cpuTimeMs !== null
-				&& measured?.cpuTimeMs !== null
-				&& measured?.cpuTimeMs !== undefined
-				&& measured.cpuTimeMs > previous.cpuTimeMs;
-			const observed = grew || cpuAdvanced ? now : newest;
+			const observed = grew ? now : newest;
 			// A run cannot have been silent for longer than it has existed. The worktree
 			// and transcript of a REPLACEMENT run still hold the dead run's files, so
 			// without this anchor the new run is judged by the old run's mtimes and is
@@ -693,8 +893,8 @@ export function detectStale(
 				...previous,
 				epoch,
 				bytes: session.bytes,
-				cpuTimeMs: measured?.cpuTimeMs ?? previous?.cpuTimeMs ?? null,
 				lastSignalMs,
+				...cpuFields,
 			};
 
 			if (lastSignalMs > cutoff) {
@@ -719,6 +919,7 @@ export function detectStale(
 				// Named only on a verdict that is actually emitted: `ps` on every cycle of a
 				// standing silence buys nothing.
 				const child = listChildren(pid)[0];
+				const childCpuDelta = child === undefined ? undefined : childCpuDeltas.get(child.pid);
 				// A truncated walk still alerts. The transcript signal is complete on its
 				// own, and a pi worker doing anything appends to its transcript — so
 				// staying quiet here would hide a real wedge in every worktree big enough
@@ -730,7 +931,7 @@ export function detectStale(
 					reason:
 						child === undefined
 							? `alive as pid ${pid} but has written nothing for ${silentMin} minute(s)${partial} — likely stuck, not working`
-							: `alive as pid ${pid} but has written nothing for ${silentMin} minute(s); child pid ${child.pid} (${childLabel(child.command)}) is still running${partial} — likely a stuck subagent`,
+							: `alive as pid ${pid} but has written nothing for ${silentMin} minute(s); child pid ${child.pid} (${childLabel(child.command)})${childCpuDelta === undefined ? "" : ` has CPU delta ${(childCpuDelta / 1000).toFixed(2)}s`} and is still running${partial} — likely a stuck subagent`,
 				});
 				const backoffMs =
 					record.emitted === fingerprint

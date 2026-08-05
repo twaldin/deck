@@ -19,16 +19,25 @@ export function editDistance(left: string, right: string): number {
 }
 
 export function resolveAgentName(names: string[], requested: string): { name?: string; suggestion?: string } {
-	const available = new Set(names);
-	const alias = AGENT_ALIASES[requested.toLowerCase() as keyof typeof AGENT_ALIASES];
-	if (alias !== undefined && available.has(alias)) return { name: alias };
-	if (available.has(requested)) return { name: requested };
-	const candidate = names
-		.map((name) => ({ name, distance: editDistance(requested.toLowerCase(), name.toLowerCase()) }))
+	const byLowerName = new Map(names.map((name) => [name.toLowerCase(), name]));
+	const normalized = requested.toLowerCase();
+	const exact = byLowerName.get(normalized);
+	if (exact !== undefined) return { name: exact };
+	const alias = AGENT_ALIASES[normalized as keyof typeof AGENT_ALIASES];
+	if (alias !== undefined && byLowerName.has(alias.toLowerCase())) return { name: byLowerName.get(alias.toLowerCase()) };
+
+	const candidates = [
+		...names.map((name) => ({ candidate: name, resolved: name })),
+		...Object.entries(AGENT_ALIASES).map(([name, resolved]) => ({ candidate: name, resolved })),
+	];
+	const candidate = candidates
+		.map((item) => ({ ...item, distance: editDistance(normalized, item.candidate.toLowerCase()) }))
 		.sort((a, b) => a.distance - b.distance)[0];
-	return candidate !== undefined && candidate.distance <= 2
-		? { name: candidate.name, suggestion: candidate.name }
-		: {};
+	if (candidate !== undefined && candidate.distance <= 2) {
+		const resolved = byLowerName.get(candidate.resolved.toLowerCase());
+		if (resolved !== undefined) return { name: resolved, suggestion: resolved };
+	}
+	return {};
 }
 
 export function validAgentNames(names: string[]): string[] {

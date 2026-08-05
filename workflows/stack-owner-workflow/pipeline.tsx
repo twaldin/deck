@@ -2,6 +2,9 @@
 /** One run owns a prompt, its ordered PR stack, review loop, and delivery. */
 import { Approval, Loop, PiAgent, Sequence, Task, Workflow, approvalDecisionSchema, createSmithers } from "smithers-orchestrator";
 import { z } from "zod";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { execOrThrow, bunExec } from "../pr-pipeline/lib/gh.ts";
 import { runMerge } from "../pr-pipeline/lib/merge.ts";
 import { executeReviewerRequest } from "../pr-pipeline/lib/reviewers.ts";
@@ -44,7 +47,12 @@ const schemas = {
   result: z.object({ done: z.boolean(), summary: z.string() }),
 };
 const { outputs, smithers } = createSmithers(schemas);
-const agent = (model: string) => new PiAgent({ provider: "deck", model, timeoutMs: 30 * 60_000, thinking: "medium", noSession: true, tools: ["read", "grep", "edit", "write", "bash"] });
+const agent = (model: string) => {
+  const configured = process.env.DECK_SUBAGENT_EXTENSION;
+  const bundled = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../subagents/extension/index.ts");
+  const extension = configured ?? (fs.existsSync(bundled) ? bundled : undefined);
+  return new PiAgent({ provider: "deck", model, timeoutMs: 30 * 60_000, thinking: "medium", noSession: true, tools: ["read", "grep", "edit", "write", "bash"], ...(extension === undefined ? {} : { extension: [extension] }) });
+};
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export default smithers((ctx) => {

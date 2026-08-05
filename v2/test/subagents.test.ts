@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { resolveAgentName, structuredSubagentError, validAgentNames } from "../src/subagents";
-import { activityAdvanced, type ActivitySnapshot } from "../src/wake";
+import { activityAdvanced, type ActivitySnapshot } from "../src/activity";
 import { startSubagentWatchdog } from "../../subagents/extension/watchdog";
 
 const children: ReturnType<typeof spawn>[] = [];
@@ -26,7 +26,7 @@ describe("subagent primitive", () => {
 	});
 
 	test("liveness treats CPU, transcript, and worktree growth as activity", () => {
-		const before: ActivitySnapshot = { worktreeMtimeMs: 10, transcriptMtimeMs: 10, transcriptBytes: 10, cpuTimeMs: 100 };
+		const before: ActivitySnapshot = { worktreeMtimeMs: 10, worktreeTruncated: false, transcriptMtimeMs: 10, transcriptBytes: 10, cpuTimeMs: 100 };
 		expect(activityAdvanced(before, { ...before, cpuTimeMs: 101 })).toBe(true);
 		expect(activityAdvanced(before, { ...before, transcriptBytes: 11 })).toBe(true);
 		expect(activityAdvanced(before, { ...before, worktreeMtimeMs: 11 })).toBe(true);
@@ -51,7 +51,7 @@ describe("subagent primitive", () => {
 		const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 10000)"], { cwd: worktree });
 		children.push(child);
 		const failure = await new Promise<unknown>((resolve) => {
-			const watchdog = startSubagentWatchdog(child, { worktree, timeoutMs: 10000, livenessMs: 5000, onFailure: resolve });
+			const watchdog = startSubagentWatchdog(child, { worktree, timeoutMs: 10000, livenessMs: 1000, onFailure: resolve });
 			child.once("close", () => watchdog.stop());
 		});
 		expect(failure).toMatchObject({ kind: "dead" });

@@ -98,6 +98,7 @@ export function localFixPrompt(blockingFindings: string[], worktree: string, aft
 	return [
 		"You are the IMPLEMENTER. An adversarial reviewer produced blocking findings on your change.",
 		`Worktree: ${worktree}. Fix them with plain commits on the current branch. DO NOT push.`,
+		SUBAGENT_GUIDANCE,
 		"",
 		"Blocking findings to resolve (all of them):",
 		JSON.stringify(blockingFindings, null, 2),
@@ -129,6 +130,7 @@ export function watchFixPrompt(args: {
 		"Current machine-checked poll state:",
 		args.pollJson,
 		"",
+		SUBAGENT_GUIDANCE,
 		"Do, in order:",
 		`1. If mergeability is CONFLICTING, or mergeStateStatus is DIRTY or BEHIND, run the deterministic rebase helper: fetch origin/${args.baseBranch}, rebase THIS PR branch onto origin/${args.baseBranch}, run relevant tests, then force-with-lease push. If the helper is unavailable, run exactly those git commands yourself.`,
 		"   Resolve conflicts, run relevant tests, then force-with-lease push the existing PR branch. Do not merge.",
@@ -171,6 +173,7 @@ export function falloutPrompt(args: {
 		`Watch window (anchored to deploy): ${args.windowStart} .. ${args.windowEnd}.`,
 		`NAMED break-signal from preflight (your primary probe): ${args.breakSignal}`,
 		`Kill-switch: ${args.killSwitch}`,
+		SUBAGENT_GUIDANCE,
 		args.probes.length > 0
 			? `Additional probe commands to run and interpret:\n${args.probes.map((probe) => `- ${probe}`).join("\n")}`
 			: "No additional probe commands configured.",
