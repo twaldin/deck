@@ -6,6 +6,7 @@ import { wakeFiles } from "../../../v2/src/home.ts";
 import * as fs from "node:fs";
 
 const baseInput = { repo: "org/repo", worktree: "/tmp/worktree", branch: "feature", prompt: "Add feature", dryRun: true };
+
 const testHome = fs.mkdtempSync("/tmp/stack-owner-test-");
 beforeEach(() => { process.env.DECK_V2_HOME = testHome; });
 
@@ -21,6 +22,7 @@ describe("stack owner", () => {
     const result = await pollStack(exec, "org/repo", [1]);
     expect(result.signal).toBe("idle");
     expect(result.prs[0]?.ci).toBe("pending");
+    expect(result.prs[0]).toMatchObject({ number: 1, url: "https://github.com/org/repo/pull/1", mergeStateStatus: "UNKNOWN", reviewState: "PENDING" });
     expect(calls.every((call) => call.includes("api"))).toBe(true);
   });
   test("workflow graph executes in dry-run mode", async () => {

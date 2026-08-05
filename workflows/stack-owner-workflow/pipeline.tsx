@@ -107,7 +107,13 @@ export default smithers((ctx) => {
   const stack = opened?.prs ?? [];
   // Only facts the "complete" poll signal actually establishes: every PR is
   // CI-green and mergeable, with no unresolved comment and no decision ask.
-  const stackSummary = stack.map((pr) => `PR #${pr.number} https://github.com/${input.repo}/pull/${pr.number}`).join("\n");
+  const stackSummary = stack.map((pr) => {
+    const evidence = latestPoll?.prs?.find((candidate) => candidate.number === pr.number);
+    return [
+      `PR #${pr.number} https://github.com/${input.repo}/pull/${pr.number}`,
+      evidence ? `  CI: ${evidence.ci}; review: ${evidence.reviewState}; mergeability: ${evidence.mergeable ? "MERGEABLE" : "NOT MERGEABLE"} (${evidence.mergeStateStatus})` : "  Evidence: poll data unavailable",
+    ].join("\n");
+  }).join("\n");
   const mergeApproval = stackReady ? (dryRun ? <Task id="merge-stack-approval" output={outputs.approval}>{() => ({ approved: true, note: "dry-run stack approval", decidedBy: "dry-run", decidedAt: new Date().toISOString() })}</Task> : <Approval id="merge-stack-approval" output={outputs.approval} request={{ title: `Approve ordered stack merge: ${input.repo} (${stack.length} PRs)`, summary: `Ordered stack:\n${stackSummary}\n\nEvery PR is CI-green and mergeable, with no unresolved review comment and no open decision ask. Approving submits the Gateway decision; the workflow then re-polls the stack and its own merge node submits each PR to the GitHub merge queue in order. Denying stops the run.` }} onDeny="fail" />) : null;
   const merged = approval?.approved === true ? <Task id="merge-stack" output={outputs.merge} retries={1}>{async () => {
     if (dryRun) return { merged: true, receipts: stack.map((pr) => `dry-run: PR #${pr.number}`) };
