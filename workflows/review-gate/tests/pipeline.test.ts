@@ -4,8 +4,22 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { askIfAbsent, openQuestions } from "../../../v2/src/questions-store.ts";
 import { reviewCommand, shouldSubmitReview } from "../decision.ts";
+import { parseCronEntries } from "../launch.ts";
 
 const source = readFileSync(new URL("../pipeline.tsx", import.meta.url), "utf8");
+
+test("parses documented and legacy cron list shapes", () => {
+  expect(parseCronEntries('{"crons":[{"cronId":"one","workflowPath":"review-gate/pipeline.tsx"}]}')).toEqual([
+    { cronId: "one", workflowPath: "review-gate/pipeline.tsx" },
+  ]);
+  expect(parseCronEntries('[{"id":"two","workflow":"review-gate/pipeline.tsx"}]')).toEqual([
+    { id: "two", workflow: "review-gate/pipeline.tsx" },
+  ]);
+});
+
+test("rejects an unexpected cron list shape", () => {
+  expect(() => parseCronEntries('{"crons":{}}')).toThrow("unexpected JSON shape");
+});
 
 test("atomic global asks queue one event under concurrent callers", () => {
   const dir = mkdtempSync(join(tmpdir(), "review-gate-"));
