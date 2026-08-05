@@ -4,7 +4,10 @@
  * evidence-gated done, and model family opposition.
  */
 
-import { describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { resolve } from "node:path";
 
 import { validateBrief } from "../lib/brief.ts";
@@ -30,6 +33,23 @@ import {
 	isReviewFinding,
 } from "../lib/watch.ts";
 import type { MigrationEvidenceEntry, WatchSnapshot } from "../lib/types.ts";
+
+// Keep gate tests away from the operator home. Some imported helpers can write
+// wake state while evaluating workflow-related fixtures.
+const testHome = fs.mkdtempSync(path.join(os.tmpdir(), "deck-gates-home-"));
+const originalDeckV2Home = process.env.DECK_V2_HOME;
+
+beforeAll(() => {
+	process.env.DECK_V2_HOME = testHome;
+});
+afterEach(() => {
+	fs.rmSync(path.join(testHome, "state"), { recursive: true, force: true });
+});
+afterAll(() => {
+	if (originalDeckV2Home === undefined) delete process.env.DECK_V2_HOME;
+	else process.env.DECK_V2_HOME = originalDeckV2Home;
+	fs.rmSync(testHome, { recursive: true, force: true });
+});
 
 // ---------------------------------------------------------------------------
 // Preflight: brief validation

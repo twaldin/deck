@@ -92,7 +92,7 @@ import { executeReviewerRequest } from "./lib/reviewers.ts";
 import { assessCi, evaluateWatchExit } from "./lib/watch.ts";
 import { rebaseAndPush } from "./lib/rebase.ts";
 import type { Brief, MigrationEvidenceEntry } from "./lib/types.ts";
-import { claimMainFailure, produceWakeConditions, releaseMainFailure } from "../../v2/src/wake-producers.ts";
+import { claimMainFailure, publishWakeProducer, releaseMainFailure } from "../../v2/src/wake-producers.ts";
 import { smithersWorkspaceCwd } from "../../v2/src/workspace.ts";
 import { runTestCommand } from "./lib/test-lane.ts";
 
@@ -175,6 +175,8 @@ export const inputSchema = z.object({
 	brief: z.unknown().optional(),
 	/** Default TRUE: real GH writes require explicit dryRun:false. */
 	dryRun: z.boolean().optional(),
+	/** Test-only wake suppression for render-only workflow inspection. */
+	wakeDryRun: z.boolean().optional(),
 	/**
 	 * Test-only: replace <Approval> parks with auto-approved compute rows so
 	 * simulate() can traverse the full graph. Preflight REFUSES bypass unless
@@ -439,39 +441,6 @@ function nowIso(): string {
 	return new Date().toISOString();
 }
 
-/** Publish durable wake inputs for the deck extension. The extension reads this
- * record from the canonical Smithers workspace even without a TUI session. */
-export function publishWakeProducer(input: { taskId: string; maxAdversarial?: boolean; reviewerSilent?: boolean; mainRed?: boolean; migrationBlocked?: boolean; brokerNoQuota?: boolean; needsDecision?: string }): void {
-	if (input.taskId.length === 0) return;
-	const file = path.join(smithersWorkspaceCwd(), "wake-producers.json");
-	fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-	const lock = `${file}.lock`;
-	try { fs.mkdirSync(lock, { mode: 0o700 }); } catch { return; }
-	try {
-		let records: Array<typeof input> = [];
-		try {
-			const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as typeof input | Array<typeof input>;
-			records = Array.isArray(parsed) ? parsed : [parsed];
-		} catch { /* create the producer log on first publish */ }
-		records = records.filter((record) => record.taskId !== input.taskId);
-		records.push(input);
-		const tmp = `${file}.${process.pid}.tmp`;
-		fs.writeFileSync(tmp, `${JSON.stringify(records)}\n`, { mode: 0o600 });
-		fs.renameSync(tmp, file);
-		produceWakeConditions({
-			taskId: input.taskId,
-			maxAdversarial: input.maxAdversarial,
-			reviewerSilent: input.reviewerSilent,
-			mainRed: input.mainRed,
-			migrationBlocked: input.migrationBlocked,
-			brokerNoQuota: input.brokerNoQuota,
-			needsDecision: input.needsDecision,
-		});
-	} finally {
-		fs.rmSync(lock, { recursive: true, force: true });
-	}
-}
-
 function seat(ref: ModelSeat): { ref: string; reasoning?: string } {
 	return typeof ref === "string" ? { ref } : { ref: ref.model, reasoning: ref.reasoning };
 }
@@ -553,6 +522,7 @@ export function buildModelPolicy(
 export default smithers((ctx) => {
 	const input = ctx.input;
 	const dryRun = input.dryRun !== false;
+	const wakeDryRun = dryRun || (process.env.NODE_ENV === "test" && input.wakeDryRun === true);
 	const bypass = input.bypassApprovals === true;
 	const limits = { ...DEFAULT_LIMITS, ...(input.limits ?? {}) };
 	const fixtures = { ...DEFAULT_FIXTURES, ...(input.fixtures ?? {}) };
@@ -757,20 +727,23 @@ export default smithers((ctx) => {
 		? claimMainFailure(coordinationRoot, mainFingerprint, input.ticket)
 		: (releaseMainFailure(coordinationRoot, mainFingerprint), false);
 	publishWakeProducer({
-		taskId: input.ticket,
-		maxAdversarial: reviewExhausted && !pushAllowed,
-		reviewerSilent: producerWatch?.disposition === "wait" && producerWatch?.poll >= 3,
-		mainRed: producerWatch?.ci === "red" && mainFailureClaimed,
-		migrationBlocked: migRequired && anyWatchSettled && migGate === undefined,
-		brokerNoQuota: process.env.DECK_BROKER_NO_QUOTA === "1" || (() => {
-			try {
-				const roster = JSON.parse(fs.readFileSync(path.join(process.env.HOME ?? "", ".deck", "broker", "usage.json"), "utf8")) as { reports?: Array<{ limits?: Array<{ amount?: { remainingFraction?: number } }> }> };
-				return (roster.reports ?? []).some((report) => (report.limits ?? []).some((limit) => limit.amount?.remainingFraction === 0));
-			} catch { return false; }
-		})(),
-		needsDecision: preflight !== undefined && !preflight.ok
-			? `PREFLIGHT REFUSED: ${preflight.openQuestions.join("; ")}`
-			: undefined,
+		dryRun: wakeDryRun,
+		snapshot: {
+			taskId: input.ticket,
+			maxAdversarial: reviewExhausted && !pushAllowed,
+			reviewerSilent: producerWatch?.disposition === "wait" && producerWatch?.poll >= 3,
+			mainRed: producerWatch?.ci === "red" && mainFailureClaimed,
+			migrationBlocked: migRequired && anyWatchSettled && migGate === undefined,
+			brokerNoQuota: process.env.DECK_BROKER_NO_QUOTA === "1" || (() => {
+				try {
+					const roster = JSON.parse(fs.readFileSync(path.join(process.env.HOME ?? "", ".deck", "broker", "usage.json"), "utf8")) as { reports?: Array<{ limits?: Array<{ amount?: { remainingFraction?: number } }> }> };
+					return (roster.reports ?? []).some((report) => (report.limits ?? []).some((limit) => limit.amount?.remainingFraction === 0));
+				} catch { return false; }
+			})(),
+			needsDecision: preflight !== undefined && !preflight.ok
+				? `PREFLIGHT REFUSED: ${preflight.openQuestions.join("; ")}`
+				: undefined,
+		},
 	});
 
 	// ===========================================================================
@@ -831,7 +804,7 @@ export default smithers((ctx) => {
 							const reason = `PREFLIGHT REFUSED - the brief is not dispatchable. Open questions:\n` +
 								preflight.openQuestions.map((question) => `  - ${question}`).join("\n") +
 								`\nResolve every item and start a NEW run (input is immutable).`;
-							publishWakeProducer({ taskId: input.ticket, needsDecision: reason });
+							publishWakeProducer({ dryRun: wakeDryRun, snapshot: { taskId: input.ticket, needsDecision: reason } });
 							throw new Error(reason);
 						}}
 					</Task>

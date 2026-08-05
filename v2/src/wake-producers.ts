@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { clearWakeConditions, enqueueWakeConditions, type WakeCondition } from "./wake";
+import { smithersWorkspaceCwd } from "./workspace";
 
 /** Durable producers used by workflow observers and the headless reconciler. */
 export type ProducerSnapshot = {
@@ -16,6 +17,82 @@ export type ProducerSnapshot = {
 	decisionAsk?: boolean;
 	terminal?: boolean;
 };
+
+export type WakeProducerPublish = {
+	snapshot: ProducerSnapshot;
+	dryRun: boolean;
+	/** Override only for isolated tests. Production uses the canonical workspace. */
+	workspace?: string;
+};
+
+export type WakeProducerIntent = { at: string; snapshot: ProducerSnapshot };
+
+const PRODUCER_FILE = "wake-producers.json";
+const INTENT_FILE = "wake-producer-intents.jsonl";
+
+function producerFile(workspace: string): string {
+	return path.join(workspace, PRODUCER_FILE);
+}
+
+function intentFile(workspace: string): string {
+	return path.join(workspace, INTENT_FILE);
+}
+
+/** Read dry-run publication intents without touching the real wake queue. */
+export function wakeProducerIntents(workspace = smithersWorkspaceCwd()): WakeProducerIntent[] {
+	try {
+		return fs
+			.readFileSync(intentFile(workspace), "utf8")
+			.split("\n")
+			.flatMap((line) => {
+				try { return [JSON.parse(line) as WakeProducerIntent]; }
+				catch { return []; }
+			});
+	} catch {
+		return [];
+	}
+}
+
+/**
+ * The only workflow-to-wake publisher. Dry runs retain observable intent but
+ * never enter the real outbox. Tests must not call the real path: fail before
+ * either the producer record or the wake queue can be written.
+ */
+export function publishWakeProducer({ snapshot, dryRun, workspace = smithersWorkspaceCwd() }: WakeProducerPublish): void {
+	if (snapshot.taskId.length === 0) return;
+	if (dryRun) {
+		fs.mkdirSync(workspace, { recursive: true, mode: 0o700 });
+		fs.appendFileSync(
+			intentFile(workspace),
+			`${JSON.stringify({ at: new Date().toISOString(), snapshot } satisfies WakeProducerIntent)}\n`,
+			{ mode: 0o600 },
+		);
+		return;
+	}
+	if (process.env.NODE_ENV === "test") {
+		throw new Error("refusing real wake publication from a test runner");
+	}
+	const file = producerFile(workspace);
+	fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+	const lock = `${file}.lock`;
+	try { fs.mkdirSync(lock, { mode: 0o700 }); }
+	catch { return; }
+	try {
+		let records: ProducerSnapshot[] = [];
+		try {
+			const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as ProducerSnapshot | ProducerSnapshot[];
+			records = Array.isArray(parsed) ? parsed : [parsed];
+		} catch { /* create the producer record on first publish */ }
+		records = records.filter((record) => record.taskId !== snapshot.taskId);
+		records.push(snapshot);
+		const tmp = `${file}.${process.pid}.tmp`;
+		fs.writeFileSync(tmp, `${JSON.stringify(records)}\n`, { mode: 0o600 });
+		fs.renameSync(tmp, file);
+		produceWakeConditions(snapshot);
+	} finally {
+		fs.rmSync(lock, { recursive: true, force: true });
+	}
+}
 
 export function produceWakeConditions(snapshot: ProducerSnapshot): void {
 	const conditions: WakeCondition[] = [];

@@ -493,6 +493,31 @@ describe("a live worker that stops making progress", () => {
 		expect(verdicts[0]?.reason).toContain("subagent");
 	});
 
+	// The observer writes a pipeline MILESTONE as `resolved:` (observer.ts maps
+	// push-pr/landing-poll/fallout-wait to that verb). Every one of those is
+	// followed by the pipeline WAITING — a CI poll, a fallout wait — with the run
+	// alive and deliberately writing nothing. That is the paused class wearing a
+	// different verb, and reporting it as stuck is the absorbed-stale noise the
+	// engine exists to remove.
+	test("REGRESSION: a live task silent after a resolved milestone is not stuck", async () => {
+		const { wake, events } = await mods();
+		const { updateMeta } = await import("../src/meta");
+		events.appendStatus("t1", "resolved", "PR landed (sha abc123)");
+		updateMeta("t1", { run_pid: 4242, worktree: worktreeWith({ "src/a.ts": 20 }) });
+		expect(
+			wake.detectStale(["t1"], { runAlive: () => true, listChildren: () => [] }),
+		).toHaveLength(0);
+	});
+
+	// `resolved` is a terminal status for stale detection. A pipeline milestone
+	// must not produce the self-contradicting vanished-run message.
+	test("REGRESSION: a vanished run after a resolved milestone has no stale verdict", async () => {
+		const { wake, events, meta } = await mods();
+		events.appendStatus("t1", "resolved", "PR opened (prNumber 42)");
+		meta.writeMeta({ id: "t1", run_pid: 999999 });
+		expect(wake.detectStale(["t1"], { runAlive: () => false })).toHaveLength(0);
+	});
+
 	test("REGRESSION: CPU activity alone keeps a silent worker working", async () => {
 		const { wake } = await mods();
 		const { updateMeta } = await import("../src/meta");

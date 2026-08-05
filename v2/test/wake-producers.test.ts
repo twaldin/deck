@@ -29,6 +29,46 @@ describe("wake producers", () => {
 		expect(queue).toContain("needs-decision");
 	});
 
+	test("REGRESSION: dry-run publisher records intent without creating a real wake", async () => {
+		const { publishWakeProducer, wakeProducerIntents } = await import("../src/wake-producers");
+		const workspace = path.join(root, "state", "smithers");
+		publishWakeProducer({ dryRun: true, workspace, snapshot: { taskId: "fixture-call-site", needsDecision: "fixture refusal" } });
+		expect(wakeProducerIntents(workspace)).toEqual([
+			expect.objectContaining({ snapshot: { taskId: "fixture-call-site", needsDecision: "fixture refusal" } }),
+		]);
+		expect(fs.existsSync(path.join(root, "state", ".wake-queue.jsonl"))).toBe(false);
+		expect(fs.existsSync(path.join(workspace, "wake-producers.json"))).toBe(false);
+	});
+
+	test("REGRESSION: a test fixture cannot publish a real wake", async () => {
+		const { publishWakeProducer } = await import("../src/wake-producers");
+		const workspace = path.join(root, "state", "smithers");
+		expect(() => publishWakeProducer({ dryRun: false, workspace, snapshot: { taskId: "fixture-call-site", ciFail: true } })).toThrow("refusing real wake publication from a test runner");
+		expect(fs.existsSync(path.join(root, "state", ".wake-queue.jsonl"))).toBe(false);
+		expect(fs.existsSync(path.join(workspace, "wake-producers.json"))).toBe(false);
+	});
+
+	test("REGRESSION: an inactive publish retracts a condition so it can wake again", async () => {
+		const { publishWakeProducer } = await import("../src/wake-producers");
+		const workspace = path.join(root, "state", "smithers");
+		const savedNodeEnv = process.env.NODE_ENV;
+		delete process.env.NODE_ENV;
+		try {
+			publishWakeProducer({ dryRun: false, workspace, snapshot: { taskId: "recurring", ciFail: true } });
+			publishWakeProducer({ dryRun: false, workspace, snapshot: { taskId: "recurring", ciFail: false } });
+			publishWakeProducer({ dryRun: false, workspace, snapshot: { taskId: "recurring", ciFail: true } });
+		} finally {
+			if (savedNodeEnv === undefined) delete process.env.NODE_ENV;
+			else process.env.NODE_ENV = savedNodeEnv;
+		}
+		const events = fs
+			.readFileSync(path.join(root, "state", ".wake-queue.jsonl"), "utf8")
+			.trim()
+			.split("\n")
+			.map((line) => JSON.parse(line) as { verb?: string });
+		expect(events.filter((event) => event.verb === "ci-fail")).toHaveLength(2);
+	});
+
 	test("releases a recovered incident so a later failure can claim it", async () => {
 		const { claimMainFailure, releaseMainFailure } = await import("../src/wake-producers");
 		const fingerprint = "repo:main";

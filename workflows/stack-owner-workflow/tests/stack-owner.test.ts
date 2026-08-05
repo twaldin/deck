@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { renderWorkflow, simulate } from "smithers-orchestrator/testing";
 import { pollHasNoAgent, pollStack } from "../lib/poll.ts";
-import { produceWakeConditions } from "../../../v2/src/wake-producers.ts";
+import { produceWakeConditions, wakeProducerIntents } from "../../../v2/src/wake-producers.ts";
 import { wakeFiles } from "../../../v2/src/home.ts";
 import * as fs from "node:fs";
 
@@ -11,7 +11,7 @@ const testHome = fs.mkdtempSync("/tmp/stack-owner-test-");
 beforeEach(() => { process.env.DECK_V2_HOME = testHome; });
 
 afterEach(() => {
-  for (const file of Object.values(wakeFiles())) fs.rmSync(file, { force: true });
+  fs.rmSync(`${testHome}/state`, { recursive: true, force: true });
 });
 
 describe("stack owner", () => {
@@ -37,7 +37,8 @@ describe("stack owner", () => {
     expect((sim.outputs.review ?? []).length).toBe(2);
     expect(sim.outputs.opened).toBeUndefined();
     expect((sim.outputs.result?.[0] as { done?: boolean } | undefined)?.done).toBe(false);
-    expect(fs.readFileSync(wakeFiles().queue, "utf8")).toContain("max-adversarial");
+    expect(wakeProducerIntents(`${testHome}/state/smithers`).some((intent) => intent.snapshot.maxAdversarial === true)).toBe(true);
+    expect(fs.existsSync(wakeFiles().queue)).toBe(false);
   });
 
   test("rendered graph contains the open-to-poll dependency", async () => {
