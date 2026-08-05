@@ -252,7 +252,7 @@ squash commit \`(#N)\` on the base branch, never the merged flag alone.
 
 In PR threads: agree, or answer with facts. Never argue with a reviewer — if you
 believe a reviewer is wrong, append \`needs-decision:\` and stop. Write comments in
-Simplified Technical English.${signatureProjects().has(project ?? "") ? `
+Simplified Technical English.${signatureProjects().has(project?.toLowerCase() ?? "") ? `
 
 Sign every comment you post \`${AGENT_COMMENT_SIGNATURE}\`, because a reader deserves to know a
 person did not write it.` : ""}

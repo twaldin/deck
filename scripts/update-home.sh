@@ -51,10 +51,12 @@ fi
 if [ -n "$HOME_PROFILE" ] && command -v gh >/dev/null && gh auth status >/dev/null 2>&1; then
   TEMP_HOME="$(mktemp -d)"
   trap 'rm -rf "$TEMP_HOME"' EXIT
-  HOME_REMOTE="${DECK_HOME_GIT_REMOTE:-twaldin/deck-home}"
-  if gh repo clone "$HOME_REMOTE" "$TEMP_HOME/repo" -- --branch "profile/$HOME_PROFILE" >/dev/null 2>&1; then
-    if [ "$HOME_PROFILE" = "personal" ] && find "$TEMP_HOME/repo" -type f \( -name 'lindy-*' -o -path '*/secrets-map.md' \) -not -path '*/.git/*' -print -quit | grep -q .; then
-      echo "error: Lindy material in personal home" >&2
+  HOME_REMOTE="${DECK_HOME_GIT_REMOTE:-}"
+  if [ -z "$HOME_REMOTE" ]; then
+    echo "home sync skipped: DECK_HOME_GIT_REMOTE is unset" >&2
+  elif gh repo clone "$HOME_REMOTE" "$TEMP_HOME/repo" -- --branch "profile/$HOME_PROFILE" >/dev/null 2>&1; then
+    if [ "$HOME_PROFILE" = "personal" ] && find "$TEMP_HOME/repo" -type f \( -name 'restricted-*' -o -path '*/secrets-map.md' \) -not -path '*/.git/*' -print -quit | grep -q .; then
+      echo "error: restricted project material in personal home" >&2
       exit 1
     fi
     mkdir -p "$HOME_REPO"

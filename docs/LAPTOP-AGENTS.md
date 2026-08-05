@@ -100,7 +100,7 @@ Captain (or orch when he says “drain inbox”) turns these into `ship` runs. *
 ## Update deck code on the box
 
 ```sh
-ssh <user>@<orch-host> '~/dev/deck/scripts/update-home.sh'
+ssh <user>@<orch-host> '~/dev/deck/update.sh'
 ```
 
 ## Glass in (human)

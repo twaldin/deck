@@ -22,8 +22,8 @@ Usage:
   deck-intake ls [--state <file>] [--json]  list intake records with correlated task ids
 
 Options:
-  --login <login>       GitHub login to poll for (default: twaldin)
-  --org <org>           Org scope, repeatable (default: lindy-ai)
+  --login <login>       GitHub login to poll for (default: DECK_INTAKE_LOGIN)
+  --org <org>           Org scope, repeatable (default: DECK_INTAKE_ORG)
   --include-user-repos  Also scope to the login's own repos (adds user:<login>)
   --state <file>        Durable JSON state file (default: $DECK_V2_HOME/intake/intake-prs.json)
   --out <file>          Markdown output path (default: $DECK_V2_HOME/intake/intake-prs.md)
@@ -67,7 +67,7 @@ interface CliOptions {
 
 function parseArguments(argv: string[]): CliOptions | "help" {
 	const defaults: CliOptions = {
-		login: "twaldin",
+		login: process.env.DECK_INTAKE_LOGIN ?? "",
 		orgs: [],
 		includeUserRepos: false,
 		stateFile: path.join(deckHome(), "intake", "intake-prs.json"),
@@ -141,8 +141,11 @@ function parseArguments(argv: string[]): CliOptions | "help" {
 	if (once && defaults.loopSeconds !== null) {
 		throw new Error("--once and --loop are mutually exclusive");
 	}
+	if (defaults.login.length === 0) {
+		throw new Error("--login or DECK_INTAKE_LOGIN is required");
+	}
 	if (defaults.orgs.length === 0) {
-		defaults.orgs.push("lindy-ai");
+		throw new Error("--org or DECK_INTAKE_ORG is required");
 	}
 	return defaults;
 }

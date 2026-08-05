@@ -100,7 +100,7 @@ export function bootstrapHome(options: { repoV2Dir: string; home?: string } = { 
 			// Strip the seed's build-time HTML comment: it explains why the file is
 			// not named AGENTS.md in the repo, which is guidance for whoever works on
 			// deck, not an operating instruction for the agent that reads it.
-			const seeded = fs.readFileSync(source, "utf8").replace(/<!--[\s\S]*?-->\n\n?/, "");
+			const seeded = removeSeedComment(fs.readFileSync(source, "utf8"));
 			fs.writeFileSync(target, seeded, { mode: 0o600 });
 			created.push(target);
 		}
@@ -140,6 +140,14 @@ function readLink(target: string): string | null {
 	} catch {
 		return null;
 	}
+}
+
+export function removeOnboardingBlock(contract: string): string {
+	return contract.replace(/<!-- ONBOARDING-START[\s\S]*?ONBOARDING-END -->\n?/, "");
+}
+
+export function removeSeedComment(contract: string): string {
+	return contract.replace(/<!--\nThis is the SEED[\s\S]*?-->\n\n?/, "");
 }
 
 export function formatBootstrap(result: BootstrapResult): string {

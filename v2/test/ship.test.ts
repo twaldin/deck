@@ -10,7 +10,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { ChildProcess, SpawnOptions } from "node:child_process";
 import { validateBrief } from "../../workflows/pr-pipeline/lib/brief";
-import { profilesFile, seedProfiles, type ProjectProfile } from "../src/projects";
+import { loadProfiles, profilesFile, type ProjectProfile } from "../src/projects";
 import { existingPrFromFlag, runCli } from "../src/cli";
 import { buildPipelineInput, pipelineDir, startShip, type ShipRequest } from "../src/ship";
 import { assertShipGoesThroughPipeline, shipProfileFor, workerModelFor } from "../src/spawn";
@@ -24,6 +24,11 @@ beforeEach(() => {
 	for (const key of ["DECK_V2_HOME", "DECK_PIPELINE_DIR"]) saved[key] = process.env[key];
 	process.env.DECK_V2_HOME = home;
 	delete process.env.DECK_PIPELINE_DIR;
+	fs.mkdirSync(path.dirname(profilesFile(home)), { recursive: true });
+	fs.writeFileSync(profilesFile(home), JSON.stringify([
+		{ id: "example-project", repo: "example-org/example-project", primary: "/opt/example-project", pipeline: "yolo-ship", yolo: true, stamp: false, knowledge: [], depsWarm: true },
+		{ id: "review-project", repo: "example-org/review-project", primary: "/opt/review-project", pipeline: "lindy-full", yolo: false, stamp: true, knowledge: [], depsWarm: true },
+	]));
 });
 
 afterEach(() => {
@@ -34,13 +39,13 @@ afterEach(() => {
 	fs.rmSync(home, { recursive: true, force: true });
 });
 
-const seeds = () => seedProfiles(home);
-const deckProfile = () => seeds().find((p) => p.id === "deck") as ProjectProfile;
-const lindyProfile = () => seeds().find((p) => p.id === "lindy") as ProjectProfile;
+const seeds = () => loadProfiles(home);
+const deckProfile = () => seeds().find((p) => p.id === "example-project") as ProjectProfile;
+const lindyProfile = () => seeds().find((p) => p.id === "review-project") as ProjectProfile;
 
 const request = (overrides: Partial<ShipRequest> = {}): ShipRequest => ({
 	ticket: "deck-42",
-	profile: "deck",
+	profile: "example-project",
 	worktree: "/tmp/wt",
 	branch: "deck/x",
 	title: "A change",
@@ -127,8 +132,8 @@ describe("buildPipelineInput", () => {
 
 	test("maps the profile onto the pipeline input; dryRun defaults FALSE (ship means ship)", () => {
 		const input = buildPipelineInput(request(), deckProfile());
-		expect(input.profile).toBe("deck");
-		expect(input.repo).toBe("twaldin/deck");
+		expect(input.profile).toBe("example-project");
+		expect(input.repo).toBe("example-org/example-project");
 		expect(input.dryRun).toBe(false);
 		expect(input.ticket).toBe("deck-42");
 	});
@@ -156,7 +161,7 @@ describe("buildPipelineInput", () => {
 		expect((deck.github as { skipReviewerRequest?: boolean })?.skipReviewerRequest).toBe(true);
 		const withReviewers = buildPipelineInput(request({ reviewers: ["alice"] }), deckProfile());
 		expect(withReviewers.github).toBeUndefined();
-		const lindy = buildPipelineInput(request({ profile: "lindy" }), lindyProfile());
+		const lindy = buildPipelineInput(request({ profile: "review-project" }), lindyProfile());
 		expect(lindy.github).toBeUndefined();
 	});
 
@@ -178,15 +183,15 @@ describe("buildPipelineInput", () => {
 	});
 
 	test("explicit reviewer skip is passed through even for a stamp profile", () => {
-		const input = buildPipelineInput(request({ profile: "lindy", skipReviewerRequest: true }), lindyProfile());
+		const input = buildPipelineInput(request({ profile: "review-project", skipReviewerRequest: true }), lindyProfile());
 		expect(input.github).toEqual({ skipReviewerRequest: true });
 	});
 
 	test("a stamp profile (lindy) never gets the weak git-log deploy default: preflight must fail closed until explicit evidence exists", () => {
-		const lindy = buildPipelineInput(request({ profile: "lindy" }), lindyProfile());
+		const lindy = buildPipelineInput(request({ profile: "review-project" }), lindyProfile());
 		expect(lindy.commands).toBeUndefined();
 		const explicit = buildPipelineInput(
-			request({ profile: "lindy", deployEvidence: "check-deploy.sh" }),
+			request({ profile: "review-project", deployEvidence: "check-deploy.sh" }),
 			lindyProfile(),
 		);
 		expect((explicit.commands as { deployEvidence: string }).deployEvidence).toBe("check-deploy.sh");
@@ -293,9 +298,9 @@ describe("startShip", () => {
 describe("spawn enforcement: pipeline is the default ship path", () => {
 	test("shipProfileFor matches by project name, repo alias, and primary path", () => {
 		const base = { taskId: "t", task: "x", acceptance: [], kind: "ship" as const };
-		expect(shipProfileFor({ ...base, repo: "deck" })?.id).toBe("deck");
-		expect(shipProfileFor({ ...base, project: "lindy", worktree: "/tmp/wt" })?.id).toBe("lindy");
-		expect(shipProfileFor({ ...base, repo: deckProfile().primary })?.id).toBe("deck");
+		expect(shipProfileFor({ ...base, repo: "example-project" })?.id).toBe("example-project");
+		expect(shipProfileFor({ ...base, project: "review-project", worktree: "/tmp/wt" })?.id).toBe("review-project");
+		expect(shipProfileFor({ ...base, repo: deckProfile().primary })?.id).toBe("example-project");
 		expect(shipProfileFor({ ...base, repo: "/somewhere/unprofiled" })).toBeNull();
 	});
 
@@ -324,7 +329,7 @@ describe("spawn enforcement: pipeline is the default ship path", () => {
 			JSON.stringify([
 				{
 					id: "repoproj",
-					repo: "twaldin/repoproj",
+					repo: "example-org/repoproj",
 					primary,
 					pipeline: "yolo-ship",
 					yolo: true,
@@ -343,7 +348,7 @@ describe("spawn enforcement: pipeline is the default ship path", () => {
 	});
 
 	test("REGRESSION: a bare ship spawn on a profiled repo is refused and points at deck-v2 ship", () => {
-		const req = { taskId: "t", task: "x", acceptance: [], kind: "ship" as const, repo: "deck" };
+		const req = { taskId: "t", task: "x", acceptance: [], kind: "ship" as const, repo: "example-project" };
 		expect(() => assertShipGoesThroughPipeline(req)).toThrow(/deck-v2 ship/);
 		expect(() => assertShipGoesThroughPipeline(req)).toThrow(/adversarial review/);
 	});
@@ -355,7 +360,7 @@ describe("spawn enforcement: pipeline is the default ship path", () => {
 				task: "x",
 				acceptance: [],
 				kind: "ship",
-				repo: "deck",
+				repo: "example-project",
 				noPipeline: true,
 			}),
 		).not.toThrow();
@@ -368,7 +373,7 @@ describe("spawn enforcement: pipeline is the default ship path", () => {
 				task: "x",
 				acceptance: [],
 				kind: "scout",
-				repo: "deck",
+				repo: "example-project",
 			}),
 		).not.toThrow();
 		expect(() =>
@@ -390,7 +395,7 @@ describe("spawn enforcement: pipeline is the default ship path", () => {
 			JSON.stringify([
 				{
 					id: "sideproj",
-					repo: "twaldin/sideproj",
+					repo: "example-org/sideproj",
 					primary: "/somewhere/sideproj",
 					pipeline: "yolo-ship",
 					yolo: true,

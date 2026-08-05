@@ -3,11 +3,11 @@ import { diffStates, formatChangeLine, normalizePrUrl, resolveRemoval, untracked
 import type { GithubClient, PrLookup, RawPr } from "../src/github";
 import type { DiffChange, IntakeState, PrItem } from "../src/schema";
 
-const LOGIN = "twaldin";
+const LOGIN = "example-user";
 
 function makeItem(overrides: Partial<PrItem> & { url: string }): PrItem {
 	return {
-		repo: "lindy-ai/lindy",
+		repo: "example-org/review-project",
 		number: 1,
 		title: "a change",
 		author: LOGIN,
@@ -44,26 +44,26 @@ function mockClient(overrides: Partial<GithubClient> = {}): GithubClient {
 
 describe("diff engine", () => {
 	test("new my-PR is reported as new, not review-requested", async () => {
-		const current = makeState([makeItem({ url: "https://github.com/lindy-ai/lindy/pull/1" })]);
+		const current = makeState([makeItem({ url: "https://github.com/example-org/review-project/pull/1" })]);
 		const changes = await diffStates(makeState([]), current, LOGIN, mockClient());
 		expect(changes).toEqual([
 			{
 				kind: "new",
-				url: "https://github.com/lindy-ai/lindy/pull/1",
+				url: "https://github.com/example-org/review-project/pull/1",
 				buckets: ["my-pr"],
 				reviewRequested: false,
 				title: "a change",
 			},
 		]);
 		expect(formatChangeLine(changes[0]!)).toBe(
-			"new\t-\thttps://github.com/lindy-ai/lindy/pull/1\tmy-pr\ta change",
+			"new\t-\thttps://github.com/example-org/review-project/pull/1\tmy-pr\ta change",
 		);
 	});
 
 	test("new review-owed PR is high-signal REVIEW-REQUESTED", async () => {
 		const current = makeState([
 			makeItem({
-				url: "https://github.com/lindy-ai/lindy/pull/2",
+				url: "https://github.com/example-org/review-project/pull/2",
 				author: "someone-else",
 				buckets: ["review-owed"],
 				requestedReviewers: [LOGIN],
@@ -76,7 +76,7 @@ describe("diff engine", () => {
 	});
 
 	test("ci, review-decision, reviewer and bucket transitions each emit one line", async () => {
-		const url = "https://github.com/lindy-ai/lindy/pull/3";
+		const url = "https://github.com/example-org/review-project/pull/3";
 		const before = makeState([
 			makeItem({ url, ci: "pending", reviewDecision: "review-required", requestedReviewers: ["alice"] }),
 		]);
@@ -104,7 +104,7 @@ describe("diff engine", () => {
 	});
 
 	test("self newly requested as reviewer is high-signal", async () => {
-		const url = "https://github.com/lindy-ai/lindy/pull/4";
+		const url = "https://github.com/example-org/review-project/pull/4";
 		const before = makeState([makeItem({ url, requestedReviewers: [] })]);
 		const after = makeState([makeItem({ url, requestedReviewers: [LOGIN] })]);
 		const changes = await diffStates(before, after, LOGIN, mockClient());
@@ -114,13 +114,13 @@ describe("diff engine", () => {
 	});
 
 	test("no changes on identical states", async () => {
-		const state = makeState([makeItem({ url: "https://github.com/lindy-ai/lindy/pull/5" })]);
+		const state = makeState([makeItem({ url: "https://github.com/example-org/review-project/pull/5" })]);
 		expect(await diffStates(state, state, LOGIN, mockClient())).toEqual([]);
 	});
 });
 
 describe("removal resolution (GitHub merge queue landing check)", () => {
-	const item = makeItem({ url: "https://github.com/lindy-ai/lindy/pull/900", number: 900 });
+	const item = makeItem({ url: "https://github.com/example-org/review-project/pull/900", number: 900 });
 
 	test("merged PR resolves as merged, no squash search needed", async () => {
 		let squashCalls = 0;
@@ -139,7 +139,7 @@ describe("removal resolution (GitHub merge queue landing check)", () => {
 		const client = mockClient({
 			lookupPr: async () => ({ state: "closed", mergedAt: null }),
 			findSquashCommit: async (repo, number) => {
-				expect(repo).toBe("lindy-ai/lindy");
+				expect(repo).toBe("example-org/review-project");
 				expect(number).toBe(900);
 				return "abc1234";
 			},
@@ -198,7 +198,7 @@ describe("removal resolution (GitHub merge queue landing check)", () => {
 });
 
 describe("line format fixtures (watcher parser contract)", () => {
-	const url = "https://github.com/lindy-ai/lindy/pull/7";
+	const url = "https://github.com/example-org/review-project/pull/7";
 	const cases: Array<[DiffChange, string]> = [
 		[
 			{ kind: "new", url, buckets: ["my-pr"], reviewRequested: false, title: "t" },
@@ -238,13 +238,13 @@ describe("line format fixtures (watcher parser contract)", () => {
 describe("untracked flagging", () => {
 	test("flags items missing from the tracked set, tolerant of trailing slash/case", () => {
 		const state = makeState([
-			makeItem({ url: "https://github.com/lindy-ai/lindy/pull/10", number: 10 }),
-			makeItem({ url: "https://github.com/lindy-ai/lindy/pull/11", number: 11, title: "rogue" }),
+			makeItem({ url: "https://github.com/example-org/review-project/pull/10", number: 10 }),
+			makeItem({ url: "https://github.com/example-org/review-project/pull/11", number: 11, title: "rogue" }),
 		]);
-		const tracked = new Set([normalizePrUrl("https://github.com/lindy-ai/lindy/pull/10/")]);
+		const tracked = new Set([normalizePrUrl("https://github.com/example-org/review-project/pull/10/")]);
 		const changes: DiffChange[] = untrackedChanges(state, tracked);
 		expect(changes).toEqual([
-			{ kind: "untracked", url: "https://github.com/lindy-ai/lindy/pull/11", title: "rogue" },
+			{ kind: "untracked", url: "https://github.com/example-org/review-project/pull/11", title: "rogue" },
 		]);
 	});
 });

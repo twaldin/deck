@@ -32,7 +32,7 @@ describe("backlog boundary (the three checks the debate required)", () => {
 		expect(() => b.assertDispatchable("scout-thing")).toThrow(/internal scout item/);
 		// External refs pass.
 		b.assertDispatchable("#123");
-		b.assertDispatchable("lindy-ai/lindy#456");
+		b.assertDispatchable("example-org/review-project#456");
 		b.assertDispatchable("REL-10508");
 	});
 

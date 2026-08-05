@@ -40,12 +40,13 @@ Yolo does **not** skip adversarial review. It skips only the human stamp park at
 
 ```sh
 # one-time
-git clone https://github.com/twaldin/deck.git ~/dev/deck
+export DECK_REPO_URL="https://github.com/<owner>/deck.git"
+git clone "$DECK_REPO_URL" ~/dev/deck
 cd ~/dev/deck && git checkout main
-./install-personal.sh
+./install.sh
 
 # keep updated
-~/dev/deck/scripts/update-home.sh
+~/dev/deck/update.sh
 
 # interactive once — personal accounts only
 bun ~/dev/deck/broker/src/cli.ts login anthropic
@@ -88,9 +89,14 @@ Sync code with git. **Never rsync `~/.deck` between hosts** (credentials + state
 | [`workflows/pr-pipeline/README.md`](workflows/pr-pipeline/README.md) | Pipeline stages |
 | [`v2/seed/orchestrator-contract.md`](v2/seed/orchestrator-contract.md) | Seed for `~/.deck/AGENTS.md` |
 
-## Historical directories
+## Layout details
 
-The router-era `router/`, `fleet/`, `shadow/`, `core/`, `tui/`, `gateway/`, `mcpx/`, `kit/`, `skills/`, and `prompts/` directories were removed in deadwood-phase1. Their design history remains in git.
+- `cli/` allocates isolated deck worktrees and is linked by `v2/install.sh`.
+- `intake/` is consumed by the `v2` wake loop.
+- `ops/` contains launchd installers and the resource monitor.
+- `subagents/` contains crew agent definitions.
+
+The router-era directories were removed. Their design history is in `docs/archive/router-era/`.
 
 ## Develop deck itself
 

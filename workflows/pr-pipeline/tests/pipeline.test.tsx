@@ -12,7 +12,7 @@
  * self-approve.
  */
 
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -20,7 +20,7 @@ import * as path from "node:path";
 import { renderWorkflow, simulate } from "smithers-orchestrator/testing";
 
 import pipeline, { buildModelPolicy, DEFAULT_GITHUB } from "../pipeline.tsx";
-import type { ProjectProfile } from "../lib/profiles.ts";
+import { loadProfiles, type ProjectProfile } from "../lib/profiles.ts";
 import { falloutPrompt, localFixPrompt, localReviewPrompt, reviewersDecisionPrompt } from "../lib/prompts.ts";
 import { resolveAdversary } from "../lib/models.ts";
 import { isSchemaEcho, schemaEchoCorrection } from "../lib/schema-echo.ts";
@@ -43,7 +43,10 @@ const seatModels = {
 	oppositionDefaults: { anthropic: "deck/gpt-5.6-luna" },
 };
 
+const testHome = fs.mkdtempSync(path.join(os.tmpdir(), "deck-pipeline-home-"));
+
 const baseInput = {
+	watchSetPath: path.join(testHome, "watch-set.jsonl"),
 	ticket: "LIN-123",
 	repo: "lindy-ai/lindy",
 	worktree: "/tmp/lindy-wt",
@@ -51,6 +54,47 @@ const baseInput = {
 	brief: validBrief,
 	dryRun: true,
 };
+
+const fixtureProfiles: ProjectProfile[] = [
+	{
+		id: "deck",
+		repo: "twaldin/deck",
+		primary: "/tmp/deck",
+		pipeline: "yolo-ship",
+		yolo: true,
+		stamp: false,
+		knowledge: [],
+		depsWarm: true,
+	},
+	{
+		id: "lindy",
+		repo: "lindy-ai/lindy",
+		primary: "/tmp/lindy",
+		pipeline: "lindy-full",
+		yolo: false,
+		stamp: true,
+		knowledge: [],
+		depsWarm: true,
+	},
+];
+
+let savedDeckHome: string | undefined;
+let savedProcessHome: string | undefined;
+beforeAll(() => {
+	savedDeckHome = process.env.DECK_V2_HOME;
+	savedProcessHome = process.env.HOME;
+	process.env.DECK_V2_HOME = testHome;
+	process.env.HOME = testHome;
+	fs.mkdirSync(path.join(testHome, "config"), { recursive: true });
+	fs.writeFileSync(path.join(testHome, "config", "projects.json"), JSON.stringify(fixtureProfiles));
+});
+afterAll(() => {
+	if (savedDeckHome === undefined) delete process.env.DECK_V2_HOME;
+	else process.env.DECK_V2_HOME = savedDeckHome;
+	if (savedProcessHome === undefined) delete process.env.HOME;
+	else process.env.HOME = savedProcessHome;
+	fs.rmSync(testHome, { recursive: true, force: true });
+});
 
 async function run(input: Record<string, unknown>) {
 	const sim = simulate(pipeline, { input });
@@ -116,7 +160,6 @@ describe("workflow rendering contracts", () => {
 				const agent = task.agent;
 				if (agent !== undefined) {
 					expect(Array.isArray(agent)).toBe(false);
-					if (task.nodeId === "local-review") console.log("AGENT", agent);
 					seats[task.nodeId] = {
 						model: String((agent as unknown as { model: string }).model),
 						thinking: String((agent as { opts?: { thinking?: string }; thinking?: string }).opts?.thinking ?? (agent as { thinking?: string }).thinking ?? ""),
@@ -351,19 +394,8 @@ describe("preflight gate", () => {
 });
 
 describe("project profiles (yolo vs stamp is data, not a fork)", () => {
-	// Pin the profile source to a fresh temp home so the machine's live
-	// ~/.deck/config never leaks into these assertions (seeds answer).
-	let home: string;
-	let savedHome: string | undefined;
-	beforeEach(() => {
-		home = fs.mkdtempSync(path.join(os.tmpdir(), "deck-pipeline-profiles-"));
-		savedHome = process.env.DECK_V2_HOME;
-		process.env.DECK_V2_HOME = home;
-	});
-	afterEach(() => {
-		if (savedHome === undefined) delete process.env.DECK_V2_HOME;
-		else process.env.DECK_V2_HOME = savedHome;
-		fs.rmSync(home, { recursive: true, force: true });
+	test("uses the isolated fixture instead of the operator home", () => {
+		expect(loadProfiles().map((profile) => profile.id)).toEqual(["deck", "lindy"]);
 	});
 
 	test("a yolo profile (deck) traverses to done with NO approval bypass: the stamp park is skipped", async () => {

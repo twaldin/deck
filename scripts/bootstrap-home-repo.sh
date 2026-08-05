@@ -2,14 +2,14 @@
 # Create the private home repository and its two structurally filtered branches.
 set -euo pipefail
 
-REMOTE="${DECK_HOME_GIT_REMOTE:-twaldin/deck-home}"
+REMOTE="${DECK_HOME_GIT_REMOTE:?Set DECK_HOME_GIT_REMOTE to the private home repository}"
 FULL_SOURCE="${1:?usage: bootstrap-home-repo.sh FULL_SOURCE PERSONAL_SOURCE}"
 PERSONAL_SOURCE="${2:?usage: bootstrap-home-repo.sh FULL_SOURCE PERSONAL_SOURCE}"
 for source in "$FULL_SOURCE" "$PERSONAL_SOURCE"; do
   [ -d "$source" ] || { echo "error: missing profile source: $source" >&2; exit 1; }
 done
-if find "$PERSONAL_SOURCE" -type f \( -name 'lindy-*' -o -path '*/secrets-map.md' \) -print -quit | grep -q . || grep -qi 'lindy' "$PERSONAL_SOURCE/config/projects.json" 2>/dev/null; then
-  echo "error: personal source contains Lindy material" >&2
+if find "$PERSONAL_SOURCE" -type f \( -name 'restricted-*' -o -path '*/secrets-map.md' \) -print -quit | grep -q .; then
+  echo "error: personal source contains restricted project material" >&2
   exit 1
 fi
 

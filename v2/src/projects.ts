@@ -41,7 +41,7 @@ export type ModelSeats = {
 export type ProjectProfile = {
 	/** Stable id; doubles as the repo alias (spawn --repo <id>). */
 	id: string;
-	/** e.g. "lindy-ai/lindy" */
+	/** e.g. "example-org/review-project" */
 	repo: string;
 	/** Absolute path to the primary checkout. Never edited; worktrees only. */
 	primary: string;
@@ -75,84 +75,9 @@ export function profilesFile(home = defaultHome()): string {
 	return path.join(home, "config", "projects.json");
 }
 
-/**
- * Frozen copy of the 3 load-bearing traps from data/lindy-domain.md.
- *
- * Inlined verbatim on purpose: a path alone decays (workers skip the read),
- * and reading the live file at brief time would make the brief depend on
- * home-file state. Keep in sync with lindy-domain.md when the traps change.
- */
-export const LINDY_TRAPS = `1. **Landing requires the squash commit on the base branch**: do not infer that work is absent from a closed or unmerged PR state. Before any "not landed" verdict, search main for the squash commit \`(#N)\`.
-2. **Migration gate**: a diff touching migrations/ or packages/database-migrations/ makes the migration run (stg → verify → prod → verify, with evidence) mandatory before landing is done. Unapplied migrations block ALL of CI repo-wide.
-3. **Review requests silently no-op**: after requesting reviewers (or any GH edit), verify via the requested_reviewers API. Plausible-but-wrong logins return ok.`;
-
-/** Seed profiles: the machine form of data/projects.md at seeding time. */
-export function seedProfiles(home = defaultHome()): ProjectProfile[] {
-	const data = path.join(home, "data");
-	const distill = path.join(data, "ref", "distill");
-	return [
-		{
-			id: "lindy",
-			repo: "lindy-ai/lindy",
-			primary: path.join(os.homedir(), "dev", "fm2", "projects", "lindy"),
-			pipeline: "lindy-full",
-			yolo: false,
-			stamp: true,
-			knowledge: [
-				path.join(data, "KNOWLEDGE.md"),
-				path.join(data, "lindy-domain.md"),
-				path.join(data, "lindy-ops.md"),
-				path.join(data, "lindy-pipeline.md"),
-				path.join(data, "lindy-standing-work.md"),
-				path.join(data, "lindy-learnings.md"),
-				path.join(distill, "STANDING-RULES.md"),
-				path.join(distill, "SETUP-CHECKLIST.md"),
-				path.join(distill, "CREDS-AND-TOOLS.md"),
-			],
-			models: {
-				implementer: "deck/gpt-5.6-luna",
-				watcher: "deck/gpt-5.6-luna",
-				fallout: "deck/gpt-5.6-sol",
-				familyOpposition: true,
-				oppositionDefaults: {
-					anthropic: "deck/gpt-5.6-sol",
-					openai: "deck/claude-fable-5",
-				},
-			},
-			depsWarm: true,
-			doctrine: `The 3 load-bearing traps (verbatim, non-negotiable):
-
-${LINDY_TRAPS}
-
-And:
-
-- Prod DB reads: \`pnpm repl:prod-readonly\` only. Repo skills live under \`.agent/skills/\`.
-- Sitevars: query the collection sorted \`version: -1\` — never \`getSitevar()\` (REPL cache returns registry defaults) and never unsorted \`findOne\`.
-- Reviewers: CODEOWNERS + review-frequency + gh-reviewer-lookup skill. Never Ali as code reviewer.
-- CI/review watching belongs to the orchestrator's wake engine — never sleep-poll in your own run; workers that poll-and-exit read as dead.`,
-		},
-		{
-			id: "deck",
-			repo: "twaldin/deck",
-			primary: path.join(os.homedir(), "dev", "deck"),
-			pipeline: "yolo-ship",
-			yolo: true,
-			stamp: false,
-			knowledge: [],
-			models: {
-				implementer: "deck/gpt-5.6-luna",
-				reviewer: undefined,
-				watcher: "deck/gpt-5.6-luna",
-				fallout: "deck/gpt-5.6-sol",
-				familyOpposition: true,
-				oppositionDefaults: {
-					anthropic: "deck/gpt-5.6-sol",
-					openai: "deck/claude-fable-5",
-				},
-			},
-			depsWarm: true,
-		},
-	];
+/** Personal projects are configured in ~/.deck/config/projects.json. */
+export function seedProfiles(_home?: string): ProjectProfile[] {
+	return [];
 }
 
 /** Each pipeline implies its flags; a file that contradicts itself is refused. */

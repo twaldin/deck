@@ -9,7 +9,8 @@ if [[ -z "${EXTENSION_SOURCE:-}" ]]; then
   if [[ -n "$PI_PACKAGE_ROOT" ]]; then
     EXTENSION_SOURCE="$(dirname "$PI_PACKAGE_ROOT")/examples/extensions/subagent"
   else
-    EXTENSION_SOURCE="/Users/twaldin/.nvm/versions/node/v24.8.0/lib/node_modules/@earendil-works/pi-coding-agent/examples/extensions/subagent"
+    printf 'error: set EXTENSION_SOURCE to the pi subagent example directory\n' >&2
+    exit 1
   fi
 fi
 
