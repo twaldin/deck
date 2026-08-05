@@ -685,7 +685,9 @@ export default function deckV2(pi: any, dependencies: DeckV2Dependencies = {}): 
 		for (const verdict of detectStale()) {
 			// Staleness is derived from live facts, not from a status event, so it
 			// is not an outbox entry; it is recomputed every cycle and is
-			// therefore safe to send directly.
+			// therefore safe to send directly. detectStale suppresses a repeat of the
+			// same verdict, so a failed send here is delayed to the next backoff
+			// window rather than lost: the condition is still true and still detected.
 			attempted++;
 			if (await send(ctx, `${DECK_OPERATIONAL_PREFIX}${verdict.taskId} stopped responding: ${verdict.reason}`)) sent++;
 		}

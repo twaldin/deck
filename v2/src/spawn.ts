@@ -48,7 +48,7 @@ export const DEFAULT_WORKER_MODEL = "deck/gpt-5.6-luna";
  */
 export const WORKER_EXCLUDED_TOOLS = ["ask_captain", "web_search"] as const;
 
-/** A worker exceeding this has stopped making progress; see run_deadline. */
+/** Wall-clock budget recorded on a run. Advisory: silence, not overrun, is stale. */
 export const DEFAULT_DEADLINE_MS = 30 * 60 * 1000;
 
 export type SpawnRequest = {
@@ -420,13 +420,17 @@ function launchRun(
 		throw new Error("pi did not launch; releasing the worktree");
 	}
 	// Recorded so stale detection can tell "run finished" from "run vanished".
-	// The deadline makes "bounded work" an enforced property rather than an
-	// assumption: a live worker that loops writes no status and never dies, so
-	// without a deadline it is invisible forever. Observed on a live run.
+	// The deadline is the recorded budget for readers; the stuck-worker signal is
+	// silence (no writes to the worktree or transcript), because a long run that is
+	// still writing is working.
+	// run_started anchors stale detection: this run's silence is measured from its
+	// own launch, never from files the previous run left in the reused worktree.
 	if (pid > 0) {
+		const startedAt = Date.now();
 		updateMeta(request.taskId, {
 			run_pid: pid,
-			run_deadline: Date.now() + (request.deadlineMs ?? DEFAULT_DEADLINE_MS),
+			run_started: startedAt,
+			run_deadline: startedAt + (request.deadlineMs ?? DEFAULT_DEADLINE_MS),
 		});
 		updateWorktreePid(worktree, request.taskId, pid);
 	}
