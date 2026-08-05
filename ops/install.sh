@@ -9,6 +9,9 @@ BUN_BIN_DIR=""
 LAUNCHD_DIR="${SCRIPT_DIR}/launchd"
 AGENT_DIR="${HOME}/Library/LaunchAgents"
 LOG_DIR="${HOME}/.deck/logs"
+# The gateway serves the LIVE run workspace, which is separate from the source
+# checkout it loads workflow modules from.
+GATEWAY_WORKSPACE="${HOME}/.deck/state/smithers"
 USER_UID="$(id -u)"
 DOMAIN="gui/${USER_UID}"
 BROKER_SOCKET="${HOME}/.deck/run/broker.sock"
@@ -186,6 +189,7 @@ render_plist() {
 		-e "s|@DECK_ROOT@|${DECK_ROOT}|g" \
 		-e "s|@LOG_DIR@|${LOG_DIR}|g" \
 		-e "s|@BUN_PATH@|${BUN_BIN_DIR}|g" \
+		-e "s|@GATEWAY_WORKSPACE@|${GATEWAY_WORKSPACE}|g" \
 		"${source}" > "${rendered}"
 }
 
@@ -308,17 +312,3 @@ for index in "${!LABELS[@]}"; do
 		bootstrap_agent "${label}" "${destination}"
 	fi
 done
-
-if service_loaded "ai.deck.smithers-gateway"; then
-	for attempt in $(seq 1 30); do
-		if curl -fsS --max-time 1 http://127.0.0.1:7331/health >/dev/null 2>&1; then
-			printf 'Status: Smithers Gateway is serving on http://127.0.0.1:7331.\n'
-			break
-		fi
-		if (( attempt == 30 )); then
-			printf 'ERROR: Smithers Gateway is loaded but did not become healthy on port 7331.\n' >&2
-			exit 1
-		fi
-		sleep 1
-	done
-fi

@@ -1,21 +1,39 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>Label</key><string>ai.deck.smithers-gateway</string>
-  <key>ProgramArguments</key><array>
-    <string>/usr/bin/env</string><string>bun</string><string>@DECK_ROOT@/workflows/.smithers/gateway.ts</string>
-  </array>
-  <key>WorkingDirectory</key><string>@DECK_ROOT@/workflows/.smithers</string>
-  <key>EnvironmentVariables</key><dict>
-    <key>PATH</key><string>/Users/twaldin/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-    <key>SMITHERS_WORKSPACE_ROOT</key><string>/Users/twaldin/.deck/state/smithers</string>
-    <key>HOST</key><string>127.0.0.1</string>
-    <key>PORT</key><string>7331</string>
-  </dict>
-  <key>KeepAlive</key><true/>
-  <key>RunAtLoad</key><true/>
-  <key>ThrottleInterval</key><integer>5</integer>
-  <key>ProcessType</key><string>Background</string>
-  <key>StandardOutPath</key><string>@LOG_DIR@/smithers-gateway.log</string>
-  <key>StandardErrorPath</key><string>@LOG_DIR@/smithers-gateway.log</string>
-</dict></plist>
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>ai.deck.smithers-gateway</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/bin/env</string>
+		<string>bun</string>
+		<string>@DECK_ROOT@/workflows/.smithers/gateway.ts</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>@DECK_ROOT@/workflows/.smithers</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>@BUN_PATH@:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+		<key>SMITHERS_WORKSPACE_ROOT</key>
+		<string>@GATEWAY_WORKSPACE@</string>
+		<key>HOST</key>
+		<string>127.0.0.1</string>
+		<key>PORT</key>
+		<string>7331</string>
+	</dict>
+	<key>KeepAlive</key>
+	<true/>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>ThrottleInterval</key>
+	<integer>5</integer>
+	<key>ProcessType</key>
+	<string>Background</string>
+	<key>StandardOutPath</key>
+	<string>@LOG_DIR@/smithers-gateway.log</string>
+	<key>StandardErrorPath</key>
+	<string>@LOG_DIR@/smithers-gateway.log</string>
+</dict>
+</plist>
