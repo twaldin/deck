@@ -1,6 +1,6 @@
 /** @jsxImportSource smithers-orchestrator */
 /** One run owns a prompt, its ordered PR stack, review loop, and delivery. */
-import { Approval, Loop, PiAgent, Sequence, Task, UI, Workflow, approvalDecisionSchema, createSmithers } from "smithers-orchestrator";
+import { Approval, Loop, PiAgent, Sequence, Task, Workflow, approvalDecisionSchema, createSmithers } from "smithers-orchestrator";
 import { z } from "zod";
 import { execOrThrow, bunExec } from "../pr-pipeline/lib/gh.ts";
 import { runMerge } from "../pr-pipeline/lib/merge.ts";
@@ -101,10 +101,14 @@ export default smithers((ctx) => {
   const opened = ctx.latest(outputs.opened, "open-stack");
   const latestPoll = ctx.latest(outputs.poll, "poll-stack");
   const approval = ctx.latest(outputs.approval, "merge-stack-approval");
-  const stackReady = latestPoll?.signal === "complete" && approval === undefined;
+  // The gate node stays rendered after it resolves: dropping it once a decision
+  // exists would remove the node the merge below reads, and break resume.
+  const stackReady = latestPoll?.signal === "complete";
   const stack = opened?.prs ?? [];
-  const stackSummary = stack.map((pr) => `PR #${pr.number} https://github.com/${input.repo}/pull/${pr.number} title "${input.prompt.slice(0, 80)}"; CI ${latestPoll?.signal === "complete" ? "green" : "not green"}; reviews clear; mergeability ${latestPoll?.signal === "complete" ? "mergeable" : "must be rechecked"}`).join("\n");
-  const mergeApproval = stackReady ? (dryRun ? <Task id="merge-stack-approval" output={outputs.approval}>{() => ({ approved: true, note: "dry-run stack approval", decidedBy: "dry-run", decidedAt: new Date().toISOString() })}</Task> : <Approval id="merge-stack-approval" output={outputs.approval} request={{ title: `Approve ordered stack merge: ${input.repo}`, summary: `Stack: ${stackSummary}. CI is green and every PR is mergeable. Approving submits the Gateway decision; the workflow then re-checks the stack and its merge compute node submits each PR to the GitHub merge queue. Denying stops the run.` }} onDeny="fail" />) : null;
+  // Only facts the "complete" poll signal actually establishes: every PR is
+  // CI-green and mergeable, with no unresolved comment and no decision ask.
+  const stackSummary = stack.map((pr) => `PR #${pr.number} https://github.com/${input.repo}/pull/${pr.number}`).join("\n");
+  const mergeApproval = stackReady ? (dryRun ? <Task id="merge-stack-approval" output={outputs.approval}>{() => ({ approved: true, note: "dry-run stack approval", decidedBy: "dry-run", decidedAt: new Date().toISOString() })}</Task> : <Approval id="merge-stack-approval" output={outputs.approval} request={{ title: `Approve ordered stack merge: ${input.repo} (${stack.length} PRs)`, summary: `Ordered stack:\n${stackSummary}\n\nEvery PR is CI-green and mergeable, with no unresolved review comment and no open decision ask. Approving submits the Gateway decision; the workflow then re-polls the stack and its own merge node submits each PR to the GitHub merge queue in order. Denying stops the run.` }} onDeny="fail" />) : null;
   const merged = approval?.approved === true ? <Task id="merge-stack" output={outputs.merge} retries={1}>{async () => {
     if (dryRun) return { merged: true, receipts: stack.map((pr) => `dry-run: PR #${pr.number}`) };
     const verified = await pollStack(bunExec, input.repo, stack.map((pr) => pr.number), gh);
@@ -122,5 +126,5 @@ export default smithers((ctx) => {
     const ok = blockers.length === 0 && signal === "complete" && ctx.latest(outputs.merge, "merge-stack")?.merged === true;
     produceWakeConditions({ taskId, terminal: ok, maxAdversarial: !ok && blockers.length > 0, ciFail: !ok && signal === "ci-fail", actionableComment: !ok && signal === "actionable-comment", decisionAsk: !ok && signal === "decision-ask" });
     return ok ? { done: true, summary: input.profile === "lindy-full" ? "stack merged after captain approval" : "stack merged" } : { done: false, summary: `stack owner stopped with unresolved ${blockers.length ? "review blockers" : `${signal ?? "unknown"} poll signal`}` };
-  }}</Task></Sequence><UI entry="../.smithers/ui/stack-owner.tsx" title="Stack Owner approvals" /></Workflow>;
+  }}</Task></Sequence></Workflow>;
 });

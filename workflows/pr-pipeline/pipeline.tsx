@@ -29,7 +29,6 @@
 
 import {
 	Approval,
-	UI,
 	Loop,
 	Parallel,
 	PiAgent,
@@ -541,15 +540,7 @@ export function buildModelPolicy(
 }
 
 export default smithers((ctx) => {
-	const input = {
-		ticket: "gateway-ui-registration",
-		repo: "owner/repo",
-		worktree: process.cwd(),
-		branch: "gateway-ui-registration",
-		baseBranch: "main",
-		dryRun: true,
-		...(ctx.input ?? {}),
-	} as typeof ctx.input;
+	const input = ctx.input;
 	const dryRun = input.dryRun !== false;
 	const bypass = input.bypassApprovals === true;
 	const limits = { ...DEFAULT_LIMITS, ...(input.limits ?? {}) };
@@ -573,7 +564,7 @@ export default smithers((ctx) => {
 	const policy = buildModelPolicy(profile, profileRepoMismatch, input.models);
 
 	const ghCtx = { gh: github.gh, repo: input.repo, exec: bunExec };
-	const project = input.profile ?? input.repo?.split("/").at(-1) ?? "pr-pipeline";
+	const project = input.profile ?? input.repo.split("/").at(-1);
 
 	// -- persisted state reads ------------------------------------------------
 	const preflight = ctx.latest(outputs.preflight, "preflight");
@@ -2010,7 +2001,6 @@ prNumber: pr.prNumber,
 					</Task>
 				) : null}
 			</Parallel>
-			<UI entry="../.smithers/ui/pr-pipeline.tsx" title="PR Pipeline approvals" />
 		</Workflow>
 	);
 });
