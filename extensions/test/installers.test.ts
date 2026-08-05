@@ -164,6 +164,7 @@ describe("ponytail installer", () => {
 describe("idle-compaction installer", () => {
 	const target = install("extensions/install.sh");
 	const extensionDir = path.join(target, "extensions", "deck-idle-compaction");
+	const nativeExtensionDir = path.join(target, "extensions", "deck-native-compaction");
 
 	test("installs a directory extension whose sibling import resolves", () => {
 		expect(lstatSync(extensionDir).isDirectory()).toBe(true);
@@ -180,12 +181,14 @@ describe("idle-compaction installer", () => {
 		// pi discovers extensions/*.ts as top-level extensions, so a stray
 		// policy symlink beside the directory gets loaded and rejected.
 		const entries = readdirSync(path.join(target, "extensions")).sort();
-		expect(entries).toEqual(["deck-idle-compaction"]);
+		expect(entries).toEqual(["deck-idle-compaction", "deck-native-compaction"]);
 	});
 
-	test("the installed entrypoint exports a factory", async () => {
+	test("the installed entrypoints export factories", async () => {
 		const loaded = await import(path.join(extensionDir, "index.ts"));
+		const native = await import(path.join(nativeExtensionDir, "index.ts"));
 		expect(typeof loaded.default).toBe("function");
+		expect(typeof native.default).toBe("function");
 	});
 
 	test("reruns converge", () => {
@@ -249,7 +252,7 @@ describe("idle-compaction installer migration from the old flat layout", () => {
 		const result = runInstaller("extensions/install.sh", target);
 		expect(result.stderr).toBe("");
 		expect(result.exitCode).toBe(0);
-		expect(readdirSync(extensions).sort()).toEqual(["deck-idle-compaction"]);
+		expect(readdirSync(extensions).sort()).toEqual(["deck-idle-compaction", "deck-native-compaction"]);
 	});
 
 	test("refuses to delete a user-owned file it cannot prove is ours", () => {
