@@ -17,7 +17,7 @@ cd ~/dev/deck/workflows/.smithers
   --format json
 ```
 
-Store the returned `token` in the Gateway process's secret environment as `SMITHERS_GATEWAY_TOKEN`, then restart the Gateway. Never put the bearer in this repository, a launchd plist, shell history, a URL, or a tailnet ACL.
+Store the returned `token` in the Gateway process's secret environment as `SMITHERS_GATEWAY_TOKEN`, and retain the returned non-secret `tokenId` in the rotation record. Then restart the Gateway. Never put the bearer in this repository, a launchd plist, shell history, a URL, or a tailnet ACL.
 
 Clients must send `Authorization: Bearer <token>` for HTTP. A `SmithersGatewayClient` must receive the same value as its `token` option so it includes the token in the WebSocket `connect` frame.
 
@@ -35,13 +35,13 @@ Smithers 0.30.0 does not load CLI grants into an embedded `new Gateway(...)` by 
      http://127.0.0.1:7331/v1/api/runs
    ```
 
-4. Record revocation of the old grant:
+4. Record revocation of the old grant by its non-secret token id, not by putting the bearer in argv:
 
    ```sh
-   ./node_modules/.bin/smithers token revoke "$OLD_SMITHERS_GATEWAY_TOKEN"
+   ./node_modules/.bin/smithers token revoke "$OLD_SMITHERS_GATEWAY_TOKEN_ID"
    ```
 
-   Load that variable from the secret store without pasting the bearer into the command line.
+   `smithers token revoke` accepts the issued `tokenId`; keep that identifier with the deployment record.
 
 If the token is exposed, do the same rotation immediately; do not wait for its TTL.
 
@@ -57,7 +57,7 @@ SMITHERS_AUTH_TEST_WORKSPACE_ROOT="$HOME/.deck/state/smithers" \
   bun workflows/.smithers/test-gateway-auth.ts
 ```
 
-The test starts a separate Gateway on an OS-assigned ephemeral loopback port, issues its bearer with the pinned CLI into a temporary token store, and always stops the process. It verifies missing, unissued, and revoked tokens fail startup; anonymous and wrong-token root/UI, metadata, HTTP RPC/API, and WebSocket requests are rejected; idle sockets time out; pre-connect WS reads and mutations are denied; the challenge contains only a nonce and timestamp; no application data leaks; issued-token HTTP and post-connect WS read/mutation traffic is forwarded; and grant expiry closes an active authenticated socket and stops the Gateway.
+The test starts a separate Gateway on an OS-assigned ephemeral loopback port, issues its bearer with the pinned CLI into a temporary token store, and always stops the process. It verifies missing, unissued, revoked, expired, insufficient-scope, and wrong-role grants fail startup; only `GET /health` is public and sanitized; alternate HTTP auth schemes are rejected; anonymous and wrong-token UI/metadata/RPC/API/WS requests fail; idle sockets time out; pre-connect WS reads and mutations are denied; the challenge contains only a nonce and timestamp; no application data leaks; issued-token HTTP and post-connect WS read/mutation traffic is forwarded; and grant expiry closes an active authenticated socket and stops the Gateway.
 
 This ephemeral test proves the checked-in code path against live workspace data; it does **not** prove that launchd loaded the provisioned secret or that the live listener runs this configuration. During live cutover, restart `ai.deck.smithers-gateway`, load `SMITHERS_GATEWAY_TOKEN` from the secret store without printing it, and verify the actual service:
 

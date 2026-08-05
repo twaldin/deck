@@ -51,16 +51,22 @@ function assertGatewayStartupRejected(
   }
 }
 
-function issueTestToken(storePath: string, ttl: string, actionId: string): string {
+function issueTestToken(
+  storePath: string,
+  ttl: string,
+  actionId: string,
+  scopes = "*",
+  role = "operator",
+): string {
   const result = Bun.spawnSync({
     cmd: [
       join(here, "node_modules", ".bin", "smithers"),
       "token",
       "issue",
       "--scopes",
-      "*",
+      scopes,
       "--role",
-      "operator",
+      role,
       "--ttl",
       ttl,
       "--action-id",
@@ -133,6 +139,36 @@ try {
     "revoked-token startup",
     { ...startupEnv, SMITHERS_GATEWAY_TOKEN: revokedToken },
     "SMITHERS_GATEWAY_TOKEN has been revoked",
+  );
+  const insufficientScopeToken = issueTestToken(
+    tokenStore,
+    "5m",
+    "gateway-auth-test-scope",
+    "run:read",
+  );
+  assertGatewayStartupRejected(
+    "insufficient-scope startup",
+    { ...startupEnv, SMITHERS_GATEWAY_TOKEN: insufficientScopeToken },
+    "must grant the `*` scope",
+  );
+  const wrongRoleToken = issueTestToken(
+    tokenStore,
+    "5m",
+    "gateway-auth-test-role",
+    "*",
+    "viewer",
+  );
+  assertGatewayStartupRejected(
+    "wrong-role startup",
+    { ...startupEnv, SMITHERS_GATEWAY_TOKEN: wrongRoleToken },
+    "must grant the `operator` role",
+  );
+  const expiredToken = issueTestToken(tokenStore, "1s", "gateway-auth-test-expired");
+  await sleep(1_100);
+  assertGatewayStartupRejected(
+    "expired-token startup",
+    { ...startupEnv, SMITHERS_GATEWAY_TOKEN: expiredToken },
+    "has expired or has no expiry",
   );
 
   const portFile = join(testRoot, "gateway.port");
@@ -431,6 +467,8 @@ try {
   const anonymousRoot = await fetch(`${baseUrl}/`, { redirect: "manual" });
   assertRejected(anonymousRoot, "unauthenticated GET /");
 
+  const unauthenticatedHealthMutation = await fetch(`${baseUrl}/health`, { method: "POST" });
+  assertRejected(unauthenticatedHealthMutation, "unauthenticated POST /health");
   for (const [path, response] of await Promise.all(
     ["/metrics", "/workflows", "/v1/api/runs"].map(async (path) => [
       path,

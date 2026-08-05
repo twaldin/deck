@@ -37,6 +37,9 @@ if (expiresAtMs === undefined || expiresAtMs <= Date.now()) {
 if (!issuedGrant.scopes.includes("*")) {
   throw new Error("SMITHERS_GATEWAY_TOKEN must grant the `*` scope");
 }
+if (issuedGrant.role !== "operator") {
+  throw new Error("SMITHERS_GATEWAY_TOKEN must grant the `operator` role");
+}
 
 const gateway = new Gateway({
   heartbeatMs: 15_000,
@@ -255,7 +258,7 @@ function createAuthenticatedProxy(internalPort: number): Bun.Server<ProxySocketD
         return new Response("WebSocket upgrade failed\n", { status: 500 });
       }
 
-      if (url.pathname === "/health") {
+      if (req.method === "GET" && url.pathname === "/health") {
         try {
           const upstream = await fetch(`http://${internalHost}:${internalPort}/health`);
           const payload = (await upstream.json()) as { ok?: unknown };
