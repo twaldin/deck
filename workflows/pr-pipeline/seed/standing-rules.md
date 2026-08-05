@@ -94,6 +94,8 @@ evidence-gated done.
   Chat mention is optional speed-assist, never primary. [lindy-pipeline.md §routing]
 - Only the orchestrator asks the captain. Workers report needs-decision via
   status. Two channels race and lose decisions. [~/.deck/AGENTS.md §3]
+- Never run OptMem from a worker or subagent. Route decisions through the
+  workflow's question result.
 - Cost is never a hold reason under tens of $k for authorized work; report it
   for correctness only. [~/firstmate/data/captain.md §spend 2026-07-25]
 - MAX-CRITICAL program mode (template for flagged criticals): every crewmate

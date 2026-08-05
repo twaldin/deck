@@ -15,6 +15,8 @@ const RESULT_OBJECT_RULE =
 	"Return a result object with these keys, NOT the schema. do not include $schema, type, properties, or required.";
 const SUBAGENT_GUIDANCE =
 	"Subagents are a first-class capability. Use exact ids worker, worker-gpt, reviewer, reviewer-claude, and scout; aliases claude, codex, and gpt are accepted. Choose the opposite model family for adversarial review. For stack work, land the schema/base PR first, then fan out subagents for dependent pieces.";
+const WORKER_MEMORY_CONTRACT =
+	"Never run OptMem from a worker or subagent. Route decisions through the workflow's question result.";
 const STANDING_RULES_MAX_BYTES = 4 * 1024;
 const STANDING_RULES_FALLBACK = new URL("../seed/standing-rules.md", import.meta.url);
 
@@ -59,7 +61,13 @@ export function standingRulesDigest(): string {
 }
 
 function seatPrompt(lines: string[]): string {
-	return [standingRulesDigest(), "", ...lines].join("\n");
+	return [
+		standingRulesDigest(),
+		"",
+		...lines,
+		"",
+		`MEMORY/DECISION BOUNDARY: ${WORKER_MEMORY_CONTRACT}`,
+	].join("\n");
 }
 
 function resultContract(example: string): string[] {

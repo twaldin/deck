@@ -170,6 +170,9 @@ describe("standing-rules seat injection", () => {
 		for (const prompt of prompts) {
 			expect(prompt.startsWith("--- STANDING-RULES")).toBe(true);
 			expect(prompt).toContain("The \"make PR\" flow");
+			expect(prompt).toContain(
+				"Never run OptMem from a worker or subagent. Route decisions through the workflow's question result.",
+			);
 		}
 		expect(Buffer.byteLength(standingRulesDigest(), "utf8")).toBeLessThanOrEqual(4_300);
 	});
@@ -182,6 +185,9 @@ describe("standing-rules seat injection", () => {
 		fs.mkdirSync(path.dirname(live), { recursive: true });
 		fs.writeFileSync(live, "live doctrine alpha\n");
 		expect(implementPrompt(validBrief, "/tmp/wt", "feature")).toContain("live doctrine alpha");
+		expect(implementPrompt(validBrief, "/tmp/wt", "feature")).toContain(
+			"Never run OptMem from a worker or subagent. Route decisions through the workflow's question result.",
+		);
 		fs.writeFileSync(live, "live doctrine beta\n");
 		expect(implementPrompt(validBrief, "/tmp/wt", "feature")).toContain("live doctrine beta");
 	});
