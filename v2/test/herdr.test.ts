@@ -12,6 +12,7 @@ import {
 	desiredState,
 	mayClosePane,
 	projectionMessage,
+	commandFor,
 	shellQuote,
 	shouldReleasePane,
 } from "../src/herdr";
@@ -135,6 +136,13 @@ describe("mayClosePane: identity-exact, never less", () => {
 	});
 });
 
+describe("projection commands", () => {
+	test("spawn panes run the compact deck tail and workflows run smithers logs", () => {
+		expect(commandFor({ taskId: "worker-1", runId: null })).toContain("exec deck-v2 tail 'worker-1'");
+		expect(commandFor({ taskId: "workflow", runId: "run-1" })).toBe("smithers status 'run-1'; exec smithers logs 'run-1' --follow --tail 30");
+	});
+});
+
 describe("shellQuote", () => {
 	test("spaces and metacharacters stay data", () => {
 		expect(shellQuote("/a b/c.status")).toBe("'/a b/c.status'");
@@ -172,5 +180,74 @@ describe("projectFleet degrades without herdr", () => {
 		} finally {
 			process.env.PATH = original;
 		}
+	});
+
+	test("projects two spawns and one workflow in one reusable workspace", async () => {
+		const originalPath = process.env.PATH;
+		const bin = fs.mkdtempSync(path.join(os.tmpdir(), "deck-herdr-bin-"));
+		const log = path.join(bin, "calls.jsonl");
+		const state = path.join(bin, "state.json");
+		const herdrStub = path.join(bin, "herdr");
+		fs.writeFileSync(state, JSON.stringify({ workspace: null, panes: {}, next: 1 }));
+		fs.writeFileSync(herdrStub, `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+const stateFile = process.env.FAKE_HERDR_STATE;
+const logFile = process.env.FAKE_HERDR_LOG;
+const state = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+fs.appendFileSync(logFile, JSON.stringify(args) + "\\n");
+const result = (value) => process.stdout.write(JSON.stringify({ result: value }));
+const flag = (name) => { const index = args.indexOf(name); return index < 0 ? undefined : args[index + 1]; };
+if (args[0] === "workspace" && args[1] === "list") result({ workspaces: state.workspace === null ? [] : [state.workspace] });
+else if (args[0] === "workspace" && args[1] === "get") result(state.workspace === null ? {} : { workspace: state.workspace });
+else if (args[0] === "workspace" && args[1] === "create") { state.workspace = { workspace_id: "ws1", label: flag("--label") }; result({ workspace: state.workspace }); }
+else if (args[0] === "workspace" && args[1] === "rename") { state.workspace.label = args[3]; result({ workspace: state.workspace }); }
+else if (args[0] === "pane" && args[1] === "list") result({ panes: Object.values(state.panes) });
+else if (args[0] === "tab" && args[1] === "create") { const n = state.next++; const pane = { pane_id: "p" + n, tab_id: "t" + n, workspace_id: "ws1", agent: undefined, label: flag("--label") }; state.panes[pane.pane_id] = pane; result({ root_pane: { pane_id: pane.pane_id }, tab: { tab_id: pane.tab_id } }); }
+else if (args[0] === "pane" && args[1] === "run") result({});
+else if (args[0] === "pane" && args[1] === "report-agent") { const pane = state.panes[args[2]]; if (pane !== undefined) pane.agent = flag("--agent"); result({}); }
+else if (args[0] === "pane" && args[1] === "get") { const pane = state.panes[args[2]]; result({ pane: pane === undefined ? null : pane }); }
+else if (args[0] === "pane" && args[1] === "release-agent") result({});
+else if (args[0] === "tab" && args[1] === "close") { for (const [id, pane] of Object.entries(state.panes)) if (pane.tab_id === args[2]) delete state.panes[id]; result({}); }
+else result({});
+fs.writeFileSync(stateFile, JSON.stringify(state));
+`, { mode: 0o700 });
+	process.env.PATH = originalPath ?? "";
+	process.env.DECK_HERDR_BIN = herdrStub;
+	process.env.FAKE_HERDR_STATE = state;
+	process.env.FAKE_HERDR_LOG = log;
+	try {
+		const { projectFleet } = await import("../src/herdr");
+		const frame = {
+			generatedAt: new Date().toISOString(),
+			tasks: [task({ taskId: "spawn-a", runState: "running" }), task({ taskId: "spawn-b", runState: "running" }), task({ taskId: "run:workflow-1", runId: "workflow-1", runState: "running" })],
+			workflows: [],
+			counters: { tasks: 3, running: 3, blocked: 0, openDecisions: 0, queuedMessages: 0, openQuestions: 0, internalOpen: 0, internalCap: 12 },
+			sources: [],
+		};
+		expect((await projectFleet(frame)).state).toBe("ok");
+		const first = fs.readFileSync(log, "utf8").trim().split("\n").map((line) => JSON.parse(line) as string[]);
+		expect(first.filter((call) => call[0] === "workspace" && call[1] === "create")).toHaveLength(1);
+		expect(first.filter((call) => call[0] === "tab" && call[1] === "create")).toHaveLength(3);
+		const paneCommands = first.filter((call) => call[0] === "pane" && call[1] === "run").map((call) => call[3] as string);
+		expect(paneCommands.filter((command) => command.includes("spawn-a"))).toHaveLength(1);
+		expect(paneCommands.filter((command) => command.includes("spawn-b"))).toHaveLength(1);
+		expect(paneCommands).toContain("smithers status 'workflow-1'; exec smithers logs 'workflow-1' --follow --tail 30");
+		expect(paneCommands.some((command) => command.includes("DECK_V2_HOME="))).toBe(true);
+		const beforeSecond = first.length;
+		expect((await projectFleet(frame)).state).toBe("ok");
+		const second = fs.readFileSync(log, "utf8").trim().split("\n").map((line) => JSON.parse(line) as string[]);
+		expect(second.slice(beforeSecond).some((call) => call[0] === "workspace" && call[1] === "create")).toBe(false);
+		const terminal = { ...frame, tasks: frame.tasks.map((item) => item.taskId === "spawn-a" ? { ...item, runState: "finished" as const, lastVerb: "done" } : item) };
+		expect((await projectFleet(terminal)).state).toBe("ok");
+		const final = fs.readFileSync(log, "utf8").trim().split("\n").map((line) => JSON.parse(line) as string[]);
+		expect(final.filter((call) => call[0] === "tab" && call[1] === "close")).toHaveLength(1);
+	} finally {
+		process.env.PATH = originalPath;
+		delete process.env.DECK_HERDR_BIN;
+		delete process.env.FAKE_HERDR_STATE;
+		delete process.env.FAKE_HERDR_LOG;
+		fs.rmSync(bin, { recursive: true, force: true });
+	}
 	});
 });

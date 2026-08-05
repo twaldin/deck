@@ -6,6 +6,7 @@
  * tools. Both are faces on @deck/v2.
  */
 import * as path from "node:path";
+import * as fs from "node:fs";
 import {
 	assertDispatchable,
 	closeInternal,
@@ -29,6 +30,7 @@ import { STATUS_VERBS, type StatusVerb } from "./status";
 import { evaluateTeardown, formatVerdict } from "./teardown";
 import { detectStale, foldBatched, reconcile } from "./wake";
 import { smithersWorkspaceRoot } from "./workspace";
+import { sessionDirForTask, tailSession } from "./tail";
 
 const REASONING_LEVELS = new Set(["low", "medium", "high", "xhigh", "max"]);
 function parseReasoning(value: string): "low" | "medium" | "high" | "xhigh" | "max" {
@@ -59,7 +61,9 @@ const USAGE = `deck-v2 — fleet primitives
                                  --no-pipeline
   send <id> <message>              queue a message for the task's next run
   status <id> [--json]             the task's events and current reconciliation
-  peek <id> [--limit N]            tail the task's session transcript
+  peek <id> [--limit N]            print recent transcript entries
+  tail <id>                        follow a compact live session tail
+       --file <path.jsonl>         follow a specific session file
   fleet [--json] [--statusline] [--project]   the fleet frame; --project mirrors it into herdr
   wake [--json]                    one reconcile pass (T0 now, T1 folded, T2 silent)
   stale                            runs that vanished without a terminal status
@@ -277,6 +281,23 @@ export async function runCli(argv: string[]): Promise<number> {
 				for (const entry of entries) {
 					process.stdout.write(`[${entry.role}] ${entry.text.slice(0, 400)}\n`);
 				}
+				return 0;
+			}
+
+			case "tail": {
+				const file = str(args.flags, "file");
+				const id = args._[1];
+				if (file === undefined && id === undefined) throw new Error("tail needs a task id or --file <path.jsonl>");
+				if (file !== undefined && id !== undefined) throw new Error("tail accepts a task id or --file, not both");
+				const target = file === undefined ? sessionDirForTask(id as string) : path.resolve(file);
+				if (file !== undefined && (!fs.existsSync(target) || !fs.statSync(target).isFile())) {
+					throw new Error(`session file not found: ${target}`);
+				}
+				if (file === undefined && !fs.existsSync(target)) {
+					process.stdout.write(`no session yet for ${id}\n`);
+					return 0;
+				}
+				await tailSession(target);
 				return 0;
 			}
 
