@@ -140,7 +140,13 @@ export async function rebaseAndPush(
 ): Promise<string[]> {
 	const run = (command: string[]) => execOrThrow(exec, command, { cwd: args.worktree });
 	const actions: string[] = [];
-	await run([args.git, "fetch", "origin", args.baseBranch, args.branch]);
+	await run([
+		args.git,
+		"fetch",
+		"origin",
+		`+refs/heads/${args.baseBranch}:refs/remotes/origin/${args.baseBranch}`,
+		`+refs/heads/${args.branch}:refs/remotes/origin/${args.branch}`,
+	]);
 	actions.push(`fetched origin/${args.baseBranch} and origin/${args.branch}`);
 	const [currentBranch, remoteHead, localHead] = await Promise.all([
 		run([args.git, "branch", "--show-current"]).then((value) => value.trim()),

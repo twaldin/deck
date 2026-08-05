@@ -76,6 +76,38 @@ describe("assertBoundedRebase", () => {
 			(await git(repo.worktree, "rev-parse", "origin/feature")).trim(),
 		);
 	});
+	test("rebases onto a base update fetched from a separate clone", async () => {
+		const repo = await fixture();
+		const expectedRemoteHead = (await git(repo.worktree, "rev-parse", "origin/feature")).trim();
+		const basePusher = path.join(repo.root, "base-pusher");
+		await execOrThrow(bunExec, [
+			"git",
+			"clone",
+			"--branch",
+			"main",
+			repo.origin,
+			basePusher,
+		]);
+		await git(basePusher, "config", "user.name", "Base Update Test");
+		await git(basePusher, "config", "user.email", "base-update@example.test");
+		await commitFile(basePusher, "external-base.txt", "new base\n", "external base update");
+		await git(basePusher, "push", "origin", "main");
+
+		await rebaseAndPush(bunExec, {
+			git: "git",
+			worktree: repo.worktree,
+			branch: "feature",
+			baseBranch: "main",
+			expectedRemoteHead,
+			testCommand: "true",
+		});
+		expect(
+			(await Bun.spawn(["git", "merge-base", "--is-ancestor", "origin/main", "HEAD"], {
+				cwd: repo.worktree,
+			}).exited),
+		).toBe(0);
+	});
+
 
 	test("rejects a local commit that was neither on the PR branch nor attributed to this run", async () => {
 		const repo = await fixture();
