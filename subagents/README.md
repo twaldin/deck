@@ -4,7 +4,9 @@ This package installs pi's shipped `subagent` extension together with Deck's cro
 
 ## Install
 
-The installer only modifies the pi agent directory. It is safe to rerun: files managed by this package are refreshed as symlinks pointing at this package (for definitions) and the installed pi example (for the extension). Reruns do not remove files left by an older version of the package.
+The installer only modifies the pi agent directory. It is safe to rerun: files managed by this package are refreshed as symlinks pointing at this package (for definitions and the patched extension). Reruns do not remove files left by an older version of the package.
+
+Subagent calls have a 30-minute wall-clock limit by default. Set `DECK_SUBAGENT_TIMEOUT_MS` to override it. A child that produces no worktree writes, transcript growth, or CPU-time growth for 25 seconds is killed and returned as a structured failure. Set `DECK_SUBAGENT_LIVENESS_MS` to override the liveness window.
 
 ```bash
 ./subagents/install.sh
@@ -26,6 +28,8 @@ INSTALL_TARGET="$(mktemp -d)/agent" ./subagents/install.sh
 | `reviewer-claude` | Adversarial review with inspection tools for GPT-produced work | `deck/claude-opus-5` |
 | `scout` | Cheap read-only reconnaissance | `deck/claude-sonnet-5` |
 
+Aliases are supported: `claude` resolves to `reviewer-claude`; `codex` and `gpt` resolve to `worker-gpt`. Unknown names list valid ids and suggest close matches.
+
 Model values are Deck broker-qualified defaults. The dispatching agent may override any default for a specific task by selecting the other worker/reviewer definition (or maintaining a task-specific definition with the desired `model` frontmatter). The reviewer must still use the opposite model family from whoever produced the work under review.
 
 ## Brief language for firstmate
@@ -34,7 +38,7 @@ Firstmate can copy this into a crew brief (substitute the task and any explicit 
 
 > Use the Deck pi subagent rig. Start with `scout` for cheap read-only reconnaissance when the task needs it. Delegate implementation to `worker` (Claude default) or `worker-gpt` (GPT-family alternative); builders work in isolated context windows, construct and validate the change, then report back with completed work, validation, files changed, and notes so the supervisor context stays small. After a builder finishes, run an adversarial review in a fresh context using `reviewer` or `reviewer-claude`, and choose the OPPOSITE model family from whoever produced the work. Reviewers have read-oriented inspection tools plus `bash` for repository inspection; their prompt forbids mutation, and they must return prioritized findings with exact paths. This is a behavioral contract, not a kernel-enforced sandbox. Have the builder address valid findings, rerun validation, and report the final handoff.
 
-For larger builds, repeat builder/reviewer cycles across multiple context windows rather than putting the whole implementation and review in one conversation.
+For larger builds, repeat builder/reviewer cycles across multiple context windows rather than putting the whole implementation and review in one conversation. For stack work, land the schema/base PR first, then fan out subagents for the dependent pieces.
 
 ## Definition format
 

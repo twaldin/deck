@@ -205,6 +205,8 @@ Do not write one test per changed line. A test earns its place by going red on
 the old behavior — if it passes against the code before your change, it is
 testing nothing. Verify the mechanism fires rather than trusting a green run.`);
 
+	sections.push("## Subagent dispatch\n\nSubagents are a first-class capability. Use the exact agent ids worker, worker-gpt, reviewer, reviewer-claude, and scout; aliases claude, codex, and gpt are also accepted. Choose the opposite model family for adversarial review. For stack work, land the schema/base PR first, then fan out subagents for the dependent pieces.");
+
 	sections.push(buildStandingDoctrine(project));
 
 	if (kind === "scout") {

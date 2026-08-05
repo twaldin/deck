@@ -9,6 +9,8 @@ import type { Brief } from "./types.ts";
 
 const RESULT_OBJECT_RULE =
 	"Return a result object with these keys, NOT the schema. do not include $schema, type, properties, or required.";
+const SUBAGENT_GUIDANCE =
+	"Subagents are a first-class capability. Use exact ids worker, worker-gpt, reviewer, reviewer-claude, and scout; aliases claude, codex, and gpt are accepted. Choose the opposite model family for adversarial review. For stack work, land the schema/base PR first, then fan out subagents for dependent pieces.";
 function resultContract(example: string): string[] {
 	return [
 		RESULT_OBJECT_RULE,
@@ -36,6 +38,7 @@ export function implementPrompt(brief: Brief, worktree: string, branch: string):
 		JSON.stringify(brief, null, 2),
 		"",
 		"Rules:",
+		`- ${SUBAGENT_GUIDANCE}`,
 		"- Implement exactly the brief. No scope creep; open questions were resolved before dispatch.",
 		"- Run the relevant tests locally and record what you ran.",
 		"- Commit your work as one or more plain commits on this branch. DO NOT push.",
@@ -68,6 +71,7 @@ export function localReviewPrompt(
 		"Brief the change claims to implement:",
 		JSON.stringify({ title: brief.title, acceptanceCriteria: brief.acceptanceCriteria }, null, 2),
 		"",
+		SUBAGENT_GUIDANCE,
 		"Hunt for: acceptance criteria not actually met, missing/weak tests, correctness bugs,",
 		"unhandled edge cases, migration hazards, blast-radius surprises, dead code.",
 		...(previous
