@@ -100,6 +100,20 @@ function clearProxyAuthTimer(data: ProxySocketData): void {
   data.authTimer = undefined;
 }
 
+function sendProxyClient(data: ProxySocketData, message: string): boolean {
+  if (data.client) {
+    data.client.send(message);
+    return true;
+  }
+  if (data.pendingClient.length < MAX_PRE_AUTH_QUEUE) {
+    data.pendingClient.push(message);
+    return true;
+  }
+  data.failed = true;
+  data.upstream.close(1009, "Gateway proxy queue limit exceeded");
+  return false;
+}
+
 function rejectPreAuthRequest(
   client: Bun.ServerWebSocket<ProxySocketData>,
   id: string,
@@ -159,29 +173,71 @@ function createAuthenticatedProxy(internalPort: number): Bun.Server<ProxySocketD
           if (typeof event.data !== "string") {
             data.failed = true;
             data.client?.close(1011, "Gateway proxy received a non-text frame");
+            data.upstream.close(1011, "Gateway proxy received a non-text frame");
             return;
           }
-          if (data.authState === "authenticating") {
+
+          let outbound = event.data;
+          if (data.authState !== "authenticated") {
+            let frame: {
+              type?: string;
+              id?: string;
+              event?: string;
+              payload?: unknown;
+              ok?: boolean;
+            };
             try {
-              const frame = JSON.parse(event.data) as { type?: string; id?: string; ok?: boolean };
-              if (frame.type === "res" && frame.id === data.connectId) {
-                data.authState =
-                  frame.ok === true && data.connectTokenValid ? "authenticated" : "rejected";
-                clearProxyAuthTimer(data);
-              }
+              frame = JSON.parse(event.data);
             } catch {
               data.failed = true;
+              clearProxyAuthTimer(data);
               data.client?.close(1011, "Gateway proxy received invalid JSON");
+              data.upstream.close(1011, "Gateway proxy received invalid JSON");
+              return;
+            }
+            const challenge =
+              frame.type === "event" &&
+              frame.event === "connect.challenge" &&
+              frame.payload !== null &&
+              typeof frame.payload === "object" &&
+              !Array.isArray(frame.payload) &&
+              typeof (frame.payload as Record<string, unknown>).nonce === "string" &&
+              typeof (frame.payload as Record<string, unknown>).ts === "number" &&
+              Object.keys(frame.payload as Record<string, unknown>).every(
+                (key) => key === "nonce" || key === "ts",
+              );
+            const connectResponse =
+              data.authState === "authenticating" &&
+              frame.type === "res" &&
+              frame.id === data.connectId;
+            if (!challenge && !connectResponse) {
+              data.failed = true;
+              data.authState = "rejected";
+              clearProxyAuthTimer(data);
+              data.client?.close(1008, "Unexpected pre-auth Gateway frame");
+              data.upstream.close(1008, "Unexpected pre-auth Gateway frame");
+              return;
+            }
+            if (connectResponse) {
+              clearProxyAuthTimer(data);
+              if (frame.ok === true && data.connectTokenValid) {
+                data.authState = "authenticated";
+              } else {
+                data.authState = "rejected";
+                outbound = JSON.stringify({
+                  type: "res",
+                  id: data.connectId,
+                  ok: false,
+                  error: { code: "UNAUTHORIZED", message: "Invalid token" },
+                });
+                sendProxyClient(data, outbound);
+                data.client?.close(1008, "authentication failed");
+                data.upstream.close(1008, "authentication failed");
+                return;
+              }
             }
           }
-          if (data.client) {
-            data.client.send(event.data);
-          } else if (data.pendingClient.length < MAX_PRE_AUTH_QUEUE) {
-            data.pendingClient.push(event.data);
-          } else {
-            data.failed = true;
-            data.upstream.close(1009, "Gateway proxy queue limit exceeded");
-          }
+          sendProxyClient(data, outbound);
         });
         data.upstream.addEventListener("close", (event) => {
           clearProxyAuthTimer(data);
