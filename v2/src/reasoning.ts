@@ -75,9 +75,12 @@ export function providerForModel(model: string): "anthropic" | "openai" | "xai" 
 
 export function supportedLevels(model: string): readonly ReasoningLevel[] {
 	const id = model.split("/").at(-1) ?? model;
-	if (providerForModel(model) === "xai") return ["low", "high"];
-	if (id === "gpt-5.6-sol") return ["low", "medium", "high", "xhigh"];
-	if (id === "claude-sonnet-4-5" || id === "claude-haiku-4-5" || id === "claude-fable-5") return REASONING_LEVELS;
+	if (providerForModel(model) === "xai") return ["low", "medium", "high"];
+	if (["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"].includes(id)) return REASONING_LEVELS;
+	if (["claude-fable-5", "claude-opus-5", "claude-sonnet-5"].includes(id)) return REASONING_LEVELS;
+	if (["claude-sonnet-4-5", "claude-haiku-4-5", "gpt-5.3-codex-spark", "gpt-5.4", "gpt-5.4-mini", "gpt-5.5"].includes(id)) {
+		return id === "claude-haiku-4-5" ? ["low", "medium", "high", "xhigh"] : ["low", "medium", "high", "xhigh"];
+	}
 	return ["low", "high"];
 }
 
