@@ -8,12 +8,12 @@
 	<array>
 		<string>/usr/bin/env</string>
 		<string>bun</string>
-		<string>/Users/twaldin/dev/deck/broker/src/main.ts</string>
+		<string>@DECK_ROOT@/broker/src/main.ts</string>
 	</array>
 	<key>EnvironmentVariables</key>
 	<dict>
 		<key>PATH</key>
-		<string>/Users/twaldin/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+		<string>@BUN_PATH@:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
 	</dict>
 	<key>KeepAlive</key>
 	<true/>
@@ -24,8 +24,8 @@
 	<key>ProcessType</key>
 	<string>Background</string>
 	<key>StandardOutPath</key>
-	<string>/Users/twaldin/.deck/logs/broker.log</string>
+	<string>@LOG_DIR@/broker.log</string>
 	<key>StandardErrorPath</key>
-	<string>/Users/twaldin/.deck/logs/broker.log</string>
+	<string>@LOG_DIR@/broker.log</string>
 </dict>
 </plist>

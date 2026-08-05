@@ -1,7 +1,21 @@
 #!/bin/sh
 set -eu
-out="${DECK_RESOURCE_MONITOR_OUTPUT:-${HOME}/.deck/data/resource-monitor}"
-mkdir -p "$(dirname "$out")"
+default_out="${HOME}/.deck/data/resource-monitor/metrics.log"
+out="${DECK_RESOURCE_MONITOR_OUTPUT:-$default_out}"
+dir="$(dirname "$out")"
+if [ -d "$out" ]; then
+  printf 'ERROR: DECK_RESOURCE_MONITOR_OUTPUT must name a file, but %s is a directory.\n' "$out" >&2
+  exit 1
+fi
+if [ "$out" = "$default_out" ] && [ -f "$dir" ]; then
+  if [ -e "${dir}.legacy" ]; then
+    printf 'ERROR: cannot migrate %s because %s already exists.\n' "$dir" "${dir}.legacy" >&2
+    exit 1
+  fi
+  mv "$dir" "${dir}.legacy"
+  printf 'Moved legacy resource monitor output to %s.\n' "${dir}.legacy" >&2
+fi
+mkdir -p "$dir"
 while :; do
   max=$(sysctl -n kern.maxfiles 2>/dev/null || echo 0)
   used=$(lsof -n 2>/dev/null | awk 'NR > 1 {n++} END {print n+0}')

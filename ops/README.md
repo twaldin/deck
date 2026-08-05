@@ -27,8 +27,19 @@ The installer:
 - creates `~/.deck/logs` with mode `0700`;
 - copies available units to `~/Library/LaunchAgents`;
 - runs `launchctl bootstrap gui/$(id -u) <plist>`, falling back to `launchctl load -w <plist>` on older launchctl behavior;
-- leaves an already loaded service running and reports its status;
-- skips a unit with a warning when its `~/dev/deck/<daemon>/src/main.ts` entrypoint is missing.
+- refuses to replace a changed plist for a loaded, running service unless the operator passes `--force-service` with `--yes`;
+- does not restart an unchanged loaded service;
+- only runs from the primary checkout. It refuses linked worktrees and a `DECK_ROOT` that differs from the installer checkout;
+- skips a unit with a warning when its `<checkout>/<daemon>/src/main.ts` entrypoint is missing.
+
+To deliberately restart a live service after a plist change:
+
+```sh
+cd ~/dev/deck
+./ops/install.sh --yes --force-service
+```
+
+The installer stops the broker and waits for both port 8377 and `~/.deck/run/broker.sock` to be free before it starts the replacement.
 
 `RunAtLoad` starts each installed daemon. `KeepAlive` restarts it after an exit, with launchd throttling restarts to one attempt every five seconds.
 
@@ -43,6 +54,9 @@ launchctl print gui/$(id -u)/ai.deck.broker
 Both stdout and stderr go to one file per daemon:
 
 - broker: `~/.deck/logs/broker.log`
+- resource monitor: `~/.deck/logs/resource-monitor.log`
+
+Resource metrics append to `~/.deck/data/resource-monitor/metrics.log`. An older file at `~/.deck/data/resource-monitor` moves to `.legacy` before the directory is created.
 
 Follow them with:
 
