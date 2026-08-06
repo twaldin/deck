@@ -604,6 +604,7 @@ const RETRYABLE_MERGE_CI = new Set<CiClassification>([
 	"RUNNING",
 	"STARTING",
 	"RUNNER_QUEUED",
+	"MERGEABILITY_STALE",
 ]);
 
 export interface MergeSafetyAssessment {
@@ -637,6 +638,14 @@ export function assessMergeSafety(
 			retryable: false,
 			ciClassification: ci.classification,
 			reason: `PR ${snapshot.mergeable}/${snapshot.mergeStateStatus} has a merge conflict.`,
+		};
+	}
+	if (snapshot.mergeable === "UNKNOWN") {
+		return {
+			ok: false,
+			retryable: true,
+			ciClassification: "MERGEABILITY_STALE",
+			reason: `GitHub mergeability is still calculating (${snapshot.mergeable}/${snapshot.mergeStateStatus}).`,
 		};
 	}
 	if (ci.classification !== "TERMINAL_SUCCESS" || ci.state !== "green") {

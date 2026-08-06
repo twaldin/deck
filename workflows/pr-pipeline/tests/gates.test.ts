@@ -380,6 +380,11 @@ describe("evaluateWatchExit", () => {
 			ciClassification: "TERMINAL_FAILURE",
 		});
 		expect(assessMergeSafety(snapshot(), "different-head").ok).toBe(false);
+		expect(assessMergeSafety(snapshot({ mergeable: "UNKNOWN" }), "abc123")).toMatchObject({
+			ok: false,
+			retryable: true,
+			ciClassification: "MERGEABILITY_STALE",
+		});
 		expect(assessMergeSafety(snapshot({ mergeable: "CONFLICTING" }), "abc123").ok).toBe(false);
 	});
 	test("UNKNOWN GitHub mergeability is stale metadata, not a rebase trigger", () => {
