@@ -1,6 +1,6 @@
 import type { Api, AuthStorage, Model } from "@oh-my-pi/pi-ai";
 import { startAuthGateway, type ModelResolver } from "@oh-my-pi/pi-ai/auth-gateway";
-import type { FastUsageMonitor } from "./fast-usage";
+import { fastCreditMultiplier, type FastUsageMonitor } from "./fast-usage";
 
 const FAST_SUFFIX = ":fast";
 
@@ -9,15 +9,14 @@ export function parseFastModel(modelId: string, resolveModel: ModelResolver): { 
 	const baseId = modelId.slice(0, -FAST_SUFFIX.length);
 	const resolverId = baseId.startsWith("deck/") ? baseId.slice("deck/".length) : baseId;
 	const model = resolveModel(resolverId);
-	if (!model || !isOpenAIModel(model)) {
-		throw new Error(`:fast is supported only for OpenAI models (received ${JSON.stringify(modelId)})`);
+	if (!model || fastCreditMultiplier(model.provider, model.id) === undefined) {
+		throw new Error(
+			`:fast requires a ChatGPT OAuth model in the GPT-5.4, GPT-5.5, or GPT-5.6 family (received ${JSON.stringify(modelId)})`,
+		);
 	}
 	return { modelId: resolverId, serviceTier: "priority" };
 }
 
-function isOpenAIModel(model: Model<Api>): boolean {
-	return model.provider === "openai" || model.provider === "openai-codex";
-}
 
 
 export const ARTIFACT_REQUEST_ID_HEADER = "x-deck-artifact-request-id";

@@ -47,6 +47,19 @@ describe("fast usage attribution", () => {
 		})).toEqual({ inputTokens: 200, outputTokens: 30, cacheReadTokens: 50, cacheWriteTokens: 0 });
 	});
 
+	test("extracts nested Responses usage and normalizes disjoint cache counters", () => {
+		expect(extractTokenUsage({
+			type: "response.completed",
+			response: { usage: { input_tokens: 200, output_tokens: 30, input_tokens_details: { cached_tokens: 50 } } },
+		})).toEqual({ inputTokens: 200, outputTokens: 30, cacheReadTokens: 50, cacheWriteTokens: 0 });
+		expect(extractTokenUsage({
+			usage: { input_tokens: 100, output_tokens: 20, cache_read_input_tokens: 40, cache_creation_input_tokens: 10 },
+		})).toEqual({ inputTokens: 150, outputTokens: 20, cacheReadTokens: 40, cacheWriteTokens: 10 });
+		expect(extractTokenUsage({
+			message: { usage: { input: 100, output: 20, cacheRead: 40, cacheWrite: 10 } },
+		})).toEqual({ inputTokens: 150, outputTokens: 20, cacheReadTokens: 40, cacheWriteTokens: 10 });
+	});
+
 	test("computes a trailing seven-day standard-cost-weighted share and warning", () => {
 		const now = Date.parse("2026-08-06T12:00:00.000Z");
 		const summary = summarizeFastUsage([
@@ -111,10 +124,20 @@ describe("fast usage attribution", () => {
 			expires: Date.now() + 60_000,
 			accountId: "acct-fast-test",
 		});
+		const allRows = store.upsertAuthCredentialForProvider("openai-codex", {
+			type: "oauth",
+			access: "other-access-token",
+			refresh: "other-refresh-token",
+			expires: Date.now() + 60_000,
+			accountId: "acct-other-test",
+		});
 		await storage.reload();
 		const credential = rows.find(row => row.credential.type === "oauth");
-		if (credential === undefined) throw new Error("failed to seed OAuth credential");
-		expect(storage.pinSessionOAuthAccount("openai-codex", "fast-session", credential.id)).toBe(true);
+		const otherCredential = allRows.find(row =>
+			row.credential.type === "oauth" && row.credential.accountId === "acct-other-test",
+		);
+		if (credential === undefined || otherCredential === undefined) throw new Error("failed to seed OAuth credentials");
+		expect(storage.pinSessionOAuthAccount("openai-codex", "fast-session", otherCredential.id)).toBe(true);
 
 		const models = buildModelIndex();
 		const now = Date.parse("2026-08-06T12:00:00.000Z");
@@ -123,6 +146,7 @@ describe("fast usage attribution", () => {
 			provider: "openai-codex",
 			model: "gpt-5.6-sol",
 			sessionId: "fast-session",
+			credentialId: credential.id,
 			requestedServiceTier: "priority",
 		}, { inputTokens: 1_000, outputTokens: 100, cacheReadTokens: 0, cacheWriteTokens: 0 })).toBe(true);
 
@@ -135,5 +159,16 @@ describe("fast usage attribution", () => {
 		});
 		expect(entries[0]!.costUsd).toBeGreaterThan(0);
 		expect(monitor.summary()).toMatchObject({ fastFraction: 1, fastRequests: 1, totalRequests: 1, exceedsTarget: true });
+
+		expect(storage.pinSessionOAuthAccount("openai-codex", "reference-session", credential.id)).toBe(true);
+		expect(storage.recordUsageCost("openai-codex", 1, {
+			sessionId: "reference-session",
+			recordedAt: now + 1,
+			model: "gpt-5.6-sol",
+			serviceTier: "default",
+		})).toBe(true);
+		const compared = storage.listUsageCosts({ sinceMs: now - 1 });
+		expect(compared).toHaveLength(2);
+		expect(compared[0]?.accountKey).toBe(compared[1]?.accountKey);
 	});
 });

@@ -23,6 +23,7 @@ export interface FastUsageAttribution {
 	provider: string;
 	model: string;
 	sessionId?: string;
+	credentialId?: number;
 	requestedServiceTier?: string;
 }
 
@@ -45,6 +46,7 @@ interface FastUsageStorage {
 		options?: {
 			sessionId?: string;
 			recordedAt?: number;
+			credentialId?: number;
 			baseUrl?: string;
 			model?: string;
 			serviceTier?: AttributedServiceTier;
@@ -77,21 +79,32 @@ export function extractTokenUsage(payload: unknown): TokenUsage | undefined {
 	if (root === undefined) return undefined;
 	const message = object(root.message);
 	const data = object(root.data);
-	const usage = object(root.usage) ?? object(message?.usage) ?? object(data?.usage);
+	const response = object(root.response) ?? object(data?.response);
+	const usage = object(root.usage) ?? object(message?.usage) ?? object(data?.usage) ?? object(response?.usage);
 	if (usage === undefined) return undefined;
 
 	const promptDetails = object(usage.prompt_tokens_details);
 	const inputDetails = object(usage.input_tokens_details);
-	const inputTokens = tokenCount(usage, "input_tokens", "prompt_tokens", "inputTokens", "input") ?? 0;
-	const outputTokens = tokenCount(usage, "output_tokens", "completion_tokens", "outputTokens", "output") ?? 0;
+	const anthropicCacheRead = tokenCount(usage, "cache_read_input_tokens");
+	const anthropicCacheWrite = tokenCount(usage, "cache_creation_input_tokens");
 	const cacheReadTokens = tokenCount(usage, "cache_read_tokens", "cacheReadTokens", "cacheRead")
+		?? anthropicCacheRead
 		?? tokenCount(promptDetails ?? {}, "cached_tokens")
 		?? tokenCount(inputDetails ?? {}, "cached_tokens")
 		?? 0;
 	const cacheWriteTokens = tokenCount(usage, "cache_write_tokens", "cacheWriteTokens", "cacheWrite")
+		?? anthropicCacheWrite
 		?? tokenCount(promptDetails ?? {}, "cache_write_tokens")
 		?? tokenCount(inputDetails ?? {}, "cache_write_tokens")
 		?? 0;
+	const wireInputTokens = tokenCount(usage, "input_tokens", "prompt_tokens");
+	const normalizedInputTokens = tokenCount(usage, "inputTokens", "input");
+	const disjointInput = normalizedInputTokens !== undefined
+		|| anthropicCacheRead !== undefined
+		|| anthropicCacheWrite !== undefined;
+	const inputTokens = (wireInputTokens ?? normalizedInputTokens ?? 0)
+		+ (disjointInput ? cacheReadTokens + cacheWriteTokens : 0);
+	const outputTokens = tokenCount(usage, "output_tokens", "completion_tokens", "outputTokens", "output") ?? 0;
 	if (inputTokens === 0 && outputTokens === 0 && cacheReadTokens === 0 && cacheWriteTokens === 0) return undefined;
 	return { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens };
 }
@@ -190,6 +203,7 @@ export class FastUsageMonitor {
 			? "priority"
 			: "default";
 		return this.storage.recordUsageCost(attribution.provider as Provider, costUsd, {
+			credentialId: attribution.credentialId,
 			sessionId: attribution.sessionId,
 			recordedAt: this.now(),
 			model: modelId,

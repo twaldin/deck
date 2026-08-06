@@ -426,6 +426,7 @@ export function startValidatedGateway(
 					fastUsageAttribution = {
 						provider: artifactRoute?.authProvider ?? effectiveModelParts.at(-2) ?? requested.provider,
 						model: effectiveModelParts.at(-1) ?? effectiveModel,
+						credentialId: artifactRoute?.credentialId,
 						sessionId: artifactRoute?.sessionId
 							?? (typeof effectiveOptions.sessionId === "string" ? effectiveOptions.sessionId : undefined),
 						requestedServiceTier: typeof effectiveOptions.serviceTier === "string"
@@ -575,6 +576,7 @@ export function startValidatedGateway(
 								?? usageModelParts.at(-2)
 								?? (usageModel.startsWith("claude-") ? "anthropic" : usageModel.startsWith("grok-") ? "xai" : "openai-codex"),
 							model: usageModel,
+							credentialId: artifactRoute?.credentialId,
 							sessionId: artifactRoute?.sessionId ?? body.prompt_cache_key,
 							requestedServiceTier: body.service_tier ?? (usageModel.endsWith(":fast") ? "priority" : undefined),
 						};

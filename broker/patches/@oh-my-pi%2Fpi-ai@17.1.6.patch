@@ -1,12 +1,18 @@
+diff --git a/node_modules/@oh-my-pi/pi-ai/.bun-tag-a4801a0d4094ec35 b/.bun-tag-a4801a0d4094ec35
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/node_modules/@oh-my-pi/pi-ai/.bun-tag-cefee13a3ece00c2 b/.bun-tag-cefee13a3ece00c2
 new file mode 100644
 index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/dist/types/auth-storage.d.ts b/dist/types/auth-storage.d.ts
-index 1eb5bd8a5bc18f14c95ac819c5af566fa42f7886..ccb57c8c7bcb46cfb38e69e36d5809d92aa6149c 100644
+index 1eb5bd8a5bc18f14c95ac819c5af566fa42f7886..2469787707c0e583bcd55eff7f6aa93d9e945d3c 100644
 --- a/dist/types/auth-storage.d.ts
 +++ b/dist/types/auth-storage.d.ts
-@@ -883,7 +883,11 @@ export declare class AuthStorage {
+@@ -881,9 +881,14 @@ export declare class AuthStorage {
+     /** Record one observed provider request cost for later local usage aggregation. */
+     recordUsageCost(provider: Provider, costUsd: number, options?: {
          sessionId?: string;
++        credentialId?: number;
          recordedAt?: number;
          baseUrl?: string;
 +        model?: string;
@@ -36,16 +42,17 @@ index f5a8743f82daf94cc4d0f4cc1bd926830ef94b56..68421a93623224b356dc6adae4d70587
  /** Filter for reading observed request costs. */
  export interface UsageCostHistoryQuery {
 diff --git a/src/auth-storage.ts b/src/auth-storage.ts
-index 51b9f25ac19c50d380ef3ce6a3ceb20f926d6c12..e096739aa52434796d224b2d7b5dbd2c845de62d 100644
+index 51b9f25ac19c50d380ef3ce6a3ceb20f926d6c12..1ab9122c3e832d639ad63ecfd8e3c710ef9554b0 100644
 --- a/src/auth-storage.ts
 +++ b/src/auth-storage.ts
-@@ -3184,7 +3184,13 @@ export class AuthStorage {
+@@ -3184,18 +3184,27 @@ export class AuthStorage {
  	recordUsageCost(
  		provider: Provider,
  		costUsd: number,
 -		options?: { sessionId?: string; recordedAt?: number; baseUrl?: string },
 +		options?: {
 +			sessionId?: string;
++			credentialId?: number;
 +			recordedAt?: number;
 +			baseUrl?: string;
 +			model?: string;
@@ -54,7 +61,12 @@ index 51b9f25ac19c50d380ef3ce6a3ceb20f926d6c12..e096739aa52434796d224b2d7b5dbd2c
  	): boolean {
  		if (!Number.isFinite(costUsd) || costUsd <= 0) return false;
  		const record = this.#store.recordUsageCosts;
-@@ -3196,6 +3202,8 @@ export class AuthStorage {
+ 		if (!record) return false;
+-		const credential = this.#resolveObservedUsageCredential(provider, options?.sessionId);
++		const credential = this.#resolveObservedUsageCredential(provider, options?.sessionId, options?.credentialId);
+ 		if (!credential) return false;
+ 		const entry: UsageCostHistoryEntry = {
+ 			recordedAt: options?.recordedAt ?? Date.now(),
  			provider,
  			accountKey: this.#buildUsageCacheIdentity(credential),
  			costUsd,
@@ -63,7 +75,7 @@ index 51b9f25ac19c50d380ef3ce6a3ceb20f926d6c12..e096739aa52434796d224b2d7b5dbd2c
  		};
  		try {
  			record.call(this.#store, [entry]);
-@@ -3216,6 +3224,11 @@ export class AuthStorage {
+@@ -3216,6 +3225,11 @@ export class AuthStorage {
  		}
  	}
  
@@ -75,7 +87,24 @@ index 51b9f25ac19c50d380ef3ce6a3ceb20f926d6c12..e096739aa52434796d224b2d7b5dbd2c
  	/**
  	 * Forward one completed request's usage to the store's observer hook.
  	 * Broker-backed stores batch these into per-install reports so the broker
-@@ -6781,10 +6794,10 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
+@@ -3266,8 +3280,15 @@ export class AuthStorage {
+ 		return this.#store.getClientUsageSummary?.(sinceMs) ?? { clients: [] };
+ 	}
+ 
+-	#resolveObservedUsageCredential(provider: Provider, sessionId?: string): UsageCredential | undefined {
++	#resolveObservedUsageCredential(provider: Provider, sessionId?: string, credentialId?: number): UsageCredential | undefined {
+ 		const entries = this.#getStoredCredentials(provider);
++		if (credentialId !== undefined) {
++			const explicit = entries.find(entry => entry.id === credentialId)?.credential;
++			if (explicit === undefined) return undefined;
++			return explicit.type === "api_key"
++				? { type: "api_key", apiKey: explicit.key }
++				: this.#buildUsageCredential(explicit);
++		}
+ 		const sessionCredential = this.#getSessionCredential(provider, sessionId);
+ 		if (sessionCredential) {
+ 			const credential = entries[sessionCredential.index]?.credential;
+@@ -6781,10 +6802,10 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
  			"SELECT recorded_at, provider, account_key, email, account_id, limit_id, label, window_label, used_fraction, status, resets_at FROM usage_history WHERE recorded_at >= ? AND (? IS NULL OR provider = ?) ORDER BY recorded_at ASC",
  		);
  		this.#insertUsageCostStmt = this.#db.prepare(
@@ -88,7 +117,7 @@ index 51b9f25ac19c50d380ef3ce6a3ceb20f926d6c12..e096739aa52434796d224b2d7b5dbd2c
  		);
  	}
  
-@@ -6884,7 +6897,9 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
+@@ -6884,7 +6905,9 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
  				recorded_at INTEGER NOT NULL,
  				provider TEXT NOT NULL,
  				account_key TEXT NOT NULL,
@@ -99,7 +128,7 @@ index 51b9f25ac19c50d380ef3ce6a3ceb20f926d6c12..e096739aa52434796d224b2d7b5dbd2c
  			);
  			CREATE INDEX IF NOT EXISTS idx_usage_cost_history_lookup ON usage_cost_history(provider, account_key, recorded_at);
  			CREATE INDEX IF NOT EXISTS idx_usage_history_recorded ON usage_history(recorded_at);
-@@ -6911,6 +6926,19 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
+@@ -6911,6 +6934,19 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
  			CREATE INDEX IF NOT EXISTS idx_client_usage_recorded ON client_usage(recorded_at);
  		`);
  
@@ -119,7 +148,7 @@ index 51b9f25ac19c50d380ef3ce6a3ceb20f926d6c12..e096739aa52434796d224b2d7b5dbd2c
  		if (!this.#authCredentialsTableExists()) {
  			this.#createAuthCredentialsTable();
  			this.#createAuthCredentialBlocksTable();
-@@ -7686,7 +7714,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
+@@ -7686,7 +7722,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
  	recordUsageCosts(entries: UsageCostHistoryEntry[]): void {
  		try {
  			for (const entry of entries) {
@@ -128,7 +157,7 @@ index 51b9f25ac19c50d380ef3ce6a3ceb20f926d6c12..e096739aa52434796d224b2d7b5dbd2c
  			}
  		} catch {
  			// Cost history is best-effort; never break request persistence.
-@@ -7708,12 +7736,16 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
+@@ -7708,12 +7744,16 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
  				provider: string;
  				account_key: string;
  				cost_usd: number;

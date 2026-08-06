@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
 import { buildModelIndex, DEFAULT_ALLOWLIST } from "../src/models";
+import type { FastUsageMonitor } from "../src/fast-usage";
 import { startFastGateway } from "../src/fast-gateway";
 import { startValidatedGateway } from "../src/validated-gateway";
 
@@ -47,6 +48,22 @@ describe("fast gateway proxy", () => {
 
 		expect(response.status).toBe(200);
 		expect(received).toMatchObject({ model: "openai-codex/gpt-5.6-luna", service_tier: "priority" });
+
+		const rejected = await fetch(`${gateway.url}/v1/chat/completions`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ model: "openai-codex/gpt-5.4-mini:fast", messages: [] }),
+		});
+		expect(rejected.status).toBe(400);
+		expect(await rejected.text()).toContain("GPT-5.4, GPT-5.5, or GPT-5.6");
+
+		const standard = await fetch(`${gateway.url}/v1/chat/completions`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ model: "openai-codex/gpt-5.4-mini", messages: [] }),
+		});
+		expect(standard.status).toBe(200);
+		expect(received).toEqual({ model: "openai-codex/gpt-5.4-mini", messages: [] });
 	});
 
 	test("preserves priority through validated routing and account rotation", async () => {
@@ -71,6 +88,7 @@ describe("fast gateway proxy", () => {
 		};
 		const index = buildModelIndex(DEFAULT_ALLOWLIST);
 		const pins: number[] = [];
+		const usageCredentialIds: number[] = [];
 		let rotated = false;
 		const gateway = startValidatedGateway({
 			bind: "127.0.0.1:0",
@@ -95,6 +113,12 @@ describe("fast gateway proxy", () => {
 				},
 			} as AuthStorage,
 			upstream,
+			fastUsageMonitor: {
+				record(attribution: { credentialId?: number }) {
+					if (attribution.credentialId !== undefined) usageCredentialIds.push(attribution.credentialId);
+					return true;
+				},
+			} as unknown as FastUsageMonitor,
 		});
 		resources.push(gateway);
 
@@ -117,6 +141,7 @@ describe("fast gateway proxy", () => {
 		expect(received).toHaveLength(2);
 		expect(received[0]).toMatchObject({ model: "openai-codex/gpt-5.6-sol", service_tier: "priority" });
 		expect(received[1]).toMatchObject({ model: "openai-codex/gpt-5.6-sol", service_tier: "priority" });
+		expect(usageCredentialIds).toEqual([1, 2]);
 	});
 
 	test("forwards bodies for unmatched POST routes", async () => {
