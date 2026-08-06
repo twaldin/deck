@@ -294,7 +294,10 @@ export function classifyCiEvidence(
 	}
 	if (observedRequired.some((observed) =>
 		observed.kind === "check"
-			? ["pending", "queued", "waiting"].includes(observed.check.status)
+			? (
+				observed.check.status !== "completed"
+				&& ACTIVE_RUN_STATUSES[observed.check.status.toLowerCase()] === true
+			)
 			: observed.status.state.toLowerCase() === "pending"
 	)) {
 		return ciAssessment(

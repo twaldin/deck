@@ -905,6 +905,18 @@ describe("evaluateWatchExit", () => {
 		expect(classifyCiEvidence(snapshot({ checkRuns: [], ciEvidence: baseEvidence })).classification)
 			.toBe("RUNNER_QUEUED");
 		expect(classifyCiEvidence(snapshot({
+			checkRuns: [{
+				id: 77,
+				name: "required / ci",
+				status: "requested",
+				conclusion: null,
+				headSha: "abc123",
+				appId: 44,
+				checkSuiteId: 22,
+			}],
+			ciEvidence: baseEvidence,
+		})).classification).toBe("RUNNER_QUEUED");
+		expect(classifyCiEvidence(snapshot({
 			checkRuns: [],
 			ciEvidence: {
 				...baseEvidence,
