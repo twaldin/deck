@@ -1100,7 +1100,7 @@ describe("watch helpers", () => {
 		expect(reviewersNeedingReRequest(reviewers, ["requested"], lastPush, ["me"])).toEqual(["stale"]);
 	});
 
-	test("never re-requests reviewers with an existing decision", () => {
+	test("re-requests stale approvals and changes requests but not inert comments", () => {
 		const lastPush = "2026-07-27T10:00:00Z";
 		const reviewers = [
 			{ login: "approved", isBot: false, lastActivityAt: "2026-07-27T09:00:00Z", lastReviewState: "APPROVED" },
@@ -1108,7 +1108,31 @@ describe("watch helpers", () => {
 			{ login: "changes", isBot: false, lastActivityAt: "2026-07-27T09:00:00Z", lastReviewState: "CHANGES_REQUESTED" },
 			{ login: "silent", isBot: false, lastActivityAt: "2026-07-27T09:00:00Z", lastReviewState: null },
 		];
-		expect(reviewersNeedingReRequest(reviewers, [], lastPush)).toEqual(["changes", "silent"]);
+		expect(reviewersNeedingReRequest(reviewers, [], lastPush)).toEqual(["approved", "changes", "silent"]);
+	});
+
+	test("re-requests a human whose approval belongs to the previous head", () => {
+		const lastPush = "2026-07-27T10:00:00Z";
+		const reviewers = [
+			{
+				login: "stale-approval",
+				isBot: false,
+				lastActivityAt: "2026-07-27T09:00:00Z",
+				lastReviewState: "APPROVED",
+				headSha: "previous",
+			},
+			{
+				login: "current-approval",
+				isBot: false,
+				lastActivityAt: "2026-07-27T09:00:00Z",
+				lastReviewState: "APPROVED",
+				headSha: "current",
+			},
+		];
+		expect(reviewersNeedingReRequest(reviewers, [], lastPush, [], "current")).toEqual([
+			"stale-approval",
+		]);
+		expect(reviewersNeedingReRequest(reviewers, ["stale-approval"], lastPush, [], "current")).toEqual([]);
 	});
 
 	test("unansweredComments counts only others' comments newer than our latest activity", () => {
