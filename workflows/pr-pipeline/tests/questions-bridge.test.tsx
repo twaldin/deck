@@ -12,7 +12,6 @@ import {
 	workflowQuestionId,
 } from "../../../v2/src/questions-store.ts";
 import pipeline from "../pipeline.tsx";
-import { parseDecisionClassBlocker } from "../lib/watch.ts";
 import type { PipelineOutputFixtures } from "./output-fixtures.ts";
 
 const validBrief = {
@@ -33,6 +32,11 @@ const baseInput = {
 	brief: validBrief,
 	dryRun: false,
 	wakeDryRun: true,
+	github: {
+		git: "git",
+		gh: "gh",
+		reviewPolicy: { requireHuman: true, requiredBots: [] },
+	},
 };
 
 const originalQueueFile = process.env.DECK_QUESTIONS_FILE;
@@ -257,7 +261,7 @@ describe("pipeline question bridge", () => {
 		expect(workflowQuestions(file, "run-fallout", "fallout-escalation")[0]?.status).toBe("answered");
 	});
 
-	test("watch decision blockers are keyed by thread and hydrate the next fixer", async () => {
+	test("watch DECISION routes are durably keyed by trigger and never duplicate", async () => {
 		const file = freshQueue();
 		const outputs = approvalReadyOutputs();
 		outputs.readyPoll = [];
@@ -271,22 +275,34 @@ describe("pipeline question bridge", () => {
 			actionable: true,
 			ci: "green",
 			unresolvedThreads: 1,
-			unansweredComments: 0,
+			unansweredComments: 1,
 			reviewersToReRequest: [],
-			reasons: ["one unresolved review thread"],
+			reasons: ["new human review item"],
 			rebaseRequired: false,
+			triggers: [{
+				id: "comment:thread-9",
+				kind: "human_comment",
+				headSha: "abc123",
+				summary: "human review comment",
+				payload: { threadId: "thread-9" },
+			}],
 		}];
 		outputs.watchFix = [{
 			nodeId: "r0-watch-fix",
 			round: 0,
 			afterPoll: 0,
-			actions: [
-				"DECISION-CLASS BLOCKER: thread=https://github.com/lindy-ai/lindy/pull/42#discussion_r9 | decision=Should the API preserve the old default?",
-			],
+			actions: ["routed product decision"],
 			commits: [],
 			pushed: false,
 			reRequested: [],
-			summary: "captain decision required",
+			summary: "captain decision queued without blocking other work",
+			routes: [{
+				triggerId: "comment:thread-9",
+				outcome: "DECISION",
+				rationale: "Compatibility is a product choice.",
+				question: "Should the API preserve the old default?",
+			}],
+			handledTriggerIds: ["comment:thread-9"],
 		}];
 		await render("run-watch", outputs);
 		await render("run-watch", outputs);
@@ -295,29 +311,15 @@ describe("pipeline question bridge", () => {
 			workflow: {
 				runId: "run-watch",
 				nodeId: "r0-watch-fix",
-				decisionKey: "https://github.com/lindy-ai/lindy/pull/42#discussion_r9",
+				decisionKey: "comment:thread-9",
 				answerLane: "store",
+				originalIssue: "Should the API preserve the old default?",
 			},
 		});
 		expect(fs.readFileSync(file, "utf8").trim().split("\n")).toHaveLength(1);
-		answer(file, question!.id, "Preserve the old default for existing callers.");
-
-		outputs.watchPoll = [{ ...outputs.watchPoll[0]!, poll: 1 }];
-		outputs.watchBaseline = [{
-			nodeId: "r0-watch-baseline",
-			round: 0,
-			afterPoll: 1,
-			headSha: "abc123",
-			valid: true,
-			reason: "test baseline",
-		}];
-		const hydrated = await render("run-watch", outputs);
-		const fixer = hydrated.tasks.find((task) => task.nodeId === "r0-watch-fix");
-		expect(fixer?.prompt).toContain('"captainDecisionAnswers"');
-		expect(fixer?.prompt).toContain("Preserve the old default for existing callers.");
 	});
 
-	test("watch questions are dismissed when the fixer no longer reports the blocker", async () => {
+	test("DECISION questions remain queued when later watch work continues", async () => {
 		const file = freshQueue();
 		const outputs = approvalReadyOutputs();
 		outputs.readyPoll = [];
@@ -331,20 +333,34 @@ describe("pipeline question bridge", () => {
 			actionable: true,
 			ci: "green",
 			unresolvedThreads: 1,
-			unansweredComments: 0,
+			unansweredComments: 1,
 			reviewersToReRequest: [],
-			reasons: ["one unresolved review thread"],
+			reasons: ["new review decision"],
 			rebaseRequired: false,
+			triggers: [{
+				id: "comment:thread-1",
+				kind: "human_comment",
+				headSha: "abc123",
+				summary: "human review comment",
+				payload: {},
+			}],
 		}];
 		outputs.watchFix = [{
 			nodeId: "r0-watch-fix",
 			round: 0,
 			afterPoll: 0,
-			actions: ["DECISION-CLASS BLOCKER: thread=thread-1 | decision=Choose compatibility behavior"],
+			actions: ["queued decision"],
 			commits: [],
 			pushed: false,
 			reRequested: [],
 			summary: "captain decision required",
+			routes: [{
+				triggerId: "comment:thread-1",
+				outcome: "DECISION",
+				rationale: "Compatibility behavior needs a product decision.",
+				question: "Choose compatibility behavior.",
+			}],
+			handledTriggerIds: ["comment:thread-1"],
 		}];
 		await render("run-watch-cleared", outputs);
 		expect(openQuestions(file)).toHaveLength(1);
@@ -353,21 +369,38 @@ describe("pipeline question bridge", () => {
 		outputs.watchFix = [{
 			...outputs.watchFix[0]!,
 			afterPoll: 1,
-			actions: ["review thread resolved without a product decision"],
-			summary: "blocker no longer present",
+			actions: ["continued other work"],
+			routes: [],
+			summary: "other watch work continued",
 		}];
 		await render("run-watch-cleared", outputs);
-		expect(openQuestions(file)).toEqual([]);
-		expect(workflowQuestions(file, "run-watch-cleared", "r0-watch-fix")[0]).toMatchObject({
-			status: "dismissed",
-			answer: "The watch fixer no longer reports this decision-class blocker.",
-		});
+		expect(openQuestions(file)).toHaveLength(1);
+		expect(workflowQuestions(file, "run-watch-cleared", "r0-watch-fix")[0]?.status).toBe("open");
 	});
 
-	test("parses only the exact decision-class blocker contract", () => {
-		expect(parseDecisionClassBlocker(
-			"DECISION-CLASS BLOCKER: thread=thread-1 | decision=Choose A or B",
-		)).toEqual({ threadRef: "thread-1", decision: "Choose A or B" });
-		expect(parseDecisionClassBlocker("DECISION-CLASS BLOCKER: choose A or B")).toBeNull();
+	test("NOT_VALID routes also tell the captain without blocking publication", async () => {
+		const file = freshQueue();
+		const outputs = approvalReadyOutputs();
+		outputs.watchFix = [{
+			nodeId: "r0-watch-fix",
+			round: 0,
+			afterPoll: 0,
+			actions: ["explained invalid suggestion"],
+			commits: [],
+			pushed: false,
+			reRequested: [],
+			summary: "invalid suggestion answered",
+			routes: [{
+				triggerId: "comment:invalid",
+				outcome: "NOT_VALID",
+				rationale: "The suggestion assumes a path the code never takes.",
+				replyBody: "This does not apply because that path is unreachable.",
+			}],
+			handledTriggerIds: ["comment:invalid"],
+		}];
+		await render("run-watch-not-valid", outputs);
+		expect(openQuestions(file)[0]).toMatchObject({
+			workflow: { decisionKey: "comment:invalid" },
+		});
 	});
 });

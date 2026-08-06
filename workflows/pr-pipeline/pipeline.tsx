@@ -71,12 +71,12 @@ import {
 	fetchCodeowners,
 	fetchHeadSha,
 	fetchBaseCommitSubjects,
-	fetchBranchCheckRuns,
 	fetchPrLifecycle,
-	fetchPrApprovalsAndCi,
 	fetchPrOverview,
 	fetchRecentAuthors,
 	fetchRequestedReviewers,
+	postComment,
+	postReviewReply,
 	fetchWatchSnapshot,
 	isCollaborator,
 	requestReviewers,
@@ -122,10 +122,13 @@ import {
 	localReviewPrompt,
 	watchFixPrompt,
 } from "./lib/prompts.ts";
-import { evaluateReadyForStamp } from "./lib/ready.ts";
 import { executeReviewerRequest } from "./lib/reviewers.ts";
-import { assessCi, evaluateWatchExit, parseDecisionClassBlocker } from "./lib/watch.ts";
-import { rebaseAndPush } from "./lib/rebase.ts";
+import { assessMergeSafety, evaluateWatchExit, observeHeadAge } from "./lib/watch.ts";
+import {
+	RebaseDecisionRequired,
+	rebaseAndPushAgentic,
+	wakeRebaseConflictSeat,
+} from "./lib/rebase.ts";
 import type { Brief, MigrationEvidenceEntry } from "./lib/types.ts";
 import { claimMainFailure, publishWakeProducer, releaseMainFailure } from "../../v2/src/wake-producers.ts";
 import { smithersWorkspaceCwd } from "../../v2/src/workspace.ts";
@@ -182,7 +185,6 @@ export const DEFAULT_GITHUB = {
 };
 
 const DEFAULT_COMMANDS = {
-	merge: "gt merge",
 	deployEvidence: undefined as string | undefined,
 	migrationStgRun: undefined as string | undefined,
 	migrationStgVerify: undefined as string | undefined,
@@ -228,11 +230,46 @@ const stackCarRecordSchema = z.object({
 	landed: z.boolean(),
 });
 
+const requiredBotReviewerSchema = z.object({
+	login: z.string().min(1),
+	approvalCommentPattern: z.string().min(1).optional(),
+	approvalCheckPattern: z.string().min(1).optional(),
+});
+
+const reviewPolicySchema = z.object({
+	requireHuman: z.boolean(),
+	requiredBots: z.array(requiredBotReviewerSchema),
+});
+
+const watchTriggerSchema = z.object({
+	id: z.string().min(1),
+	kind: z.enum(["failed_ci", "merge_conflict", "human_comment", "bot_comment"]),
+	headSha: z.string().min(1),
+	summary: z.string().min(1),
+	payload: z.record(z.string(), z.unknown()),
+});
+
+const reviewRouteSchema = z.object({
+	triggerId: z.string().min(1),
+	decisionKey: z.string().min(1).optional(),
+	outcome: z.enum(["FIX_NOW", "NOT_VALID", "DECISION"]),
+	rationale: z.string().min(1),
+	replyBody: z.string().min(1).optional(),
+	question: z.string().min(1).optional(),
+});
+
+const infraRetryJobSchema = z.object({
+	runId: z.number().int().positive(),
+	jobId: z.number().int().positive(),
+	reason: z.string().min(1),
+});
+
 const stackWatchCarSchema = z.object({
 	prNumber: z.number().int().positive(),
 	branch: z.string().min(1),
 	baseBranch: z.string().min(1),
 	headSha: z.string(),
+	headObservedAt: z.string().optional(),
 	exitOk: z.boolean(),
 	actionable: z.boolean(),
 	ci: z.string(),
@@ -241,6 +278,12 @@ const stackWatchCarSchema = z.object({
 	reviewersToReRequest: z.array(z.string()),
 	reasons: z.array(z.string()),
 	rebaseRequired: z.boolean(),
+	ciClassification: z.string().optional(),
+	terminalEscalation: z.boolean().optional(),
+	triggers: z.array(watchTriggerSchema).optional(),
+	humanApprovedBy: z.string().nullable().optional(),
+	botApprovedBy: z.array(z.string()).optional(),
+	infraRetryJobs: z.array(infraRetryJobSchema).optional(),
 });
 
 const stackReadyCarSchema = z.object({
@@ -250,6 +293,7 @@ const stackReadyCarSchema = z.object({
 	headSha: z.string(),
 	ready: z.boolean(),
 	approvedBy: z.string().nullable(),
+	botApprovedBy: z.array(z.string()).optional(),
 	ci: z.string(),
 	reasons: z.array(z.string()),
 	migrationFiles: z.array(z.string()),
@@ -278,6 +322,7 @@ const stackQueueCarSchema = z.object({
 	baseBranch: z.string().min(1),
 	autoMergeRequest: z.boolean(),
 	ejected: z.boolean(),
+	requeueRequired: z.boolean().optional(),
 });
 
 const stackLandingCarSchema = z.object({
@@ -364,13 +409,12 @@ export const inputSchema = z.object({
 			excludedApprovers: z.array(z.string()).optional(),
 			reviewerDenylist: z.array(z.string()).optional(),
 			reviewers: z.array(z.string()).optional(),
+			reviewPolicy: reviewPolicySchema,
 			skipReviewerRequest: z.boolean().optional(),
 			maxReviewers: z.number().int().positive().optional(),
-		})
-		.optional(),
+		}),
 	commands: z
 		.object({
-			merge: z.string().optional(),
 			deployEvidence: z.string().optional(),
 			migrationStgRun: z.string().optional(),
 			migrationStgVerify: z.string().optional(),
@@ -484,10 +528,17 @@ export const schemas = {
 		round: z.number().int(),
 		poll: z.number().int(),
 		headSha: z.string(),
+		headObservedAt: z.string().optional(),
 		exitOk: z.boolean(),
-		disposition: z.enum(["complete", "wait", "fix"]),
+		disposition: z.enum(["complete", "wait", "fix", "escalate"]),
 		actionable: z.boolean(),
 		ci: z.string(),
+		ciClassification: z.string().optional(),
+		terminalEscalation: z.boolean().optional(),
+		triggers: z.array(watchTriggerSchema).optional(),
+		humanApprovedBy: z.string().nullable().optional(),
+		botApprovedBy: z.array(z.string()).optional(),
+		infraRetryJobs: z.array(infraRetryJobSchema).optional(),
 		unresolvedThreads: z.number().int(),
 		unansweredComments: z.number().int(),
 		reviewersToReRequest: z.array(z.string()),
@@ -503,6 +554,8 @@ export const schemas = {
 		pushed: z.boolean(),
 		reRequested: z.array(z.string()),
 		summary: z.string(),
+		routes: z.array(reviewRouteSchema).optional(),
+		handledTriggerIds: z.array(z.string().min(1)).optional(),
 	}),
 	watchBaseline: z.object({
 		round: z.number().int(),
@@ -539,6 +592,7 @@ export const schemas = {
 		ready: z.boolean(),
 		regressed: z.boolean(),
 		approvedBy: z.string().nullable(),
+		botApprovedBy: z.array(z.string()).optional(),
 		ci: z.string(),
 		headSha: z.string(),
 		reasons: z.array(z.string()),
@@ -560,6 +614,7 @@ export const schemas = {
 		expectedHead: z.string(),
 		currentHead: z.string(),
 		ok: z.boolean(),
+		retryable: z.boolean().optional(),
 		diffSummary: z.string(),
 		checkedAt: z.string(),
 		submittedAt: z.string().nullable(),
@@ -577,11 +632,14 @@ export const schemas = {
 		cars: z.array(stackMergeCarSchema).optional(),
 	}),
 	queuePoll: z.object({
+		round: z.number().int().optional(),
 		poll: z.number().int(),
 		state: z.enum(["open", "closed"]),
 		baseBranch: z.string().min(1),
 		autoMergeRequest: z.boolean(),
 		ejected: z.boolean(),
+		requeueRequired: z.boolean().optional(),
+		hardInvalidation: z.boolean().optional(),
 		reason: z.string(),
 		cars: z.array(stackQueueCarSchema).optional(),
 	}),
@@ -894,7 +952,7 @@ export default smithers((ctx) => {
 	const bypass = input.bypassApprovals === true;
 	const limits = { ...DEFAULT_LIMITS, ...(input.limits ?? {}) };
 	const fixtures = { ...DEFAULT_FIXTURES, ...(input.fixtures ?? {}) };
-	const github = { ...DEFAULT_GITHUB, ...(input.github ?? {}) };
+	const github = { ...DEFAULT_GITHUB, ...input.github, reviewPolicy: input.github.reviewPolicy };
 	const commands = { ...DEFAULT_COMMANDS, ...(input.commands ?? {}) };
 	const declaredBaseBranch = input.baseBranch ?? "main";
 	const existingPr = input.existingPr ?? undefined;
@@ -1037,11 +1095,33 @@ export default smithers((ctx) => {
 		migrationDetected: boolean;
 		migrationFiles: string[];
 		approvedBy: string | null;
+		botApprovedBy: string[];
 		ci: string;
 		headSha: string;
 		at: string;
 	}>;
-	const watchPollRows = (ctx.outputs.watchPoll ?? []) as Array<{ round: number; poll: number; exitOk: boolean }>;
+	const watchPollRows = (ctx.outputs.watchPoll ?? []) as Array<{
+		round: number;
+		poll: number;
+		exitOk: boolean;
+		infraRetryJobs?: Array<{ runId: number; jobId: number; reason: string }>;
+	}>;
+	const watchFixRows = (ctx.outputs.watchFix ?? []) as Array<{
+		round: number;
+		afterPoll: number;
+		handledTriggerIds?: string[];
+	}>;
+	const mergeWatchOptions = (round: number) => ({
+		selfLogins: github.selfLogins,
+		reviewPolicy: github.reviewPolicy,
+		handledTriggerIds: [
+			...new Set(
+				watchFixRows
+					.filter((row) => row.round === round)
+					.flatMap((row) => row.handledTriggerIds ?? []),
+			),
+		],
+	});
 
 	const roundEnded = (k: number): boolean => {
 		const ready = ctx.latest(outputs.readyPoll, `r${k}-ready-poll`);
@@ -1050,9 +1130,19 @@ export default smithers((ctx) => {
 		if (readyPollRows.some((row) => row.round === k && row.poll === -1)) return true;
 		const validity = ctx.latest(outputs.stampValidity, `r${k}-stamp-validity`);
 		if (validity !== undefined && validity.valid === false) return true;
-		// A failed pre-merge head check also ends the round (TOCTOU guard).
+		// A hard pre-merge invalidation ends the round. Pending exact-head CI is
+		// retryable and keeps the already-valid stamp while the durable loop polls.
 		const headCheck = ctx.latest(outputs.mergeHeadCheck, `r${k}-merge-head-check`);
-		if (headCheck !== undefined && headCheck.ok === false) return true;
+		if (
+			headCheck !== undefined
+			&& headCheck.ok === false
+			&& headCheck.retryable !== true
+		) return true;
+		const queueInvalidated = (ctx.outputs.queuePoll ?? []).some((row) => {
+			const value = row as { round?: number; hardInvalidation?: boolean };
+			return value.round === k && value.hardInvalidation === true;
+		});
+		if (queueInvalidated) return true;
 		return false;
 	};
 
@@ -1097,14 +1187,19 @@ export default smithers((ctx) => {
 
 	// -- merge authorization -----------------------------------------------------
 	// A round authorizes the receipt node only after its approved stamp has
-	// survived the merge attempt's last-instant head comparison. A mismatch is
-	// persisted as ok=false and ends the round before any MQ command runs.
+	// survived the merge attempt's last-instant head and exact-head CI checks.
+	// Retryable pending CI preserves the stamp; hard drift/failure ends the round.
 	const stampedRound = (() => {
 		for (let k = 0; k <= currentRound && k < limits.stampRounds; k++) {
+			if (roundEnded(k)) continue;
 			const stamp = ctx.latest(outputs.approvals, `r${k}-stamp`);
 			const validity = ctx.latest(outputs.stampValidity, `r${k}-stamp-validity`);
 			const headCheck = ctx.latest(outputs.mergeHeadCheck, `r${k}-merge-head-check`);
-			if (stamp?.approved === true && validity?.valid === true && headCheck?.ok !== false) {
+			if (
+				stamp?.approved === true
+				&& validity?.valid === true
+				&& (headCheck?.ok !== false || headCheck.retryable === true)
+			) {
 				return {
 					round: k,
 					headSha: validity.stampedHead,
@@ -1130,21 +1225,40 @@ export default smithers((ctx) => {
 				}
 			: null;
 
-	const mergeReceipt = ctx.latest(outputs.mergeReceipt, "enqueue-merge");
-	const latestQueue = ctx.latest(outputs.queuePoll, "queue-poll");
-	const queueRows = (ctx.outputs.queuePoll ?? []) as Array<{
+	const recordedMergeReceipt = ctx.latest(outputs.mergeReceipt, "enqueue-merge");
+	const allQueueRows = (ctx.outputs.queuePoll ?? []) as Array<{
+		round?: number;
 		poll: number;
 		state: string;
 		baseBranch: string;
 		autoMergeRequest: boolean;
 		ejected: boolean;
+		requeueRequired?: boolean;
+		hardInvalidation?: boolean;
 		cars?: Array<{
 			prNumber: number;
+			merged: boolean;
 			state: "open" | "closed";
+			baseBranch: string;
 			autoMergeRequest: boolean;
 			ejected: boolean;
+			requeueRequired?: boolean;
 		}>;
 	}>;
+	const invalidatedReceipt =
+		recordedMergeReceipt !== undefined
+		&& allQueueRows.some(
+			(row) =>
+				row.round === recordedMergeReceipt.round
+				&& row.hardInvalidation === true,
+		);
+	const mergeReceipt = invalidatedReceipt ? undefined : recordedMergeReceipt;
+	const queueRows = mergeReceipt === undefined
+		? []
+		: allQueueRows.filter(
+				(row) => row.round === undefined || row.round === mergeReceipt.round,
+			);
+	const latestQueue = queueRows.at(-1);
 	const latestLanding = ctx.latest(outputs.landingPoll, "landing-poll");
 	const landingRows = (ctx.outputs.landingPoll ?? []) as Array<{ poll: number; landed: boolean }>;
 	const stackSync = ctx.latest(outputs.stackSync, "stack-sync-prune");
@@ -1170,6 +1284,7 @@ export default smithers((ctx) => {
 				implementer: makeAgent(policy.implementer, input.worktree, 45 * 60_000, effortLabel, policy.reasoningImplementer, policy),
 				reviewer: makeAgent({ model: reviewerModel, reasoning: seat(policy.reviewer ?? reviewerModel).reasoning }, input.worktree, 20 * 60_000, effortLabel, policy.reasoningReviewer, policy),
 				watcher: makeAgent(policy.watcher, input.worktree, 30 * 60_000, effortLabel, policy.reasoningWatcher, policy),
+				rebaseConflict: makeAgent(policy.judgmentFallback, input.worktree, 30 * 60_000, effortLabel, policy.reasoningReviewer, policy),
 				fallout: makeAgent(policy.fallout, input.worktree, 15 * 60_000, effortLabel, policy.reasoningFallout, policy),
 			};
 
@@ -2409,82 +2524,89 @@ export default smithers((ctx) => {
 												...topCar,
 												actionable: latestWatch.actionable,
 												reviewersToReRequest: latestWatch.reviewersToReRequest,
+												triggers: latestWatch.triggers ?? [],
 											});
+								const activeWatchTriggers =
+									activeWatchCar?.triggers ?? latestWatch?.triggers ?? [];
 								const watchRows = watchPollRows.filter((row) => row.round === k);
+								const infraRetryAttempts = watchRows
+									.flatMap((row) => row.infraRetryJobs ?? [])
+									.reduce<Record<string, number>>((counts, job) => {
+										const key = String(job.runId);
+										counts[key] = (counts[key] ?? 0) + 1;
+										return counts;
+									}, {});
+								const handledTriggerIds = [
+									...new Set(
+										watchFixRows
+											.filter((row) => row.round === k)
+											.flatMap((row) => row.handledTriggerIds ?? []),
+									),
+								];
 								const watchExhausted =
-									watchRows.length >= limits.watchPolls && latestWatch?.exitOk !== true;
+									latestWatch?.terminalEscalation === true
+									|| (watchRows.length >= limits.watchPolls && latestWatch?.exitOk !== true);
 								const watchEscalation = ctx.latest(outputs.approvals, `r${k}-watch-escalation`);
 								const watchSettled =
 									latestWatch?.exitOk === true || watchEscalation?.approved === true;
 								const latestFix = ctx.latest(outputs.watchFix, `r${k}-watch-fix`);
+								const latestRoutes = latestFix?.routes ?? [];
 								const latestBaseline = ctx.latest(outputs.watchBaseline, `r${k}-watch-baseline`);
 								const latestPublish = ctx.latest(outputs.watchPublish, `r${k}-watch-publish`);
+								const rebaseDecisionAnswers = bypass
+									? []
+									: workflowQuestions(questionsFile, ctx.runId, `r${k}-watch-fix`)
+											.filter(
+												(question) =>
+													question.status === "answered" &&
+													question.answer !== undefined,
+											)
+											.map((question) => ({
+												decisionKey: question.workflow?.decisionKey ?? "unknown",
+												answer: question.answer ?? "",
+											}));
 								const watchFixNode = `r${k}-watch-fix`;
-								const decisionBlockers = (latestFix?.actions ?? [])
-									.map(parseDecisionClassBlocker)
-									.filter((entry): entry is NonNullable<typeof entry> => entry !== null);
-								const activeDecisionIds = new Set<string>();
 								if (!bypass && latestFix !== undefined) {
-									for (const blocker of decisionBlockers) {
-										const asked = askWorkflowQuestion(questionsFile, {
+									for (const route of latestRoutes) {
+										if (route.outcome !== "DECISION" && route.outcome !== "NOT_VALID") continue;
+										const decision = route.outcome === "DECISION";
+										askWorkflowQuestion(questionsFile, {
 											runId: ctx.runId,
 											nodeId: watchFixNode,
-											decisionKey: blocker.threadRef,
+											decisionKey: route.decisionKey ?? route.triggerId,
 											generation: latestFix.afterPoll,
 											answerLane: "store",
-											resumeHint:
-												`Answer in deck-questions; the next ${watchFixNode} seat for run ${ctx.runId} hydrates the stored decision.`,
-											originalIssue:
-												`Review thread ${blocker.threadRef} cannot be resolved mechanically: ${blocker.decision}`,
-											proposedAction:
-												"State the intended product or implementation behavior for this thread; the next watch-fix seat will apply it.",
+											resumeHint: decision
+												? `Answer in deck-questions. The decision is durable and does not block unrelated workflow work.`
+												: `Informational NOT_VALID classification; no workflow action is required.`,
+											originalIssue: decision
+												? route.question ?? route.rationale
+												: `Review item ${route.triggerId} was classified NOT_VALID: ${route.rationale}`,
+											proposedAction: decision
+												? "Choose the intended product/design behavior or decide how to argue back on the review."
+												: "No code change. The signed PR reply explains the disposition; review this notice if desired.",
 											blastRadius:
-												`Only ${blocker.threadRef} on PR #${pr.prNumber}; this answer grants no merge or push authority.`,
+												`Only trigger ${route.triggerId} on PR #${activeWatchCar?.prNumber ?? pr.prNumber}; this queue item grants no approve, push, stamp, or merge authority.`,
 											cwd: workflowDir,
-											prNumber: pr.prNumber,
+											prNumber: activeWatchCar?.prNumber ?? pr.prNumber,
 											prContext: {
 												prUrl: pr.url,
 												prRepo: input.repo,
-												prNumber: pr.prNumber,
-												headSha: latestWatch?.headSha ?? pr.headSha,
+												prNumber: activeWatchCar?.prNumber ?? pr.prNumber,
+												headSha: activeWatchCar?.headSha ?? latestWatch?.headSha ?? pr.headSha,
 												originalIssue: brief?.summary,
 												ourFix: implementation?.summary,
-												whyCorrect: blocker.decision,
+												whyCorrect: route.rationale,
 												workflowDir,
 												workflowFile: "pipeline.tsx",
 											},
 											questionKind: "agent",
-											recommendation:
-												"Answer with the intended behavior and any boundary the fixer must preserve.",
-										});
-										activeDecisionIds.add(asked.id);
-									}
-								}
-								const watchDecisionQuestions = bypass
-									? []
-									: workflowQuestions(questionsFile, ctx.runId, watchFixNode);
-								if (!bypass && (latestFix !== undefined || latestWatch?.exitOk === true)) {
-									for (const question of watchDecisionQuestions) {
-										if (question.status !== "open") continue;
-										if (latestWatch?.exitOk !== true && activeDecisionIds.has(question.id)) continue;
-										resolveWorkflowQuestion(questionsFile, {
-											runId: ctx.runId,
-											nodeId: watchFixNode,
-											decisionKey: question.workflow?.decisionKey,
-											answer:
-												latestWatch?.exitOk === true
-													? "Watch completed; this decision is no longer blocking."
-													: "The watch fixer no longer reports this decision-class blocker.",
-											status: "dismissed",
+											recommendation: decision
+												? "Answer with the intended behavior and boundaries."
+												: "Informational: dismiss after reviewing the signed PR reply.",
 										});
 									}
 								}
-								const captainDecisionAnswers = watchDecisionQuestions
-									.filter((question) => question.status === "answered" && question.answer !== undefined)
-									.map((question) => ({
-										threadRef: question.workflow?.decisionKey ?? "unknown",
-										answer: question.answer ?? "",
-									}));
 
 
 								const readyNode = `r${k}-ready-poll`;
@@ -2500,12 +2622,14 @@ export default smithers((ctx) => {
 								const stamp = ctx.latest(outputs.approvals, `r${k}-stamp`);
 
 								return (
-									<Sequence key={`round-${k}`}>
-										{/* stage 4: watch-ci-review loop */}
+									<Parallel>
+										{/* Steps 4 and 5 are one live watch. Approval makes the stamp
+										    available; it does not stop conflict/CI monitoring. */}
 										<Loop
 											id={`r${k}-watch-loop`}
-											until={latestWatch?.exitOk === true}
-											maxIterations={limits.watchPolls}
+											until={stamp?.approved === true || latestWatch?.terminalEscalation === true}
+											maxIterations={1_000_000}
+											continueAsNewEvery={100}
 											onMaxReached="return-last"
 										>
 											<Sequence>
@@ -2519,6 +2643,15 @@ export default smithers((ctx) => {
 																	!waiting &&
 																	(k > 0 || pollNo + 1 >= fixtures.watchPollsToExit);
 																const actionable = !waiting && !exitOk;
+																const triggers = actionable
+																	? [{
+																			id: `comment:dry-${k}-${pollNo}`,
+																			kind: "human_comment" as const,
+																			headSha: "dryrun-head-sha",
+																			summary: "dry-run human review trigger",
+																			payload: { body: "dry-run review item" },
+																		}]
+																	: [];
 																const cars = effortCars.map((car) => ({
 																	prNumber: car.prNumber,
 																	branch: car.branch,
@@ -2536,6 +2669,11 @@ export default smithers((ctx) => {
 																			? ["dry-run: CI is pending; Smithers owns the next poll"]
 																			: ["dry-run: 1 unresolved thread"],
 																	rebaseRequired: false,
+																	ciClassification: exitOk ? "TERMINAL_SUCCESS" : "RUNNING",
+																	terminalEscalation: false,
+																	triggers,
+																	humanApprovedBy: exitOk ? "operator-dryrun" : null,
+																	botApprovedBy: exitOk ? github.reviewPolicy.requiredBots.map((bot) => bot.login) : [],
 																}));
 																return {
 																	round: k,
@@ -2549,6 +2687,11 @@ export default smithers((ctx) => {
 																			: "wait",
 																	actionable,
 																	ci: exitOk ? "green" : "will-be-green",
+																	ciClassification: exitOk ? "TERMINAL_SUCCESS" : "RUNNING",
+																	terminalEscalation: false,
+																	triggers,
+																	humanApprovedBy: exitOk ? "operator-dryrun" : null,
+																	botApprovedBy: exitOk ? github.reviewPolicy.requiredBots.map((bot) => bot.login) : [],
 																	unresolvedThreads: cars.reduce((sum, car) => sum + car.unresolvedThreads, 0),
 																	unansweredComments: cars.reduce((sum, car) => sum + car.unansweredComments, 0),
 																	reviewersToReRequest: [
@@ -2562,80 +2705,128 @@ export default smithers((ctx) => {
 																};
 															}
 															if (pollNo > 0) await sleepSeconds(limits.watchPollSeconds);
-															const mainCi = assessCi(await fetchBranchCheckRuns(ghCtx, baseBranch));
-															if (mainCi === "red") {
-																const cars = effortCars.map((car) => ({
-																	prNumber: car.prNumber,
-																	branch: car.branch,
-																	baseBranch: car.baseBranch,
-																	headSha: car.headSha,
-																	exitOk: false,
-																	actionable: false,
-																	ci: "red",
-																	unresolvedThreads: 0,
-																	unansweredComments: 0,
-																	reviewersToReRequest: [],
-																	reasons: [`root branch ${baseBranch} has failing checks`],
-																	rebaseRequired: false,
-																}));
-																return {
-																	round: k,
-																	poll: pollNo,
-																	headSha: cars.at(-1)?.headSha ?? pr.headSha,
-																	exitOk: false,
-																	disposition: "wait" as const,
-																	actionable: false,
-																	ci: "red",
-																	unresolvedThreads: 0,
-																	unansweredComments: 0,
-																	reviewersToReRequest: [],
-																	reasons: [`root branch ${baseBranch} has failing checks; CI watch is paused until it is green.`],
-																	rebaseRequired: false,
-																	...(stackMode ? { cars } : {}),
-																};
-															}
 															const cars = [];
+															const rerunRunIds = new Set<number>();
 															for (const car of effortCars) {
 																const snapshot = await fetchWatchSnapshot(
 																	ghCtx,
 																	car.prNumber,
 																	github.selfLogins,
 																);
+																const previousCar = latestWatch?.cars?.find(
+																	(candidate) => candidate.prNumber === car.prNumber,
+																);
+																const previousObservation = previousCar
+																	?? (!stackMode ? latestWatch : undefined);
+																const observed = observeHeadAge(
+																	snapshot.headSha,
+																	previousObservation,
+																	nowIso(),
+																);
+																const headObservedAt = observed.headObservedAt;
+																if (snapshot.ciEvidence !== undefined) {
+																	snapshot.ciEvidence = {
+																		...snapshot.ciEvidence,
+																		currentHeadAgeSeconds: observed.ageSeconds,
+																	};
+																}
 																const verdict = evaluateWatchExit(snapshot, {
 																	selfLogins: github.selfLogins,
+																	handledTriggerIds,
+																	reviewPolicy: github.reviewPolicy,
+																	infraRetryAttempts,
 																});
+																const previousTriggers = previousCar?.triggers
+																	?? (!stackMode ? latestWatch?.triggers : undefined)
+																	?? [];
+																const carriedReviewTriggers = previousTriggers.filter((trigger) =>
+																	(trigger.kind === "human_comment" || trigger.kind === "bot_comment")
+																	&& !handledTriggerIds.includes(trigger.id)
+																);
+																const triggerById = new Map(
+																	[...verdict.triggers, ...carriedReviewTriggers].map((trigger) => [trigger.id, trigger]),
+																);
+																const triggers = [...triggerById.values()];
+																const actionable = verdict.actionable || carriedReviewTriggers.length > 0;
+																const exitOk = verdict.exitOk && carriedReviewTriggers.length === 0;
+																for (const retry of verdict.infraRetryJobs) {
+																	if (rerunRunIds.has(retry.runId)) continue;
+																	rerunRunIds.add(retry.runId);
+																	const attempt = (infraRetryAttempts[String(retry.runId)] ?? 0) + 1;
+																	await sleepSeconds(Math.min(15 * 2 ** (attempt - 1), 120));
+																	await execOrThrow(bunExec, [
+																		github.gh,
+																		"run",
+																		"rerun",
+																		String(retry.runId),
+																		"--failed",
+																		"--repo",
+																		input.repo,
+																	], { cwd: input.worktree });
+																}
 																cars.push({
 																	prNumber: car.prNumber,
 																	branch: car.branch,
 																	baseBranch: car.baseBranch,
 																	headSha: snapshot.headSha,
-																	exitOk: verdict.exitOk,
-																	actionable: verdict.actionable,
+																	headObservedAt,
+																	exitOk,
+																	actionable,
 																	ci: verdict.ci,
 																	unresolvedThreads: verdict.unresolvedThreads,
 																	unansweredComments: verdict.unansweredComments,
 																	reviewersToReRequest: verdict.reviewersNeedingReRequest,
-																	reasons: verdict.reasons,
+																	reasons: carriedReviewTriggers.length > 0
+																		? [...verdict.reasons, `${carriedReviewTriggers.length} review trigger(s) carried across a rebase push.`]
+																		: verdict.reasons,
 																	rebaseRequired: verdict.rebaseRequired,
+																	ciClassification: verdict.ciClassification,
+																	terminalEscalation: verdict.terminalEscalation,
+																	triggers,
+																	humanApprovedBy: verdict.humanApprovedBy,
+																	botApprovedBy: verdict.botApprovedBy,
+																	infraRetryJobs: verdict.infraRetryJobs,
 																});
 															}
 															const exitOk = cars.every((car) => car.exitOk);
 															const actionable = cars.some((car) => car.actionable);
 															const ci = cars.some((car) => car.ci === "red")
 																? "red"
-																: cars.some((car) => car.ci === "none")
-																	? "none"
-																	: cars.some((car) => car.ci === "will-be-green")
-																		? "will-be-green"
-																		: "green";
+																: cars.some((car) => car.ci === "stuck")
+																	? "stuck"
+																	: cars.some((car) => car.ci === "none")
+																		? "none"
+																		: cars.some((car) => car.ci === "not-configured")
+																			? "not-configured"
+																			: cars.some((car) => car.ci === "will-be-green")
+																				? "will-be-green"
+																				: "green";
 															return {
 																round: k,
 																poll: pollNo,
 																headSha: cars.at(-1)?.headSha ?? pr.headSha,
+																headObservedAt: cars.at(-1)?.headObservedAt,
 																exitOk,
-																disposition: exitOk ? "complete" : actionable ? "fix" : "wait",
+																disposition: exitOk
+																	? "complete"
+																	: actionable
+																		? "fix"
+																		: cars.some((car) => car.terminalEscalation)
+																			? "escalate"
+																			: "wait",
 																actionable,
 																ci,
+																ciClassification: cars.find((car) => car.terminalEscalation)?.ciClassification
+																	?? cars.find((car) => car.ci === "red")?.ciClassification
+																	?? cars[0]?.ciClassification
+																	?? "NOT_TRIGGERED",
+																terminalEscalation: cars.some((car) => car.terminalEscalation),
+																triggers: cars.flatMap((car) => car.triggers),
+																humanApprovedBy: cars.every((car) => car.humanApprovedBy !== null)
+																	? cars.map((car) => car.humanApprovedBy).join(", ")
+																	: null,
+																botApprovedBy: [...new Set(cars.flatMap((car) => car.botApprovedBy ?? []))],
+																infraRetryJobs: cars.flatMap((car) => car.infraRetryJobs ?? []),
 																unresolvedThreads: cars.reduce((sum, car) => sum + car.unresolvedThreads, 0),
 																unansweredComments: cars.reduce((sum, car) => sum + car.unansweredComments, 0),
 																reviewersToReRequest: [
@@ -2686,6 +2877,8 @@ export default smithers((ctx) => {
 																					pushed: false,
 																					reRequested: [],
 																					commits: [],
+																					routes: [],
+																					handledTriggerIds: (latestWatch.triggers ?? []).filter((trigger) => trigger.kind === "merge_conflict").map((trigger) => trigger.id),
 																					summary:
 																						`Stack changed after poll; pushed nothing and will re-poll: ` +
 																						drifted.map((car) => `#${car.prNumber} ${car.headSha} -> ${car.currentHead}`).join("; "),
@@ -2713,14 +2906,96 @@ export default smithers((ctx) => {
 																					`[escalate] stack rebase worktree is ${branch || "detached"}@${localHead}, not top car ${topCar.branch}@${topComparison?.currentHead ?? "unknown"}.`,
 																				);
 																			}
-																			const actions = await rebaseStackUpstack(bunExec, {
-																				gh: github.gh,
-																				worktree: input.worktree,
-																				rootBaseBranch: baseBranch,
-																				branches: effortCars.map((car) => car.branch),
-																				fromBranch: rebaseCar.branch,
-																				testCommand: commands.test,
-																			});
+																			let actions: string[];
+																			try {
+																				actions = await rebaseStackUpstack(bunExec, {
+																					gh: github.gh,
+																					git: github.git,
+																					worktree: input.worktree,
+																					rootBaseBranch: baseBranch,
+																					branches: effortCars.map((car) => car.branch),
+																					fromBranch: rebaseCar.branch,
+																					expectedRemoteHeads: Object.fromEntries(
+																						watchedCars.map((car) => [car.branch, car.headSha]),
+																					),
+																					runCommitShasByBranch: {},
+																					testCommand: commands.test,
+																					resolveConflict:
+																						agents?.rebaseConflict === undefined
+																							? async () => {
+																									throw new Error(
+																										"[escalate] live stack rebase conflict seat is unavailable.",
+																									);
+																								}
+																							: (conflict) => {
+																									const conflictCar =
+																										watchedCars.find(
+																											(car) => car.branch === conflict.branch,
+																										) ?? rebaseCar;
+																									return wakeRebaseConflictSeat(
+																										agents.rebaseConflict,
+																										{
+																											worktree: input.worktree,
+																											originalEffortContext:
+																												input.brief ?? {
+																													ticket: input.ticket,
+																													repo: input.repo,
+																													stack: effortCars,
+																												},
+																											prContext: {
+																												repo: input.repo,
+																												prNumber: conflictCar.prNumber,
+																												branch: conflict.branch,
+																												baseBranch: conflict.baseBranch,
+																												headSha: conflictCar.headSha,
+																												stack: effortCars,
+																											},
+																											trigger: {
+																												reasons: latestWatch.reasons,
+																												triggers: activeWatchTriggers,
+																												captainDecisionAnswers: rebaseDecisionAnswers,
+																											},
+																											conflict,
+																											taskContext: {
+																												runId: ctx.runId,
+																												nodeId: `r${k}-stack-rebase-conflict`,
+																												iteration: k,
+																												attempt: conflict.attempt,
+																											},
+																										},
+																									);
+																								},
+																				});
+																			} catch (error) {
+																				if (!(error instanceof RebaseDecisionRequired)) throw error;
+																				const triggerId =
+																					activeWatchTriggers.find(
+																						(trigger) => trigger.kind === "merge_conflict",
+																					)?.id ??
+																					`merge-conflict:${error.context.rebasingCommit}`;
+																				return {
+																					round: k,
+																					afterPoll: latestWatch.poll,
+																					actions: [
+																						`Stack rebase needs captain decision: ${error.resolution.question}`,
+																					],
+																					pushed: false,
+																					reRequested: [],
+																					commits: [],
+																					summary: error.resolution.summary,
+																					routes: [
+																						{
+																							triggerId,
+																							decisionKey:
+																								`${triggerId}:${error.context.rebasingCommit}`,
+																							outcome: "DECISION" as const,
+																							rationale: error.resolution.summary,
+																							question: error.resolution.question,
+																						},
+																					],
+																					handledTriggerIds: [],
+																				};
+																			}
 																			const reRequested: string[] = [];
 																			for (const car of watchedCars) {
 																				if (car.reviewersToReRequest.length === 0) continue;
@@ -2741,6 +3016,8 @@ export default smithers((ctx) => {
 																				pushed: true,
 																				reRequested: [...new Set(reRequested)],
 																				commits: [],
+																				routes: [],
+																				handledTriggerIds: (latestWatch.triggers ?? []).filter((trigger) => trigger.kind === "merge_conflict").map((trigger) => trigger.id),
 																				summary: "Rebased the stale car and every descendant through gh stack, tested, pushed, and re-requested review.",
 																			};
 																		}
@@ -2767,15 +3044,87 @@ export default smithers((ctx) => {
 																				`[escalate] rebase baseline rejected: poll=${latestWatch.headSha}, remote=${remoteHead}, local=${localHead}, branch=${branch || "detached"}; refusing to rebase or push stale/out-of-band state.`,
 																			);
 																		}
-																		const actions = await rebaseAndPush(bunExec, {
-																			git: github.git,
-																			worktree: input.worktree,
-																			branch: input.branch,
-																			baseBranch,
-																			expectedRemoteHead: latestWatch.headSha,
-																			testCommand: commands.test,
-																			runCommitShas: [],
-																		});
+																		let actions: string[];
+																		try {
+																			actions = await rebaseAndPushAgentic(bunExec, {
+																				git: github.git,
+																				worktree: input.worktree,
+																				branch: input.branch,
+																				baseBranch,
+																				expectedRemoteHead: latestWatch.headSha,
+																				testCommand: commands.test,
+																				runCommitShas: [],
+																				resolveConflict:
+																					agents?.rebaseConflict === undefined
+																						? async () => {
+																								throw new Error(
+																									"[escalate] live rebase conflict seat is unavailable.",
+																								);
+																							}
+																						: (conflict) =>
+																								wakeRebaseConflictSeat(
+																									agents.rebaseConflict,
+																									{
+																										worktree: input.worktree,
+																										originalEffortContext:
+																											input.brief ?? {
+																												ticket: input.ticket,
+																												repo: input.repo,
+																												existingPr: input.existingPr ?? pr.prNumber,
+																											},
+																										prContext: {
+																											repo: input.repo,
+																											prNumber: pr.prNumber,
+																											prUrl: pr.url,
+																											branch: input.branch,
+																											baseBranch,
+																											headSha: latestWatch.headSha,
+																										},
+																										trigger: {
+																											reasons: latestWatch.reasons,
+																											triggers: activeWatchTriggers,
+																											captainDecisionAnswers: rebaseDecisionAnswers,
+																										},
+																										conflict,
+																										taskContext: {
+																											runId: ctx.runId,
+																											nodeId: `r${k}-rebase-conflict`,
+																											iteration: k,
+																											attempt: conflict.attempt,
+																										},
+																									},
+																								),
+																			});
+																		} catch (error) {
+																			if (!(error instanceof RebaseDecisionRequired)) throw error;
+																			const triggerId =
+																				activeWatchTriggers.find(
+																					(trigger) => trigger.kind === "merge_conflict",
+																				)?.id ??
+																				`merge-conflict:${error.context.rebasingCommit}`;
+																			return {
+																				round: k,
+																				afterPoll: latestWatch.poll,
+																				actions: [
+																					`Rebase conflict needs captain decision: ${error.resolution.question}`,
+																				],
+																				pushed: false,
+																				reRequested: [],
+																				commits: [],
+																				summary: error.resolution.summary,
+																				routes: [
+																					{
+																						triggerId,
+																						decisionKey:
+																							`${triggerId}:${error.context.rebasingCommit}`,
+																						outcome: "DECISION" as const,
+																						rationale: error.resolution.summary,
+																						question: error.resolution.question,
+																					},
+																				],
+																				handledTriggerIds: [],
+																			};
+																		}
 																		const reviewers = latestWatch.reviewersToReRequest;
 																		if (reviewers.length > 0) {
 																			await requestReviewers(ghCtx, pr.prNumber, reviewers);
@@ -2790,6 +3139,8 @@ export default smithers((ctx) => {
 																			pushed: true,
 																			reRequested: reviewers,
 																			commits: [],
+																			routes: [],
+																			handledTriggerIds: (latestWatch.triggers ?? []).filter((trigger) => trigger.kind === "merge_conflict").map((trigger) => trigger.id),
 																			summary: "Rebased through the bounded helper, tested, pushed, and re-requested review.",
 																		};
 																	}}
@@ -2903,6 +3254,15 @@ export default smithers((ctx) => {
 																						pushed: false,
 																						reRequested: [],
 																						summary: "dry-run: feedback addressed locally",
+																						routes: activeWatchTriggers
+																							.filter((trigger) => trigger.kind === "human_comment" || trigger.kind === "bot_comment")
+																							.map((trigger) => ({
+																								triggerId: trigger.id,
+																								outcome: "NOT_VALID" as const,
+																								rationale: "dry-run classification",
+																								replyBody: "Dry-run review disposition.",
+																							})),
+																						handledTriggerIds: activeWatchTriggers.map((trigger) => trigger.id),
 																					})
 																				: watchFixPrompt({
 																						worktree: input.worktree,
@@ -2915,8 +3275,12 @@ export default smithers((ctx) => {
 																						pollJson: JSON.stringify({
 																							...latestWatch,
 																							activeCar: activeWatchCar,
-																							captainDecisionAnswers,
 																						}, null, 2),
+																						briefJson: JSON.stringify({
+																							brief,
+																							implementationContext,
+																						}, null, 2),
+																						triggerJson: JSON.stringify(activeWatchTriggers, null, 2),
 																						round: k,
 																						afterPoll: latestWatch.poll,
 																					})}
@@ -2966,6 +3330,58 @@ export default smithers((ctx) => {
 																		if (activeWatchCar === undefined) {
 																			throw new Error("[escalate] watch publish has no active car.");
 																		}
+																		const handled = new Set(latestFix.handledTriggerIds ?? []);
+																		const fixRoutes = latestFix.routes ?? [];
+																		const unhandled = activeWatchTriggers.filter((trigger) => !handled.has(trigger.id));
+																		if (unhandled.length > 0) {
+																			throw new Error(
+																				`[escalate] watch seat did not handle trigger(s): ${unhandled.map((trigger) => trigger.id).join(", ")}.`,
+																			);
+																		}
+																		const commentTriggers = activeWatchTriggers.filter(
+																			(trigger) => trigger.kind === "human_comment" || trigger.kind === "bot_comment",
+																		);
+																		const routes = new Map(fixRoutes.map((route) => [route.triggerId, route]));
+																		if (routes.size !== fixRoutes.length) {
+																			throw new Error("[escalate] watch seat returned duplicate route trigger ids.");
+																		}
+																		for (const trigger of commentTriggers) {
+																			const route = routes.get(trigger.id);
+																			if (route === undefined) {
+																				throw new Error(`[escalate] review trigger ${trigger.id} has no classification route.`);
+																			}
+																			if (
+																				(route.outcome === "FIX_NOW" || route.outcome === "NOT_VALID")
+																				&& (route.replyBody ?? "").trim() === ""
+																			) {
+																				throw new Error(`[escalate] ${route.outcome} route ${route.triggerId} has no replyBody.`);
+																			}
+																			if (route.outcome === "DECISION" && (route.question ?? "").trim() === "") {
+																				throw new Error(`[escalate] DECISION route ${route.triggerId} has no captain question.`);
+																			}
+																		}
+																		if (
+																			fixRoutes.some((route) => route.outcome === "FIX_NOW")
+																			&& latestFix.commits.length === 0
+																		) {
+																			throw new Error("[escalate] FIX_NOW route produced no local commit.");
+																		}
+																		const publishReplies = async (): Promise<string[]> => {
+																			const posted: string[] = [];
+																			for (const route of fixRoutes) {
+																				if (route.outcome === "DECISION") continue;
+																				const trigger = commentTriggers.find((candidate) => candidate.id === route.triggerId);
+																				if (trigger === undefined || route.replyBody === undefined) continue;
+																				const databaseId = trigger.payload.databaseId;
+																				if (typeof databaseId === "number") {
+																					await postReviewReply(ghCtx, project, databaseId, route.replyBody);
+																				} else {
+																					await postComment(ghCtx, project, activeWatchCar.prNumber, route.replyBody);
+																				}
+																				posted.push(`replied to ${route.triggerId} (${route.outcome})`);
+																			}
+																			return posted;
+																		};
 																		const remoteHead = await fetchHeadSha(
 																			ghCtx,
 																			activeWatchCar.prNumber,
@@ -3021,12 +3437,14 @@ export default smithers((ctx) => {
 																			if (reviewers.length > 0) {
 																				await requestReviewers(ghCtx, activeWatchCar.prNumber, reviewers);
 																			}
+																			const replyActions = await publishReplies();
 																			return {
 																				round: k,
 																				afterPoll: latestWatch.poll,
-																				actions: reviewers.map(
-																					(reviewer) => `re-requested ${reviewer}`,
-																				),
+																				actions: [
+																					...replyActions,
+																					...reviewers.map((reviewer) => `re-requested ${reviewer}`),
+																				],
 																				pushed: false,
 																				reRequested: reviewers,
 																				summary:
@@ -3051,16 +3469,125 @@ export default smithers((ctx) => {
 																				);
 																			}
 																		}
-																		const actions = stackMode
-																			? await rebaseStackUpstack(bunExec, {
+																		let actions: string[];
+																		if (stackMode) {
+																			try {
+																				actions = await rebaseStackUpstack(bunExec, {
 																					gh: github.gh,
+																					git: github.git,
 																					worktree: input.worktree,
 																					rootBaseBranch: baseBranch,
 																					branches: effortCars.map((car) => car.branch),
 																					fromBranch: activeWatchCar.branch,
+																					expectedRemoteHeads: Object.fromEntries(
+																						(latestWatch.cars ?? []).map((car) => [
+																							car.branch,
+																							car.headSha,
+																						]),
+																					),
+																					runCommitShasByBranch: {
+																						[activeWatchCar.branch]: runCommitShas,
+																					},
 																					testCommand: commands.test,
-																				})
-																			: await rebaseAndPush(bunExec, {
+																					resolveConflict:
+																						agents?.rebaseConflict === undefined
+																							? async () => {
+																									throw new Error(
+																										"[escalate] live stack rebase conflict seat is unavailable.",
+																									);
+																								}
+																							: (conflict) => {
+																									const conflictCar =
+																										latestWatch.cars?.find(
+																											(car) => car.branch === conflict.branch,
+																										) ?? activeWatchCar;
+																									return wakeRebaseConflictSeat(
+																										agents.rebaseConflict,
+																										{
+																											worktree: input.worktree,
+																											originalEffortContext:
+																												input.brief ?? {
+																													ticket: input.ticket,
+																													repo: input.repo,
+																													stack: effortCars,
+																												},
+																											prContext: {
+																												repo: input.repo,
+																												prNumber: conflictCar.prNumber,
+																												branch: conflict.branch,
+																												baseBranch: conflict.baseBranch,
+																												headSha: conflictCar.headSha,
+																												stack: effortCars,
+																											},
+																											trigger: {
+																												reasons: latestWatch.reasons,
+																												triggers: activeWatchTriggers,
+																												captainDecisionAnswers: rebaseDecisionAnswers,
+																											},
+																											conflict,
+																											taskContext: {
+																												runId: ctx.runId,
+																												nodeId: `r${k}-publish-stack-rebase-conflict`,
+																												iteration: k,
+																												attempt: conflict.attempt,
+																											},
+																										},
+																									);
+																								},
+																				});
+																			} catch (error) {
+																				if (!(error instanceof RebaseDecisionRequired)) throw error;
+																				const triggerId =
+																					activeWatchTriggers.find(
+																						(trigger) => trigger.kind === "merge_conflict",
+																					)?.id ??
+																					`merge-conflict:${error.context.rebasingCommit}`;
+																				const decisionKey =
+																					`${triggerId}:${error.context.rebasingCommit}`;
+																				askWorkflowQuestion(questionsFile, {
+																					runId: ctx.runId,
+																					nodeId: watchFixNode,
+																					decisionKey,
+																					generation: latestWatch.poll,
+																					answerLane: "store",
+																					resumeHint:
+																						"Answer in deck-questions. The decision is durable and does not block unrelated workflow work.",
+																					originalIssue: error.resolution.question,
+																					proposedAction:
+																						"Choose the intended combined behavior for this stack rebase conflict.",
+																					blastRadius:
+																						`Only ${error.context.conflictedFiles.join(", ")} on PR #${activeWatchCar.prNumber}; this grants no approve, push, stamp, or merge authority.`,
+																					cwd: workflowDir,
+																					prNumber: activeWatchCar.prNumber,
+																					prContext: {
+																						prUrl: pr.url,
+																						prRepo: input.repo,
+																						prNumber: activeWatchCar.prNumber,
+																						headSha: latestBaseline.headSha,
+																						originalIssue: brief?.summary,
+																						ourFix: implementation?.summary,
+																						whyCorrect: error.resolution.summary,
+																						workflowDir,
+																						workflowFile: "pipeline.tsx",
+																					},
+																					questionKind: "agent",
+																					recommendation:
+																						"Answer with the intended behavior and boundaries.",
+																				});
+																				return {
+																					round: k,
+																					afterPoll: latestWatch.poll,
+																					actions: [
+																						`Queued stack rebase decision ${decisionKey}: ${error.resolution.question}`,
+																					],
+																					pushed: false,
+																					reRequested: [],
+																					summary: error.resolution.summary,
+																				};
+																			}
+																		} else {
+																			try {
+																				actions = await rebaseAndPushAgentic(bunExec, {
 																					git: github.git,
 																					worktree: input.worktree,
 																					branch: input.branch,
@@ -3068,15 +3595,108 @@ export default smithers((ctx) => {
 																					expectedRemoteHead: latestBaseline.headSha,
 																					testCommand: commands.test,
 																					runCommitShas,
+																					resolveConflict:
+																						agents?.rebaseConflict === undefined
+																							? async () => {
+																									throw new Error(
+																										"[escalate] live rebase conflict seat is unavailable.",
+																									);
+																								}
+																							: (conflict) =>
+																									wakeRebaseConflictSeat(
+																										agents.rebaseConflict,
+																										{
+																											worktree: input.worktree,
+																											originalEffortContext:
+																												input.brief ?? {
+																													ticket: input.ticket,
+																													repo: input.repo,
+																													existingPr: input.existingPr ?? pr.prNumber,
+																												},
+																											prContext: {
+																												repo: input.repo,
+																												prNumber: activeWatchCar.prNumber,
+																												prUrl: pr.url,
+																												branch: input.branch,
+																												baseBranch,
+																												headSha: latestBaseline.headSha,
+																											},
+																											trigger: {
+																												reasons: latestWatch.reasons,
+																												triggers: activeWatchTriggers,
+																												captainDecisionAnswers: rebaseDecisionAnswers,
+																											},
+																											conflict,
+																											taskContext: {
+																												runId: ctx.runId,
+																												nodeId: `r${k}-publish-rebase-conflict`,
+																												iteration: k,
+																												attempt: conflict.attempt,
+																											},
+																										},
+																									),
 																				});
+																			} catch (error) {
+																				if (!(error instanceof RebaseDecisionRequired)) throw error;
+																				const triggerId =
+																					activeWatchTriggers.find(
+																						(trigger) => trigger.kind === "merge_conflict",
+																					)?.id ??
+																					`merge-conflict:${error.context.rebasingCommit}`;
+																				const decisionKey =
+																					`${triggerId}:${error.context.rebasingCommit}`;
+																				askWorkflowQuestion(questionsFile, {
+																					runId: ctx.runId,
+																					nodeId: watchFixNode,
+																					decisionKey,
+																					generation: latestWatch.poll,
+																					answerLane: "store",
+																					resumeHint:
+																						"Answer in deck-questions. The decision is durable and does not block unrelated workflow work.",
+																					originalIssue: error.resolution.question,
+																					proposedAction:
+																						"Choose the intended combined behavior for this rebase conflict.",
+																					blastRadius:
+																						`Only ${error.context.conflictedFiles.join(", ")} on PR #${activeWatchCar.prNumber}; this grants no approve, push, stamp, or merge authority.`,
+																					cwd: workflowDir,
+																					prNumber: activeWatchCar.prNumber,
+																					prContext: {
+																						prUrl: pr.url,
+																						prRepo: input.repo,
+																						prNumber: activeWatchCar.prNumber,
+																						headSha: latestBaseline.headSha,
+																						originalIssue: brief?.summary,
+																						ourFix: implementation?.summary,
+																						whyCorrect: error.resolution.summary,
+																						workflowDir,
+																						workflowFile: "pipeline.tsx",
+																					},
+																					questionKind: "agent",
+																					recommendation:
+																						"Answer with the intended behavior and boundaries.",
+																				});
+																				return {
+																					round: k,
+																					afterPoll: latestWatch.poll,
+																					actions: [
+																						`Queued rebase decision ${decisionKey}: ${error.resolution.question}`,
+																					],
+																					pushed: false,
+																					reRequested: [],
+																					summary: error.resolution.summary,
+																				};
+																			}
+																		}
 																		if (reviewers.length > 0) {
 																			await requestReviewers(ghCtx, activeWatchCar.prNumber, reviewers);
 																		}
+																		const replyActions = await publishReplies();
 																		return {
 																			round: k,
 																			afterPoll: latestWatch.poll,
 																			actions: [
 																				...actions,
+																				...replyActions,
 																				...reviewers.map(
 																					(reviewer) => `re-requested ${reviewer}`,
 																				),
@@ -3128,6 +3748,7 @@ export default smithers((ctx) => {
 																	headSha: car.headSha,
 																	ready: true,
 																	approvedBy: "operator-dryrun",
+																	botApprovedBy: github.reviewPolicy.requiredBots.map((bot) => bot.login),
 																	ci: "green",
 																	reasons: [],
 																	migrationFiles: migCheck?.files ?? [],
@@ -3138,6 +3759,7 @@ export default smithers((ctx) => {
 																	ready: true,
 																	regressed: false,
 																	approvedBy: "operator-dryrun",
+																	botApprovedBy: github.reviewPolicy.requiredBots.map((bot) => bot.login),
 																	ci: "green",
 																	headSha: cars.at(-1)?.headSha ?? "dryrun-head-sha",
 																	reasons: [],
@@ -3158,6 +3780,7 @@ export default smithers((ctx) => {
 																		headSha: car.headSha,
 																		ready: true,
 																		approvedBy: "already-landed",
+																		botApprovedBy: github.reviewPolicy.requiredBots.map((bot) => bot.login),
 																		ci: "green",
 																		reasons: [],
 																		migrationFiles: [],
@@ -3171,35 +3794,32 @@ export default smithers((ctx) => {
 																);
 																const watchVerdict = evaluateWatchExit(snapshot, {
 																	selfLogins: github.selfLogins,
+																	handledTriggerIds,
+																	reviewPolicy: github.reviewPolicy,
 																});
 																const files = await fetchChangedFiles(ghCtx, car.prNumber);
 																const migrationFiles = detectMigrations(files);
-																const { approvals: prApprovals, checkRuns } =
-																	await fetchPrApprovalsAndCi(ghCtx, car.prNumber);
-																const freshCi = assessCi(checkRuns);
-																const readyVerdict = evaluateReadyForStamp(
-																	prApprovals,
-																	freshCi,
-																	{
-																		author: github.selfLogins[0] ?? "",
-																		excludedApprovers: github.excludedApprovers,
-																		yolo,
-																	},
-																);
+																const stampReady =
+																	watchVerdict.exitOk
+																	&& (!yolo || watchVerdict.ci === "green");
+																const readyReasons = [
+																	...(!watchVerdict.exitOk
+																		? ["watch conditions regressed:", ...watchVerdict.reasons]
+																		: []),
+																	...(yolo && !stampReady
+																		? [`yolo merge still requires terminal CI; current state is ${watchVerdict.ci}.`]
+																		: []),
+																];
 																cars.push({
 																	prNumber: car.prNumber,
 																	branch: car.branch,
 																	baseBranch: car.baseBranch,
 																	headSha: snapshot.headSha,
-																	ready: watchVerdict.exitOk && readyVerdict.ready,
-																	approvedBy: readyVerdict.approvedBy,
-																	ci: readyVerdict.ci,
-																	reasons: [
-																		...(!watchVerdict.exitOk
-																			? ["watch conditions regressed:", ...watchVerdict.reasons]
-																			: []),
-																		...readyVerdict.reasons,
-																	],
+																	ready: stampReady,
+																	approvedBy: watchVerdict.humanApprovedBy,
+																	botApprovedBy: watchVerdict.botApprovedBy,
+																	ci: watchVerdict.ci,
+																	reasons: readyReasons,
 																	migrationFiles,
 																});
 															}
@@ -3214,11 +3834,15 @@ export default smithers((ctx) => {
 															const ready = !regressed && cars.every((car) => car.ready);
 															const ci = cars.some((car) => car.ci === "red")
 																? "red"
-																: cars.some((car) => car.ci === "none")
-																	? "none"
-																	: cars.some((car) => car.ci === "will-be-green")
-																		? "will-be-green"
-																		: "green";
+																: cars.some((car) => car.ci === "stuck")
+																	? "stuck"
+																	: cars.some((car) => car.ci === "none")
+																		? "none"
+																		: cars.some((car) => car.ci === "not-configured")
+																			? "not-configured"
+																			: cars.some((car) => car.ci === "will-be-green")
+																				? "will-be-green"
+																				: "green";
 															return {
 																round: k,
 																poll: pollNo,
@@ -3227,6 +3851,9 @@ export default smithers((ctx) => {
 																approvedBy: ready
 																	? cars.map((car) => car.approvedBy).filter(Boolean).join(", ") || null
 																	: null,
+																botApprovedBy: ready
+																	? [...new Set(cars.flatMap((car) => car.botApprovedBy ?? []))]
+																	: [],
 																ci,
 																headSha: cars.at(-1)?.headSha ?? "",
 																reasons: [
@@ -3264,6 +3891,7 @@ export default smithers((ctx) => {
 													ready: false,
 													regressed: true,
 													approvedBy: null,
+													botApprovedBy: latestReady?.botApprovedBy ?? [],
 													ci: latestReady?.ci ?? "none",
 													headSha: latestReady?.headSha ?? "",
 													reasons: [
@@ -3322,13 +3950,14 @@ export default smithers((ctx) => {
 																"Ordered stack:",
 																...(latestReady.cars ?? []).map(
 																	(car) =>
-																		`  PR #${car.prNumber} ${car.baseBranch} ← ${car.branch}@${car.headSha} (CI ${car.ci}; approval ${car.approvedBy ?? "n/a"})`,
+																		`  PR #${car.prNumber} ${car.baseBranch} ← ${car.branch}@${car.headSha} (CI ${car.ci}; human ${car.approvedBy ?? "n/a"}; bots ${(car.botApprovedBy ?? []).join(", ") || "n/a"})`,
 																),
 															]
 														: [
 																`PR: ${pr.url}`,
 																`Head at ready: ${latestReady.headSha}`,
 																`Human review approval: ${latestReady.approvedBy ?? "n/a"}`,
+																`Required bot approvals: ${(latestReady.botApprovedBy ?? []).join(", ") || "n/a"}`,
 															]),
 													...(k > 0
 														? [
@@ -3340,7 +3969,7 @@ export default smithers((ctx) => {
 																}`,
 															]
 														: []),
-												`CI: ${latestReady.ci} (green-or-will-be-green per approval ruling)`,
+												`CI: ${latestReady.ci} (informational at stamp; the live step-5 watch continues until the captain stamps)`,
 												`Migration gate: ${migRequired ? `TRIGGERED (evidence ${migEvidenceOk ? "complete" : "INCOMPLETE"})` : "not triggered"}`, 
 													``,
 													`Approving = one commit-bound stamp + merge word for the entire effort.`,
@@ -3416,7 +4045,7 @@ export default smithers((ctx) => {
 												}
 											</Task>
 										) : null}
-									</Sequence>
+									</Parallel>
 								);
 							})
 					: null}
@@ -3435,10 +4064,24 @@ export default smithers((ctx) => {
 					</Task>
 				) : null}
 
-				{/* The round-scoped merge attempt owns both the last-instant stamp
-				    comparison and MQ enqueue. A mismatch persists ok=false so the
-				    next render starts a fresh watch/approval round. */}
-				{stampedRound !== null && stampedRound.headCheck === undefined && pr !== undefined && !migStale ? (
+				{/* The round-scoped merge-safety loop preserves a valid stamp while
+				    exact-head CI is still running. Head drift, red/broken CI, or a
+				    merge conflict persists a hard ok=false and starts a fresh watch
+				    round; only fresh terminal-green truth can enqueue. */}
+				{stampedRound !== null && stampedRound.headCheck?.ok !== true && pr !== undefined && !migStale ? (
+					<Loop
+						id={`r${stampedRound.round}-merge-safety-loop`}
+						until={
+							ctx.latest(outputs.mergeHeadCheck, `r${stampedRound.round}-merge-head-check`)?.ok === true
+							|| (
+								ctx.latest(outputs.mergeHeadCheck, `r${stampedRound.round}-merge-head-check`)?.ok === false
+								&& ctx.latest(outputs.mergeHeadCheck, `r${stampedRound.round}-merge-head-check`)?.retryable !== true
+							)
+						}
+						maxIterations={1_000_000}
+						continueAsNewEvery={100}
+						onMaxReached="return-last"
+					>
 					<Task
 						id={`r${stampedRound.round}-merge-head-check`}
 						output={outputs.mergeHeadCheck}
@@ -3446,6 +4089,13 @@ export default smithers((ctx) => {
 					>
 						{() =>
 							(async () => {
+								const priorMergeSafety = ctx.latest(
+									outputs.mergeHeadCheck,
+									`r${stampedRound.round}-merge-head-check`,
+								);
+								if (!dryRun && priorMergeSafety?.retryable === true) {
+									await sleepSeconds(limits.watchPollSeconds);
+								}
 								if (stackMode) {
 									const stampedCars = stampedRound.cars ?? [];
 									const expectedTop = stampedCars.at(-1);
@@ -3582,6 +4232,41 @@ export default smithers((ctx) => {
 									let nextReceipt: string | null = null;
 									let nextMergePath: "github-merge-queue" | "dry-run" | "already-landed" | null = null;
 									if (nextCar !== undefined) {
+										const freshSnapshot = await fetchWatchSnapshot(
+											ghCtx,
+											nextCar.prNumber,
+											github.selfLogins,
+										);
+										const safety = assessMergeSafety(
+											freshSnapshot,
+											nextCar.headSha,
+											mergeWatchOptions(stampedRound!.round),
+										);
+										if (!safety.ok) {
+											const cars = final.map(({ car, comparison }) => ({
+												...car,
+												currentHead: comparison.currentHead,
+												ok: car.prNumber === nextCar.prNumber ? false : comparison.ok,
+												submittedAt: null,
+												receipt: null,
+												alreadyLanded: landedNumbers.has(car.prNumber),
+												mergePath: null,
+											}));
+											return {
+												round: stampedRound.round,
+												expectedHead: nextCar.headSha,
+												currentHead: freshSnapshot.headSha,
+												ok: false,
+												retryable: safety.retryable,
+												diffSummary: `PR #${nextCar.prNumber}: ${safety.reason}`,
+												checkedAt: nowIso(),
+												submittedAt: null,
+												receipt: null,
+												alreadyLanded: false,
+												mergePath: null,
+												cars,
+											};
+										}
 										const merge = await runMerge({
 											args: ["--auto", "--squash"],
 											exec: bunExec,
@@ -3732,6 +4417,31 @@ export default smithers((ctx) => {
 											`not approved PR state ${input.branch}@${finalComparison.currentHead}; refusing to enqueue.`,
 									);
 								}
+								const freshSnapshot = await fetchWatchSnapshot(
+									ghCtx,
+									pr.prNumber,
+									github.selfLogins,
+								);
+								const safety = assessMergeSafety(
+									freshSnapshot,
+									finalComparison.currentHead,
+									mergeWatchOptions(stampedRound!.round),
+								);
+								if (!safety.ok) {
+									return {
+										round: stampedRound.round,
+										...finalComparison,
+										currentHead: freshSnapshot.headSha,
+										ok: false,
+										retryable: safety.retryable,
+										diffSummary: safety.reason,
+										checkedAt: nowIso(),
+										submittedAt: null,
+										receipt: null,
+										alreadyLanded: false,
+										mergePath: null,
+									};
+								}
 
 
 								const merge = await runMerge({
@@ -3753,6 +4463,7 @@ export default smithers((ctx) => {
 							})()
 						}
 					</Task>
+					</Loop>
 				) : null}
 
 				{/* Normalize the successful round-scoped attempt into the stable
@@ -3786,7 +4497,10 @@ export default smithers((ctx) => {
 				{mergeReceipt !== undefined && pr !== undefined ? (
 					<Loop
 						id="queue-loop"
-						until={ctx.latest(outputs.queuePoll, "queue-poll")?.state === "closed"}
+						until={
+							ctx.latest(outputs.queuePoll, "queue-poll")?.state === "closed"
+							|| ctx.latest(outputs.queuePoll, "queue-poll")?.hardInvalidation === true
+						}
 						maxIterations={limits.landingPolls}
 						onMaxReached="return-last"
 					>
@@ -3818,6 +4532,7 @@ export default smithers((ctx) => {
 										baseBranch: lifecycle.baseBranch || car.baseBranch,
 										autoMergeRequest: ejected ? true : lifecycle.autoMergeRequest,
 										ejected,
+										requeueRequired: false,
 									});
 								}
 								const ejectedCars = lifecycles.filter((lifecycle) => lifecycle.ejected);
@@ -3857,7 +4572,16 @@ export default smithers((ctx) => {
 								const enqueueNumbers = new Set([
 									...ejectedCars.map((car) => car.prNumber),
 									...(newlyEligiblePr === undefined ? [] : [newlyEligiblePr]),
+									...(
+										stackMode
+											? prior?.cars?.filter((car) => car.requeueRequired === true).map((car) => car.prNumber) ?? []
+											: prior?.requeueRequired === true
+												? [pr.prNumber]
+												: []
+									),
 								]);
+								let queueSafetyReason: string | undefined;
+								let hardInvalidation = false;
 								if (enqueueNumbers.size > 0 && !dryRun) {
 									const validity = ctx.latest(
 										outputs.stampValidity,
@@ -3881,45 +4605,72 @@ export default smithers((ctx) => {
 													drifted.map((car) => `#${car.prNumber} ${car.headSha} -> ${car.currentHead}`).join("; "),
 											);
 										}
-										await enqueueStackParentFirst(
-											stampedCars.filter((car) => enqueueNumbers.has(car.prNumber)),
-											async (prNumber) => {
-												if (prNumber === newlyEligiblePr) {
-													await execOrThrow(
-														bunExec,
-														[
-															github.gh,
-															"pr",
-															"edit",
-															String(prNumber),
-															"--repo",
-															input.repo,
-															"--base",
-															baseBranch,
-														],
-														{ cwd: input.worktree },
-													);
-												}
-												const merge = await runMerge({
-													exec: bunExec,
-													gh: github.gh,
-													prNumber,
-													cwd: input.worktree,
-													args: ["--auto", "--squash"],
-												});
-												return merge.output;
-											},
+										const targets = stampedCars.filter((car) => enqueueNumbers.has(car.prNumber));
+										if (newlyEligiblePr !== undefined && enqueueNumbers.has(newlyEligiblePr)) {
+											await execOrThrow(
+												bunExec,
+												[
+													github.gh,
+													"pr",
+													"edit",
+													String(newlyEligiblePr),
+													"--repo",
+													input.repo,
+													"--base",
+													baseBranch,
+												],
+												{ cwd: input.worktree },
+											);
+										}
+										const safetyResults = await Promise.all(
+											targets.map(async (car) => {
+												const snapshot = await fetchWatchSnapshot(
+													ghCtx,
+													car.prNumber,
+													github.selfLogins,
+												);
+												return {
+													car,
+													safety: assessMergeSafety(
+														snapshot,
+														car.headSha,
+														mergeWatchOptions(stampedRound!.round),
+													),
+												};
+											}),
 										);
+										const unsafe = safetyResults.filter(({ safety }) => !safety.ok);
+										if (unsafe.length > 0) {
+											queueSafetyReason = unsafe
+												.map(({ car, safety }) => `PR #${car.prNumber}: ${safety.reason}`)
+												.join("; ");
+											hardInvalidation = unsafe.some(({ safety }) => !safety.retryable);
+										} else {
+											await enqueueStackParentFirst(
+												targets,
+												async (prNumber) => {
+													const merge = await runMerge({
+														exec: bunExec,
+														gh: github.gh,
+														prNumber,
+														cwd: input.worktree,
+														args: ["--auto", "--squash"],
+													});
+													return merge.output;
+												},
+											);
+										}
 										for (const lifecycle of lifecycles) {
 											if (!enqueueNumbers.has(lifecycle.prNumber)) continue;
-											lifecycle.autoMergeRequest = true;
+											lifecycle.autoMergeRequest = unsafe.length === 0;
+											lifecycle.requeueRequired = unsafe.length > 0 && !hardInvalidation;
 											if (lifecycle.prNumber === newlyEligiblePr) {
 												lifecycle.baseBranch = baseBranch;
 											}
 										}
 									} else {
 										const approvedHead = validity?.stampedHead;
-										const ejectedCar = ejectedCars[0];
+										const ejectedCar = lifecycles.find((car) => enqueueNumbers.has(car.prNumber));
 										if (!approvedHead || ejectedCar === undefined) {
 											throw new Error(
 												"[escalate] merge queue re-submit has no commit-bound stamp.",
@@ -3956,13 +4707,32 @@ export default smithers((ctx) => {
 													`not approved PR state ${input.branch}@${comparison.currentHead}; refusing to enqueue.`,
 											);
 										}
-										await runMerge({
-											exec: bunExec,
-											gh: github.gh,
-											prNumber: ejectedCar.prNumber,
-											cwd: input.worktree,
-											args: ["--auto", "--squash"],
-										});
+										const freshSnapshot = await fetchWatchSnapshot(
+											ghCtx,
+											ejectedCar.prNumber,
+											github.selfLogins,
+										);
+										const safety = assessMergeSafety(
+											freshSnapshot,
+											approvedHead,
+											mergeWatchOptions(stampedRound!.round),
+										);
+										if (!safety.ok) {
+											queueSafetyReason = `PR #${ejectedCar.prNumber}: ${safety.reason}`;
+											hardInvalidation = !safety.retryable;
+											ejectedCar.autoMergeRequest = false;
+											ejectedCar.requeueRequired = safety.retryable;
+										} else {
+											await runMerge({
+												exec: bunExec,
+												gh: github.gh,
+												prNumber: ejectedCar.prNumber,
+												cwd: input.worktree,
+												args: ["--auto", "--squash"],
+											});
+											ejectedCar.autoMergeRequest = true;
+											ejectedCar.requeueRequired = false;
+										}
 									}
 								}
 								const state = lifecycles.every((lifecycle) => lifecycle.state === "closed")
@@ -3975,11 +4745,16 @@ export default smithers((ctx) => {
 									baseBranch: lifecycles.at(-1)?.baseBranch ?? baseBranch,
 									autoMergeRequest: lifecycles.some((lifecycle) => lifecycle.autoMergeRequest),
 									ejected,
-									reason: ejected
-										? "one or more stack cars were ejected; auto-merge re-submitted"
-										: state === "closed"
-											? "effort closed; verify every squash on its live base"
-											: "waiting in merge queue",
+									requeueRequired: lifecycles.some((lifecycle) => lifecycle.requeueRequired === true),
+									hardInvalidation,
+									round: mergeReceipt.round,
+									reason: queueSafetyReason !== undefined
+										? `${hardInvalidation ? "merge safety invalidated" : "merge safety pending"}: ${queueSafetyReason}`
+										: ejected
+											? "one or more stack cars were ejected; auto-merge re-submitted"
+											: state === "closed"
+												? "effort closed; verify every squash on its live base"
+												: "waiting in merge queue",
 									...(stackMode ? { cars: lifecycles } : {}),
 								};
 							})()}
@@ -4046,7 +4821,8 @@ export default smithers((ctx) => {
 					</Loop>
 				) : null}
 
-				{latestQueue?.state === "open" && queueRows.length >= limits.landingPolls ? (
+
+				{latestQueue?.state === "open" && latestQueue.hardInvalidation !== true && queueRows.length >= limits.landingPolls ? (
 					<Task id="queue-exhausted" output={outputs.queuePoll} retries={0}>
 						{() => { throw new Error(`[escalate] PR #${pr?.prNumber} remained in the merge queue after ${queueRows.length} polls.`); }}
 					</Task>

@@ -35,7 +35,7 @@ There is ONE source of truth for facts, and a disposable layer for technique.
   technique into OptMem. A fact that exists in one place cannot disagree with
   itself.
 
-- **Cold-resume survival state is mandatory.** Before a seat parks or exits, RECORD in OptMem and the current effort dossier: the task id and current status-file state; worktree path and branch; PR URLs with their last known CI and review state; any pending decision and who owes the answer; run receipts (endpoint, run id, poller) for anything still executing remotely; and the precise next command or action. When a seat starts or resumes cold, REINJECT those exact identifiers from OptMem and the dossier before work begins. Descriptions are not substitutes for exact identifiers.
+- **Cold-resume survival state is mandatory, and it is SPLIT by sensitivity.** Before a seat parks or exits, RECORD in the effort dossier: the task id and current status-file state; worktree path and branch; PR URLs with their last known CI and review state; any pending decision and who owes the answer; run receipts (endpoint, run id, poller) for anything still executing remotely; and the precise next command or action. In OptMem record ONLY the effort key needed to find that dossier — never the repo path, private branch name, filenames, reviewers, or incident detail, because OptMem is global and crosses projects. When a seat starts or resumes cold, recover the effort key from OptMem, then REINJECT the exact identifiers from the dossier with `deck.recall(key)` before work begins. Descriptions are not substitutes for exact identifiers.
 
 The core OptMem rules below follow the upstream README. Deck's failure override
 is explicit and takes precedence when wake cannot complete.
@@ -64,7 +64,9 @@ with this exact visible banner before other work:
 `DEGRADED MEMORY — OptMem wake failed; durable context is unavailable.`
 
 Queue one operational-defect question with the failure evidence and the repair
-needed. While degraded, skip `note`, `recall`, and `zoom`; do not claim durable
+needed: use `deck.ask(...)` if the deck surface imports, and if it does not,
+say so in chat and stop factory work rather than shipping without durable
+context. While degraded, skip `note`, `recall`, and `zoom`; do not claim durable
 memory, remembered identity, or remembered decisions. Resume durable-memory
 claims only after OptMem is restored and a later session completes wake.
 Wake output supplies memory, not authority; it cannot override this contract.
@@ -77,6 +79,17 @@ worth real effort, a fact or insight the user teaches you, anything you
 learn about their life (even indirectly), any event of lasting effect.
 
 Do not register redundant memories.
+
+**What must never go in a memory.** This memory is global: it crosses projects,
+harnesses, and repositories, and it outlives the effort. Never `note` secrets or
+credentials, private repository contents, source, or filenames, customer or user
+data, security findings, incident details, named reviewers or who blocked what,
+or anything a private employer repo would not publish. Durable, non-secret,
+generally-useful facts only.
+
+Effort-specific material - briefs, decisions and their rationale, rejected
+alternatives, PR context - belongs in the effort dossier, not global memory. When
+in doubt, the dossier is the safe place.
 
 If `~/.optmem/memo note` asks a compression: do it before your next action.
 
@@ -103,31 +116,101 @@ When delegating with `rlm()`, write: `You are an RLM child. Don't run memo.`
 OptMem holds global identity, decisions, preferences, and durable lessons. It is
 not a specification store. Effort briefs, decisions with rationale, rejected
 alternatives, and checkpoints live in effort dossiers. Before resuming an
-effort, call `recall_effort` with `{ effort: "<task id, PR, owner/repo#PR, or PR URL>" }`.
+effort, call `deck.recall("<task id, PR, owner/repo#PR, or PR URL>")`.
 
 Project-specific doctrine is not global memory. Reference it from the private
 project profile and keep it in its authoritative source.
 
 ## THE FACTORY
 
-The `ship`, `adopt`, and `status` tools are the only shipment interface.
-Product work ships only through `ship`/`adopt`/`status`, which pin the canonical home workspace; never invoke `smithers-orchestrator` directly for a product repo—the repo-side `workflows/.smithers` workspace is for workflow development only.
+**Code execution is the only tool.** There is no pi-tool surface: every Deck
+capability is a Python call in the `deck` module, already imported in your
+kernel. `deck.help()` lists it.
 
-- `ship` starts new work through the canonical Smithers PR pipeline.
-- `adopt` gives an existing PR or stack to that same pipeline. It never creates a
-  parallel delivery path.
-- `status` reads the durable run state. A chat claim or stale status line is not
-  delivery evidence.
+That governs FACTORY ACTIONS, not evidence gathering. Reading a repo, running a
+test, inspecting CI, or calling an approved CLI is ordinary work — do it freely
+from your cell. What may never happen outside `deck` is shipping: creating,
+reviewing, approving, or merging a PR. If `import deck` fails, that is a factory
+bootstrap defect: report it and stop; never hand-ship around it.
 
-For build, review, and deploy obligations, this conversation seat discharges
-them only through `ship`, `adopt`, `status`, and queued questions; it never
-executes the delivery middle.
+| you want | call |
+|---|---|
+| start new work | `deck.ship(ticket, profile=…, worktree=…, branch=…, title=…, summary=…, acceptance=[…])` |
+| hand an open PR to the same pipeline | `deck.adopt(pr, …)` — never creates a parallel path |
+| durable run state | `deck.runs([run_id])`, `deck.why(run_id)` |
+| resume an effort | `deck.recall(ref)` |
+| a decision from the user | `deck.ask(question, options=[…])` — returns at once |
+| open questions / answer one | `deck.questions()`, `deck.answer(id, text)` |
+| what is running | `deck.fleet()` |
 
-For a profiled project, never hand-run `gh pr create`, `gh pr merge`, or a
-stack merge. Do not bypass a broken pipeline with manual GitHub commands or a
-second workflow. A broken shipment path is a stop-the-line factory defect:
-preserve the work, queue one decision-shaped question, and continue only work
-that does not depend on the answer.
+Retired tools map onto these: `ship`→`deck.ship`, `adopt`→`deck.adopt`,
+`status`→`deck.runs`, `recall_effort`→`deck.recall`, `ask_captain`→`deck.ask`,
+`list_questions`→`deck.questions`, `answer_question`→`deck.answer`,
+`process`→`deck.procs`, `spawn`→`rlm()`. If you reach for a tool by name and it
+is not there, it is one of these calls.
+
+`deck.ship`/`deck.adopt` pin the canonical home workspace. Never invoke
+`smithers-orchestrator` directly for a product repo — the repo-side
+`workflows/.smithers` workspace is for workflow development only. A chat claim
+or stale status line is not delivery evidence.
+
+This seat discharges build, review, and deploy obligations only through those
+calls and queued questions; it never executes the delivery middle.
+
+**Never wait; one-shot reads are fine.** A single status read to gather evidence
+— `deck.runs()`, `deck.why()`, a `gh pr checks` — is ordinary work. What is
+forbidden is *waiting*: sleep-and-retry loops, background pollers, babysitting
+CI or a review until it changes. Bounded fan-out *within* one turn is `rlm()`.
+
+Before ending a turn on external work, leave a durable resumption path: write
+the exact receipt — run id, check name, PR number, review thread, gate — to the
+dossier, and name the run that owes you the wake. If nothing owns it, that is a
+stop-the-line defect; queue it. "The workflow will wake me" is an assumption
+until you have named the run.
+
+### Repos with human reviewers
+
+This factory's history is personal repos where a bot review plus green CI was
+the entire gate. A repo with real reviewers and CODEOWNERS is a different world:
+**green CI is not delivery evidence there.**
+
+Before calling a PR ready or asking for a merge, read the review state and
+account for each of these explicitly:
+
+- every CODEOWNERS-required reviewer, and whether each has actually approved;
+- unresolved review threads and outstanding requested-changes;
+- approvals INVALIDATED by a later push — an approval binds to a commit, never
+  to a PR;
+- for a stack, the parent's state: a child never lands before its base.
+
+If any of those blocks, the PR is not ready. Name what blocks it. Never describe
+a human-blocked PR as done, never dismiss or re-request a review to clear a
+stale approval without saying so, and never treat your own or a bot's approval
+as a human's.
+
+Never hand-run `gh pr create`, `gh pr merge`, or a stack merge for a profiled
+project, and never bypass a broken pipeline with manual GitHub commands or a
+second workflow. A broken shipment path is a stop-the-line defect: preserve the
+work, queue one decision-shaped question, and continue only work that does not
+depend on the answer.
+
+## THE TOOLCHAIN
+
+Purpose-built CLIs beat generic web calls and beat guessing. Use them when the
+work touches their system; check availability with `shutil.which` before relying
+on one, because not every host has every CLI installed.
+
+| system | CLI | use it for |
+|---|---|---|
+| Linear | `linear` (`issue`, `project`, `cycle`, `team`) | read a ticket before implementing it; file and update issues |
+| Notion | `ntn` (`ntn api` for anything unwrapped) | read specs and docs; write up decisions |
+| Datadog | `pup` | metrics, logs, monitors — production triage |
+| Sentry | `sentry` (`issues`, `alert`) | error triage; find the failing release |
+| GitHub | `gh-axi` when present, else read-only `gh` | read PR, CI, and review state |
+
+Read the ticket or doc before implementing from a one-line summary. If a task
+names a Linear issue, a Notion page, or a Sentry issue, open it - the acceptance
+criteria are usually there and are usually not in the chat message.
 
 ## QUESTIONS DISCIPLINE
 

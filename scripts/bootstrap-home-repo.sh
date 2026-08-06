@@ -13,7 +13,14 @@ if find "$PERSONAL_SOURCE" -type f \( -name 'restricted-*' -o -path '*/secrets-m
   exit 1
 fi
 
-gh repo view "$REMOTE" >/dev/null 2>&1 || gh repo create "$REMOTE" --private --description "Deck operator home profiles" >/dev/null
+if ! gh repo view "$REMOTE" >/dev/null 2>&1; then
+  gh repo create "$REMOTE" --private --description "Deck operator home profiles" >/dev/null
+fi
+visibility="$(gh repo view "$REMOTE" --json visibility --jq .visibility 2>/dev/null || true)"
+if [ "$visibility" != "PRIVATE" ]; then
+  echo "error: home profile repository must be PRIVATE: $REMOTE (visibility=${visibility:-unknown})" >&2
+  exit 1
+fi
 TEMP="$(mktemp -d)"
 trap 'rm -rf "$TEMP"' EXIT
 git init -q "$TEMP/repo"
@@ -26,7 +33,7 @@ build_profile() {
   for item in "$source"/* "$source"/.[!.]*; do
     [ -e "$item" ] || continue
     base="$(basename "$item")"
-    case "$base" in .git|.env|.pi|AGENTS.md|data|state|wt|logs|run|questions|broker) continue ;; esac
+    case "$base" in .git|.pi|.prime|.env|.deck-profile|AGENTS.md|START.md|archive|backups|broker|catalog|config|config.json|data|efforts|enter.sh|intake|questions|repos|shadow|state|workflows|wt|worktrees.json|worktrees.json.lock|logs|run) continue ;; esac
     cp -a "$item" "$TEMP/repo/"
   done
   git -C "$TEMP/repo" add -A

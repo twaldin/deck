@@ -34,6 +34,7 @@ const baseInput = {
 	brief: validBrief,
 	dryRun: false,
 	wakeDryRun: true,
+	github: { reviewPolicy: { requireHuman: false, requiredBots: [] } },
 };
 const originalDeckHome = process.env.DECK_V2_HOME;
 
@@ -202,7 +203,7 @@ function createImplementationRepo(root: string, publishPreexistingCommit: boolea
 
 async function captureImplementationBaseline(input: typeof baseInput & {
 	worktree: string;
-	github: { git: string; gh: string };
+	github: typeof baseInput.github & { git: string; gh: string };
 	watchSetPath: string;
 }) {
 	const preflight = approvalReadyOutputs().preflight;
@@ -219,7 +220,7 @@ async function captureImplementationBaseline(input: typeof baseInput & {
 async function computeImplementationReport(
 	input: typeof baseInput & {
 		worktree: string;
-		github: { git: string; gh: string };
+		github: typeof baseInput.github & { git: string; gh: string };
 		watchSetPath: string;
 	},
 	baseline: { branch: string; headSha: string },
@@ -397,22 +398,19 @@ describe("standing-rules seat injection", () => {
 			round: 0,
 			afterPoll: 0,
 		});
-		expect(prompt).toContain("Return every commit you created as a full");
-		expect(prompt).toContain("Pushes outside rebaseAndPush() are forbidden");
-		expect(prompt).toContain("Never run git push");
-		expect(prompt).toContain("Resolve the thread only after a plain commit on THIS branch addresses it");
-		expect(prompt).toContain("reviewer/captain agreement to the no-code disposition");
-		expect(prompt).toContain("Never infer agreement from silence");
-		expect(prompt).toContain(
-			"DECISION-CLASS BLOCKER: thread=<stable thread id or URL> | decision=<missing decision>",
-		);
-		expect(prompt).toContain("<REVIEW_COMMENT_ID>");
-		expect(prompt).toContain("numeric `databaseId`");
-		expect(prompt).toContain("Never run the review-reply template with the placeholder or with comment id 0");
-		expect(prompt).not.toContain("post-review-reply.ts '' 'lindy-ai/lindy' 0");
-		expect(prompt).toContain("Shape-only blocker result example");
-		expect(prompt).toContain("An empty actions array is invalid");
-		expect(prompt).not.toContain('"actions":[],"commits":[],"pushed":false,"reRequested":[],"summary":"No action required."');
+		expect(prompt).toContain("Return every commit created by this seat as a full");
+		expect(prompt).toContain("deterministic publisher owns rebase, tests, force-with-lease push");
+		expect(prompt).toContain("Never rebase, push, approve, stamp, merge");
+		expect(prompt).toContain("Never post a raw GitHub comment");
+		expect(prompt).toContain("FIX_NOW");
+		expect(prompt).toContain("NOT_VALID");
+		expect(prompt).toContain("DECISION");
+		expect(prompt).toContain("Return replyBody");
+		expect(prompt).toContain("handledTriggerIds");
+		expect(prompt).toContain("This route does not block unrelated work");
+		expect(prompt).toContain("Never change a CI runner platform/image");
+		expect(prompt).toContain("configuration blast radius belongs to the captain");
+		expect(prompt).not.toContain("DECISION-CLASS BLOCKER:");
 		expect(prompt).not.toContain("If the helper is unavailable");
 	});
 	test("routes watch publication through a deterministic node and rejects a direct-push receipt", async () => {
@@ -506,7 +504,7 @@ describe("standing-rules seat injection", () => {
 			},
 		];
 		const rendered = await renderWorkflow(pipeline, {
-			input: { ...baseInput, worktree: dir, github: { git, gh } },
+			input: { ...baseInput, worktree: dir, github: { ...baseInput.github, git, gh } },
 			outputs: {
 				...outputs,
 				watchBaseline: [
@@ -575,7 +573,7 @@ describe("standing-rules seat injection", () => {
 			},
 		];
 		const rendered = await renderWorkflow(pipeline, {
-			input: { ...baseInput, worktree: dir, github: { git, gh } },
+			input: { ...baseInput, worktree: dir, github: { ...baseInput.github, git, gh } },
 			outputs: {
 				...outputs,
 				watchBaseline: [
@@ -621,7 +619,7 @@ describe("standing-rules seat injection", () => {
 		const input = {
 			...baseInput,
 			worktree: fixture.repo,
-			github: { git: "git", gh },
+			github: { ...baseInput.github, git: "git", gh },
 			watchSetPath,
 		};
 		const baseline = await captureImplementationBaseline(input);
@@ -682,7 +680,7 @@ esac
 		const input = {
 			...baseInput,
 			worktree: fixture.repo,
-			github: { git: "git", gh: "gh" },
+			github: { ...baseInput.github, git: "git", gh: "gh" },
 			watchSetPath: path.join(dir, "watch-set.jsonl"),
 		};
 		const baseline = await captureImplementationBaseline(input);
@@ -727,7 +725,7 @@ esac
 		const input = {
 			...baseInput,
 			worktree: fixture.repo,
-			github: { git: "git", gh: "gh" },
+			github: { ...baseInput.github, git: "git", gh: "gh" },
 			watchSetPath: path.join(dir, "watch-set.jsonl"),
 		};
 		const tree = runGit(fixture.repo, "write-tree");
@@ -768,7 +766,7 @@ esac
 		const input = {
 			...baseInput,
 			worktree: fixture.repo,
-			github: { git: "git", gh: "/usr/bin/false" },
+			github: { ...baseInput.github, git: "git", gh: "/usr/bin/false" },
 			watchSetPath: path.join(dir, "watch-set.jsonl"),
 		};
 		const baseline = await captureImplementationBaseline(input);
@@ -824,7 +822,7 @@ esac
 		fs.chmodSync(git, 0o755);
 		fs.chmodSync(gh, 0o755);
 		const rendered = await renderWorkflow(pipeline, {
-			input: { ...baseInput, worktree: dir, github: { git, gh } },
+			input: { ...baseInput, worktree: dir, github: { ...baseInput.github, git, gh } },
 			outputs: approvalReadyOutputs(),
 			workflowPath: path.join(import.meta.dir, "..", "pipeline.tsx"),
 		});
@@ -885,7 +883,7 @@ describe("commit-bound stamp", () => {
 		fs.chmodSync(git, 0o755);
 		fs.chmodSync(gh, 0o755);
 		const rendered = await renderWorkflow(pipeline, {
-			input: { ...baseInput, worktree: dir, github: { git, gh } },
+			input: { ...baseInput, worktree: dir, github: { ...baseInput.github, git, gh } },
 			outputs: {
 				...approvalReadyOutputs(),
 				approvals: [
@@ -957,7 +955,7 @@ describe("commit-bound stamp", () => {
 			],
 		} satisfies PipelineOutputFixtures;
 		const rendered = await renderWorkflow(pipeline, {
-			input: { ...baseInput, worktree: dir, github: { git, gh } },
+			input: { ...baseInput, worktree: dir, github: { ...baseInput.github, git, gh } },
 			outputs,
 			workflowPath: path.join(import.meta.dir, "..", "pipeline.tsx"),
 		});
@@ -973,7 +971,7 @@ describe("commit-bound stamp", () => {
 		expect(fs.readFileSync(log, "utf8")).not.toContain("pr merge");
 
 		const rerendered = await renderWorkflow(pipeline, {
-			input: { ...baseInput, worktree: dir, github: { git, gh } },
+			input: { ...baseInput, worktree: dir, github: { ...baseInput.github, git, gh } },
 			outputs: {
 				...outputs,
 				mergeHeadCheck: [{ nodeId: "r0-merge-head-check", ...invalidation }],
@@ -987,7 +985,7 @@ describe("commit-bound stamp", () => {
 			input: {
 				...baseInput,
 				worktree: dir,
-				github: { git, gh },
+				github: { ...baseInput.github, git, gh },
 				limits: { landingPollSeconds: 0.001 },
 			},
 			outputs: {

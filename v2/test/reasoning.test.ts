@@ -20,7 +20,7 @@ afterEach(() => {
 });
 
 const profile = (models: ProjectProfile["models"]): ProjectProfile => ({
-	id: "demo", repo: "demo/repo", primary: "/tmp/demo", pipeline: "yolo-ship", yolo: true, stamp: false, knowledge: [], models, depsWarm: true,
+	id: "demo", repo: "demo/repo", primary: "/tmp/demo", pipeline: "yolo-ship", yolo: true, stamp: false, knowledge: [], models, reviewPolicy: { requireHuman: false, requiredBots: [] }, depsWarm: true,
 });
 const theme = { bold: (value: string) => value, fg: (_key: string, value: string) => value };
 

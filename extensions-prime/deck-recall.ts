@@ -159,35 +159,6 @@ export function registerDeckRecall(
 		}
 	};
 
-	agent.registerTool({
-		name: "recall_effort",
-		label: "Recall Effort",
-		description:
-			"Hydrate one Deck effort from its durable dossier and current external state. Accepts a task id or PR reference.",
-		parameters: Type.Object({
-			effort: Type.String({
-				description: "Task id, PR number/#number, owner/repo#number, or GitHub PR URL",
-				minLength: 1,
-				maxLength: 500,
-			}),
-		}),
-		async execute(_id, params) {
-			if (typeof params.effort !== "string") {
-				throw new Error("recall_effort needs an effort string");
-			}
-			const resolved = resolveEffortReference(params.effort, dependencies.efforts());
-			const hydration = dependencies.hydrate(resolved.taskId, resolved.epoch);
-			return {
-				content: [{ type: "text", text: hydration.text }],
-				details: {
-					taskId: resolved.taskId,
-					epoch: resolved.epoch,
-					messageIds: hydration.messageIds,
-				},
-			};
-		},
-	});
-
 	agent.on("session_start", async (_event, ctx) => {
 		injectedSession = false;
 		injectedCompactions.clear();

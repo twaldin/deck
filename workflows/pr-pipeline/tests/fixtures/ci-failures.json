@@ -1,0 +1,18 @@
+{
+  "infra": {
+    "jobName": "test",
+    "log": "Set up job\nFailed to resolve action download info. Error: Service Unavailable\nRetrying in 15 seconds\nFailed to resolve action download info. Error: Service Unavailable",
+    "steps": [
+      { "name": "Set up job", "status": "completed", "conclusion": "failure" },
+      { "name": "Run tests", "status": "queued", "conclusion": null }
+    ]
+  },
+  "code": {
+    "jobName": "test",
+    "log": "Run bun test\nAssertionError: expected 2 to equal 3",
+    "steps": [
+      { "name": "Set up job", "status": "completed", "conclusion": "success" },
+      { "name": "Run tests", "status": "completed", "conclusion": "failure" }
+    ]
+  }
+}

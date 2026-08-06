@@ -43,9 +43,35 @@ export interface ReviewThread {
 	lastCommenter: string | null;
 }
 
-export type CiState = "green" | "will-be-green" | "red" | "none";
+export type CiState = "green" | "will-be-green" | "red" | "none" | "not-configured" | "stuck";
+
+/**
+ * CI truth is deliberately more precise than the ready-gate traffic light.
+ * In particular, an empty check rollup is never inferred to be green.
+ */
+export type CiClassification =
+	| "RUNNING"
+	| "STARTING"
+	| "EXPECTED_STUCK"
+	| "STALE_RUN_BLOCKED"
+	| "NOT_TRIGGERED"
+	| "RUNNER_QUEUED"
+	| "INFRA_RETRY"
+	| "WORKFLOW_BROKEN"
+	| "MERGEABILITY_STALE"
+	| "TERMINAL_FAILURE"
+	| "TERMINAL_SUCCESS"
+	| "NO_REQUIRED_CHECKS";
+
+export interface RequiredStatusContext {
+	context: string;
+	integrationId: number | null;
+}
 
 export interface CheckRun {
+	id?: number;
+	/** Commit SHA reported by the checks API. */
+	headSha?: string;
 	name: string;
 	/** Workflow name when GitHub provides it. */
 	workflowName?: string;
@@ -53,8 +79,69 @@ export interface CheckRun {
 	status: string;
 	/** success | failure | neutral | skipped | cancelled | timed_out | null while running */
 	conclusion: string | null;
+	startedAt?: string | null;
 	/** GitHub's completion time, used to identify the newest workflow run. */
 	completedAt?: string | null;
+	detailsUrl?: string | null;
+	appId?: number | null;
+	appSlug?: string | null;
+	checkSuiteId?: number | null;
+}
+
+export interface CommitStatusEvidence {
+	id: number;
+	context: string;
+	state: string;
+	createdAt: string;
+	updatedAt: string;
+	targetUrl: string | null;
+}
+
+export interface WorkflowJobStepEvidence {
+	name: string;
+	status: string;
+	conclusion: string | null;
+}
+
+export interface WorkflowJobEvidence {
+	id: number;
+	name: string;
+	status: string;
+	conclusion: string | null;
+	startedAt: string | null;
+	completedAt: string | null;
+	url: string;
+	steps?: WorkflowJobStepEvidence[];
+	/** Bounded tail of the failed job log; collected only for failed jobs. */
+	logExcerpt?: string;
+}
+
+export interface WorkflowRunEvidence {
+	id: number;
+	checkSuiteId: number;
+	headSha: string;
+	status: string;
+	conclusion: string | null;
+	createdAt: string;
+	updatedAt: string;
+	startedAt: string | null;
+	url: string;
+	jobs: WorkflowJobEvidence[];
+}
+
+/**
+ * Evidence collected for the exact PR head. Required contexts come from the
+ * rules applying to rulesBranch; workflow runs are accepted only after the
+ * API proves the PR number, base branch, and exact head SHA all match.
+ */
+export interface CiEvidence {
+	requiredContexts: RequiredStatusContext[];
+	rulesBranch: string;
+	graceSeconds: number;
+	currentHeadAgeSeconds: number;
+	currentRuns: WorkflowRunEvidence[];
+	staleActiveRuns: WorkflowRunEvidence[];
+	statuses: CommitStatusEvidence[];
 }
 
 export interface ReviewerActivity {
@@ -62,11 +149,21 @@ export interface ReviewerActivity {
 	isBot: boolean;
 	/** ISO timestamp of the reviewer's last review/comment activity. */
 	lastActivityAt: string;
+	/** Review commit SHA from GitHub; production approvals must match the PR head. */
+	headSha?: string;
 	/** APPROVED | CHANGES_REQUESTED | COMMENTED | DISMISSED */
 	lastReviewState: string | null;
 }
 
 export interface CommentActivity {
+	/** Stable GraphQL node id. Fixtures may use another stable opaque id. */
+	id?: string;
+	/** Numeric REST id when this is an inline review comment. */
+	databaseId?: number;
+	url?: string;
+	/** issue_comment | review | review_comment */
+	source?: "issue_comment" | "review" | "review_comment";
+	threadId?: string;
 	author: string;
 	isBot: boolean;
 	createdAt: string;
@@ -92,26 +189,81 @@ export interface WatchSnapshot {
 	comments: CommentActivity[];
 	/** Reviewer activity, derived from reviews. */
 	reviewers: ReviewerActivity[];
+	/** GitHub's aggregate review decision; CHANGES_REQUESTED is authoritative even when review history was truncated. */
+	reviewDecision?: string | null;
 	/** Logins currently in requested_reviewers (the machine check for re-request). */
 	requestedReviewers: string[];
 	checkRuns: CheckRun[];
+	/**
+	 * Exact-head CI proof. Real GitHub snapshots always provide it. Omitted
+	 * evidence is treated as unverified, never as a successful empty rollup.
+	 */
+	ciEvidence?: CiEvidence;
+}
+
+export type WatchTriggerKind =
+	| "failed_ci"
+	| "merge_conflict"
+	| "human_comment"
+	| "bot_comment";
+
+export interface WatchTrigger {
+	id: string;
+	kind: WatchTriggerKind;
+	headSha: string;
+	summary: string;
+	payload: Record<string, unknown>;
+}
+
+export type ReviewRouteOutcome = "FIX_NOW" | "NOT_VALID" | "DECISION";
+
+export interface ReviewRoute {
+	triggerId: string;
+	outcome: ReviewRouteOutcome;
+	rationale: string;
+	/** Required for NOT_VALID so the deterministic publisher can reply. */
+	replyBody?: string;
+	/** Required for DECISION so the captain sees the actual decision needed. */
+	question?: string;
+}
+
+export interface RequiredBotReviewer {
+	login: string;
+	/** Optional profile-owned marker for bots that approve via issue comments. */
+	approvalCommentPattern?: string;
+	/** Optional profile-owned check-name marker for bots that approve via checks. */
+	approvalCheckPattern?: string;
+}
+
+export interface WatchReviewPolicy {
+	requireHuman: boolean;
+	requiredBots: RequiredBotReviewer[];
 }
 
 export interface WatchExitVerdict {
 	exitOk: boolean;
-	/** Smithers owns wait; an agent is used only for a bounded fix. */
-	disposition: "complete" | "wait" | "fix";
+	/** Smithers owns waits; only a real trigger wakes an agent seat. */
+	disposition: "complete" | "wait" | "fix" | "escalate";
 	unresolvedThreads: number;
 	unansweredComments: number;
 	reviewersNeedingReRequest: string[];
 	ci: CiState;
+	ciClassification: CiClassification;
 	reasons: string[];
-	/** True when there is agent-actionable work (fix CI, answer, re-request). */
+	/** True exactly when one or more unhandled watch triggers need a seat. */
 	actionable: boolean;
+	triggers: WatchTrigger[];
+	/** Step 4 exits only after every approver required by the profile is present. */
+	humanApprovedBy: string | null;
+	botApprovedBy: string[];
 	/** Reviewers with a current-head changes request need a code response. */
 	reviewersWithChangesRequested?: string[];
+	/** Retryable setup/provider failures are rerun deterministically, never sent to a fix seat. */
+	infraRetryJobs: Array<{ runId: number; jobId: number; reason: string }>;
 	/** Structured mergeability signal for deterministic rebase selection. */
 	rebaseRequired: boolean;
+	/** CI lifecycle/configuration reached a stated terminal escalation, not a poll. */
+	terminalEscalation: boolean;
 }
 
 export interface ReviewApproval {
@@ -119,6 +271,7 @@ export interface ReviewApproval {
 	isBot: boolean;
 	state: string;
 	submittedAt: string;
+	headSha?: string;
 }
 
 export interface ReadyVerdict {

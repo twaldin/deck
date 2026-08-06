@@ -10,11 +10,11 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ChildProcess, SpawnOptions } from "node:child_process";
-import { registerDeckShip, type DeckShipApi } from "../../extensions-prime/deck-ship";
+
 import { validateBrief } from "../../workflows/pr-pipeline/lib/brief";
 import { loadProfiles, profilesFile, type ProjectProfile } from "../src/projects";
 import { existingPrFromFlag, runCli } from "../src/cli";
-import { buildPipelineInput, pipelineDir, startShip, type ShipRequest } from "../src/ship";
+import { buildPipelineInput, mergeModelSlots, pipelineDir, startShip, type ShipRequest } from "../src/ship";
 import { assertShipGoesThroughPipeline, shipProfileFor, workerModelFor } from "../src/spawn";
 import { discoverSmithersWorkspaces, smithersWorkspaceCwd, smithersWorkspaceRoot } from "../src/workspace";
 
@@ -28,8 +28,21 @@ beforeEach(() => {
 	delete process.env.DECK_PIPELINE_DIR;
 	fs.mkdirSync(path.dirname(profilesFile(home)), { recursive: true });
 	fs.writeFileSync(profilesFile(home), JSON.stringify([
-		{ id: "example-project", repo: "example-org/example-project", primary: "/opt/example-project", pipeline: "yolo-ship", yolo: true, stamp: false, knowledge: [], depsWarm: true },
-		{ id: "review-project", repo: "example-org/review-project", primary: "/opt/review-project", pipeline: "lindy-full", yolo: false, stamp: true, knowledge: [], depsWarm: true },
+		{
+			id: "example-project", repo: "example-org/example-project", primary: "/opt/example-project", pipeline: "yolo-ship", yolo: true, stamp: false, knowledge: [], depsWarm: true,
+			reviewPolicy: { requireHuman: false, requiredBots: [{ login: "coderabbitai[bot]", approvalCheckPattern: "^CodeRabbit(?:$| /)" }] },
+		},
+		{
+			id: "review-project", repo: "example-org/review-project", primary: "/opt/review-project", pipeline: "lindy-full", yolo: false, stamp: true, knowledge: [], depsWarm: true,
+			reviewPolicy: {
+				requireHuman: true,
+				requiredBots: [{
+					login: "claude[bot]",
+					approvalCommentPattern: "^\\*\\*Claude finished .+ task in .+\\*\\*",
+					approvalCheckPattern: "claude.*review",
+				}],
+			},
+		},
 	]));
 });
 
@@ -146,6 +159,29 @@ describe("worker model wiring", () => {
 			/must use the deck provider/,
 		);
 	});
+
+	// The orchestrator, not the project config, decides which canonical model
+	// runs a given node on a given run.
+	test("a per-run override replaces one profile slot and leaves the rest", () => {
+		const base = { implementer: "deck/gpt-5.6-sol", reviewer: "deck/gpt-5.6-luna" };
+		const merged = mergeModelSlots(base, { reviewer: "deck/claude-opus-5" }) as Record<string, string>;
+		expect(merged.reviewer).toBe("deck/claude-opus-5");
+		expect(merged.implementer).toBe("deck/gpt-5.6-sol");
+	});
+
+	test("a per-run override cannot leave the canonical catalog", () => {
+		expect(() => mergeModelSlots(deckProfile().models, { reviewer: "deck/claude-sonnet-5" })).toThrow(
+			/agent-pickable deck catalog/,
+		);
+		expect(() => mergeModelSlots(deckProfile().models, { reviewer: "openai/gpt-5.6-sol" })).toThrow(
+			/must use the deck provider/,
+		);
+	});
+
+	test("no override leaves the profile untouched", () => {
+		const models = deckProfile().models;
+		expect(mergeModelSlots(models, undefined)).toBe(models);
+	});
 });
 
 describe("existingPrFromFlag", () => {
@@ -193,13 +229,23 @@ describe("buildPipelineInput", () => {
 		expect(validateBrief(none.brief).ok).toBe(true);
 	});
 
-	test("yolo profile with no reviewers records the explicit reviewer skip; lindy never does", () => {
+	test("ship resolves each profile's immutable review policy into pipeline input", () => {
 		const deck = buildPipelineInput(request(), deckProfile());
-		expect((deck.github as { skipReviewerRequest?: boolean })?.skipReviewerRequest).toBe(true);
+		const deckGithub = deck.github;
+		if (deckGithub === null || typeof deckGithub !== "object" || Array.isArray(deckGithub) || !("reviewPolicy" in deckGithub)) throw new Error("missing deck github input");
+		expect(deckGithub.reviewPolicy).toEqual({
+			requireHuman: false,
+			requiredBots: [{ login: "coderabbitai[bot]", approvalCheckPattern: "^CodeRabbit(?:$| /)" }],
+		});
+		expect("skipReviewerRequest" in deckGithub ? deckGithub.skipReviewerRequest : undefined).toBe(true);
 		const withReviewers = buildPipelineInput(request({ reviewers: ["alice"] }), deckProfile());
-		expect(withReviewers.github).toBeUndefined();
+		const withReviewersGithub = withReviewers.github;
+		if (withReviewersGithub === null || typeof withReviewersGithub !== "object" || Array.isArray(withReviewersGithub) || !("reviewPolicy" in withReviewersGithub)) throw new Error("missing reviewer github input");
+		expect(withReviewersGithub.reviewPolicy).toEqual(deckProfile().reviewPolicy);
 		const lindy = buildPipelineInput(request({ profile: "review-project" }), lindyProfile());
-		expect(lindy.github).toBeUndefined();
+		const lindyGithub = lindy.github;
+		if (lindyGithub === null || typeof lindyGithub !== "object" || Array.isArray(lindyGithub) || !("reviewPolicy" in lindyGithub)) throw new Error("missing lindy github input");
+		expect(lindyGithub.reviewPolicy).toEqual(lindyProfile().reviewPolicy);
 	});
 
 	test("real runs get a deploy-evidence command (done is evidence-gated); dry runs do not need one", () => {
@@ -219,9 +265,9 @@ describe("buildPipelineInput", () => {
 		expect(fresh.existingPr).toBeUndefined();
 	});
 
-	test("explicit reviewer skip is passed through even for a stamp profile", () => {
+	test("explicit reviewer skip is passed through with the stamp profile's review policy", () => {
 		const input = buildPipelineInput(request({ profile: "review-project", skipReviewerRequest: true }), lindyProfile());
-		expect(input.github).toEqual({ skipReviewerRequest: true });
+		expect(input.github).toEqual({ skipReviewerRequest: true, reviewPolicy: lindyProfile().reviewPolicy });
 	});
 
 	test("a stamp profile (lindy) never gets the weak git-log deploy default: preflight must fail closed until explicit evidence exists", () => {
@@ -265,38 +311,27 @@ describe("smithers workspace", () => {
 	});
 });
 
-describe("registered _ship entry contract", () => {
+describe("ship entry contract", () => {
+	// Formerly driven through the registered `ship` pi-tool. The tool is gone -
+	// code execution is the only tool - so this exercises the same entry the
+	// `deck.ship()` call and `deck-v2 ship` both reach.
 	test("REGRESSION: a real _ship input survives Smithers persistence and renders the single-PR pipeline", async () => {
 		fs.mkdirSync(smithersWorkspaceCwd(home), { recursive: true });
-		const tools: Array<Parameters<DeckShipApi["registerTool"]>[0]> = [];
-		registerDeckShip({
-			registerTool(tool) {
-				tools.push(tool);
-			},
-		});
-		const ship = tools.find((tool) => tool.name === "ship");
-		if (ship === undefined) throw new Error("deck-ship did not register the ship tool");
 
 		const repoRoot = path.resolve(pipelineDir(), "..", "..");
 		const runId = "ship-entry-contract-pipeline";
-		const result = await ship.execute(
-			"ship-entry-contract",
-			{
-				ticket: "ship-entry-contract",
-				profile: "example-project",
-				worktree: repoRoot,
-				branch: "v4-build",
-				title: "Exercise the ship entry contract",
-				summary: "Pass the registered ship tool input through the real Smithers pipeline entry",
-				acceptance: ["the single-PR workflow renders"],
-				dry_run: true,
-				run_id: runId,
-			},
-			undefined,
-			undefined,
-			{},
-		);
-		const { logPath, pid } = result.details;
+		const result = await startShip({
+			ticket: "ship-entry-contract",
+			profile: "example-project",
+			worktree: repoRoot,
+			branch: "v4-build",
+			title: "Exercise the ship entry contract",
+			summary: "Pass a real ship input through the real Smithers pipeline entry",
+			acceptance: ["the single-PR workflow renders"],
+			dryRun: true,
+			runId,
+		});
+		const { logPath, pid } = result;
 		let terminalObserved = false;
 		let log = "";
 		try {
@@ -495,6 +530,7 @@ describe("spawn enforcement: pipeline is the default ship path", () => {
 					yolo: true,
 					stamp: false,
 					knowledge: [],
+					reviewPolicy: { requireHuman: false, requiredBots: [] },
 				},
 			]),
 		);
@@ -561,6 +597,7 @@ describe("spawn enforcement: pipeline is the default ship path", () => {
 					yolo: true,
 					stamp: false,
 					knowledge: [],
+					reviewPolicy: { requireHuman: false, requiredBots: [] },
 				},
 			]),
 		);

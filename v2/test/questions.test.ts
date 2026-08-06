@@ -705,31 +705,35 @@ function fakeContext(sessionId: string, selections: string[] = [], written?: str
 }
 
 describe("questions extension", () => {
-	test("ask_captain queues durably and reports the backlog", async () => {
+	// `ask_captain` is gone: code execution is the only tool, so the agent-facing
+	// path is `deck.ask()` -> `deck-v2 questions ask` -> this store call. The
+	// queue behaviour it depended on is asserted here, one layer down.
+	test("asking queues durably and reports the backlog", () => {
 		const file = freshFile();
-		const agent = new Harness();
-		registerQuestions(agent as any, envFor(file), agent.runtime);
-		const ctx = fakeContext("session-a");
-
-		const result = await agent.tools.get("ask_captain")!.execute(
-			"call-1",
-			{ question: "Flag or not?", options: ["flag", "no flag"], urgency: "high" },
-			undefined,
-			undefined,
-			ctx,
-		);
-
-		expect(result.content[0].text).toContain("1 open");
+		ask(file, {
+			question: "Flag or not?",
+			options: ["flag", "no flag"],
+			urgency: "high",
+			sessionId: "session-a",
+			cwd: "/tmp",
+		});
 		expect(openQuestions(file)).toHaveLength(1);
-		expect(ctx.notices[0]).toContain("Queued question");
+		expect(openQuestions(file)[0]!.urgency).toBe("high");
+	});
+
+	test("no agent-callable question tool is registered", () => {
+		const agent = new Harness();
+		registerQuestions(agent as unknown as Parameters<typeof registerQuestions>[0], envFor(freshFile()), agent.runtime);
+		for (const retired of ["ask_captain", "list_questions", "answer_question"]) {
+			expect(agent.tools.get(retired)).toBeUndefined();
+		}
 	});
 
 	test("/questions custom overlay confirms newline without scrollback rerenders", async () => {
 		const file = freshFile();
 		const agent = new Harness();
 		registerQuestions(agent as any, envFor(file), agent.runtime);
-		const asker = fakeContext("session-a");
-		await agent.tools.get("ask_captain")!.execute("c1", { question: "Choose", options: ["yes", "no"] }, undefined, undefined, asker);
+		ask(file, { question: "Choose", options: ["yes", "no"], sessionId: "session-a", cwd: "/tmp" });
 		const captain = fakeContext("session-captain", [], undefined, ["x", "\n"]);
 		await agent.commands.get("questions")!.handler("", captain);
 		expect(openQuestions(file)).toHaveLength(0);
@@ -744,9 +748,7 @@ describe("questions extension", () => {
 		registerQuestions(agent as any, envFor(file), agent.runtime);
 
 		const asker = fakeContext("session-a");
-		await agent.tools
-			.get("ask_captain")!
-			.execute("c1", { question: "Flag or not?", options: ["flag", "no flag"] }, undefined, undefined, asker);
+		ask(file, { question: "Flag or not?", options: ["flag", "no flag"], sessionId: "session-a", cwd: "/tmp" });
 
 		// The captain reviews from a DIFFERENT session. Agent options are numbered
 		// so they can never collide with the control labels.

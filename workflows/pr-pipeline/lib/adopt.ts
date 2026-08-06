@@ -6,6 +6,16 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { execOrThrow, type ExecFn } from "./gh.ts";
+import {
+	activeRebaseConflictFiles,
+	assertCleanRebaseState,
+	clearCompletedRebaseMetadata,
+	removeRebaseStateResidue,
+	removeUntrackedArtifactFiles,
+	resolveActiveRebaseConflict,
+	runRebaseTests,
+	type RebaseConflictResolver,
+} from "./rebase.ts";
 
 export interface PrOverview {
 	number: number;
@@ -511,46 +521,369 @@ export async function submitStack(
 	return records;
 }
 
+interface StackRebaseArgs {
+	gh: string;
+	git: string;
+	worktree: string;
+	rootBaseBranch: string;
+	branches: string[];
+	fromBranch: string;
+	expectedRemoteHeads: Record<string, string>;
+	runCommitShasByBranch?: Record<string, string[]>;
+	testCommand: string;
+	resolveConflict?: RebaseConflictResolver;
+}
+
+async function stackConflictCoordinates(
+	exec: ExecFn,
+	args: StackRebaseArgs,
+): Promise<{ branch: string; baseBranch: string }> {
+	const reported = (
+		await execOrThrow(
+			exec,
+			[
+				args.git,
+				"rev-parse",
+				"--path-format=absolute",
+				"--git-path",
+				"gh-stack-rebase-state",
+			],
+			{ cwd: args.worktree },
+		)
+	).trim();
+	const statePath = path.isAbsolute(reported)
+		? reported
+		: path.resolve(args.worktree, reported);
+	try {
+		const state = JSON.parse(fs.readFileSync(statePath, "utf8")) as {
+			conflictBranch?: unknown;
+			currentBranchIndex?: unknown;
+		};
+		const index =
+			typeof state.currentBranchIndex === "number"
+				? state.currentBranchIndex
+				: args.branches.indexOf(
+						typeof state.conflictBranch === "string"
+							? state.conflictBranch
+							: args.fromBranch,
+					);
+		const branch =
+			typeof state.conflictBranch === "string" &&
+			args.branches.includes(state.conflictBranch)
+				? state.conflictBranch
+				: args.branches[index] ?? args.fromBranch;
+		return {
+			branch,
+			baseBranch:
+				index > 0
+					? args.branches[index - 1] ?? args.rootBaseBranch
+					: args.rootBaseBranch,
+		};
+	} catch {
+		return { branch: args.fromBranch, baseBranch: args.rootBaseBranch };
+	}
+}
+
+async function restoreStackAfterRebaseFailure(
+	exec: ExecFn,
+	args: StackRebaseArgs,
+	originalBranch: string,
+	originalRefs: Array<{ branch: string; sha: string }>,
+): Promise<void> {
+	await exec([args.gh, "stack", "rebase", "--abort"], { cwd: args.worktree });
+	await exec([args.git, "rebase", "--abort"], { cwd: args.worktree });
+	await removeRebaseStateResidue(exec, args);
+	await clearCompletedRebaseMetadata(exec, args);
+	for (const original of originalRefs) {
+		const current = (
+			await execOrThrow(
+				exec,
+				[args.git, "rev-parse", `refs/heads/${original.branch}`],
+				{ cwd: args.worktree },
+			)
+		).trim();
+		await execOrThrow(
+			exec,
+			[
+				args.git,
+				"update-ref",
+				`refs/heads/${original.branch}`,
+				original.sha,
+				current,
+			],
+			{ cwd: args.worktree },
+		);
+	}
+	await execOrThrow(exec, [args.git, "checkout", "--force", originalBranch], {
+		cwd: args.worktree,
+	});
+	const originalHead = originalRefs.find(
+		(entry) => entry.branch === originalBranch,
+	)?.sha;
+	if (originalHead === undefined) {
+		throw new Error(`cannot restore unrecorded stack branch ${originalBranch}`);
+	}
+	await execOrThrow(exec, [args.git, "reset", "--hard", originalHead], {
+		cwd: args.worktree,
+	});
+	await execOrThrow(exec, [args.git, "clean", "-fd"], { cwd: args.worktree });
+	await removeUntrackedArtifactFiles(exec, args);
+	await assertCleanRebaseState(
+		exec,
+		{ ...args, branch: originalBranch },
+		originalHead,
+	);
+}
+
 /**
  * Rebase a stale car and every descendant with gh-stack's non-interactive
- * primitive, run the package test command once, then push the whole stack.
+ * primitive. Genuine conflicts wake a judgment seat; this publisher alone
+ * continues, tests, and pushes the stack.
  */
 export async function rebaseStackUpstack(
 	exec: ExecFn,
-	args: {
-		gh: string;
-		worktree: string;
-		rootBaseBranch: string;
-		branches: string[];
-		fromBranch: string;
-		testCommand: string;
-	},
+	args: StackRebaseArgs,
 ): Promise<string[]> {
 	if (!args.branches.includes(args.fromBranch)) {
 		throw new Error(`[escalate] cannot rebase unknown stack branch "${args.fromBranch}".`);
 	}
-	const result = await exec(
-		[args.gh, "stack", "rebase", "--upstack", args.fromBranch, "--remote", "origin"],
-		{ cwd: args.worktree },
-	);
-	if (result.code !== 0) {
+	const originalBranch = (
+		await execOrThrow(exec, [args.git, "branch", "--show-current"], {
+			cwd: args.worktree,
+		})
+	).trim();
+	if (!args.branches.includes(originalBranch)) {
 		throw new Error(
-			`[escalate] gh stack rebase --upstack failed (exit ${result.code}): ${result.stderr.slice(0, 1000)}`,
+			`[escalate] stack rebase worktree is on "${originalBranch || "detached"}", not a declared stack branch.`,
 		);
 	}
-	await execOrThrow(exec, ["bash", "-lc", args.testCommand], { cwd: args.worktree });
-	await execOrThrow(exec, [args.gh, "stack", "push"], { cwd: args.worktree });
-	const view = parseGhStackView(
-		await execOrThrow(exec, [args.gh, "stack", "view", "--json"], {
-			cwd: args.worktree,
-		}),
+	const originalRefs = await Promise.all(
+		args.branches.map(async (branch) => ({
+			branch,
+			sha: (
+				await execOrThrow(exec, [args.git, "rev-parse", `refs/heads/${branch}`], {
+					cwd: args.worktree,
+				})
+			).trim(),
+		})),
 	);
-	assertGhStackMatches(view, args.rootBaseBranch, args.branches);
-	return [
-		`rebased ${args.fromBranch} and every descendant with gh stack rebase --upstack`,
-		"tested the rebased stack",
-		"pushed the native stack with gh stack push",
-	];
+	const originalHead = originalRefs.find(
+		(entry) => entry.branch === originalBranch,
+	)?.sha;
+	if (originalHead === undefined) {
+		throw new Error(`cannot capture stack branch ${originalBranch}`);
+	}
+	await assertCleanRebaseState(
+		exec,
+		{ ...args, branch: originalBranch },
+		originalHead,
+	);
+	const untrustedBranches = args.branches.filter(
+		(branch) => !args.expectedRemoteHeads[branch],
+	);
+	if (untrustedBranches.length > 0) {
+		throw new Error(
+			`[escalate] stack rebase has no trusted remote head for: ${untrustedBranches.join(", ")}.`,
+		);
+	}
+	for (const { branch, sha } of originalRefs) {
+		const trustedHead = args.expectedRemoteHeads[branch];
+		const trustedAncestor = await exec(
+			[args.git, "merge-base", "--is-ancestor", trustedHead, sha],
+			{ cwd: args.worktree },
+		);
+		if (trustedAncestor.code !== 0) {
+			throw new Error(
+				`[escalate] stack rebase baseline: ${branch}@${sha} does not descend from trusted remote head ${trustedHead}.`,
+			);
+		}
+		const actualRunCommits = (
+			await execOrThrow(
+				exec,
+				[args.git, "rev-list", "--reverse", `${trustedHead}..${sha}`],
+				{ cwd: args.worktree },
+			)
+		)
+			.split("\n")
+			.map((commit) => commit.trim())
+			.filter(Boolean);
+		const reportedRunCommits = args.runCommitShasByBranch?.[branch] ?? [];
+		if (
+			actualRunCommits.length !== reportedRunCommits.length ||
+			actualRunCommits.some(
+				(commit, index) => commit !== reportedRunCommits[index],
+			)
+		) {
+			throw new Error(
+				`[escalate] stack rebase baseline: ${branch} local commits ${JSON.stringify(actualRunCommits)} ` +
+					`do not exactly match this run's persisted commits ${JSON.stringify(reportedRunCommits)}.`,
+			);
+		}
+		const outgoingMerges = (
+			await execOrThrow(
+				exec,
+				[
+					args.git,
+					"rev-list",
+					"--merges",
+					`origin/${args.rootBaseBranch}..${sha}`,
+				],
+				{ cwd: args.worktree },
+			)
+		).trim();
+		if (outgoingMerges !== "") {
+			throw new Error(
+				`[escalate] stack rebase baseline: merge commits are not supported in ${branch}: ${outgoingMerges}.`,
+			);
+		}
+	}
+
+	const actions: string[] = [];
+	let published = false;
+	try {
+		let result = await exec(
+			[
+				args.gh,
+				"stack",
+				"rebase",
+				"--upstack",
+				args.fromBranch,
+				"--remote",
+				"origin",
+			],
+			{ cwd: args.worktree },
+		);
+		let attempt = 0;
+		while (result.code !== 0) {
+			const conflictedFiles = await activeRebaseConflictFiles(exec, args);
+			if (conflictedFiles.length === 0) {
+				throw new Error(
+					`[escalate] gh stack rebase --upstack failed without a resolvable Git conflict ` +
+						`(exit ${result.code}): ${result.stderr.slice(0, 1000)}`,
+				);
+			}
+			attempt += 1;
+			const coordinates = await stackConflictCoordinates(exec, args);
+			const conflictOriginalHead =
+				originalRefs.find((entry) => entry.branch === coordinates.branch)?.sha ??
+				originalHead;
+			const { conflict, resolution } = await resolveActiveRebaseConflict(
+				exec,
+				{
+					git: args.git,
+					worktree: args.worktree,
+					branch: coordinates.branch,
+					baseBranch: coordinates.baseBranch,
+				},
+				conflictOriginalHead,
+				attempt,
+				result.stderr,
+				args.resolveConflict,
+			);
+			if (resolution.strategy === "drop") {
+				const skipResult = await exec([args.git, "rebase", "--skip"], {
+					cwd: args.worktree,
+				});
+				if (skipResult.code !== 0) {
+					result = skipResult;
+				} else {
+					result = await exec(
+						[args.gh, "stack", "rebase", "--continue"],
+						{ cwd: args.worktree },
+					);
+				}
+			} else {
+				result = await exec(
+					[args.gh, "stack", "rebase", "--continue"],
+					{ cwd: args.worktree },
+				);
+			}
+			actions.push(
+				`agent resolved stack rebase conflict ${attempt} at ` +
+					`${conflict.rebasingCommit.slice(0, 12)} with ${resolution.strategy}: ` +
+					resolution.summary,
+			);
+		}
+		await clearCompletedRebaseMetadata(exec, args);
+		await assertCleanRebaseState(exec, { ...args, branch: originalBranch });
+		await runRebaseTests(exec, args.worktree, args.testCommand);
+		await assertCleanRebaseState(exec, { ...args, branch: originalBranch });
+		await execOrThrow(
+			exec,
+			[
+				args.git,
+				"push",
+				"--atomic",
+				...args.branches.map(
+					(branch) =>
+						`--force-with-lease=refs/heads/${branch}:${args.expectedRemoteHeads[branch]}`,
+				),
+				"origin",
+				...args.branches.map(
+					(branch) => `refs/heads/${branch}:refs/heads/${branch}`,
+				),
+			],
+			{ cwd: args.worktree },
+		);
+		published = true;
+		const view = parseGhStackView(
+			await execOrThrow(exec, [args.gh, "stack", "view", "--json"], {
+				cwd: args.worktree,
+			}),
+		);
+		assertGhStackMatches(view, args.rootBaseBranch, args.branches);
+		try {
+			await assertCleanRebaseState(exec, { ...args, branch: originalBranch });
+		} catch (residueCause) {
+			const publishedRefs = await Promise.all(
+				args.branches.map(async (branch) => ({
+					branch,
+					sha: (
+						await execOrThrow(exec, [args.git, "rev-parse", `refs/heads/${branch}`], {
+							cwd: args.worktree,
+						})
+					).trim(),
+				})),
+			);
+			try {
+				await restoreStackAfterRebaseFailure(
+					exec,
+					args,
+					originalBranch,
+					publishedRefs,
+				);
+			} catch (cleanupCause) {
+				throw new AggregateError(
+					[residueCause, cleanupCause],
+					`published stack rebase left residue and cleanup could not restore ${originalBranch}`,
+				);
+			}
+			actions.push("cleaned post-push stack worktree residue");
+		}
+		return [
+			...actions,
+			`rebased ${args.fromBranch} and every descendant with gh stack rebase --upstack`,
+			"tested the rebased stack",
+			"atomically pushed the native stack with per-branch force-with-lease",
+		];
+	} catch (cause) {
+		if (!published) {
+			try {
+				await restoreStackAfterRebaseFailure(
+					exec,
+					args,
+					originalBranch,
+					originalRefs,
+				);
+			} catch (cleanupCause) {
+				throw new AggregateError(
+					[cause, cleanupCause],
+					`stack rebase failed and cleanup could not restore ${originalBranch}`,
+				);
+			}
+		}
+		throw cause;
+	}
 }
 
 /** Prune merged cars only after the whole stack has landed. */

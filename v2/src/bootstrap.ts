@@ -9,7 +9,12 @@ import * as fs from "node:fs";
 import { execFileSync } from "node:child_process";
 import * as os from "node:os";
 import * as path from "node:path";
-import { assertHomeIsNotACheckout, assertHomeIsNotAnotherFleet, deckV2Home } from "./home";
+import {
+	assertHomeIsNotACheckout,
+	assertHomeIsNotAnotherFleet,
+	deckV2Home,
+	realpathOrNearest,
+} from "./home";
 import { seedProfilesFile } from "./projects";
 
 export type BootstrapResult = {
@@ -22,6 +27,8 @@ export type BootstrapResult = {
 export type BootstrapOptions = {
 	repoV2Dir: string;
 	home?: string;
+	/** Host-local persistence root. It must live outside home. */
+	durableRoot?: string;
 	/** Pass false for an intentionally offline bootstrap; options are a test seam. */
 	optMem?: EnsureOptMemOptions | false;
 };
@@ -31,6 +38,332 @@ export type EnsureOptMemOptions = {
 	installerPath?: string;
 	runInstaller?: (installerPath: string) => void;
 };
+
+export const DURABLE_DIRECTORY_NAMES = [
+	"archive",
+	"backups",
+	"broker",
+	"config",
+	"data",
+	"efforts",
+	"intake",
+	"questions",
+	"repos",
+	"state",
+	"wt",
+] as const;
+
+export const DURABLE_FILE_NAMES = [".deck-profile", ".env", "config.json", "worktrees.json"] as const;
+export const ARCHIVE_ONCE_NAMES = [".pi"] as const;
+export const DURABLE_LINK_NAMES: readonly string[] = [
+	...DURABLE_DIRECTORY_NAMES,
+	...DURABLE_FILE_NAMES,
+];
+
+const DURABLE_MANIFEST_NAME = ".deck-durable.json";
+
+type DurableManifest = {
+	version: 1;
+	home: string;
+	host: string;
+	entries: string[];
+	archiveOnce: string[];
+};
+
+function statOrUndefined(file: string): fs.Stats | undefined {
+	try {
+		return fs.lstatSync(file);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+		throw error;
+	}
+}
+
+
+export function durableRootForHome(home: string, configured?: string): string {
+	const resolvedHome = path.resolve(home);
+	const resolvedRoot = path.resolve(configured ?? process.env.DECK_DURABLE_HOME ?? `${resolvedHome}-durable`);
+	const relative = path.relative(realpathOrNearest(resolvedHome), realpathOrNearest(resolvedRoot));
+	if (
+		relative === "" ||
+		(!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative))
+	) {
+		throw new Error(`durable Deck data must live outside the wipe path ${resolvedHome}: ${resolvedRoot}`);
+	}
+	return resolvedRoot;
+}
+
+function filesEqual(left: string, right: string): boolean {
+	const leftStat = fs.statSync(left);
+	const rightStat = fs.statSync(right);
+	if (leftStat.size !== rightStat.size) return false;
+	const leftFd = fs.openSync(left, "r");
+	const rightFd = fs.openSync(right, "r");
+	const leftBuffer = Buffer.allocUnsafe(64 * 1024);
+	const rightBuffer = Buffer.allocUnsafe(64 * 1024);
+	try {
+		let position = 0;
+		while (position < leftStat.size) {
+			const length = Math.min(leftBuffer.length, leftStat.size - position);
+			const leftRead = fs.readSync(leftFd, leftBuffer, 0, length, position);
+			const rightRead = fs.readSync(rightFd, rightBuffer, 0, length, position);
+			if (
+				leftRead !== rightRead ||
+				!leftBuffer.subarray(0, leftRead).equals(rightBuffer.subarray(0, rightRead))
+			) return false;
+			position += leftRead;
+		}
+		return true;
+	} finally {
+		fs.closeSync(leftFd);
+		fs.closeSync(rightFd);
+	}
+}
+
+function movePath(source: string, target: string): void {
+	try {
+		fs.renameSync(source, target);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "EXDEV") throw error;
+		throw new Error(
+			`refusing non-atomic cross-device adoption from ${source} to ${target}; ` +
+				"place DECK_DURABLE_HOME on the same filesystem or migrate while every writer is stopped",
+		);
+	}
+}
+
+/** Merge without choosing a winner: identical collisions collapse; divergent data aborts intact. */
+function mergeWithoutClobber(source: string, target: string): void {
+	const targetStat = statOrUndefined(target);
+	if (targetStat === undefined) {
+		movePath(source, target);
+		return;
+	}
+	const sourceStat = fs.lstatSync(source);
+	if (sourceStat.isDirectory() && targetStat.isDirectory()) {
+		for (const name of fs.readdirSync(source)) {
+			mergeWithoutClobber(path.join(source, name), path.join(target, name));
+		}
+		fs.rmdirSync(source);
+		return;
+	}
+	if (sourceStat.isFile() && targetStat.isFile() && filesEqual(source, target)) {
+		fs.rmSync(source);
+		return;
+	}
+	if (
+		sourceStat.isSymbolicLink() &&
+		targetStat.isSymbolicLink() &&
+		fs.readlinkSync(source) === fs.readlinkSync(target)
+	) {
+		fs.rmSync(source);
+		return;
+	}
+	throw new Error(`refusing to choose between divergent durable Deck entries: ${source} and ${target}`);
+}
+
+function writeDurableManifest(root: string, home: string): void {
+	const manifestPath = path.join(root, DURABLE_MANIFEST_NAME);
+	const current = statOrUndefined(manifestPath);
+	const expectedHome = path.resolve(home);
+	const expectedHost = os.hostname();
+	if (current !== undefined) {
+		if (!current.isFile()) throw new Error(`durable Deck ownership manifest is not a file: ${manifestPath}`);
+		let manifest: DurableManifest;
+		try {
+			manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as DurableManifest;
+		} catch {
+			throw new Error(`invalid durable Deck ownership manifest: ${manifestPath}`);
+		}
+		if (manifest.version !== 1 || manifest.home !== expectedHome || manifest.host !== expectedHost) {
+			throw new Error(
+				`durable Deck root belongs to another home or host: ${manifestPath} ` +
+				`(expected ${expectedHost}:${expectedHome})`,
+			);
+		}
+	}
+	const manifest: DurableManifest = {
+		version: 1,
+		home: expectedHome,
+		host: expectedHost,
+		entries: [...DURABLE_LINK_NAMES],
+		archiveOnce: [...ARCHIVE_ONCE_NAMES],
+	};
+	const staged = path.join(root, `${DURABLE_MANIFEST_NAME}.${process.pid}.tmp`);
+	fs.writeFileSync(staged, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
+	fs.renameSync(staged, manifestPath);
+	fs.chmodSync(manifestPath, 0o600);
+}
+
+function validateVisibleDurableEntries(home: string, root: string): void {
+	const manifestExists = statOrUndefined(path.join(root, DURABLE_MANIFEST_NAME))?.isFile() === true;
+	for (const name of DURABLE_DIRECTORY_NAMES) {
+		const visible = path.join(home, name);
+		const stat = statOrUndefined(visible);
+		if (stat?.isSymbolicLink()) {
+			const actual = path.resolve(path.dirname(visible), fs.readlinkSync(visible));
+			if (!manifestExists || actual !== path.join(root, name)) {
+				throw new Error(`refusing unowned durable Deck link ${visible} -> ${fs.readlinkSync(visible)}`);
+			}
+		} else if (stat !== undefined && !stat.isDirectory()) {
+			throw new Error(`durable Deck entry is not a directory: ${visible}`);
+		}
+	}
+	for (const name of DURABLE_FILE_NAMES) {
+		const visible = path.join(home, name);
+		const stat = statOrUndefined(visible);
+		if (stat?.isSymbolicLink()) {
+			const actual = path.resolve(path.dirname(visible), fs.readlinkSync(visible));
+			if (!manifestExists || actual !== path.join(root, name)) {
+				throw new Error(`refusing unowned durable Deck link ${visible} -> ${fs.readlinkSync(visible)}`);
+			}
+		} else if (stat !== undefined && !stat.isFile()) {
+			throw new Error(`durable Deck entry is not a file: ${visible}`);
+		}
+	}
+	const retiredPi = statOrUndefined(path.join(home, ".pi"));
+	if (retiredPi !== undefined && (!retiredPi.isDirectory() || retiredPi.isSymbolicLink())) {
+		throw new Error(`refusing to archive non-directory retired Pi profile: ${path.join(home, ".pi")}`);
+	}
+}
+
+function adoptDirectory(
+	home: string,
+	root: string,
+	name: string,
+	created: string[],
+	linked: string[],
+	notes: string[],
+): void {
+	const visible = path.join(home, name);
+	const durable = path.join(root, name);
+	const visibleStat = statOrUndefined(visible);
+	if (visibleStat?.isSymbolicLink()) {
+		const actual = path.resolve(path.dirname(visible), fs.readlinkSync(visible));
+		if (actual !== durable) {
+			throw new Error(`refusing unowned durable Deck link ${visible} -> ${fs.readlinkSync(visible)}`);
+		}
+		if (statOrUndefined(durable)?.isDirectory() !== true) {
+			throw new Error(`durable Deck directory target is not a directory: ${durable}`);
+		}
+		fs.chmodSync(durable, 0o700);
+		return;
+	}
+	if (visibleStat !== undefined && !visibleStat.isDirectory()) {
+		throw new Error(`durable Deck entry is not a directory: ${visible}`);
+	}
+	if (visibleStat !== undefined) {
+		mergeWithoutClobber(visible, durable);
+		notes.push(`adopted durable ${visible} at ${durable}`);
+	} else if (statOrUndefined(durable) === undefined) {
+		fs.mkdirSync(durable, { recursive: true, mode: 0o700 });
+		created.push(durable);
+	}
+	if (statOrUndefined(durable)?.isDirectory() !== true) {
+		throw new Error(`durable Deck directory target is not a directory: ${durable}`);
+	}
+	fs.chmodSync(durable, 0o700);
+	fs.symlinkSync(durable, visible, "dir");
+	linked.push(visible);
+}
+
+function adoptFile(
+	home: string,
+	root: string,
+	name: string,
+	initialBody: string,
+	created: string[],
+	linked: string[],
+	notes: string[],
+): void {
+	const visible = path.join(home, name);
+	const durable = path.join(root, name);
+	const visibleStat = statOrUndefined(visible);
+	if (visibleStat?.isSymbolicLink()) {
+		const actual = path.resolve(path.dirname(visible), fs.readlinkSync(visible));
+		if (actual !== durable) {
+			throw new Error(`refusing unowned durable Deck link ${visible} -> ${fs.readlinkSync(visible)}`);
+		}
+		if (statOrUndefined(durable)?.isFile() !== true) {
+			throw new Error(`durable Deck file target is not a file: ${durable}`);
+		}
+		fs.chmodSync(durable, 0o600);
+		return;
+	}
+	if (visibleStat !== undefined && !visibleStat.isFile()) {
+		throw new Error(`durable Deck entry is not a file: ${visible}`);
+	}
+	if (visibleStat !== undefined) {
+		mergeWithoutClobber(visible, durable);
+		notes.push(`adopted durable ${visible} at ${durable}`);
+	} else if (statOrUndefined(durable) === undefined) {
+		fs.writeFileSync(durable, initialBody, { mode: 0o600, flag: "wx" });
+		created.push(durable);
+	}
+	if (statOrUndefined(durable)?.isFile() !== true) {
+		throw new Error(`durable Deck file target is not a file: ${durable}`);
+	}
+	fs.chmodSync(durable, 0o600);
+	fs.symlinkSync(durable, visible, "file");
+	linked.push(visible);
+}
+
+function archiveRetiredPi(home: string, root: string, notes: string[]): void {
+	const retired = path.join(home, ".pi");
+	const retiredStat = statOrUndefined(retired);
+	if (retiredStat === undefined) return;
+	if (!retiredStat.isDirectory() || retiredStat.isSymbolicLink()) {
+		throw new Error(`refusing to archive non-directory retired Pi profile: ${retired}`);
+	}
+	const archive = path.join(root, "archive", "retired-pi-profile");
+	mergeWithoutClobber(retired, archive);
+	notes.push(`archived retired Pi profile at ${archive}; it is not part of the live Prime home`);
+}
+
+function hardenCredentialStore(broker: string): void {
+	const visit = (entry: string): void => {
+		const stat = fs.lstatSync(entry);
+		if (stat.isSymbolicLink()) {
+			throw new Error(`broker credential store must not contain symlinks: ${entry}`);
+		}
+		if (stat.isDirectory()) {
+			fs.chmodSync(entry, 0o700);
+			for (const name of fs.readdirSync(entry)) visit(path.join(entry, name));
+			return;
+		}
+		if (stat.isFile()) fs.chmodSync(entry, 0o600);
+	};
+	visit(broker);
+}
+
+function configureDurableHome(
+	home: string,
+	configuredRoot: string | undefined,
+	created: string[],
+	linked: string[],
+	notes: string[],
+): string {
+	const root = durableRootForHome(home, configuredRoot);
+	assertHomeIsNotACheckout(root);
+	validateVisibleDurableEntries(home, root);
+	if (statOrUndefined(root) === undefined) {
+		fs.mkdirSync(root, { recursive: true, mode: 0o700 });
+		created.push(root);
+	}
+	if (!fs.statSync(root).isDirectory()) throw new Error(`durable Deck root is not a directory: ${root}`);
+	fs.chmodSync(root, 0o700);
+	writeDurableManifest(root, home);
+	for (const name of DURABLE_DIRECTORY_NAMES) {
+		adoptDirectory(home, root, name, created, linked, notes);
+		if (name === "broker") hardenCredentialStore(path.join(root, "broker"));
+	}
+	archiveRetiredPi(home, root, notes);
+	adoptFile(home, root, ".deck-profile", "", created, linked, notes);
+	adoptFile(home, root, ".env", "", created, linked, notes);
+	adoptFile(home, root, "config.json", "{}\n", created, linked, notes);
+	adoptFile(home, root, "worktrees.json", '{\n\t"v": 1,\n\t"entries": []\n}\n', created, linked, notes);
+	return root;
+}
 
 /** Install OptMem once. The wrapper verifies `memo wake` before it returns. */
 export function ensureOptMem(repoV2Dir: string, options: EnsureOptMemOptions = {}): "present" | "installed" {
@@ -77,22 +410,21 @@ export function bootstrapHome(options: BootstrapOptions = { repoV2Dir: "" }): Bo
 			notes.push("installed OptMem and verified memo wake");
 		}
 	}
+	const durableRoot = durableRootForHome(home, options.durableRoot);
+	assertHomeIsNotACheckout(durableRoot);
 
 	// Paths are derived from `home`, never from the env-reading helpers. Mixing the
 	// two split a home in half: AGENTS.md landed in the requested directory while
-	// data/ and state/ landed in whatever DECK_V2_HOME said.
-	const dataPath = path.join(home, "data");
-	const statePath = path.join(home, "state");
-
+	// durable records landed in whatever DECK_V2_HOME said.
 	const created: string[] = [];
 	const linked: string[] = [];
-
-	for (const dir of [home, dataPath, statePath]) {
-		if (!fs.existsSync(dir)) {
-			fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-			created.push(dir);
-		}
+	if (!fs.existsSync(home)) {
+		fs.mkdirSync(home, { recursive: true, mode: 0o700 });
+		created.push(home);
 	}
+	if (!fs.statSync(home).isDirectory()) throw new Error(`Deck home is not a directory: ${home}`);
+	fs.chmodSync(home, 0o700);
+	configureDurableHome(home, durableRoot, created, linked, notes);
 
 	// AGENTS.md is Deck's public runtime contract, not operator configuration.
 	// Keep one authority: every bootstrap converges it to the repository seed.

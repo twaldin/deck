@@ -29,8 +29,19 @@ import { startShip } from "./ship";
 import { peekSession } from "./spawn";
 import { evaluateTeardown, formatVerdict } from "./teardown";
 import { detectStale, foldBatched, reconcile } from "./wake";
-import { smithersWorkspaceRoot } from "./workspace";
+import { SMITHERS_SPEC } from "./smithers";
+import { smithersWorkspaceCwd, smithersWorkspaceRoot } from "./workspace";
 import { sessionDirForTask, tailSession } from "./tail";
+import {
+	answer as answerQuestion,
+	ask as askQuestion,
+	openQuestions,
+	queueFile,
+	readQuestions,
+} from "./questions-store";
+import { routeWorkflowQuestionAnswer } from "./workflow-questions";
+import { buildHydration } from "./hydrate";
+import { listEffortMetas, resolveEffortReference } from "./recall";
 
 
 const USAGE = `deck-v2 — fleet primitives
@@ -52,6 +63,14 @@ const USAGE = `deck-v2 — fleet primitives
   peek <id> [--limit N]            print recent transcript entries
   tail <id>                        follow a compact live session tail
        --file <path.jsonl>         follow a specific session file
+  questions list [--json]          open questions in the durable queue
+  questions ask --question <text> [--id <id>] [--context <text>]
+             [--option <choice>]... [--recommendation <text>]
+             [--urgency low|normal|high] --session <id> [--cwd <path>]
+                                   queue a decision without blocking the asker
+  questions answer --id <id> --answer <text> [--dismiss]
+                                   plain questions only; workflow approvals stay
+                                   human-only through the interactive /questions
   fleet [--json] [--statusline] [--project]   the fleet frame; --project mirrors it into herdr
   wake [--json]                    one reconcile pass (T0 now, T1 folded, T2 silent)
   stale                            runs that vanished without a terminal status
@@ -103,6 +122,24 @@ export function existingPrFromFlag(value: string | boolean | undefined): number 
 	return prNumber;
 }
 
+/** `reviewer=claude-fable-5,watcher=gpt-5.6-luna` -> per-run seat assignment. */
+export function parseModelSlots(value: string): Record<string, string> {
+	const slots: Record<string, string> = {};
+	for (const pair of value.split(",")) {
+		const trimmed = pair.trim();
+		if (trimmed === "") continue;
+		const eq = trimmed.indexOf("=");
+		if (eq <= 0) throw new Error(`--models needs slot=model pairs, got "${trimmed}"`);
+		const slot = trimmed.slice(0, eq).trim();
+		const model = trimmed.slice(eq + 1).trim();
+		if (slot === "" || model === "") throw new Error(`--models needs slot=model pairs, got "${trimmed}"`);
+		// Accept a bare canonical id; the deck provider is the only provider.
+		slots[slot] = model.includes("/") ? model : `deck/${model}`;
+	}
+	if (Object.keys(slots).length === 0) throw new Error("--models needs at least one slot=model pair");
+	return slots;
+}
+
 export async function runCli(argv: string[]): Promise<number> {
 	const args = parse(argv);
 	const command = args._[0];
@@ -124,7 +161,7 @@ export async function runCli(argv: string[]): Promise<number> {
 
 	try {
 		if (command === "ship") {
-			const known = ["profile", "worktree", "branch", "title", "summary", "accept", "base", "break-signal", "kill-switch", "blast-radius", "reviewers", "deploy-evidence", "run-id", "dry-run", "skip-reviewer-request", "existing-pr"];
+			const known = ["profile", "worktree", "branch", "title", "summary", "accept", "base", "break-signal", "kill-switch", "blast-radius", "reviewers", "deploy-evidence", "run-id", "dry-run", "skip-reviewer-request", "existing-pr", "models"];
 			const unknown = Object.keys(args.flags).filter((flag) => !known.includes(flag) && flag !== "help");
 			if (unknown.length > 0) throw new Error(`unknown flag(s) for ship: ${unknown.map((flag) => `--${flag}`).join(", ")}`);
 		}
@@ -182,6 +219,10 @@ export async function runCli(argv: string[]): Promise<number> {
 					...(args.flags["dry-run"] === true ? { dryRun: true } : {}),
 					...(args.flags["skip-reviewer-request"] === true ? { skipReviewerRequest: true } : {}),
 					...(existingPr === undefined ? {} : { existingPr }),
+					// `--models reviewer=claude-fable-5,watcher=gpt-5.6-luna`: the
+					// orchestrator picks the seat for this run; the profile only
+					// supplies defaults.
+					...(str(args.flags, "models") === undefined ? {} : { models: parseModelSlots(need(args.flags, "models")) }),
 				});
 				process.stdout.write(
 					`ship ${result.runId} started (pid ${result.pid}) — profile ${result.profile} (${result.pipeline})${result.dryRun ? " [DRY RUN]" : ""}\n` +
@@ -201,6 +242,137 @@ export async function runCli(argv: string[]): Promise<number> {
 				process.stdout.write(
 					`queued ${queued.id} for ${id}; delivered to its next run (${pending(id).length} pending)\n`,
 				);
+				return 0;
+			}
+
+			// The code-only surface. Every capability the retired pi-tools exposed
+			// reaches the SAME store functions the interactive /questions command
+			// uses; nothing here reimplements folding, bounding, or routing.
+			case "questions": {
+				const sub = args._[1] ?? "list";
+				const file = queueFile();
+				if (sub === "list") {
+					const open = openQuestions(file);
+					if (args.flags.json === true) {
+						process.stdout.write(`${JSON.stringify({ questions: open }, null, 2)}\n`);
+						return 0;
+					}
+					for (const entry of open) {
+						process.stdout.write(`${entry.id}\t${entry.question}\n`);
+					}
+					return 0;
+				}
+				if (sub === "ask") {
+					const raw = args.flags.option;
+					const options = typeof raw === "string" ? raw.split(";").map((s) => s.trim()).filter((s) => s !== "") : [];
+					const event = askQuestion(file, {
+						question: need(args.flags, "question"),
+						// Ids are scoped to the asking session by the store, so the
+						// caller MUST report which session it is; a wrong id hands the
+						// captain's answer to the wrong agent.
+						sessionId: need(args.flags, "session"),
+						cwd: str(args.flags, "cwd") ?? process.cwd(),
+						...(str(args.flags, "id") === undefined ? {} : { id: need(args.flags, "id") }),
+						...(str(args.flags, "context") === undefined ? {} : { context: need(args.flags, "context") }),
+						...(options.length === 0 ? {} : { options }),
+						...(str(args.flags, "recommendation") === undefined
+							? {}
+							: { recommendation: need(args.flags, "recommendation") }),
+						...(str(args.flags, "urgency") === undefined ? {} : { urgency: need(args.flags, "urgency") }),
+					});
+					process.stdout.write(
+						`${JSON.stringify({ id: event.id, open: openQuestions(file).length }, null, 2)}\n`,
+					);
+					return 0;
+				}
+				if (sub === "answer") {
+					const id = need(args.flags, "id").trim();
+					const text = need(args.flags, "answer").trim();
+					if (id === "") throw new Error("questions answer needs a question id");
+					if (text === "") throw new Error("questions answer needs a non-empty answer");
+					const entry = openQuestions(file).find((question) => question.id === id);
+					if (entry === undefined) {
+						const existing = readQuestions(file).find((question) => question.id === id);
+						throw new Error(existing === undefined
+							? `question ${id} does not exist`
+							: `question ${id} is already ${existing.status}`);
+					}
+					// Unchanged invariant: a Smithers gate is the captain's to advance.
+					if (entry.workflow?.answerLane === "smithers-approval") {
+						throw new Error(
+							"workflow approvals require the interactive /questions command; the code surface cannot advance a Smithers gate",
+						);
+					}
+					const routed = entry.workflow === undefined
+						? undefined
+						: await routeWorkflowQuestionAnswer(file, entry, text, { env: process.env });
+					if (routed?.choice === "hold") {
+						process.stdout.write(`${JSON.stringify({ id, held: true, open: openQuestions(file).length }, null, 2)}\n`);
+						return 0;
+					}
+					const applied = routed?.applied ?? answerQuestion(file, id, text, args.flags.dismiss === true ? "dismissed" : "answered");
+					if (!applied) {
+						const existing = readQuestions(file).find((question) => question.id === id);
+						throw new Error(`question ${id} is already ${existing?.status ?? "resolved"}`);
+					}
+					process.stdout.write(`${JSON.stringify({ id, open: openQuestions(file).length }, null, 2)}\n`);
+					return 0;
+				}
+				throw new Error(`unknown questions subcommand: ${sub}`);
+			}
+
+			// Effort hydration, formerly the `recall_effort` tool. Same resolver, so
+			// a task id, `owner/repo#PR`, or a PR URL all still work.
+			case "recall": {
+				const reference = args._[1];
+				if (reference === undefined) throw new Error("recall needs a task id or PR reference");
+				const resolved = resolveEffortReference(reference, listEffortMetas());
+				const hydration = buildHydration(resolved.taskId, resolved.epoch);
+				process.stdout.write(`${JSON.stringify({ ...resolved, hydration }, null, 2)}\n`);
+				return 0;
+			}
+
+			// Read-only Smithers state. This MUST run from the canonical workspace:
+			// Smithers resolves its run database from the working directory, so a
+			// read from an agent's arbitrary cwd silently reports the wrong runs or
+			// none at all. The retired `status` tool pinned this; the code surface
+			// reaches it through here.
+			case "runs":
+			case "why": {
+				const runId = args._[1];
+				if (command === "why" && runId === undefined) throw new Error("why needs a run id");
+				if (runId !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(runId)) {
+					throw new Error(`${command} needs a Smithers run id, not an option or path`);
+				}
+				const smithersArgs = command === "why"
+					? ["why", runId as string]
+					: runId === undefined ? ["ps", "--all"] : ["inspect", runId];
+				// Use the RUNNING bun, not `bunx`: Homebrew's `bunx` shim is a symlink
+				// into a versioned Cellar path that goes stale on upgrade, so it
+				// resolves on PATH but fails to spawn (ENOENT) - which reads exactly
+				// like "no runs" at the call site.
+				const runner = [process.execPath, "x", SMITHERS_SPEC];
+				// posix_spawn reports a missing CWD as ENOENT naming the BINARY, which
+				// sends every reader hunting a broken bun install. Check it here so
+				// the message names the real problem.
+				const workspace = smithersWorkspaceCwd();
+				if (!fs.existsSync(workspace)) {
+					throw new Error(
+						`no Smithers workspace at ${workspace}; run \`deck-v2 bootstrap\` before reading run state`,
+					);
+				}
+				const read = Bun.spawnSync({
+					cmd: [...runner, ...smithersArgs, "--format", "json"],
+					cwd: workspace,
+					stdout: "pipe",
+					stderr: "pipe",
+				});
+				const out = read.stdout.toString().trim();
+				if (!read.success && out === "") {
+					throw new Error(read.stderr.toString().trim() || `smithers ${command} failed`);
+				}
+				if (out === "") throw new Error("Smithers returned no run state");
+				process.stdout.write(`${out}\n`);
 				return 0;
 			}
 

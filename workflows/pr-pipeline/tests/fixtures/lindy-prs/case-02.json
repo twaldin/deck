@@ -1,0 +1,273 @@
+{
+  "schemaVersion": 1,
+  "caseId": "case-02",
+  "situationTags": [
+    "review-required"
+  ],
+  "real": {
+    "state": "OPEN",
+    "isDraft": true,
+    "mergeable": "MERGEABLE",
+    "mergeStateStatus": "BLOCKED",
+    "transientMergeableObservation": null,
+    "reviewDecision": "REVIEW_REQUIRED",
+    "behindBy": 62,
+    "requiredChecks": {
+      "configured": 2,
+      "observed": 2
+    }
+  },
+  "headAgeSeconds": 62532,
+  "actors": [
+    {
+      "id": "self",
+      "kind": "self",
+      "codeowner": "unknown"
+    },
+    {
+      "id": "claude-1",
+      "kind": "claude",
+      "codeowner": "unknown"
+    },
+    {
+      "id": "bot-1",
+      "kind": "bot",
+      "codeowner": "unknown"
+    }
+  ],
+  "threads": [],
+  "comments": [
+    {
+      "id": "comment-1",
+      "authorId": "claude-1",
+      "source": "issue_comment",
+      "afterHeadSeconds": -8874,
+      "signal": "claude-approved",
+      "actionable": true
+    },
+    {
+      "id": "comment-2",
+      "authorId": "bot-1",
+      "source": "issue_comment",
+      "afterHeadSeconds": -8762,
+      "signal": "finding",
+      "actionable": true
+    },
+    {
+      "id": "comment-3",
+      "authorId": "self",
+      "source": "issue_comment",
+      "afterHeadSeconds": -2835,
+      "signal": "finding",
+      "actionable": false
+    },
+    {
+      "id": "comment-4",
+      "authorId": "self",
+      "source": "issue_comment",
+      "afterHeadSeconds": 45,
+      "signal": "finding",
+      "actionable": false
+    }
+  ],
+  "reviews": [],
+  "requestedReviewerIds": [],
+  "checks": [
+    {
+      "id": "check-1",
+      "contextId": "other-3",
+      "workflowId": "workflow-1",
+      "status": "completed",
+      "conclusion": "skipped",
+      "startedAfterHeadSeconds": 14,
+      "completedAfterHeadSeconds": 14,
+      "appId": "app-1",
+      "checkSuiteId": "suite-1"
+    },
+    {
+      "id": "check-2",
+      "contextId": "other-4",
+      "workflowId": "workflow-2",
+      "status": "completed",
+      "conclusion": "skipped",
+      "startedAfterHeadSeconds": 14,
+      "completedAfterHeadSeconds": 13,
+      "appId": "app-1",
+      "checkSuiteId": "suite-1"
+    },
+    {
+      "id": "check-3",
+      "contextId": "required-1",
+      "workflowId": "workflow-3",
+      "status": "completed",
+      "conclusion": "success",
+      "startedAfterHeadSeconds": 17,
+      "completedAfterHeadSeconds": 20,
+      "appId": "app-1",
+      "checkSuiteId": "suite-1"
+    },
+    {
+      "id": "check-4",
+      "contextId": "other-5",
+      "workflowId": "workflow-4",
+      "status": "completed",
+      "conclusion": "skipped",
+      "startedAfterHeadSeconds": 13,
+      "completedAfterHeadSeconds": 13,
+      "appId": "app-1",
+      "checkSuiteId": "suite-2"
+    },
+    {
+      "id": "check-5",
+      "contextId": "other-6",
+      "workflowId": "workflow-5",
+      "status": "completed",
+      "conclusion": "skipped",
+      "startedAfterHeadSeconds": 13,
+      "completedAfterHeadSeconds": 13,
+      "appId": "app-1",
+      "checkSuiteId": "suite-3"
+    },
+    {
+      "id": "check-6",
+      "contextId": "other-7",
+      "workflowId": "workflow-6",
+      "status": "completed",
+      "conclusion": "success",
+      "startedAfterHeadSeconds": 20,
+      "completedAfterHeadSeconds": 756,
+      "appId": "app-1",
+      "checkSuiteId": "suite-4"
+    },
+    {
+      "id": "check-7",
+      "contextId": "other-8",
+      "workflowId": "workflow-7",
+      "status": "completed",
+      "conclusion": "success",
+      "startedAfterHeadSeconds": 16,
+      "completedAfterHeadSeconds": 21,
+      "appId": "app-1",
+      "checkSuiteId": "suite-3"
+    }
+  ],
+  "ci": {
+    "rulesBranchRelation": "base",
+    "graceSeconds": 150,
+    "requiredContexts": [
+      {
+        "contextId": "required-1",
+        "appId": "app-1"
+      },
+      {
+        "contextId": "required-2",
+        "appId": null
+      }
+    ],
+    "currentRuns": [
+      {
+        "id": "run-1",
+        "checkSuiteId": "suite-2",
+        "head": "current",
+        "status": "completed",
+        "conclusion": "skipped",
+        "createdAfterHeadSeconds": 13,
+        "startedAfterHeadSeconds": 13,
+        "jobs": [
+          {
+            "id": "job-1-1",
+            "status": "completed",
+            "conclusion": "skipped",
+            "startedAfterHeadSeconds": 13,
+            "completedAfterHeadSeconds": 13
+          }
+        ]
+      },
+      {
+        "id": "run-2",
+        "checkSuiteId": "suite-1",
+        "head": "current",
+        "status": "completed",
+        "conclusion": "success",
+        "createdAfterHeadSeconds": 13,
+        "startedAfterHeadSeconds": 13,
+        "jobs": [
+          {
+            "id": "job-2-1",
+            "status": "completed",
+            "conclusion": "success",
+            "startedAfterHeadSeconds": 17,
+            "completedAfterHeadSeconds": 20
+          },
+          {
+            "id": "job-2-2",
+            "status": "completed",
+            "conclusion": "skipped",
+            "startedAfterHeadSeconds": 14,
+            "completedAfterHeadSeconds": 13
+          },
+          {
+            "id": "job-2-3",
+            "status": "completed",
+            "conclusion": "skipped",
+            "startedAfterHeadSeconds": 14,
+            "completedAfterHeadSeconds": 14
+          }
+        ]
+      },
+      {
+        "id": "run-3",
+        "checkSuiteId": "suite-4",
+        "head": "current",
+        "status": "completed",
+        "conclusion": "success",
+        "createdAfterHeadSeconds": 13,
+        "startedAfterHeadSeconds": 13,
+        "jobs": [
+          {
+            "id": "job-3-1",
+            "status": "completed",
+            "conclusion": "success",
+            "startedAfterHeadSeconds": 20,
+            "completedAfterHeadSeconds": 756
+          }
+        ]
+      },
+      {
+        "id": "run-4",
+        "checkSuiteId": "suite-3",
+        "head": "current",
+        "status": "completed",
+        "conclusion": "success",
+        "createdAfterHeadSeconds": 12,
+        "startedAfterHeadSeconds": 12,
+        "jobs": [
+          {
+            "id": "job-4-1",
+            "status": "completed",
+            "conclusion": "success",
+            "startedAfterHeadSeconds": 16,
+            "completedAfterHeadSeconds": 21
+          },
+          {
+            "id": "job-4-2",
+            "status": "completed",
+            "conclusion": "skipped",
+            "startedAfterHeadSeconds": 13,
+            "completedAfterHeadSeconds": 13
+          }
+        ]
+      }
+    ],
+    "staleActiveRuns": [],
+    "statuses": [
+      {
+        "id": "status-1",
+        "contextId": "required-2",
+        "state": "success",
+        "createdAfterHeadSeconds": 745,
+        "updatedAfterHeadSeconds": 745
+      }
+    ]
+  }
+}

@@ -512,6 +512,20 @@ describe("deck wt", () => {
 		expect(readState(fixture.home).entries).toHaveLength(24);
 	});
 
+	test("refuses an unowned worktree registry symlink without changing its target", async () => {
+		const fixture = await createFixture();
+		const foreign = path.join(fixture.root, "foreign-worktrees.json");
+		const sentinel = '{"v":1,"entries":[]}\n';
+		fs.mkdirSync(fixture.home, { recursive: true });
+		fs.writeFileSync(foreign, sentinel);
+		fs.symlinkSync(foreign, path.join(fixture.home, "worktrees.json"));
+
+		const result = await deck(fixture, ["wt", "ls", "--json"]);
+		expect(result.exitCode).toBe(4);
+		expect(result.stderr).toContain("refusing unowned worktree registry link");
+		expect(fs.readFileSync(foreign, "utf8")).toBe(sentinel);
+	});
+
 	test("maps malformed commands to user exit 2 and corrupt state to I/O exit 4", async () => {
 		const fixture = await createFixture();
 		const userError = await deck(fixture, ["wt", "alloc", "--repo", fixture.repo]);

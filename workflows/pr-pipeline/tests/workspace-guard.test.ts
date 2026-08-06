@@ -20,6 +20,7 @@ const productionProfile: ProjectProfile = {
 	stamp: false,
 	production: true,
 	knowledge: [],
+	reviewPolicy: { requireHuman: false, requiredBots: [] },
 	depsWarm: true,
 };
 

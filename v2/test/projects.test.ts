@@ -46,6 +46,7 @@ const deckOverride = {
 	yolo: true,
 	stamp: false,
 	knowledge: [],
+	reviewPolicy: { requireHuman: false, requiredBots: [{ login: "coderabbitai[bot]", approvalCheckPattern: "^CodeRabbit(?:$| /)" }] },
 };
 
 function writeConfig(profiles: unknown): void {
@@ -86,6 +87,18 @@ describe("config file", () => {
 		expect(() => loadProfiles()).toThrow(/implies yolo=true stamp=false/);
 	});
 
+	test("review policy is explicit, profile-scoped, and regex-validated", () => {
+		const { reviewPolicy: _missing, ...withoutPolicy } = deckOverride;
+		expect(() => validateProfiles([withoutPolicy], "x")).toThrow(/reviewPolicy is required/);
+		expect(() => validateProfiles([{
+			...deckOverride,
+			reviewPolicy: {
+				requireHuman: false,
+				requiredBots: [{ login: "coderabbitai[bot]", approvalCheckPattern: "[" }],
+			},
+		}], "x")).toThrow(/approvalCheckPattern must be a valid regex/);
+	});
+
 	test("model seat config refuses malformed opposition defaults", () => {
 		writeConfig([{ ...deckOverride, models: { implementer: "deck/gpt-5.6-luna", watcher: "deck/gpt-5.6-luna", fallout: "deck/gpt-5.6-sol", familyOpposition: true, oppositionDefaults: { openai: 42 } } }]);
 		expect(() => loadProfiles()).toThrow(/oppositionDefaults values/);
@@ -119,6 +132,13 @@ describe("config file", () => {
 		writeConfig([{ ...deckOverride, models }]);
 		const profile = loadProfiles()[0];
 		expect(profile?.models?.implementer).toBe(models && "implementer" in models ? "deck/claude-fable-5" : undefined);
+	});
+
+	test("preserves a configured post-landing fallout probe and rejects malformed probes", () => {
+		writeConfig([{ ...deckOverride, falloutCommand: "bun run smoke:prod" }]);
+		expect(loadProfiles()[0]?.falloutCommand).toBe("bun run smoke:prod");
+		expect(() => validateProfiles([{ ...deckOverride, falloutCommand: 42 }], "x"))
+			.toThrow(/falloutCommand must be a string/);
 	});
 
 	test("malformed entries are refused with the reason", () => {

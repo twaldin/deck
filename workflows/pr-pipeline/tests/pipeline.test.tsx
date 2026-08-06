@@ -19,7 +19,7 @@ import * as path from "node:path";
 // Smithers testing is optional in minimal checkouts; workflow tests run when the pinned package is installed.
 import { renderWorkflow, simulate } from "smithers-orchestrator/testing";
 
-import pipeline, { buildModelPolicy, DEFAULT_GITHUB, schemas } from "../pipeline.tsx";
+import pipeline, { buildModelPolicy, DEFAULT_GITHUB, inputSchema, schemas } from "../pipeline.tsx";
 import { loadProfiles, type ProjectProfile } from "../lib/profiles.ts";
 import { falloutPrompt, localFixPrompt, localReviewPrompt, reviewersDecisionPrompt } from "../lib/prompts.ts";
 import { resolveAdversary } from "../lib/models.ts";
@@ -67,6 +67,7 @@ const baseInput = {
 	brief: validBrief,
 	dryRun: true,
 	wakeDryRun: true,
+	github: { reviewPolicy: { requireHuman: false, requiredBots: [] } },
 };
 const fixtureProfiles: ProjectProfile[] = [
 	{
@@ -77,6 +78,7 @@ const fixtureProfiles: ProjectProfile[] = [
 		yolo: true,
 		stamp: false,
 		knowledge: [],
+		reviewPolicy: { requireHuman: false, requiredBots: [{ login: "coderabbitai[bot]", approvalCheckPattern: "^CodeRabbit" }] },
 		depsWarm: true,
 	},
 	{
@@ -87,6 +89,7 @@ const fixtureProfiles: ProjectProfile[] = [
 		yolo: false,
 		stamp: true,
 		knowledge: [],
+		reviewPolicy: { requireHuman: true, requiredBots: [{ login: "claude[bot]", approvalCheckPattern: "claude.*review" }] },
 		depsWarm: true,
 	},
 	{
@@ -98,6 +101,7 @@ const fixtureProfiles: ProjectProfile[] = [
 		stamp: false,
 		production: true,
 		knowledge: [],
+		reviewPolicy: { requireHuman: false, requiredBots: [] },
 		depsWarm: true,
 	},
 ];
@@ -154,6 +158,7 @@ describe("workflow rendering contracts", () => {
 		yolo: false,
 		stamp: true,
 		knowledge: [],
+		reviewPolicy: { requireHuman: true, requiredBots: [] },
 		depsWarm: true,
 	};
 	const fullModels = seatModels;
@@ -215,6 +220,32 @@ describe("workflow rendering contracts", () => {
 
 	test("input schema accepts null models", () => {
 		expect((pipeline as typeof pipeline & { inputSchema: { safeParse: (value: unknown) => { success: boolean } } }).inputSchema.safeParse({ ...baseInput, models: null }).success).toBe(true);
+	});
+
+	test("input schema fails closed when the immutable project review policy is missing", () => {
+		const { github: _github, ...withoutGitHub } = baseInput;
+		expect(inputSchema.safeParse(withoutGitHub).success).toBe(false);
+		expect(inputSchema.safeParse({
+			...withoutGitHub,
+			github: { gh: "gh", git: "git" },
+		}).success).toBe(false);
+	});
+
+	test("adopted and persisted/resumed inputs retain the resolved review policy exactly", () => {
+		const reviewPolicy = {
+			requireHuman: true,
+			requiredBots: [{
+				login: "claude[bot]",
+				approvalCheckPattern: "^claude-review$",
+			}],
+		};
+		const adopted = inputSchema.parse({
+			...baseInput,
+			existingPr: 777,
+			github: { ...baseInput.github, reviewPolicy },
+		});
+		const resumed = inputSchema.parse(JSON.parse(JSON.stringify(adopted)));
+		expect(resumed.github.reviewPolicy).toEqual(reviewPolicy);
 	});
 
 	test("profile reasoning flows to each seat, with explicit seat overrides", () => {
@@ -368,6 +399,7 @@ describe("reviewer selection contracts", () => {
 		expect(DEFAULT_GITHUB.selfLogins).toEqual([]);
 		expect(DEFAULT_GITHUB.excludedApprovers).toEqual([]);
 		expect(DEFAULT_GITHUB.reviewerDenylist).toEqual([]);
+		expect("reviewPolicy" in DEFAULT_GITHUB).toBe(false);
 	});
 });
 
@@ -684,7 +716,7 @@ printf '%s\\n' '${JSON.stringify({ number: 777, html_url: "https://github.com/li
 					existingPr: 777,
 					worktree: dir,
 					watchSetPath,
-					github: { git, gh },
+					github: { ...baseInput.github, git, gh },
 				},
 				outputs: {
 					preflight: [{ nodeId: "preflight", ok: true, openQuestions: [], briefDigest: "", resolvedReviewerModel: "deck/claude-fable-5" }],
@@ -715,7 +747,7 @@ printf '%s\\n' '${JSON.stringify({ number: 777, html_url: "https://github.com/li
 		fs.chmodSync(gh, 0o755);
 		try {
 			const rendered = await renderWorkflow(pipeline, {
-				input: { ...baseInput, baseBranch: "main", dryRun: false, wakeDryRun: true, existingPr: 777, worktree: dir, github: { git, gh } },
+				input: { ...baseInput, baseBranch: "main", dryRun: false, wakeDryRun: true, existingPr: 777, worktree: dir, github: { ...baseInput.github, git, gh } },
 				outputs: {
 					preflight: [{ nodeId: "preflight", ok: true, openQuestions: [], briefDigest: "", resolvedReviewerModel: "deck/claude-fable-5" }],
 					adoptBase: [{ nodeId: "adopt-base", baseBranch: "fm/stack-parent" }],
@@ -831,20 +863,95 @@ describe("enqueue-merge regressions", () => {
 		} satisfies PipelineOutputFixtures;
 	}
 
-	async function renderMergeTask(baseBranch: string, log: string, landed = false) {
+	async function renderMergeTask(baseBranch: string, log: string, landed = false, pending = false) {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "deck-merge-task-"));
 		const git = path.join(dir, "git");
 		const gh = path.join(dir, "gh");
 		fs.writeFileSync(git, `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(log)}\ncase "$1" in log) ${landed ? "printf 'squash\\tfix: landed (#42)\\n'" : ":"};; rev-parse) if [ "$2" = "--abbrev-ref" ]; then printf 'fm/lin-123\\n'; else printf 'abc123\\n'; fi;; esac\n`);
+		const graphql = JSON.stringify({
+			data: {
+				repository: {
+					pullRequest: {
+						headRefOid: "abc123",
+						headRefName: "fm/lin-123",
+						baseRefName: baseBranch,
+						mergeable: "MERGEABLE",
+						mergeStateStatus: "CLEAN",
+						reviewDecision: "APPROVED",
+						commits: { nodes: [{ commit: { committedDate: "2026-08-01T00:00:00Z" } }] },
+						reviewThreads: { nodes: [] },
+						reviews: { nodes: [] },
+						comments: { nodes: [] },
+					},
+				},
+			},
+		});
+		const overview = JSON.stringify({
+			number: 42,
+			html_url: "https://github.com/lindy-ai/lindy/pull/42",
+			state: "open",
+			draft: false,
+			head: { ref: "fm/lin-123", sha: "abc123", repo: { full_name: "lindy-ai/lindy" } },
+			base: { ref: baseBranch },
+		});
+		const checkRuns = JSON.stringify({
+			check_runs: [{
+				id: 7,
+				name: "ci",
+				status: pending ? "in_progress" : "completed",
+				conclusion: pending ? null : "success",
+				started_at: "2026-08-01T00:00:00Z",
+				completed_at: pending ? null : "2026-08-01T00:01:00Z",
+				app: { id: 1, slug: "github-actions" },
+				check_suite: { id: 11, head_sha: "abc123" },
+			}],
+		});
+		const workflowRuns = JSON.stringify({
+			workflow_runs: [{
+				id: 1,
+				head_sha: "abc123",
+				check_suite: { id: 11 },
+				status: pending ? "in_progress" : "completed",
+				conclusion: pending ? null : "success",
+				created_at: "2026-08-01T00:00:00Z",
+				updated_at: "2026-08-01T00:01:00Z",
+				html_url: "https://github.invalid/runs/1",
+				pull_requests: [{ number: 42, base: { ref: baseBranch }, head: { ref: "fm/lin-123", sha: "abc123" } }],
+			}],
+		});
+		const jobs = JSON.stringify({
+			jobs: [{
+				id: 70,
+				name: "ci",
+				status: pending ? "in_progress" : "completed",
+				conclusion: pending ? null : "success",
+				started_at: "2026-08-01T00:00:00Z",
+				completed_at: pending ? null : "2026-08-01T00:01:00Z",
+				html_url: "https://github.invalid/jobs/70",
+			}],
+		});
 		fs.writeFileSync(gh, `#!/bin/sh
-if [ "$1" = api ] && [ "$3" = --jq ]; then printf 'abc123\\n'
-elif [ "$1" = api ]; then printf '%s\\n' '${JSON.stringify({ number: 42, html_url: "https://github.com/lindy-ai/lindy/pull/42", state: "open", draft: false, head: { ref: "fm/lin-123", sha: "abc123", repo: { full_name: "lindy-ai/lindy" } }, base: { ref: baseBranch } })}'
-else printf 'queued\\n'; fi
+printf '%s\\n' "$*" >> ${JSON.stringify(log)}
+if [ "$1" != api ]; then printf 'queued\\n'; exit 0; fi
+if [ "$2" = "repos/lindy-ai/lindy/pulls/42" ] && [ "$3" = "--jq" ]; then printf 'abc123\\n'; exit 0; fi
+case "$2" in
+  graphql) printf '%s\\n' '${graphql}' ;;
+  repos/lindy-ai/lindy/pulls/42) printf '%s\\n' '${overview}' ;;
+  repos/lindy-ai/lindy/pulls/42/requested_reviewers) printf '%s\\n' '{"users":[]}' ;;
+  repos/lindy-ai/lindy/pulls?*) printf '%s\\n' '[]' ;;
+  *check-runs*) printf '%s\\n' '${checkRuns}' ;;
+  *commits/abc123/status*) printf '%s\\n' '{"statuses":[]}' ;;
+  repos/lindy-ai/lindy/actions/runs/1/jobs*) printf '%s\\n' '${jobs}' ;;
+  repos/lindy-ai/lindy/actions/runs*) printf '%s\\n' '${workflowRuns}' ;;
+  repos/lindy-ai/lindy/rules/branches/*) printf '%s\\n' '[]' ;;
+  repos/lindy-ai/lindy/compare/*) printf '%s\\n' '{"status":"identical","ahead_by":0,"behind_by":0,"total_commits":0,"files":[]}' ;;
+  *) printf '{}\\n' ;;
+esac
 `);
 		fs.chmodSync(git, 0o755);
 		fs.chmodSync(gh, 0o755);
 		const rendered = await renderWorkflow(pipeline, {
-			input: { ...baseInput, worktree: dir, dryRun: false, wakeDryRun: true, github: { git, gh } },
+			input: { ...baseInput, worktree: dir, dryRun: false, wakeDryRun: true, github: { ...baseInput.github, git, gh } },
 			outputs: mergeTaskOutputs(baseBranch),
 			workflowPath: path.join(import.meta.dir, "..", "pipeline.tsx"),
 		});
@@ -864,6 +971,175 @@ else printf 'queued\\n'; fi
 			const receipt = await task.computeFn!();
 			expect(receipt).toMatchObject({ mergePath: "github-merge-queue", alreadyLanded: false });
 			expect(task.outputSchema!.safeParse(receipt).success).toBe(true);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+			fs.rmSync(log, { force: true });
+		}
+	});
+
+	test("a valid stamp waits on fresh exact-head pending CI and never invokes merge", async () => {
+		const log = path.join(os.tmpdir(), `deck-merge-pending-${crypto.randomUUID()}.log`);
+		const { dir, task } = await renderMergeTask("main", log, false, true);
+		try {
+			const attempt = schemas.mergeHeadCheck.parse(await task.computeFn!());
+			expect(attempt).toMatchObject({
+				ok: false,
+				retryable: true,
+				submittedAt: null,
+				mergePath: null,
+			});
+			expect(attempt.diffSummary).toContain("merge requires TERMINAL_SUCCESS");
+			expect(fs.readFileSync(log, "utf8")).not.toContain("pr merge");
+			const rerendered = await renderWorkflow(pipeline, {
+				input: {
+					...baseInput,
+					worktree: dir,
+					dryRun: false,
+					wakeDryRun: true,
+					github: {
+						...baseInput.github,
+						git: path.join(dir, "git"),
+						gh: path.join(dir, "gh"),
+					},
+				},
+				outputs: {
+					...mergeTaskOutputs("main"),
+					mergeHeadCheck: [{
+						nodeId: "r0-merge-head-check",
+						...attempt,
+					}],
+				} as PipelineOutputFixtures,
+				workflowPath: path.join(import.meta.dir, "..", "pipeline.tsx"),
+			});
+			expect(rerendered.tasks.some((candidate) => candidate.nodeId === "r0-merge-head-check")).toBe(true);
+			expect(rerendered.tasks.some((candidate) => candidate.nodeId === "r1-watch-poll")).toBe(false);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+			fs.rmSync(log, { force: true });
+		}
+	});
+
+	test("an ejected queue item never re-submits while fresh exact-head CI is pending", async () => {
+		const log = path.join(os.tmpdir(), `deck-requeue-pending-${crypto.randomUUID()}.log`);
+		const { dir } = await renderMergeTask("main", log, false, true);
+		try {
+			const checkedAt = "2026-08-01T00:00:00.000Z";
+			const rendered = await renderWorkflow(pipeline, {
+				input: {
+					...baseInput,
+					worktree: dir,
+					dryRun: false,
+					wakeDryRun: true,
+					limits: { landingPollSeconds: 0.001 },
+					github: {
+						...baseInput.github,
+						git: path.join(dir, "git"),
+						gh: path.join(dir, "gh"),
+					},
+				},
+				outputs: {
+					...mergeTaskOutputs("main"),
+					mergeHeadCheck: [{
+						nodeId: "r0-merge-head-check",
+						round: 0,
+						expectedHead: "abc123",
+						currentHead: "abc123",
+						ok: true,
+						diffSummary: "fresh green at initial enqueue",
+						checkedAt,
+						submittedAt: checkedAt,
+						receipt: "queued",
+						alreadyLanded: false,
+						mergePath: "github-merge-queue",
+					}],
+					mergeReceipt: [{
+						nodeId: "enqueue-merge",
+						round: 0,
+						submittedAt: checkedAt,
+						receipt: "queued",
+						alreadyLanded: false,
+						mergePath: "github-merge-queue",
+					}],
+					queuePoll: [{
+						nodeId: "queue-poll",
+						poll: 0,
+						state: "open",
+						baseBranch: "main",
+						autoMergeRequest: true,
+						ejected: false,
+						reason: "queued",
+					}],
+				} satisfies PipelineOutputFixtures,
+				workflowPath: path.join(import.meta.dir, "..", "pipeline.tsx"),
+			});
+			const queuePoll = rendered.tasks.find((candidate) => candidate.nodeId === "queue-poll");
+			const result = schemas.queuePoll.parse(await queuePoll?.computeFn?.());
+			expect(result).toMatchObject({
+				state: "open",
+				autoMergeRequest: false,
+				requeueRequired: true,
+				hardInvalidation: false,
+			});
+			expect(result.reason).toContain("merge safety pending");
+			const hardInvalidation = {
+				...result,
+				hardInvalidation: true,
+				requeueRequired: false,
+				reason: "merge safety invalidated: exact-head CI is TERMINAL_FAILURE",
+			};
+			const restarted = await renderWorkflow(pipeline, {
+				input: {
+					...baseInput,
+					worktree: dir,
+					dryRun: false,
+					wakeDryRun: true,
+					github: {
+						...baseInput.github,
+						git: path.join(dir, "git"),
+						gh: path.join(dir, "gh"),
+					},
+				},
+				outputs: {
+					...mergeTaskOutputs("main"),
+					reviewerRequest: [{
+						nodeId: "request-reviewers",
+						skipped: false,
+						requested: ["reviewer"],
+						verified: ["reviewer"],
+						source: "test",
+						at: checkedAt,
+						reviewerPrompt: "",
+					}],
+					mergeHeadCheck: [{
+						nodeId: "r0-merge-head-check",
+						round: 0,
+						expectedHead: "abc123",
+						currentHead: "abc123",
+						ok: true,
+						diffSummary: "fresh green at initial enqueue",
+						checkedAt,
+						submittedAt: checkedAt,
+						receipt: "queued",
+						alreadyLanded: false,
+						mergePath: "github-merge-queue",
+					}],
+					mergeReceipt: [{
+						nodeId: "enqueue-merge",
+						round: 0,
+						submittedAt: checkedAt,
+						receipt: "queued",
+						alreadyLanded: false,
+						mergePath: "github-merge-queue",
+					}],
+					queuePoll: [{
+						nodeId: "queue-poll",
+						...hardInvalidation,
+					}],
+				} satisfies PipelineOutputFixtures,
+				workflowPath: path.join(import.meta.dir, "..", "pipeline.tsx"),
+			});
+			expect(restarted.tasks.map((candidate) => candidate.nodeId)).toContain("r1-watch-poll");
+			expect(fs.readFileSync(log, "utf8")).not.toContain("pr merge");
 		} finally {
 			fs.rmSync(dir, { recursive: true, force: true });
 			fs.rmSync(log, { force: true });
@@ -998,7 +1274,7 @@ describe("full graph traversal (bypassApprovals, dry-run only)", () => {
 		const { sim, error } = await run({
 			...baseInput,
 			bypassApprovals: true,
-			github: { skipReviewerRequest: true },
+			github: { ...baseInput.github, skipReviewerRequest: true },
 			fixtures: { changedFiles: ["src/feature.ts"] },
 		});
 		expect(error).toBeUndefined();

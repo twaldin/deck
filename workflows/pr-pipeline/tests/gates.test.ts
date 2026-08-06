@@ -8,11 +8,10 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { resolve } from "node:path";
 
 import { validateBrief } from "../lib/brief.ts";
 import { evaluateDone } from "../lib/done.ts";
-import { parseCheckRuns, parseRequestedReviewers, parseReviews, parseReviewThreads } from "../lib/gh.ts";
+import { fetchBranchCheckRuns, parseCheckRuns, parseRequestedReviewers, parseReviews, parseReviewThreads } from "../lib/gh.ts";
 import { findLandingCommit } from "../lib/landing.ts";
 import { detectMigrations, migrationEvidenceComplete, missingMigrationStages } from "../lib/migrations.ts";
 import {
@@ -28,12 +27,29 @@ import { watchFixPrompt } from "../lib/prompts.ts";
 import { evaluateReadyForStamp, findHumanApproval } from "../lib/ready.ts";
 import {
 	assessCi,
-	evaluateWatchExit,
+	assessMergeSafety,
+	classifyCiEvidence,
+	evaluateWatchExit as evaluateWatchExitRequired,
 	reviewersNeedingReRequest,
 	unansweredComments,
 	isReviewFinding,
+	observeHeadAge,
 } from "../lib/watch.ts";
 import type { MigrationEvidenceEntry, WatchSnapshot } from "../lib/types.ts";
+import ciFailureFixtures from "./fixtures/ci-failures.json";
+
+const TEST_REVIEW_POLICY = { requireHuman: true, requiredBots: [] };
+function evaluateWatchExit(
+	snapshot: WatchSnapshot,
+	options: Omit<Parameters<typeof evaluateWatchExitRequired>[1], "reviewPolicy"> & {
+		reviewPolicy?: Parameters<typeof evaluateWatchExitRequired>[1]["reviewPolicy"];
+	},
+) {
+	return evaluateWatchExitRequired(snapshot, {
+		reviewPolicy: TEST_REVIEW_POLICY,
+		...options,
+	});
+}
 
 // Keep gate tests away from the operator home. Some imported helpers can write
 // wake state while evaluating workflow-related fixtures.
@@ -189,7 +205,7 @@ describe("model policy (deck catalog + family opposition)", () => {
 	});
 
 	test("same-family reviewer with opposition ON is a violation", () => {
-		const policy = { ...defaultModelPolicy(), implementer: "deck/claude-sonnet-5", reviewer: "deck/claude-opus-5" };
+		const policy = { ...defaultModelPolicy(), implementer: "deck/claude-fable-5", reviewer: "deck/claude-opus-5" };
 		const violations = validateModelPolicy(policy);
 		expect(violations.some((v) => v.includes("same family"))).toBe(true);
 	});
@@ -197,7 +213,7 @@ describe("model policy (deck catalog + family opposition)", () => {
 	test("same-family reviewer with opposition explicitly OFF is allowed", () => {
 		const policy = {
 			...defaultModelPolicy(),
-			implementer: "deck/claude-sonnet-5",
+			implementer: "deck/claude-fable-5",
 			reviewer: "deck/claude-opus-5",
 			familyOpposition: false,
 		};
@@ -236,7 +252,10 @@ function snapshot(overrides: Partial<WatchSnapshot> = {}): WatchSnapshot {
 		lastPushAt: "2026-07-27T10:00:00Z",
 		threads: [],
 		comments: [],
-		reviewers: [],
+		reviewers: [
+			{ login: "human-reviewer", isBot: false, lastActivityAt: "2026-07-27T11:00:00Z", lastReviewState: "APPROVED" },
+			{ login: "claude[bot]", isBot: true, lastActivityAt: "2026-07-27T11:01:00Z", lastReviewState: "APPROVED" },
+		],
 		requestedReviewers: [],
 		checkRuns: [{ name: "ci", status: "completed", conclusion: "success" }],
 		...overrides,
@@ -264,21 +283,21 @@ describe("evaluateWatchExit", () => {
 		expect(verdict.reasons.join(" ")).toContain("needs rebase");
 	});
 
-	test("BEHIND blocks exit and requests a rebase fix", () => {
-		const verdict = evaluateWatchExit(snapshot({ mergeStateStatus: "BEHIND" }), { selfLogins: ["twaldin"] });
-		expect(verdict.exitOk).toBe(false);
-		expect(verdict.disposition).toBe("fix");
-		expect(verdict.actionable).toBe(true);
-		expect(verdict.reasons.join(" ")).toContain("needs rebase");
+	test("GitHub BEHIND is not a conflict and does not invent a rebase trigger", () => {
+		const verdict = evaluateWatchExit(snapshot({ mergeStateStatus: "BEHIND", behindBy: 21 }), { selfLogins: ["twaldin"] });
+		expect(verdict.exitOk).toBe(true);
+		expect(verdict.rebaseRequired).toBe(false);
+		expect(verdict.triggers).toHaveLength(0);
 	});
 
-	test("unresolved thread blocks exit", () => {
+	test("an old unresolved thread is visible but does not invent a new trigger", () => {
 		const verdict = evaluateWatchExit(
 			snapshot({ threads: [{ id: "t1", isResolved: false, lastCommenter: "rev" }] }),
 			{ selfLogins: ["twaldin"] },
 		);
-		expect(verdict.exitOk).toBe(false);
+		expect(verdict.exitOk).toBe(true);
 		expect(verdict.unresolvedThreads).toBe(1);
+		expect(verdict.triggers).toEqual([]);
 	});
 
 	test("verified Linear linkbacks do not create watch work", () => {
@@ -289,24 +308,130 @@ describe("evaluateWatchExit", () => {
 		expect(verdict.unansweredComments).toBe(0);
 	});
 
-	test("substantive human and unknown bot comments stay actionable", () => {
+	test("humans and only profile-configured review bots are findings", () => {
 		expect(isReviewFinding({ author: "reviewer", isBot: false, createdAt: "", body: "linear scan breaks link handling" })).toBe(true);
-		expect(isReviewFinding({ author: "claude[bot]", isBot: true, createdAt: "", body: "Please fix the linear link handling" })).toBe(true);
+		expect(isReviewFinding(
+			{ author: "claude[bot]", isBot: true, createdAt: "", body: "Please fix the linear link handling" },
+			["claude[bot]"],
+		)).toBe(true);
+		expect(isReviewFinding({ author: "claude[bot]", isBot: true, createdAt: "", body: "noise" })).toBe(false);
 	});
 
-	test("known bot banner requires both author and exact banner shape", () => {
+	test("unrelated automation is never promoted into review work", () => {
 		expect(isReviewFinding({ author: "linear[bot]", isBot: true, createdAt: "", body: "<!-- linear-linkback -->" })).toBe(false);
-		expect(isReviewFinding({ author: "linear[bot]", isBot: true, createdAt: "", body: "the linear scan here breaks the link handling" })).toBe(true);
-		expect(isReviewFinding({ author: "unknown[bot]", isBot: true, createdAt: "", body: "automation banner" })).toBe(true);
+		expect(isReviewFinding({ author: "linear[bot]", isBot: true, createdAt: "", body: "the linear scan here breaks the link handling" })).toBe(false);
+		expect(isReviewFinding({ author: "unknown[bot]", isBot: true, createdAt: "", body: "automation banner" })).toBe(false);
 	});
 
-	test("behind count wins over green checks and is the first reaction", () => {
+	test("distance from base alone never wakes a conflict resolver", () => {
 		const verdict = evaluateWatchExit(snapshot({ mergeStateStatus: "BLOCKED", behindBy: 21 }), { selfLogins: ["twaldin"] });
-		expect(verdict.disposition).toBe("fix");
-		expect(verdict.reasons[0]).toContain("21 commit(s) behind");
+		expect(verdict.exitOk).toBe(true);
+		expect(verdict.rebaseRequired).toBe(false);
+
+		expect(verdict.reasons.join(" ")).not.toContain("commit(s) behind");
+	});
+	test("merge safety preserves a stamp only while exact-head CI is genuinely pending", () => {
+		const pending = assessMergeSafety(snapshot({
+			checkRuns: [{
+				name: "ci",
+				status: "in_progress",
+				conclusion: null,
+				headSha: "abc123",
+				startedAt: "2026-07-27T10:00:00Z",
+			}],
+		}), "abc123");
+		expect(pending.ok).toBe(false);
+		expect(pending.retryable).toBe(true);
+		expect(["RUNNING", "RUNNER_QUEUED"]).toContain(pending.ciClassification);
 	});
 
-	test("behind and conflicting or dirty states all require rebase", () => {
+	test("merge safety requires fresh terminal-green CI, current head, and MERGEABLE", () => {
+		expect(assessMergeSafety(snapshot(), "abc123")).toMatchObject({
+			ok: true,
+			retryable: false,
+			ciClassification: "TERMINAL_SUCCESS",
+		});
+		const noCi = assessMergeSafety(snapshot({
+			checkRuns: [],
+			ciEvidence: {
+				requiredContexts: [],
+				rulesBranch: "main",
+				graceSeconds: 150,
+				currentHeadAgeSeconds: 600,
+				currentRuns: [],
+				staleActiveRuns: [],
+				statuses: [],
+			},
+		}), "abc123");
+		expect(noCi.ok).toBe(false);
+		expect(noCi.retryable).toBe(false);
+		expect(noCi.ciClassification).toBe("NO_REQUIRED_CHECKS");
+		const failed = assessMergeSafety(snapshot({
+			checkRuns: [{
+				name: "ci",
+				status: "completed",
+				conclusion: "failure",
+				headSha: "abc123",
+			}],
+		}), "abc123");
+		expect(failed).toMatchObject({
+			ok: false,
+			retryable: false,
+			ciClassification: "TERMINAL_FAILURE",
+		});
+		expect(assessMergeSafety(snapshot(), "different-head").ok).toBe(false);
+		expect(assessMergeSafety(snapshot({ mergeable: "UNKNOWN" }), "abc123")).toMatchObject({
+			ok: false,
+			retryable: true,
+			ciClassification: "MERGEABILITY_STALE",
+		});
+		const redAndUnknown = assessMergeSafety(snapshot({
+			mergeable: "UNKNOWN",
+			checkRuns: [{
+				name: "ci",
+				status: "completed",
+				conclusion: "failure",
+				headSha: "abc123",
+			}],
+		}), "abc123");
+		expect(redAndUnknown).toMatchObject({
+			ok: false,
+			retryable: false,
+			ciClassification: "TERMINAL_FAILURE",
+		});
+		const lateReview = assessMergeSafety(snapshot({
+			comments: [{
+				id: "late-review",
+				author: "reviewer",
+				isBot: false,
+				createdAt: "2026-07-27T11:00:00Z",
+				body: "Please change this before merge.",
+				source: "review",
+			}],
+		}), "abc123", {
+			selfLogins: ["twaldin"],
+			reviewPolicy: TEST_REVIEW_POLICY,
+		});
+		expect(lateReview).toMatchObject({
+			ok: false,
+			retryable: false,
+			ciClassification: "TERMINAL_SUCCESS",
+		});
+		expect(lateReview.reason).toContain("Fresh review watch regressed before merge");
+		expect(assessMergeSafety(snapshot({ mergeable: "CONFLICTING" }), "abc123").ok).toBe(false);
+	});
+	test("UNKNOWN GitHub mergeability is stale metadata, not a rebase trigger", () => {
+		const verdict = evaluateWatchExit(snapshot({
+			mergeable: "UNKNOWN",
+			mergeStateStatus: "UNKNOWN",
+			behindBy: 0,
+		}), { selfLogins: ["twaldin"] });
+		expect(verdict.rebaseRequired).toBe(false);
+		expect(verdict.triggers).toHaveLength(0);
+		expect(verdict.ciClassification).toBe("MERGEABILITY_STALE");
+	});
+
+	test("conflicting and dirty states require rebase regardless of behind distance", () => {
 		for (const state of [
 			snapshot({ mergeable: "CONFLICTING", behindBy: 2 }),
 			snapshot({ mergeStateStatus: "DIRTY", behindBy: 2 }),
@@ -360,12 +485,37 @@ describe("evaluateWatchExit", () => {
 			reviewers: [{ login: "rev", isBot: false, lastActivityAt: "2026-07-27T09:00:00Z", lastReviewState: "CHANGES_REQUESTED" }],
 			requestedReviewers: ["rev"],
 		}), { selfLogins: ["twaldin"] });
-		expect(verdict.reviewersNeedingReRequest).toEqual(["rev"]);
+		expect(verdict.reviewersNeedingReRequest).toEqual([]);
 		expect(verdict.exitOk).toBe(false);
-		expect(verdict.disposition).toBe("fix");
+		expect(verdict.disposition).toBe("wait");
 	});
 
-	test("re-requested reviewer (verified via requested_reviewers) passes", () => {
+	test("current-head CHANGES_REQUESTED wakes a review-routing seat even without a body", () => {
+		const verdict = evaluateWatchExit(snapshot({
+			comments: [],
+			reviewers: [{
+				login: "reviewer",
+				isBot: false,
+				lastActivityAt: "2026-07-27T11:00:00Z",
+				lastReviewState: "CHANGES_REQUESTED",
+				headSha: "abc123",
+			}],
+		}), { selfLogins: ["twaldin"] });
+		expect(verdict.disposition).toBe("fix");
+		expect(verdict.triggers).toEqual([
+			expect.objectContaining({
+				kind: "human_comment",
+				headSha: "abc123",
+				payload: expect.objectContaining({
+					author: "reviewer",
+					source: "review_state",
+					reviewState: "CHANGES_REQUESTED",
+				}),
+			}),
+		]);
+	});
+
+	test("a re-requested reviewer still needs every profile-resolved approval", () => {
 		const verdict = evaluateWatchExit(
 			snapshot({
 				reviewers: [
@@ -375,7 +525,8 @@ describe("evaluateWatchExit", () => {
 			}),
 			{ selfLogins: ["twaldin"] },
 		);
-		expect(verdict.exitOk).toBe(true);
+		expect(verdict.exitOk).toBe(false);
+		expect(verdict.disposition).toBe("wait");
 	});
 
 	test("hard red CI starts a bounded fix; pending CI stays with Smithers", () => {
@@ -390,20 +541,527 @@ describe("evaluateWatchExit", () => {
 			snapshot({ checkRuns: [{ name: "ci", status: "in_progress", conclusion: null }] }),
 			{ selfLogins: ["twaldin"] },
 		);
-		expect(pending.exitOk).toBe(false);
+		expect(pending.exitOk).toBe(true);
 		expect(pending.ci).toBe("will-be-green");
-		expect(pending.disposition).toBe("wait");
+		expect(pending.disposition).toBe("complete");
 		expect(pending.actionable).toBe(false);
 	});
 
-	test("zero checks is a durable wait, never terminal success or agent work", () => {
-		const verdict = evaluateWatchExit(snapshot({ checkRuns: [] }), {
-			selfLogins: ["twaldin"],
-		});
+	test("aggregate CHANGES_REQUESTED blocks completion even when historical rows look approved", () => {
+		const verdict = evaluateWatchExit(snapshot({
+			reviewDecision: "CHANGES_REQUESTED",
+			reviewers: [{
+				login: "reviewer",
+				isBot: false,
+				lastActivityAt: "2026-07-27T11:00:00Z",
+				lastReviewState: "APPROVED",
+				headSha: "abc123",
+			}],
+		}), { selfLogins: ["twaldin"] });
+		expect(verdict.humanApprovedBy).toBe("reviewer");
 		expect(verdict.exitOk).toBe(false);
-		expect(verdict.ci).toBe("none");
-		expect(verdict.disposition).toBe("wait");
+		expect(verdict.reasons.join(" ")).toContain("aggregate review decision is CHANGES_REQUESTED");
+		expect(verdict.disposition).toBe("fix");
+		expect(verdict.triggers).toEqual([
+			expect.objectContaining({
+				kind: "human_comment",
+				payload: expect.objectContaining({
+					source: "aggregate_review_decision",
+					reviewState: "CHANGES_REQUESTED",
+				}),
+			}),
+		]);
+	});
+
+	test("wake kinds are generic while configured bot identity is profile-resolved", () => {
+		const claudePolicy = {
+			requireHuman: true,
+			requiredBots: [{ login: "claude[bot]" }],
+		};
+		const codeRabbitPolicy = {
+			requireHuman: false,
+			requiredBots: [{ login: "coderabbitai[bot]" }],
+		};
+		const conflict = evaluateWatchExit(snapshot({ mergeable: "CONFLICTING" }), {
+			selfLogins: ["twaldin"],
+			reviewPolicy: claudePolicy,
+		});
+		const red = evaluateWatchExit(
+			snapshot({ checkRuns: [{ id: 7, name: "ci", status: "completed", conclusion: "failure" }] }),
+			{ selfLogins: ["twaldin"], reviewPolicy: claudePolicy },
+		);
+		const human = evaluateWatchExit(snapshot({
+			comments: [{ id: "human-1", author: "reviewer", isBot: false, createdAt: "2026-07-27T12:00:00Z", body: "Please change this." }],
+		}), { selfLogins: ["twaldin"], reviewPolicy: claudePolicy });
+		const claude = evaluateWatchExit(snapshot({
+			comments: [{ id: "claude-1", author: "claude[bot]", isBot: true, createdAt: "2026-07-27T12:00:00Z", body: "Please change this." }],
+		}), { selfLogins: ["twaldin"], reviewPolicy: claudePolicy });
+		const codeRabbit = evaluateWatchExit(snapshot({
+			comments: [{ id: "rabbit-1", author: "coderabbitai[bot]", isBot: true, createdAt: "2026-07-27T12:00:00Z", body: "Please change this." }],
+		}), { selfLogins: ["twaldin"], reviewPolicy: codeRabbitPolicy });
+		expect([conflict, red, human, claude].map((value) => value.triggers[0]?.kind))
+			.toEqual(["merge_conflict", "failed_ci", "human_comment", "bot_comment"]);
+		expect(codeRabbit.triggers[0]?.kind).toBe("bot_comment");
+		for (const automation of ["dependabot[bot]", "github-actions[bot]", "twaldin"]) {
+			const verdict = evaluateWatchExit(snapshot({
+				comments: [{ id: automation, author: automation, isBot: true, createdAt: "2026-07-27T12:00:00Z", body: "noise" }],
+			}), { selfLogins: ["twaldin"], reviewPolicy: claudePolicy });
+			expect(verdict.triggers).toHaveLength(0);
+		}
+	});
+
+	test("CodeRabbit COMMENTED plus its profile-declared current-head check satisfies the bot gate", () => {
+		const reviewPolicy = {
+			requireHuman: false,
+			requiredBots: [{ login: "coderabbitai[bot]", approvalCheckPattern: "^CodeRabbit(?:$| /)" }],
+		};
+		const value = snapshot({
+			reviewers: [{
+				login: "coderabbitai[bot]",
+				isBot: true,
+				lastActivityAt: "2026-07-27T11:00:00Z",
+				lastReviewState: "COMMENTED",
+				headSha: "abc123",
+			}],
+			checkRuns: [{
+				name: "CodeRabbit",
+				status: "completed",
+				conclusion: "success",
+				headSha: "abc123",
+			}],
+		});
+		const current = evaluateWatchExit(value, { selfLogins: ["twaldin"], reviewPolicy });
+		expect(current.botApprovedBy).toEqual(["coderabbitai[bot]"]);
+		expect(current.exitOk).toBe(true);
+		const stale = evaluateWatchExit({
+			...value,
+			checkRuns: [{ ...value.checkRuns[0]!, headSha: "obsolete" }],
+		}, { selfLogins: ["twaldin"], reviewPolicy });
+		expect(stale.botApprovedBy).toEqual([]);
+		expect(stale.exitOk).toBe(false);
+	});
+
+	test("handled DECISION review item does not wake repeatedly or block other work", () => {
+		const value = snapshot({
+			comments: [{
+				id: "human-decision",
+				source: "review_comment",
+				threadId: "thread-1",
+				author: "reviewer",
+				isBot: false,
+				createdAt: "2026-07-27T12:00:00Z",
+				body: "Which product behavior should win?",
+			}],
+		});
+		const first = evaluateWatchExit(value, { selfLogins: ["twaldin"] });
+		expect(first.triggers[0]?.kind).toBe("human_comment");
+		const afterRouting = evaluateWatchExit(value, {
+			selfLogins: ["twaldin"],
+			handledTriggerIds: [first.triggers[0]!.id],
+		});
+		expect(afterRouting.actionable).toBe(false);
+		expect(afterRouting.exitOk).toBe(true);
+	});
+
+	test("a configured bot's approval marker is evidence but its comment is classified first", () => {
+		const reviewPolicy = {
+			requireHuman: true,
+			requiredBots: [{
+				login: "claude[bot]",
+				approvalCommentPattern: "^\\*\\*Claude finished .+ task in .+\\*\\*",
+			}],
+		};
+		const value = snapshot({
+			reviewers: [
+				{ login: "human-reviewer", isBot: false, lastActivityAt: "2026-07-27T11:00:00Z", lastReviewState: "APPROVED" },
+			],
+			comments: [{
+				id: "claude-finished",
+				source: "issue_comment",
+				author: "claude[bot]",
+				isBot: true,
+				createdAt: "2026-07-27T12:00:00Z",
+				body: "**Claude finished review task in 2m**",
+			}],
+		});
+		const first = evaluateWatchExit(value, { selfLogins: ["twaldin"], reviewPolicy });
+		expect(first.botApprovedBy).toEqual(["claude[bot]"]);
+		expect(first.exitOk).toBe(false);
+		const handled = evaluateWatchExit(value, {
+			selfLogins: ["twaldin"],
+			reviewPolicy,
+			handledTriggerIds: [first.triggers[0]!.id],
+		});
+		expect(handled.exitOk).toBe(true);
+	});
+
+	test("the latest configured-bot comment controls marker approval, so a later error revokes it", () => {
+		const value = snapshot({
+			reviewers: [{
+				login: "human-reviewer",
+				isBot: false,
+				lastActivityAt: "2026-07-27T10:30:00Z",
+				lastReviewState: "APPROVED",
+			}],
+			comments: [
+				{
+
+					id: "claude-finished",
+					author: "claude[bot]",
+					isBot: true,
+					createdAt: "2026-07-27T11:00:00Z",
+					body: "**Claude finished review task in 1m**",
+				},
+				{
+					id: "claude-error",
+					author: "claude[bot]",
+					isBot: true,
+					createdAt: "2026-07-27T12:00:00Z",
+					body: "Claude encountered an error",
+				},
+			],
+		});
+		const verdict = evaluateWatchExit(value, {
+			selfLogins: ["twaldin"],
+			reviewPolicy: {
+				requireHuman: true,
+				requiredBots: [{
+					login: "claude[bot]",
+					approvalCommentPattern: "^\\*\\*Claude finished .+ task in .+\\*\\*",
+				}],
+			},
+		});
+		expect(verdict.botApprovedBy).toEqual([]);
+	});
+
+	test("CI grace starts when this durable watcher first observes a head, not at commit author time", () => {
+		const first = observeHeadAge("head-a", undefined, "2026-08-06T16:00:00Z");
+		expect(first).toEqual({
+			headObservedAt: "2026-08-06T16:00:00Z",
+			ageSeconds: 0,
+		});
+		expect(observeHeadAge("head-a", {
+			headSha: "head-a",
+			headObservedAt: first.headObservedAt,
+		}, "2026-08-06T16:02:31Z").ageSeconds).toBe(151);
+		expect(observeHeadAge("head-b", {
+			headSha: "head-a",
+			headObservedAt: first.headObservedAt,
+		}, "2026-08-06T17:00:00Z")).toEqual({
+			headObservedAt: "2026-08-06T17:00:00Z",
+			ageSeconds: 0,
+		});
+	});
+	test("zero checks with no required contexts terminates as no CI configured, never success", () => {
+		const verdict = evaluateWatchExit(snapshot({
+			checkRuns: [],
+			ciEvidence: {
+				requiredContexts: [],
+				rulesBranch: "main",
+				graceSeconds: 150,
+				currentHeadAgeSeconds: 600,
+				currentRuns: [],
+				staleActiveRuns: [],
+				statuses: [],
+			},
+		}), { selfLogins: ["twaldin"] });
+		expect(verdict.exitOk).toBe(false);
+		expect(verdict.disposition).toBe("escalate");
+		expect(verdict.terminalEscalation).toBe(true);
+		expect(verdict.ci).toBe("not-configured");
+		expect(verdict.ciClassification).toBe("NO_REQUIRED_CHECKS");
+		expect(verdict.reasons.join(" ")).toContain("human must decide");
+	});
+
+	test("zero checks with required CI inside grace waits for reporting", () => {
+		const verdict = evaluateWatchExit(snapshot({
+			checkRuns: [],
+			ciEvidence: {
+				requiredContexts: [{ context: "required / ci", integrationId: 1 }],
+				rulesBranch: "main",
+				graceSeconds: 150,
+				currentHeadAgeSeconds: 30,
+				currentRuns: [],
+				staleActiveRuns: [],
+				statuses: [],
+			},
+		}), { selfLogins: ["twaldin"] });
+		expect(verdict.exitOk).toBe(true);
+		expect(verdict.ciClassification).toBe("STARTING");
+		expect(verdict.ci).toBe("will-be-green");
+	});
+
+	test("zero checks with overdue required CI terminates into an explicit escalation", () => {
+		const verdict = evaluateWatchExit(snapshot({
+			checkRuns: [],
+			ciEvidence: {
+				requiredContexts: [{ context: "required / ci", integrationId: 1 }],
+				rulesBranch: "main",
+				graceSeconds: 150,
+				currentHeadAgeSeconds: 600,
+				currentRuns: [],
+				staleActiveRuns: [],
+				statuses: [],
+			},
+		}), { selfLogins: ["twaldin"] });
+		expect(verdict.exitOk).toBe(false);
+		expect(verdict.ciClassification).toBe("NOT_TRIGGERED");
+		expect(verdict.disposition).toBe("escalate");
+		expect(verdict.terminalEscalation).toBe(true);
 		expect(verdict.actionable).toBe(false);
+	});
+	test("required success must match exact current suite and App integration", () => {
+		const currentRun = {
+			id: 11,
+			checkSuiteId: 22,
+			headSha: "abc123",
+			status: "completed",
+			conclusion: "success",
+			createdAt: "2026-07-27T10:00:00Z",
+			updatedAt: "2026-07-27T10:05:00Z",
+			startedAt: "2026-07-27T10:01:00Z",
+			url: "https://example.invalid/run/11",
+			jobs: [],
+		};
+		const exact = snapshot({
+			checkRuns: [{
+				id: 33,
+				name: "required / ci",
+				status: "completed",
+				conclusion: "success",
+				completedAt: "2026-07-27T10:05:00Z",
+				checkSuiteId: 22,
+				appId: 44,
+			}],
+			ciEvidence: {
+				requiredContexts: [{ context: "required / ci", integrationId: 44 }],
+				rulesBranch: "main",
+				graceSeconds: 150,
+				currentHeadAgeSeconds: 600,
+				currentRuns: [currentRun],
+				staleActiveRuns: [],
+				statuses: [],
+			},
+		});
+		expect(classifyCiEvidence(exact).classification).toBe("TERMINAL_SUCCESS");
+		expect(classifyCiEvidence({
+			...exact,
+			checkRuns: [{
+				...exact.checkRuns[0]!,
+				id: 32,
+				conclusion: "cancelled",
+				completedAt: "2026-07-27T10:00:00Z",
+			}, ...exact.checkRuns],
+		}).classification).toBe("TERMINAL_SUCCESS");
+		expect(classifyCiEvidence({
+			...exact,
+			checkRuns: [
+				...exact.checkRuns,
+				{
+					id: 34,
+					name: "optional obsolete check",
+					status: "completed",
+					conclusion: "failure",
+					checkSuiteId: 999,
+					appId: 44,
+				},
+			],
+		}).classification).toBe("TERMINAL_SUCCESS");
+		expect(classifyCiEvidence({
+			...exact,
+			ciEvidence: {
+				...exact.ciEvidence!,
+				requiredContexts: [{ context: "required / ci", integrationId: 99 }],
+			},
+		}).classification).toBe("WORKFLOW_BROKEN");
+		expect(classifyCiEvidence({
+			...exact,
+			checkRuns: [{ ...exact.checkRuns[0]!, checkSuiteId: 999 }],
+		}).classification).toBe("WORKFLOW_BROKEN");
+	});
+	test("setup provider outage retries with backoff while executed test failure wakes a fix seat", () => {
+		const ciSnapshot = (fixture: typeof ciFailureFixtures.infra): WatchSnapshot => snapshot({
+			checkRuns: [{
+				id: 91,
+				name: "test",
+				status: "completed",
+				conclusion: "failure",
+				checkSuiteId: 22,
+				appId: 44,
+			}],
+			ciEvidence: {
+				requiredContexts: [{ context: "test", integrationId: 44 }],
+				rulesBranch: "main",
+				graceSeconds: 150,
+				currentHeadAgeSeconds: 600,
+				currentRuns: [{
+					id: 11,
+					checkSuiteId: 22,
+					headSha: "abc123",
+					status: "completed",
+					conclusion: "failure",
+					createdAt: "2026-07-27T10:00:00Z",
+					updatedAt: "2026-07-27T10:05:00Z",
+					startedAt: "2026-07-27T10:01:00Z",
+					url: "https://example.invalid/run/11",
+					jobs: [{
+						id: 12,
+						name: fixture.jobName,
+						status: "completed",
+						conclusion: "failure",
+						startedAt: "2026-07-27T10:01:00Z",
+						completedAt: "2026-07-27T10:02:00Z",
+						url: "https://example.invalid/job/12",
+						steps: fixture.steps,
+						logExcerpt: fixture.log,
+					}],
+				}],
+				staleActiveRuns: [],
+				statuses: [],
+			},
+		});
+		const infra = evaluateWatchExit(ciSnapshot(ciFailureFixtures.infra), { selfLogins: ["twaldin"] });
+		expect(infra.ciClassification).toBe("INFRA_RETRY");
+		expect(infra.disposition).toBe("wait");
+		expect(infra.actionable).toBe(false);
+		expect(infra.triggers).toHaveLength(0);
+		expect(infra.infraRetryJobs).toEqual([{ runId: 11, jobId: 12, reason: "setup/provider failure: Failed to resolve action download info" }]);
+		expect(infra.reasons.join(" ")).toContain("Infrastructure retry 1/3");
+
+		const exhausted = evaluateWatchExit(ciSnapshot(ciFailureFixtures.infra), {
+			selfLogins: ["twaldin"],
+			infraRetryAttempts: { "11": 3 },
+		});
+		expect(exhausted.disposition).toBe("escalate");
+		expect(exhausted.terminalEscalation).toBe(true);
+		expect(exhausted.infraRetryJobs).toHaveLength(0);
+
+		const mixedSnapshot = ciSnapshot(ciFailureFixtures.infra);
+		const originalRun = mixedSnapshot.ciEvidence!.currentRuns[0]!;
+		mixedSnapshot.checkRuns.push({
+			...mixedSnapshot.checkRuns[0]!,
+			id: 92,
+			name: "test-secondary",
+			checkSuiteId: 23,
+		});
+		mixedSnapshot.ciEvidence!.requiredContexts.push({
+			context: "test-secondary",
+			integrationId: 44,
+		});
+		mixedSnapshot.ciEvidence!.currentRuns.push({
+			...originalRun,
+			id: 21,
+			checkSuiteId: 23,
+			jobs: originalRun.jobs.map((job) => ({ ...job, id: 22 })),
+		});
+		const mixed = evaluateWatchExit(mixedSnapshot, {
+			selfLogins: ["twaldin"],
+			infraRetryAttempts: { "11": 3, "21": 0 },
+		});
+		expect(mixed.terminalEscalation).toBe(true);
+		expect(mixed.infraRetryJobs).toEqual([
+			{ runId: 21, jobId: 22, reason: "setup/provider failure: Failed to resolve action download info" },
+		]);
+
+		const code = evaluateWatchExit(ciSnapshot(ciFailureFixtures.code), { selfLogins: ["twaldin"] });
+		expect(code.ciClassification).toBe("TERMINAL_FAILURE");
+		expect(code.triggers[0]?.kind).toBe("failed_ci");
+		expect(code.disposition).toBe("fix");
+	});
+
+	test("real queued jobs and obsolete-SHA blockage are distinguished", () => {
+		const activeRun = {
+			id: 11,
+			checkSuiteId: 22,
+			headSha: "abc123",
+			status: "in_progress",
+			conclusion: null,
+			createdAt: "2026-07-27T10:00:00Z",
+			updatedAt: "2026-07-27T10:05:00Z",
+			startedAt: "2026-07-27T10:01:00Z",
+			url: "https://example.invalid/run/11",
+			jobs: [{
+				id: 1,
+				name: "test",
+				status: "queued",
+				conclusion: null,
+				startedAt: null,
+				completedAt: null,
+				url: "https://example.invalid/job/1",
+			}],
+		};
+		const baseEvidence = {
+			requiredContexts: [{ context: "required / ci", integrationId: 44 }],
+			rulesBranch: "main",
+			graceSeconds: 150,
+			currentHeadAgeSeconds: 600,
+			currentRuns: [activeRun],
+			staleActiveRuns: [],
+			statuses: [],
+		};
+		expect(classifyCiEvidence(snapshot({ checkRuns: [], ciEvidence: baseEvidence })).classification)
+			.toBe("RUNNER_QUEUED");
+		expect(classifyCiEvidence(snapshot({
+			checkRuns: [{
+				id: 77,
+				name: "required / ci",
+				status: "requested",
+				conclusion: null,
+				headSha: "abc123",
+				appId: 44,
+				checkSuiteId: 22,
+			}],
+			ciEvidence: baseEvidence,
+		})).classification).toBe("RUNNER_QUEUED");
+		expect(classifyCiEvidence(snapshot({
+			checkRuns: [],
+			ciEvidence: {
+				...baseEvidence,
+				currentRuns: [{ ...activeRun, jobs: [] }],
+				staleActiveRuns: [{ ...activeRun, id: 10, headSha: "obsolete", jobs: [] }],
+			},
+		})).classification).toBe("STALE_RUN_BLOCKED");
+		expect(classifyCiEvidence(snapshot({
+			checkRuns: [],
+			ciEvidence: {
+				...baseEvidence,
+				currentRuns: [{
+					...activeRun,
+					jobs: [{
+						...activeRun.jobs[0]!,
+						status: "in_progress",
+						startedAt: "2026-07-27T10:01:00Z",
+					}],
+				}],
+			},
+		})).classification).toBe("RUNNING");
+		expect(classifyCiEvidence(snapshot({
+			checkRuns: [
+				{
+					id: 77,
+					name: "required / ci",
+					workflowName: "CI",
+					status: "completed",
+					conclusion: "cancelled",
+					completedAt: "2026-07-27T10:03:00Z",
+					headSha: "abc123",
+					appId: 44,
+					checkSuiteId: 22,
+				},
+				{
+					id: 78,
+					name: "optional",
+					workflowName: "CI",
+					status: "completed",
+					conclusion: "success",
+					completedAt: "2026-07-27T10:04:00Z",
+					headSha: "abc123",
+					appId: 55,
+					checkSuiteId: 99,
+				},
+			],
+			ciEvidence: baseEvidence,
+		})).classification).toBe("TERMINAL_FAILURE");
 	});
 });
 
@@ -427,6 +1085,28 @@ describe("watch helpers", () => {
 				{ name: "ci", workflowName: "CI", status: "in_progress", conclusion: null },
 			]),
 		).toBe("will-be-green");
+		expect(
+			assessCi([
+				{
+					name: "lint",
+					workflowName: "CI",
+					status: "completed",
+					conclusion: "cancelled",
+					completedAt: "2026-07-30T11:00:00Z",
+					appId: 1,
+					headSha: "abc123",
+				},
+				{
+					name: "test",
+					workflowName: "CI",
+					status: "completed",
+					conclusion: "success",
+					completedAt: "2026-07-30T12:00:00Z",
+					appId: 1,
+					headSha: "abc123",
+				},
+			]),
+		).toBe("red");
 		expect(
 			assessCi([
 				{ name: "ci", workflowName: "CI", status: "completed", conclusion: "cancelled", completedAt: "2026-07-30T11:00:00Z" },
@@ -453,7 +1133,7 @@ describe("watch helpers", () => {
 		expect(reviewersNeedingReRequest(reviewers, ["requested"], lastPush, ["me"])).toEqual(["stale"]);
 	});
 
-	test("never re-requests reviewers with an existing decision", () => {
+	test("re-requests stale approvals and changes requests but not inert comments", () => {
 		const lastPush = "2026-07-27T10:00:00Z";
 		const reviewers = [
 			{ login: "approved", isBot: false, lastActivityAt: "2026-07-27T09:00:00Z", lastReviewState: "APPROVED" },
@@ -461,7 +1141,49 @@ describe("watch helpers", () => {
 			{ login: "changes", isBot: false, lastActivityAt: "2026-07-27T09:00:00Z", lastReviewState: "CHANGES_REQUESTED" },
 			{ login: "silent", isBot: false, lastActivityAt: "2026-07-27T09:00:00Z", lastReviewState: null },
 		];
-		expect(reviewersNeedingReRequest(reviewers, [], lastPush)).toEqual(["changes", "silent"]);
+		expect(reviewersNeedingReRequest(reviewers, [], lastPush)).toEqual(["approved", "changes", "silent"]);
+	});
+
+	test("re-requests a human whose approval belongs to the previous head", () => {
+		const lastPush = "2026-07-27T10:00:00Z";
+		const reviewers = [
+			{
+				login: "stale-approval",
+				isBot: false,
+				lastActivityAt: "2026-07-27T09:00:00Z",
+				lastReviewState: "APPROVED",
+				headSha: "previous",
+			},
+			{
+				login: "current-approval",
+				isBot: false,
+				lastActivityAt: "2026-07-27T09:00:00Z",
+				lastReviewState: "APPROVED",
+				headSha: "current",
+			},
+		];
+		expect(reviewersNeedingReRequest(reviewers, [], lastPush, [], "current")).toEqual([
+			"stale-approval",
+		]);
+		expect(reviewersNeedingReRequest(reviewers, ["stale-approval"], lastPush, [], "current")).toEqual([]);
+	});
+
+	test("a stale approval makes the deterministic re-request path actionable", () => {
+		const verdict = evaluateWatchExit(snapshot({
+			comments: [],
+			requestedReviewers: [],
+			reviewers: [{
+				login: "reviewer",
+				isBot: false,
+				lastActivityAt: "2026-07-27T09:00:00Z",
+				lastReviewState: "APPROVED",
+				headSha: "previous",
+			}],
+		}), { selfLogins: ["twaldin"] });
+		expect(verdict.reviewersNeedingReRequest).toEqual(["reviewer"]);
+		expect(verdict.actionable).toBe(true);
+		expect(verdict.disposition).toBe("fix");
+		expect(verdict.triggers).toEqual([]);
 	});
 
 	test("unansweredComments counts only others' comments newer than our latest activity", () => {
@@ -490,30 +1212,32 @@ describe("watch fix worker boundary", () => {
 			gh: "gh",
 			baseBranch: "main",
 			pollJson: "{}",
+			briefJson: JSON.stringify(validBrief),
+			triggerJson: JSON.stringify([{ id: "comment:1", kind: "human_comment" }]),
 			round: 0,
 			afterPoll: 1,
 		});
 		expect(prompt).toContain("Return pushed=false and reRequested=[]");
-		expect(prompt).toContain("pipeline owns publication through rebaseAndPush()");
-		expect(prompt).toContain("bounded-ancestry check");
-		expect(prompt).toContain("force-with-lease push");
-		expect(prompt).toContain("Never run git push");
-		expect(prompt).toContain("Never sleep-poll CI or review state");
-		expect(prompt).toContain("reviewersToReRequest list");
-		expect(prompt).not.toContain("If the helper is unavailable");
-		expect(prompt).not.toContain("re-request every prior human reviewer");
-		expect(prompt).toContain("persisted Smithers poll owns the wait");
+		expect(prompt).toContain("deterministic publisher owns rebase, tests, force-with-lease push");
+		expect(prompt).toContain("Never rebase, push, approve, stamp, merge");
+		expect(prompt).toContain("Never sleep-poll CI or reviews");
+		expect(prompt).toContain("FIX_NOW");
+		expect(prompt).toContain("NOT_VALID");
+		expect(prompt).toContain("DECISION");
+		expect(prompt).toContain("comment:1");
+		expect(prompt).toContain(validBrief.summary);
 	});
 
-	test("signature project prompt uses the signing helper for both comment types", () => {
+	test("review routes return reply text instead of giving the seat GitHub authority", () => {
 		const prompt = watchFixPrompt({
 			worktree: "/tmp/wt", branch: "fix/ci", repo: "owner/repo", prNumber: 42,
 			project: "lindy-ai/lindy", gh: "gh", baseBranch: "main", pollJson: "{}", round: 0, afterPoll: 1,
 		});
-		expect(prompt).toContain(`bun ${resolve(import.meta.dir, "../lib/post-comment.ts")}`);
-		expect(prompt).toContain("post-review-reply.ts");
-		expect(prompt).toContain("-- tim's agent");
-		expect(prompt).toContain("stdin");
+		expect(prompt).toContain("Never post a raw GitHub comment");
+		expect(prompt).toContain("Return replyBody");
+		expect(prompt).toContain("publisher signs and posts");
+		expect(prompt).toContain("This route does not block unrelated work");
+		expect(prompt).toContain('"FIX_NOW"|"NOT_VALID"|"DECISION"');
 	});
 });
 
@@ -603,8 +1327,10 @@ describe("evaluateReadyForStamp", () => {
 		expect(evaluateReadyForStamp([approval("rev")], "will-be-green", options).ready).toBe(true);
 	});
 
-	test("hard red CI blocks", () => {
-		expect(evaluateReadyForStamp([approval("rev")], "red", options).ready).toBe(false);
+	test("hard red CI is surfaced but does not hide the captain's stamp", () => {
+		const verdict = evaluateReadyForStamp([approval("rev")], "red", options);
+		expect(verdict.ready).toBe(true);
+		expect(verdict.reasons.join(" ")).toContain("live step-5 watch");
 	});
 
 	test("bot approval never counts", () => {
@@ -768,6 +1494,32 @@ describe("gh parsers", () => {
 			}),
 		).toEqual([{ name: "ci", status: "completed", conclusion: "success" }]);
 		expect(parseCheckRuns({})).toEqual([]);
+	});
+
+	test("fetchBranchCheckRuns follows a full 100-result page instead of truncating CI truth", async () => {
+		let calls = 0;
+		const result = await fetchBranchCheckRuns({
+			gh: "gh",
+			repo: "owner/repo",
+			exec: async (args) => {
+				calls += 1;
+				const count = calls === 1 ? 100 : 1;
+				return {
+					code: 0,
+					stderr: "",
+					stdout: JSON.stringify({
+						check_runs: Array.from({ length: count }, (_, index) => ({
+							id: (calls - 1) * 100 + index + 1,
+							name: `ci-${(calls - 1) * 100 + index + 1}`,
+							status: "completed",
+							conclusion: "success",
+						})),
+					}),
+				};
+			},
+		}, "abc123");
+		expect(result).toHaveLength(101);
+		expect(calls).toBe(2);
 	});
 
 	test("parseReviews flags bots via __typename and [bot] suffix", () => {

@@ -8,6 +8,7 @@ import * as path from "node:path";
 import { assertProductWorkspace } from "../workflows/pr-pipeline/lib/workspace-guard";
 import type { ProjectProfile } from "../workflows/pr-pipeline/lib/profiles";
 import { z } from "../broker/node_modules/zod";
+import { DURABLE_LINK_NAMES, bootstrapHome } from "../v2/src/bootstrap";
 
 const PINNED_VERSION = "0.7.0";
 const PINNED_TAG = "v0.7.0";
@@ -118,8 +119,15 @@ const TranscriptEntrySchema = z.looseObject({
 
 const SettingsSchema = z.object({
 	defaultProvider: z.literal("deck"),
-	enabledModels: z.tuple([z.literal("deck/*")]),
-	packages: z.tuple([z.literal(PROCESS_PACKAGE)]),
+	// The seat is pinned to the judgment model at high reasoning, and may only
+	// select from the captain's canonical four. `deck/*` here is what let a
+	// conversation drift onto a non-canonical model.
+	defaultModel: z.literal("claude-fable-5"),
+	defaultThinkingLevel: z.literal("high"),
+	enabledModels: z.array(z.string()).nonempty(),
+	// Empty on purpose: the process package stays pinned and installed but
+	// unloaded, because a seat must never poll.
+	packages: z.tuple([]),
 	autoRefine: z.object({ enabled: z.literal(false) }),
 });
 const AuthStoreSchema = z.record(z.string(), z.unknown());
@@ -310,8 +318,11 @@ beforeAll(() => {
 	agentDir = path.join(deckHome, ".prime", "agent");
 	wrapper = path.join(deckHome, ".prime", "bin", "prime-conversation");
 	daemonSocket = path.join(deckHome, DECK_PRIME_PROFILE.daemonSocketRelative);
-	fs.mkdirSync(deckHome, { recursive: true });
-	fs.writeFileSync(path.join(deckHome, "AGENTS.md"), SEED);
+	bootstrapHome({
+		repoV2Dir: path.join(import.meta.dir, "..", "v2"),
+		home: deckHome,
+		optMem: false,
+	});
 	const globalPrimeAgent = path.join(home, ".prime", "agent");
 	fs.mkdirSync(globalPrimeAgent, { recursive: true });
 	fs.writeFileSync(path.join(globalPrimeAgent, "settings.json"), JSON.stringify({
@@ -353,21 +364,55 @@ exit 2
 	if (second.status !== 0) throw new Error(`idempotent reinstall failed: ${second.output}`);
 }, 30_000);
 
+/**
+ * Stop ONLY the sandbox daemon.
+ *
+ * `prime-agent shutdown` is per-UID, not per-HOME: the supervisor registry lives
+ * in /tmp/prime-agent-$UID, so an isolated HOME does not scope it and there is
+ * no socket flag (`shutdown` takes only --force/--json). Running this suite used
+ * to stop every daemon this user owns, which killed the captain's live
+ * conversation mid-turn - observed as "The daemon stopped this agent session".
+ * Talking to the fixture's own socket is the only scoped stop.
+ */
+function shutdownSandboxDaemon(): void {
+	if (primeBinary === undefined || daemonSocket === undefined) return;
+	if (!fs.existsSync(daemonSocket)) return;
+	const clientModule = path.join(
+		primeBinary.replace(/\/bin\/prime-agent$/, ""),
+		"lib/node_modules/prime-agent/dist/modes/daemon/daemon-client.js",
+	);
+	if (!fs.existsSync(clientModule)) return;
+	spawnSync("node", ["--input-type=module", "-", clientModule, daemonSocket], {
+		input: `
+import { pathToFileURL } from "node:url";
+const [clientModule, socketPath] = process.argv.slice(2);
+const { DaemonClient } = await import(pathToFileURL(clientModule).href);
+const client = new DaemonClient(socketPath);
+try {
+  await client.connect();
+  await client.waitForHello();
+  await client.request({ type: "shutdown", force: true }, 10_000);
+} finally {
+  client.close();
+}
+`,
+		encoding: "utf8",
+		timeout: 15_000,
+	});
+}
+
 afterAll(() => {
-	if (primeBinary !== undefined && daemonSocket !== undefined) {
-		spawnSync(primeBinary, ["shutdown", "--force"], {
-			env: {
-				...installEnv,
-				HERDR_ENV: "0",
-				PRIME_AGENT_CODING_AGENT_DIR: agentDir,
-				PRIME_AGENT_SESSION_DIR: path.join(deckHome, ".prime", "sessions"),
-			},
-			encoding: "utf8",
-			timeout: 10_000,
-		});
-	}
+	shutdownSandboxDaemon();
 	if (root !== undefined) fs.rmSync(root, { recursive: true, force: true });
 }, 30_000);
+
+	test("keeps bootstrap-owned durable links intact across the convergent reinstall", () => {
+		for (const name of DURABLE_LINK_NAMES) {
+			const visible = path.join(deckHome, name);
+			expect(fs.lstatSync(visible).isSymbolicLink()).toBe(true);
+			expect(fs.realpathSync(visible)).toBe(fs.realpathSync(path.join(`${deckHome}-durable`, name)));
+		}
+	});
 
 describe("Prime conversation installer", () => {
 	test("is dry-run by default and writes no profile", () => {
@@ -425,12 +470,9 @@ describe("Prime conversation installer", () => {
 		expect(refused.output).toContain("existing shared Prime daemon predates this environment boundary");
 		expect(refused.output).toContain("root installer drains idle seats and restarts the daemon safely");
 
-		const stopped = combinedOutput(
-			primeBinary,
-			["shutdown", "--force"],
-			installEnv,
-		);
-		expect(stopped.status).toBe(0);
+		// Scoped to this fixture's socket. `prime-agent shutdown` is per-UID and
+		// would stop the developer's live conversation too.
+		shutdownSandboxDaemon();
 		const reapplied = combinedOutput("bash", [INSTALLER, "--apply"], installEnv);
 		expect(reapplied.status).toBe(0);
 	}, 30_000);
@@ -561,7 +603,8 @@ describe("Prime conversation installer", () => {
 
 	test("mirrors only the approved Deck extensions and pinned process package", () => {
 		const extensions = path.join(agentDir, "extensions");
-		for (const name of ["deck-questions", "deck-ship", "deck-recall", "deck-usage"]) {
+		// deck-ship is gone: shipping is `deck.ship()`, not a registered tool.
+		for (const name of ["deck-questions", "deck-recall", "deck-usage"]) {
 			const entry = path.join(extensions, name, "index.ts");
 			expect(fs.realpathSync(entry)).toBe(fs.realpathSync(path.join(import.meta.dir, "..", "extensions-prime", `${name}.ts`)));
 		}
@@ -581,7 +624,6 @@ describe("Prime conversation installer", () => {
 			"deck-provider.ts",
 			"deck-questions",
 			"deck-recall",
-			"deck-ship",
 			"deck-usage",
 			"node_modules",
 			"prime-conversation-guard.ts",
@@ -941,23 +983,12 @@ export default function workflowToolProbe(agent: { getAllTools(): Array<{ name: 
 			const frames = rpcFrames(result.stdout);
 			expect(deckModels(frames).length).toBeGreaterThan(0);
 			expect(selectedProvider(frames)).toBe("deck");
+			// The pi-processes package is installed and pinned, but deliberately NOT
+			// loaded: a seat must never poll. Waiting is a durable workflow state,
+			// and process inspection is `deck.procs()`.
 			const processCommands = extensionCommands(frames).filter((command) =>
 				command.name === "ps" || command.name.startsWith("ps:"));
-			expect(processCommands.map((command) => command.name).sort()).toEqual([
-				"ps",
-				"ps:clear",
-				"ps:dock",
-				"ps:kill",
-				"ps:logs",
-				"ps:pin",
-				"ps:settings",
-			]);
-			expect(processCommands.every((command) =>
-				command.source === "extension"
-					&& command.sourceInfo.path.includes("pi-processes")
-					&& command.sourceInfo.source === PROCESS_PACKAGE
-					&& command.sourceInfo.scope === "project"
-					&& command.sourceInfo.origin === "package")).toBe(true);
+			expect(processCommands).toEqual([]);
 			const probe = ProbeOutputSchema.parse(JSON.parse(fs.readFileSync(probeOutput, "utf8")));
 			expect(probe.cwd).toBe(fs.realpathSync(deckHome));
 			expect(probe.agentDir).toBe(agentDir);
@@ -969,16 +1000,12 @@ export default function workflowToolProbe(agent: { getAllTools(): Array<{ name: 
 			expect(probe.adminToken).toBeNull();
 			expect(probe.ambientSecret).toBeNull();
 			expect(probe.maxDepth).toBe("1");
-			expect(probe.tools).toEqual(expect.arrayContaining([
-				"list_questions",
-				"answer_question",
-				"ship",
-				"adopt",
-				"status",
-				"recall_effort",
-				"ipython",
-				"process",
-			]));
+			// Code execution is the only tool. Deck's capabilities are Python calls
+			// in the `deck` module, so a registered pi-tool here is a regression.
+			// EXACT, not a denylist. The contract is that code execution is the only
+			// tool, so an allowlist-by-omission would let a new pi-tool creep in
+			// while this still passed.
+			expect(probe.tools).toEqual(["ipython"]);
 			expect(probe.tools.some((tool) => /agent|dispatch|spawn/i.test(tool))).toBe(false);
 			expect(typeof probe.systemPrompt).toBe("string");
 			if (typeof probe.systemPrompt !== "string") throw new Error("system prompt missing from probe");
@@ -1145,8 +1172,16 @@ export default function workflowToolProbe(agent: { getAllTools(): Array<{ name: 
 		);
 		expect(settings).toEqual({
 			defaultProvider: "deck",
-			enabledModels: ["deck/*"],
-			packages: [PROCESS_PACKAGE],
+			defaultModel: "claude-fable-5",
+			defaultThinkingLevel: "high",
+			// Exactly the canonical set, sourced from DECK_AGENT_CATALOG.
+			enabledModels: [
+				"deck/claude-fable-5",
+				"deck/claude-opus-5",
+				"deck/gpt-5.6-sol",
+				"deck/gpt-5.6-luna",
+			],
+			packages: [],
 			autoRefine: { enabled: false },
 		});
 		const originalCustody = fs.readFileSync(custody);
@@ -1225,5 +1260,56 @@ describe("Prime upgrade tripwire", () => {
 		});
 		expect(provenanceRejected.status).toBe(1);
 		expect(provenanceRejected.output).toContain("install-state tripwire");
+	});
+});
+
+describe("daemon shutdowns never reach the live daemon", () => {
+	// An unscoped `prime-agent shutdown --force` in this suite killed the captain's
+	// running orch session on deckbox: the shared production daemon received the
+	// shutdown and reported "The daemon stopped this agent session". Isolating HOME
+	// is not sufficient — the socket must be named explicitly.
+	test("every direct shutdown in this suite names a daemon socket", () => {
+		const source = fs.readFileSync(import.meta.path, "utf8");
+		const directShutdowns = source.match(/\[\s*"shutdown"[^\]]*\]/g) ?? [];
+		expect(directShutdowns.length).toBeGreaterThan(0);
+		for (const call of directShutdowns) {
+			// Wrapper invocations supply --daemon-socket themselves; direct binary
+			// invocations pass --force and must scope the socket.
+			if (!call.includes("--force")) continue;
+			expect(call, call).toContain("--daemon-socket");
+		}
+	});
+});
+
+describe("the code surface reaches the kernel", () => {
+	// The tool surface was deleted in favour of a `deck` Python module. That is
+	// only safe if the kernel can actually import it: the wrapper runs `env -i`,
+	// so anything not exported AND allowlisted is silently dropped and the agent
+	// would lose every capability at once.
+	test("the wrapper exports PYTHONPATH and IPYTHONDIR past env -i", () => {
+		const wrapper = fs.readFileSync(path.join(deckHome, ".prime", "bin", "prime-conversation"), "utf8");
+		expect(wrapper).toContain("export PYTHONPATH=");
+		expect(wrapper).toContain("export IPYTHONDIR=");
+		// Exporting is not enough - env -i keeps only the allowlisted names.
+		const allowlist = wrapper.slice(wrapper.indexOf("for name in PATH HOME"), wrapper.indexOf("do\n  if [[ -n"));
+		expect(allowlist).toContain("PYTHONPATH");
+		expect(allowlist).toContain("IPYTHONDIR");
+	});
+
+	test("the installed module imports and answers help()", () => {
+		const pythonRoot = path.join(deckHome, ".prime", "python");
+		expect(fs.existsSync(path.join(pythonRoot, "deck", "__init__.py"))).toBe(true);
+		const probe = spawnSync("python3", ["-c", "import deck; print(deck.help())"], {
+			env: { ...process.env, PYTHONPATH: pythonRoot },
+			encoding: "utf8",
+		});
+		expect(probe.status).toBe(0);
+		expect(probe.stdout).toContain("deck.ship");
+		expect(probe.stdout).toContain("ask_captain->deck.ask");
+	});
+
+	test("the kernel startup file auto-imports the surface", () => {
+		const startup = path.join(deckHome, ".prime", "ipython", "profile_default", "startup", "00-deck.py");
+		expect(fs.readFileSync(startup, "utf8")).toContain("import deck");
 	});
 });

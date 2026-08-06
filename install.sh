@@ -441,8 +441,8 @@ mkdir -p "$BIN_TARGET"
 ln -sfn "$PRIME_AGENT_TARGET" "$BIN_TARGET/prime-agent"
 
 
-bash "$REPO/v2/install.sh"
 bun "$REPO/v2/bin/deck-v2" bootstrap
+bash "$REPO/v2/install.sh"
 
 
 PRIME_CONVERSATION_HOME="$HOME/.deck" \
@@ -540,6 +540,7 @@ cat <<EOF
 
 Done. Code: $REPO
 Home: $HOME/.deck
+Durable: ${DECK_DURABLE_HOME:-$HOME/.deck-durable} (host-local; never sync)
 
 Start the broker and a Prime conversation:
 

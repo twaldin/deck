@@ -25,6 +25,7 @@ import { readMeta, updateMeta } from "./meta";
 import { findProfile, type ProjectProfile } from "./projects";
 import { SMITHERS_SPEC } from "./smithers";
 import { smithersWorkspaceCwd, uiWarn, warnOnShadowWorkspace } from "./workspace";
+import { assertDeckModel } from "../../workflows/pr-pipeline/lib/model-policy";
 import { claimWorktree, updateWorktreePid } from "./worktree-lock";
 
 export type ReviewersConfig = {
@@ -105,6 +106,16 @@ export type ShipRequest = {
 	/** Simulate side effects. Default FALSE here: ship means ship. */
 	dryRun?: boolean;
 	/**
+	 * Per-run seat assignment, chosen by the orchestrator.
+	 *
+	 * The profile supplies defaults; this overrides individual roles for THIS
+	 * run, so a seat can be escalated to judgment or dropped to the cheap
+	 * workhorse without editing project config. Every value is validated
+	 * against the canonical catalog, so an override can pick a different
+	 * canonical model but never an off-catalog one.
+	 */
+	models?: Record<string, string>;
+	/**
 	 * Adopt an already-open PR: the pipeline skips greenfield implement only,
 	 * runs local adversarial review, verifies the branch matches the PR head,
 	 * seeds its PR record from gh (never creates a second PR), and enters the same
@@ -135,6 +146,32 @@ export function pipelineDir(): string {
 }
 
 /**
+ * Apply the orchestrator's per-run seat choices on top of the profile defaults.
+ *
+ * Choosing WHICH canonical model runs a node is the orchestrator's job; the
+ * profile only supplies defaults. Validation stays here so an override cannot
+ * smuggle in an off-catalog model: the pipeline's own preflight would reject it
+ * later, but failing at ship time names the offending slot instead of dying
+ * mid-run.
+ */
+export function mergeModelSlots(
+	profileModels: unknown,
+	overrides: Record<string, string> | undefined,
+): unknown {
+	if (overrides === undefined) return profileModels;
+	const slots = Object.entries(overrides);
+	if (slots.length === 0) return profileModels;
+	for (const [slot, model] of slots) {
+		if (typeof model !== "string" || model.trim() === "") {
+			throw new Error(`model slot ${slot} needs a model id`);
+		}
+		assertDeckModel(model);
+	}
+	const base = (profileModels ?? {}) as Record<string, unknown>;
+	return { ...base, ...Object.fromEntries(slots) };
+}
+
+/**
  * Map a ship request + its resolved profile onto the pipeline's input shape.
  * dryRun defaults FALSE: the pipeline's own default is dry-run (safe for a
  * bare `smithers up`), but `deck-v2 ship` is the ship command.
@@ -151,7 +188,7 @@ export function buildPipelineInput(
 		worktree: request.worktree,
 		branch: request.branch,
 		profile: profile.id,
-		models: profile.models,
+		models: mergeModelSlots(profile.models, request.models),
 		dryRun: request.dryRun === true,
 		brief: {
 			ticket: request.ticket,
@@ -176,7 +213,7 @@ export function buildPipelineInput(
 	};
 	if (request.baseBranch !== undefined) input.baseBranch = request.baseBranch;
 	if (request.existingPr !== undefined) input.existingPr = request.existingPr;
-	const github: Record<string, unknown> = {};
+	const github: Record<string, unknown> = { reviewPolicy: profile.reviewPolicy };
 	if (reviewersConfig !== undefined) {
 		github.selfLogins = reviewersConfig.selfLogins;
 		github.excludedApprovers = reviewersConfig.excludedApprovers;

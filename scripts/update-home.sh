@@ -48,17 +48,26 @@ if [ -n "$HOME_PROFILE" ] && command -v gh >/dev/null && gh auth status >/dev/nu
   HOME_REMOTE="${DECK_HOME_GIT_REMOTE:-}"
   if [ -z "$HOME_REMOTE" ]; then
     echo "home sync skipped: DECK_HOME_GIT_REMOTE is unset" >&2
+  elif [ "$(gh repo view "$HOME_REMOTE" --json visibility --jq .visibility 2>/dev/null || true)" != "PRIVATE" ]; then
+    echo "error: home sync requires a verified PRIVATE GitHub repository: $HOME_REMOTE" >&2
+    exit 1
   elif gh repo clone "$HOME_REMOTE" "$TEMP_HOME/repo" -- --branch "profile/$HOME_PROFILE" >/dev/null 2>&1; then
     if [ "$HOME_PROFILE" = "personal" ] && find "$TEMP_HOME/repo" -type f \( -name 'restricted-*' -o -path '*/secrets-map.md' \) -not -path '*/.git/*' -print -quit | grep -q .; then
       echo "error: restricted project material in personal home" >&2
       exit 1
     fi
     mkdir -p "$HOME_REPO"
-    # Preserve live state, data, contract, and local secrets. Copy only profile files.
+    # Preserve host-local authority and runtime state. Copy only portable profile files.
     for item in "$TEMP_HOME/repo"/* "$TEMP_HOME/repo"/.[!.]*; do
       [ -e "$item" ] || continue
       name="$(basename "$item")"
-      case "$name" in .git|.prime|.env|.deck-profile|AGENTS.md|data|state|wt|logs|run|questions|broker) continue ;; esac
+      case "$name" in
+        .git) continue ;;
+        .pi|.prime|.env|.deck-profile|AGENTS.md|START.md|archive|backups|broker|catalog|config|config.json|data|efforts|enter.sh|intake|logs|questions|repos|run|shadow|state|workflows|wt|worktrees.json|worktrees.json.lock)
+          echo "error: home profile contains reserved host-local entry: $name" >&2
+          exit 1
+          ;;
+      esac
       cp -a "$item" "$HOME_REPO/"
     done
   else

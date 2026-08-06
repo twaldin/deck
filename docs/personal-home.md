@@ -7,9 +7,41 @@ in this public repo.
 ## The one rule
 
 **The personal home is outside the company security perimeter.** Each host has
-its own `~/.deck`. Nothing inside a `~/.deck` is ever copied between hosts —
-not `broker/store.db` (OAuth credentials), not `.env`, not `data/`, not
-`state/`, not `questions/`. Deck code syncs through the git remote only.
+its own `~/.deck` and host-local `~/.deck-durable`. Neither tree is copied
+between hosts. Deck code syncs through the git remote only. The private home
+repository carries reviewed portable profile files only; bootstrap excludes
+every durable link and retired profile from it.
+
+Bootstrap uses a sibling root rather than making `~/.deck` a repository or
+making the whole home durable. Existing tools keep their `~/.deck/...` paths
+through installer-owned symlinks, while a rename or removal of `~/.deck` leaves
+the targets in `~/.deck-durable` untouched. A git-backed durable root is
+forbidden: it would mix credentials and machine-local workflow authority with
+portable profile data. `DECK_DURABLE_HOME` may select another host-local path,
+but bootstrap rejects one inside `~/.deck` and records home/host ownership in a
+0600 manifest.
+
+| Path under `~/.deck` | Class | Why |
+|---|---|---|
+| `data/` | DURABLE | Effort dossiers, inbox inputs, and recorded facts are the cold-resume record. |
+| `state/` | DURABLE | Effort status/meta/queue/receipts and Smithers databases, executions, approvals, and ship inputs form one integrity unit. Some caches inside are derivable, but selectively wiping the directory can corrupt a live effort. |
+| `questions/` | DURABLE | The append-only captain decision queue must retain open and answered decisions. |
+| `worktrees.json` | DURABLE | It binds effort, repository, branch, and worktree identities; those relationships cannot be inferred safely. |
+| `wt/` | DURABLE | Worktrees may contain uncommitted or unpushed work. The registry and trees survive together. |
+| `broker/` | DURABLE | OAuth accounts and local capabilities must remain authenticated on this host. Directories are 0700; every regular file, including `store.db` and tokens, is forced to 0600. |
+| `config/`, `config.json` | DURABLE | Project/reviewer policy, admission limits, and host-specific routing are private authority, not installer defaults. |
+| `efforts/` | DURABLE | Legacy manifests, charters, inboxes, and tails remain effort evidence until explicitly retired. |
+| `archive/`, `backups/`, `repos/` | DURABLE | Recovery copies and potentially local-only checkout work are not assumed reconstructible. |
+| `.env`, `.deck-profile` | DURABLE | Host secrets and profile identity are private host configuration. |
+| `.pi/` | EPHEMERAL as a live path; ARCHIVE-ONCE | Pi is retired. On first migration bootstrap moves any old profile to `~/.deck-durable/archive/retired-pi-profile` and never recreates a live `.pi`. |
+| `.prime/` | EPHEMERAL | The installer owns the runtime, extensions, cache, and profile. Conversation sessions and refinement technique are explicitly non-authoritative. |
+| `catalog/` | EPHEMERAL | It is a derived index. |
+| `run/` | EPHEMERAL | Sockets, PID files, and process coordination are invalid after a rebuild. |
+| `logs/` | EPHEMERAL | Diagnostics do not carry workflow authority. |
+| `shadow/` | EPHEMERAL | Session indexes and divergence projections are derived comparison output. |
+| `intake/` | DURABLE | The edge-triggered PR snapshot and append-only wake event log cannot be reconstructed after the source cursor advances. |
+| `AGENTS.md`, `START.md`, `enter.sh`, `workflows` | EPHEMERAL | These are installer-managed seeds, entrypoints, or links. |
+| `worktrees.json.lock` | EPHEMERAL | The kernel lock owner does not survive the process; retaining a stale lock is harmful. |
 
 Forbidden on the personal host, permanently:
 
@@ -55,11 +87,11 @@ deck-v2 home pull
 deck-v2 home push
 ```
 
-Pull is additive. It never deletes local home entries. Review the profile before
-pushing it. A trusted host may use `profile/full`; a less-trusted host uses
-`profile/personal`. The personal profile is built without restricted project
-files or entries. Never copy the full profile to an untrusted host. Runtime
-state, Smithers runs, questions, credentials, and `.env` are machine-local.
+Pull is additive. It never deletes local portable profile entries. Review the
+profile before pushing it. A trusted host may use `profile/full`; a less-trusted
+host uses `profile/personal`. Project configuration, dossiers, runtime state,
+Smithers runs, questions, worktrees, credentials, `.env`, and retired `.pi`
+state are host-local durable data and are excluded from both pull and push.
 
 For a remote operator session, run `~/dev/deck/update.sh`, then start a new
 `prime-conversation`. The updater is safe to run repeatedly and is the primary
@@ -77,9 +109,10 @@ active `gh auth login` before the home repo clone or pull.
    bun --cwd ~/dev/deck/broker src/main.ts
    ```
 
-   Credentials land in `~/.deck/broker/store.db` (0600) on this host and stay
-   here. Keep the broker running with your own process manager when the factory
-   needs it. It is not started by `install.sh`.
+Credentials are visible at `~/.deck/broker/store.db` and physically live in
+`~/.deck-durable/broker/store.db` (0600) on this host. They stay here. Keep the
+broker running with your own process manager when the factory needs it. It is
+not started by `install.sh`.
 
 5. **Remote access.** Plain SSH is sufficient:
 
@@ -125,5 +158,6 @@ point — the pipeline is the default, `--no-pipeline` is the escape hatch.
 | Work host | no | `~/dev/deck/update.sh` |
 | Personal operator host | optional personal features | `~/dev/deck/update.sh` |
 
-`update.sh` is the existing-install path. Runtime state never travels; only the
-repository code does.
+`update.sh` is the existing-install path. Host-local durable and runtime state
+never travels; only repository code and explicitly reviewed portable profile
+files do.
