@@ -160,6 +160,8 @@ env REVIEWERS_FILE="$REVIEWERS_FILE" bun -e '
   if (keys.some((key) => !Array.isArray(config[key]) || config[key].length !== 0)) process.exit(1);
 ' || fail "fresh reviewer config must contain only empty public defaults"
 
+mkdir -p "$DECK_HOME/run"
+
 PROBE="$SANDBOX_HOME/verify-deck-tools.mjs"
 cat > "$PROBE" <<'EOF'
 export default function verifyDeckInstall(agent) {
@@ -184,7 +186,11 @@ RPC_OUTPUT="$({
     PATH="$DECK_BIN:$ORIGINAL_PATH" \
     DECK_V2_HOME="$DECK_HOME" \
     DECK_HERDR_AUTO_ATTACH=0 \
-    "$DECK_BIN/prime-conversation" --mode rpc --no-session --offline --extension "$PROBE"
+    PRIME_AGENT_CODING_AGENT_DIR="$PRIME_HOME/agent" \
+    PRIME_AGENT_SESSION_DIR="$PRIME_HOME/sessions" \
+    RLM_MAX_DEPTH=1 \
+    "$DECK_BIN/prime-agent" --mode rpc --no-session --offline --provider deck \
+      --daemon-socket "$DECK_HOME/run/prime-agent.sock" --extension "$PROBE"
 ) 2>&1)" || {
   printf '%s\n' "$RPC_OUTPUT" >&2
   fail "fresh Prime RPC conversation failed"
