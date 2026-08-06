@@ -903,6 +903,33 @@ describe("evaluateWatchExit", () => {
 		expect(exhausted.terminalEscalation).toBe(true);
 		expect(exhausted.infraRetryJobs).toHaveLength(0);
 
+		const mixedSnapshot = ciSnapshot(ciFailureFixtures.infra);
+		const originalRun = mixedSnapshot.ciEvidence!.currentRuns[0]!;
+		mixedSnapshot.checkRuns.push({
+			...mixedSnapshot.checkRuns[0]!,
+			id: 92,
+			name: "test-secondary",
+			checkSuiteId: 23,
+		});
+		mixedSnapshot.ciEvidence!.requiredContexts.push({
+			context: "test-secondary",
+			integrationId: 44,
+		});
+		mixedSnapshot.ciEvidence!.currentRuns.push({
+			...originalRun,
+			id: 21,
+			checkSuiteId: 23,
+			jobs: originalRun.jobs.map((job) => ({ ...job, id: 22 })),
+		});
+		const mixed = evaluateWatchExit(mixedSnapshot, {
+			selfLogins: ["twaldin"],
+			infraRetryAttempts: { "11": 3, "21": 0 },
+		});
+		expect(mixed.terminalEscalation).toBe(true);
+		expect(mixed.infraRetryJobs).toEqual([
+			{ runId: 21, jobId: 22, reason: "setup/provider failure: Failed to resolve action download info" },
+		]);
+
 		const code = evaluateWatchExit(ciSnapshot(ciFailureFixtures.code), { selfLogins: ["twaldin"] });
 		expect(code.ciClassification).toBe("TERMINAL_FAILURE");
 		expect(code.triggers[0]?.kind).toBe("failed_ci");

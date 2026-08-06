@@ -725,9 +725,13 @@ export function evaluateWatchExit(snapshot: WatchSnapshot, options: WatchExitOpt
 	const reviewPolicy = options.reviewPolicy;
 	const ci = classifyCiEvidence(snapshot);
 	const retryLimit = 3;
-	const infraRetriesExhausted = ci.infraRetryJobs.length > 0
-		&& ci.infraRetryJobs.every((job) => (options.infraRetryAttempts?.[String(job.runId)] ?? 0) >= retryLimit);
-	const infraRetryJobs = infraRetriesExhausted ? [] : ci.infraRetryJobs;
+	const exhaustedInfraRetries = ci.infraRetryJobs.filter(
+		(job) => (options.infraRetryAttempts?.[String(job.runId)] ?? 0) >= retryLimit,
+	);
+	const infraRetriesExhausted = exhaustedInfraRetries.length > 0;
+	const infraRetryJobs = ci.infraRetryJobs.filter(
+		(job) => (options.infraRetryAttempts?.[String(job.runId)] ?? 0) < retryLimit,
+	);
 	const terminalEscalation = ci.terminalEscalation || infraRetriesExhausted;
 	const rebaseRequired = needsRebase(snapshot);
 	const triggers: WatchTrigger[] = [];
