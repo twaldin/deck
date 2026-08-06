@@ -452,7 +452,7 @@ describe("evaluateWatchExit", () => {
 			reviewers: [{ login: "rev", isBot: false, lastActivityAt: "2026-07-27T09:00:00Z", lastReviewState: "CHANGES_REQUESTED" }],
 			requestedReviewers: ["rev"],
 		}), { selfLogins: ["twaldin"] });
-		expect(verdict.reviewersNeedingReRequest).toEqual(["rev"]);
+		expect(verdict.reviewersNeedingReRequest).toEqual([]);
 		expect(verdict.exitOk).toBe(false);
 		expect(verdict.disposition).toBe("wait");
 	});
@@ -1133,6 +1133,24 @@ describe("watch helpers", () => {
 			"stale-approval",
 		]);
 		expect(reviewersNeedingReRequest(reviewers, ["stale-approval"], lastPush, [], "current")).toEqual([]);
+	});
+
+	test("a stale approval makes the deterministic re-request path actionable", () => {
+		const verdict = evaluateWatchExit(snapshot({
+			comments: [],
+			requestedReviewers: [],
+			reviewers: [{
+				login: "reviewer",
+				isBot: false,
+				lastActivityAt: "2026-07-27T09:00:00Z",
+				lastReviewState: "APPROVED",
+				headSha: "previous",
+			}],
+		}), { selfLogins: ["twaldin"] });
+		expect(verdict.reviewersNeedingReRequest).toEqual(["reviewer"]);
+		expect(verdict.actionable).toBe(true);
+		expect(verdict.disposition).toBe("fix");
+		expect(verdict.triggers).toEqual([]);
 	});
 
 	test("unansweredComments counts only others' comments newer than our latest activity", () => {
