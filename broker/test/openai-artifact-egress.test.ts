@@ -1,0 +1,159 @@
+import { afterEach, describe, expect, test } from "bun:test";
+import { buildModelIndex, DEFAULT_ALLOWLIST } from "../src/models";
+import { startValidatedGateway } from "../src/validated-gateway";
+
+const resources: Array<{ close(): Promise<void> }> = [];
+
+afterEach(async () => {
+	for (const resource of resources.splice(0)) await resource.close();
+});
+
+describe("OpenAI artifact vendor egress", () => {
+	test("demotes encrypted reasoning to visible assistant text before the real Responses transport", async () => {
+		const captured: Array<{ path: string; body: unknown }> = [];
+		const vendor = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			async fetch(request) {
+				captured.push({ path: new URL(request.url).pathname, body: await request.json() });
+				return Response.json({ error: { type: "invalid_request_error", message: "request captured" } }, { status: 400 });
+			},
+		});
+		resources.push({ close: async () => vendor.stop(true) });
+
+		const index = buildModelIndex(DEFAULT_ALLOWLIST);
+		const bundled = index.resolve("openai/gpt-5.4");
+		if (bundled === undefined) throw new Error("missing OpenAI Responses transport test model");
+		const model = { ...bundled, baseUrl: `http://127.0.0.1:${vendor.port}/v1` };
+		const gateway = startValidatedGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: [],
+			version: "test",
+			resolveModel: id => id.split("/").at(-1) === model.id ? model : undefined,
+			listModels: () => [model],
+			storage: { getApiKey: async () => "sk-openai-egress-test" } as never,
+			quotaAccounts: () => [{ credentialId: 1, provider: "openai", authProvider: "openai", blocked: [] }],
+			quotaPreferences: () => [],
+		});
+		resources.push(gateway);
+
+		const response = await fetch(`${gateway.url}/v1/responses`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "openai/gpt-5.4",
+				prompt_cache_key: "account-rotation",
+				input: [
+					{
+						type: "reasoning",
+						id: "rs_wrong_account",
+						encrypted_content: "opaque-wrong-account",
+						summary: [{ type: "summary_text", text: "visible summary" }],
+					},
+					{ role: "user", content: "continue" },
+				],
+			}),
+		});
+		// The fake vendor rejects after capture; the assertion is the actual body
+		// produced by pi-ai's OpenAI Responses transport, not the outer rewrite.
+		expect(response.status).toBe(502);
+		await response.text();
+		expect(captured).toHaveLength(1);
+		expect(captured[0]).toMatchObject({
+			path: "/v1/responses",
+			body: {
+				model: "gpt-5.4",
+				input: [
+					{ type: "message", role: "assistant" },
+					{ role: "user", content: "continue" },
+				],
+				store: false,
+			},
+		});
+		const vendorBody = JSON.stringify(captured[0]?.body);
+		expect(vendorBody).toContain("visible summary");
+		expect(vendorBody).not.toContain('\"encrypted_content\":');
+		expect(vendorBody).not.toContain("opaque-wrong-account");
+		expect(vendorBody).not.toContain("rs_wrong_account");
+		expect(vendorBody).not.toContain('"type":"reasoning"');
+	}, 30_000);
+
+	test("uses the quota-selected account for the real Responses transport", async () => {
+		const authorizations: string[] = [];
+		const vendor = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch(request) {
+				authorizations.push(request.headers.get("authorization") ?? "");
+				if (request.headers.get("authorization") === "Bearer token-b") {
+					return Response.json({ id: "unexpected-account-switch", output: [] });
+				}
+				return Response.json({
+					error: { type: "invalid_request_error", code: "invalid_api_key", message: "Incorrect API key provided" },
+				}, { status: 401 });
+			},
+		});
+		resources.push({ close: async () => vendor.stop(true) });
+
+		const index = buildModelIndex(DEFAULT_ALLOWLIST);
+		const bundled = index.resolve("openai/gpt-5.4");
+		if (bundled === undefined) throw new Error("missing OpenAI Responses transport test model");
+		const model = { ...bundled, baseUrl: `http://127.0.0.1:${vendor.port}/v1` };
+		let activeCredentialId: number | undefined;
+		let unpinnedGetApiKeyCalls = 0;
+		const targetedPositions: number[] = [];
+		const gateway = startValidatedGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: [],
+			version: "test",
+			resolveModel: id => id.split("/").at(-1) === model.id ? model : undefined,
+			listModels: () => [model],
+			storage: {
+				getApiKey: async () => {
+					unpinnedGetApiKeyCalls += 1;
+					return "token-b";
+				},
+				getOAuthAccessAt: async (_provider: string, position: number) => {
+					targetedPositions.push(position);
+					return {
+						ok: true,
+						accessToken: position === 0 ? "token-a" : "token-b",
+						credentialId: position + 1,
+					};
+				},
+				pinSessionOAuthAccount: (_provider: string, _sessionId: string, credentialId: number) => {
+					activeCredentialId = credentialId;
+					return true;
+				},
+				listOAuthAccounts: () => [
+					{ position: 0, credentialId: 1, active: activeCredentialId === 1 },
+					{ position: 1, credentialId: 2, active: activeCredentialId === 2 },
+				],
+				invalidateCredentialMatching: async () => true,
+			} as never,
+			quotaAccounts: () => [
+				{ credentialId: 1, provider: "openai", authProvider: "openai", blocked: [], lastUsedAt: 0 },
+				{ credentialId: 2, provider: "openai", authProvider: "openai", blocked: [], lastUsedAt: 100 },
+			],
+			quotaPreferences: () => [],
+		});
+		resources.push(gateway);
+
+		const response = await fetch(`${gateway.url}/v1/responses`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "openai/gpt-5.4",
+				prompt_cache_key: "pinned-auth-retry",
+				input: "probe",
+			}),
+		});
+		expect(response.status).not.toBe(200);
+		await response.text();
+		expect(authorizations.length).toBeGreaterThan(0);
+		expect(new Set(authorizations)).toEqual(new Set(["Bearer token-a"]));
+		expect(targetedPositions.length).toBeGreaterThan(0);
+		expect(new Set(targetedPositions)).toEqual(new Set([0]));
+		expect(unpinnedGetApiKeyCalls).toBe(0);
+	}, 30_000);
+});
