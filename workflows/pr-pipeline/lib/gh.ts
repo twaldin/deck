@@ -36,10 +36,28 @@ export interface ExecResult {
 
 export type ExecFn = (argv: string[], options?: { cwd?: string; stdin?: string }) => Promise<ExecResult>;
 
+/**
+ * Environment that keeps tool output MACHINE readable.
+ *
+ * `gh` colorizes and paginates when it believes a human is watching, and a
+ * pipeline launched from a pane inherits exactly that belief. A single leading
+ * escape byte turns every `JSON.parse` here into `Unrecognized token '\u001b'`
+ * — which is how an adopt run died at `fetchPrOverview`.
+ */
+const MACHINE_ENV = {
+	NO_COLOR: "1",
+	CLICOLOR: "0",
+	CLICOLOR_FORCE: "0",
+	GH_FORCE_TTY: "",
+	GH_PAGER: "cat",
+	PAGER: "cat",
+} as const;
+
 /** Default exec via Bun.spawn. Injectable for tests. */
 export const bunExec: ExecFn = async (argv, options) => {
 	const proc = Bun.spawn(argv, {
 		cwd: options?.cwd,
+		env: { ...process.env, ...MACHINE_ENV },
 		stdout: "pipe",
 		stderr: "pipe",
 		stdin: options?.stdin === undefined ? "ignore" : new Blob([options.stdin]),
@@ -58,6 +76,29 @@ export async function execOrThrow(exec: ExecFn, argv: string[], options?: { cwd?
 		throw new Error(`command failed (${result.code}): ${argv.join(" ")}\n${result.stderr.slice(0, 2000)}`);
 	}
 	return result.stdout;
+}
+
+// Belt and braces with MACHINE_ENV: a wrapper binary on PATH can still colorize
+// whatever the environment says. ANSI must be removed BEFORE looking for the
+// start of the JSON, because a CSI sequence contains a literal `[` and would
+// otherwise be mistaken for the opening bracket of an array.
+const ANSI = /\u001B(?:\[[0-9;?]*[ -/]*[@-~]|\][^\u0007\u001B]*(?:\u0007|\u001B\\)|[@-Z\\-_])/g;
+const JSON_START = /[[{]/;
+
+/** Parse tool output as JSON, tolerating a decorated prefix. */
+export function parseToolJson<T>(out: string, what: string): T {
+	const clean = out.replace(ANSI, "").trim();
+	const at = clean.search(JSON_START);
+	if (at < 0) {
+		throw new Error(`${what} returned no JSON: ${clean.slice(0, 200)}`);
+	}
+	try {
+		return JSON.parse(clean.slice(at)) as T;
+	} catch (error) {
+		throw new Error(
+			`${what} returned unparseable JSON (${error instanceof Error ? error.message : String(error)}): ${clean.slice(0, 200)}`,
+		);
+	}
 }
 
 /** Post an issue or pull-request comment with the configured signature. */
@@ -327,7 +368,7 @@ export async function fetchBranchCheckRuns(ctx: GhContext, branch: string): Prom
 			"api",
 			page === 1 ? endpoint : `${endpoint}&page=${page}`,
 		]);
-		const payload: unknown = JSON.parse(out);
+		const payload: unknown = parseToolJson(out, "gh");
 		if (!isRecord(payload) || !Array.isArray(payload.check_runs)) {
 			throw new Error(`GitHub returned invalid check-run page ${page} for ${branch}`);
 		}
@@ -346,7 +387,7 @@ async function fetchCommitStatuses(ctx: GhContext, headSha: string): Promise<Com
 			"api",
 			page === 1 ? endpoint : `${endpoint}&page=${page}`,
 		]);
-		const payload: unknown = JSON.parse(out);
+		const payload: unknown = parseToolJson(out, "gh");
 		if (!isRecord(payload) || !Array.isArray(payload.statuses)) {
 			throw new Error(`GitHub returned invalid commit-status page ${page} for ${headSha}`);
 		}
@@ -365,7 +406,7 @@ async function fetchPullWorkflowRuns(ctx: GhContext, branch: string): Promise<Ra
 			"api",
 			page === 1 ? endpoint : `${endpoint}&page=${page}`,
 		]);
-		const payload: unknown = JSON.parse(out);
+		const payload: unknown = parseToolJson(out, "gh");
 		if (!isRecord(payload) || !Array.isArray(payload.workflow_runs)) {
 			throw new Error(`GitHub returned invalid workflow-run page ${page} for ${branch}`);
 		}
@@ -540,7 +581,7 @@ async function fetchWorkflowJobs(
 			"api",
 			page === 1 ? endpoint : `${endpoint}&page=${page}`,
 		]);
-		const payload: unknown = JSON.parse(out);
+		const payload: unknown = parseToolJson(out, "gh");
 		if (!isRecord(payload) || !Array.isArray(payload.jobs)) {
 			throw new Error(`GitHub returned invalid workflow-job page ${page} for run ${runId}`);
 		}
@@ -820,14 +861,14 @@ export async function fetchRequestedReviewers(ctx: GhContext, prNumber: number):
 	const out = await execOrThrow(exec, [
 		ctx.gh, "api", `repos/${ctx.repo}/pulls/${prNumber}/requested_reviewers`,
 	]);
-	return parseRequestedReviewers(JSON.parse(out));
+	return parseRequestedReviewers(parseToolJson(out, "gh"));
 }
 
 /** Overview of an existing PR (adopt path: verify + seed, never create). */
 export async function fetchPrOverview(ctx: GhContext, prNumber: number): Promise<PrOverview> {
 	const exec = ctx.exec ?? bunExec;
 	const out = await execOrThrow(exec, [ctx.gh, "api", `repos/${ctx.repo}/pulls/${prNumber}`]);
-	const payload = JSON.parse(out) as {
+	const payload = parseToolJson(out, "gh") as {
 		number: number;
 		html_url: string;
 		state: string;
@@ -861,7 +902,7 @@ export interface PrLifecycle {
 export async function fetchPrLifecycle(ctx: GhContext, prNumber: number): Promise<PrLifecycle> {
 	const exec = ctx.exec ?? bunExec;
 	const out = await execOrThrow(exec, [ctx.gh, "api", `repos/${ctx.repo}/pulls/${prNumber}`]);
-	const payload = JSON.parse(out) as { state?: unknown; merged?: unknown; auto_merge?: unknown; base?: { ref?: unknown } };
+	const payload = parseToolJson(out, "gh") as { state?: unknown; merged?: unknown; auto_merge?: unknown; base?: { ref?: unknown } };
 	return {
 		state: payload.state === "closed" ? "closed" : "open",
 		merged: payload.merged === true,
