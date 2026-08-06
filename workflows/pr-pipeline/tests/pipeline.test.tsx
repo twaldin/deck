@@ -415,11 +415,13 @@ describe("local review contracts", () => {
 		expect(prompt).toContain("Reply with ONLY the result object");
 	});
 
-	test("pipeline prompts name the valid subagent ids and stack fan-out pattern", () => {
+	test("pipeline prompts carry the native RLM depth and model policy", () => {
 		const review = localReviewPrompt(validBrief, "/tmp/wt", "main", 1);
-		expect(review).toContain("worker, worker-gpt, reviewer, reviewer-claude, and scout");
+		expect(review).toContain("Use Prime's native `rlm()`");
+		expect(review).toContain("deck/gpt-5.6-luna at xhigh");
+		expect(review).toContain("deck/claude-fable-5 at high");
+		expect(review).toContain("children are allowed and grandchildren are not");
 		expect(review).toContain("land the schema/base PR first");
-		expect(review).not.toContain("do not use subagents");
 	});
 });
 

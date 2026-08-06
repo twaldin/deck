@@ -216,7 +216,7 @@ if [[ -d "$EXTENSIONS_DIR" ]]; then
     esac
   done
 fi
-for forbidden in "$EXTENSIONS_DIR/deck-subagents" "$EXTENSIONS_DIR/subagent" "$EXTENSIONS_DIR/herdr-agent-state.ts" "$EXTENSIONS_DIR/herdr-agent-state.js"; do
+for forbidden in "$EXTENSIONS_DIR/herdr-agent-state.ts" "$EXTENSIONS_DIR/herdr-agent-state.js"; do
   if [[ -e "$forbidden" || -L "$forbidden" ]]; then
     printf 'error: forbidden conversation-profile extension is present: %s\n' "$forbidden" >&2
     exit 1
@@ -249,8 +249,8 @@ ensure_symlink "$PROCESS_PACKAGE_SOURCE" "$PROCESS_PACKAGE_LINK"
 
 
 # Reuse the v2 installer's exact extension tree shape without invoking it. The
-# full v2 installer also adds deck-subagents, CLI shims, and a Smithers runtime;
-# those are deliberately forbidden in this zero-custody conversation profile.
+# full v2 installer also adds CLI shims and a Smithers runtime; those are
+# deliberately outside this zero-custody conversation profile.
 if [[ -e "$LIB_ROOT" || -L "$LIB_ROOT" ]]; then
   if [[ -L "$LIB_ROOT" || ! -d "$LIB_ROOT" ]]; then
     printf 'error: %s exists and is not Deck support state\n' "$LIB_ROOT" >&2
@@ -330,6 +330,7 @@ export default function primeConversationGuard(pi: PrimeGuardApi): void {
       stampToken: process.env.DECK_STAMP_TOKEN ?? null,
       publisherToken: process.env.DECK_PUBLISHER_TOKEN ?? null,
       adminToken: process.env.ADMIN_TOKEN ?? null,
+      ambientSecret: process.env.DECK_TEST_AMBIENT_SECRET ?? null,
       skipVersionCheck: process.env.PI_SKIP_VERSION_CHECK,
       offline: process.env.PI_OFFLINE,
       maxDepth: process.env.RLM_MAX_DEPTH,
@@ -595,6 +596,71 @@ case "\${PRIME_CONVERSATION_RLM_MAX_DEPTH:-1}" in
     ;;
 esac
 
+surface_conversation_in_herdr() {
+  if [[ "\${DECK_HERDR_AUTO_ATTACH:-1}" == 0 ||
+        "\${DECK_HERDR_RELAUNCHED:-0}" == 1 ||
+        -n "\${HERDR_PANE_ID:-}" ||
+        "\${1:-}" == --version ]]; then
+    return 1
+  fi
+  local herdr_bin="\${DECK_HERDR_BIN:-herdr}"
+  command -v "\$herdr_bin" >/dev/null 2>&1 || return 1
+  "\$herdr_bin" status server >/dev/null 2>&1 || return 1
+
+  local workspace_json workspace_id created created_fields pane_id tab_id
+  workspace_json="\$("\$herdr_bin" workspace list 2>/dev/null)" || return 1
+  workspace_id="\$(printf '%s' "\$workspace_json" | node -e '
+const fs = require("node:fs");
+const parsed = JSON.parse(fs.readFileSync(0, "utf8"));
+const workspaces = Array.isArray(parsed?.result?.workspaces) ? parsed.result.workspaces : [];
+const matches = workspaces.filter((workspace) => workspace?.label === "deck-fleet");
+if (matches.length > 1) process.exit(2);
+if (typeof matches[0]?.workspace_id === "string") process.stdout.write(matches[0].workspace_id);
+' 2>/dev/null)" || return 1
+
+  if [[ -n "\$workspace_id" ]]; then
+    created="\$("\$herdr_bin" tab create \
+      --workspace "\$workspace_id" \
+      --label 'deck · orch · conversation' \
+      --cwd "\$DECK_HOME" \
+      --env DECK_HERDR_RELAUNCHED=1 \
+      --no-focus 2>/dev/null)" || return 1
+  else
+    created="\$("\$herdr_bin" workspace create \
+      --label deck-fleet \
+      --cwd "\$DECK_HOME" \
+      --env DECK_HERDR_RELAUNCHED=1 \
+      --no-focus 2>/dev/null)" || return 1
+  fi
+  created_fields="\$(printf '%s' "\$created" | node -e '
+const fs = require("node:fs");
+const parsed = JSON.parse(fs.readFileSync(0, "utf8"));
+const pane = parsed?.result?.root_pane?.pane_id;
+const tab = parsed?.result?.tab?.tab_id;
+if (typeof pane !== "string" || typeof tab !== "string") process.exit(2);
+process.stdout.write(pane + "\\t" + tab);
+' 2>/dev/null)" || return 1
+  IFS=\$'\\t' read -r pane_id tab_id <<<"\$created_fields"
+  if ! "\$herdr_bin" pane rename "\$pane_id" 'deck · orch · conversation' >/dev/null 2>&1; then
+    "\$herdr_bin" pane close "\$pane_id" >/dev/null 2>&1 || true
+    return 1
+  fi
+
+  local relaunch_command quoted
+  printf -v relaunch_command 'exec %q' "\${BASH_SOURCE[0]}"
+  for argument in "\$@"; do
+    printf -v quoted ' %q' "\$argument"
+    relaunch_command+="\$quoted"
+  done
+  if ! "\$herdr_bin" pane run "\$pane_id" "\$relaunch_command" >/dev/null 2>&1; then
+    "\$herdr_bin" pane close "\$pane_id" >/dev/null 2>&1 || true
+    return 1
+  fi
+  "\$herdr_bin" tab focus "\$tab_id" >/dev/null 2>&1 || true
+  exec "\$herdr_bin"
+}
+surface_conversation_in_herdr "\$@" || true
+
 mkdir -p "\$RUN_DIR" "\$SESSIONS_DIR"
 chmod 700 "\$RUN_DIR" "\$SESSIONS_DIR"
 export PRIME_AGENT_CODING_AGENT_DIR="\$AGENT_DIR"
@@ -603,16 +669,25 @@ export DECK_V2_HOME="\$DECK_HOME"
 export PI_SKIP_VERSION_CHECK=1
 export PI_OFFLINE=1
 export RLM_MAX_DEPTH="\${PRIME_CONVERSATION_RLM_MAX_DEPTH:-1}"
-unset SMITHERS_GATEWAY_TOKEN SMITHERS_TOKEN_STORE DECK_STAMP_TOKEN DECK_PUBLISHER_TOKEN ADMIN_TOKEN
-unset ANTHROPIC_API_KEY OPENAI_API_KEY GOOGLE_API_KEY GEMINI_API_KEY XAI_API_KEY GROQ_API_KEY
+prime_env=()
+for name in PATH HOME SHELL TMPDIR TMP TEMP LANG LC_ALL LC_CTYPE TERM COLORTERM NO_COLOR FORCE_COLOR USER LOGNAME TZ \
+  GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL \
+  DECK_GATEWAY_ORIGIN DECK_PI_MAX_TOKENS \
+  HERDR_ENV HERDR_PANE_ID HERDR_SOCKET_PATH HERDR_TAB_ID HERDR_WORKSPACE_ID \
+  PRIME_CONVERSATION_PROBE PRIME_AGENT_CODING_AGENT_DIR PRIME_AGENT_SESSION_DIR \
+  DECK_V2_HOME PI_SKIP_VERSION_CHECK PI_OFFLINE RLM_MAX_DEPTH; do
+  if [[ -n "\${!name+x}" ]]; then
+    prime_env+=("\$name=\${!name}")
+  fi
+done
 cd "\$DECK_HOME"
 if [[ "\${1:-}" == --version ]]; then
-  exec "\$PRIME_AGENT_BIN" --version
+  exec env -i "\${prime_env[@]}" "\$PRIME_AGENT_BIN" --version
 fi
 catalog_probe="\$(printf '%s\\n%s\\n' \\
   '{"id":"models","type":"get_available_models"}' \\
   '{"id":"state","type":"get_state"}' | \\
-  "\$PRIME_AGENT_BIN" --mode rpc --offline --no-session --daemon-socket "\$SOCKET" --provider deck 2>/dev/null)" || {
+  env -i "\${prime_env[@]}" "\$PRIME_AGENT_BIN" --mode rpc --offline --no-session --daemon-socket "\$SOCKET" --provider deck 2>/dev/null)" || {
   printf 'error: Deck provider preflight failed\n' >&2
   exit 1
 }
@@ -629,7 +704,7 @@ if (deckModels.length === 0 || state?.data?.model?.provider !== "deck") process.
   printf 'error: Deck provider preflight found no Deck model or selected a non-Deck provider\n' >&2
   exit 1
 fi
-exec "\$PRIME_AGENT_BIN" --offline --daemon-socket "\$SOCKET" --provider deck "\$@"
+exec env -i "\${prime_env[@]}" "\$PRIME_AGENT_BIN" --offline --daemon-socket "\$SOCKET" --provider deck "\$@"
 EOF
 mv -f "$wrapper_tmp" "$WRAPPER"
 chmod 700 "$WRAPPER"

@@ -28,6 +28,7 @@ beforeEach(() => {
 	fs.writeFileSync(path.join(workflowsSource, ".smithers", "workflows", "keep.tsx"), "fixture workflow\n");
 	fs.mkdirSync(path.join(workflowsSource, "pr-pipeline", "lib"), { recursive: true });
 	fs.writeFileSync(path.join(workflowsSource, "pr-pipeline", "lib", "models.ts"), "fixture models\n");
+	fs.writeFileSync(path.join(workflowsSource, "pr-pipeline", "lib", "model-policy.ts"), "fixture policy\n");
 });
 
 afterEach(() => {
@@ -106,6 +107,33 @@ describe("installer layout", () => {
 		expect(fs.existsSync(retired)).toBe(false);
 	});
 
+	test("removes the fully recognizable retired Deck child extension", () => {
+		const retired = extensionDir("retired-child");
+		fs.mkdirSync(path.join(retired, "lib"), { recursive: true });
+		fs.mkdirSync(path.join(retired, "agents"), { recursive: true });
+		for (const file of [
+			"index.ts",
+			"lib/spawn.ts",
+			"lib/agent-registry.ts",
+			"lib/model-registry.ts",
+			"agents/worker.md",
+			"agents/reviewer.md",
+		]) {
+			fs.writeFileSync(path.join(retired, file), "retired Deck fixture\n");
+		}
+		install();
+		expect(fs.existsSync(retired)).toBe(false);
+	});
+
+	test("preserves an unowned extension with only a partial retired layout", () => {
+		const unowned = extensionDir("private-child");
+		fs.mkdirSync(path.join(unowned, "lib"), { recursive: true });
+		fs.writeFileSync(path.join(unowned, "index.ts"), "private extension\n");
+		fs.writeFileSync(path.join(unowned, "lib", "spawn.ts"), "private helper\n");
+		install();
+		expect(fs.readFileSync(path.join(unowned, "index.ts"), "utf8")).toBe("private extension\n");
+	});
+
 	test("REGRESSION: installing does not overwrite the repo's own src/index.ts", () => {
 		const before = fs.readFileSync(path.join(REPO_V2, "src", "index.ts"), "utf8");
 		install();
@@ -151,9 +179,6 @@ describe("installer layout", () => {
 		).version;
 		expect(fs.readFileSync(shim, "utf8")).toContain("deck pi shim");
 		expect(execFileSync(shim, ["--version"], { encoding: "utf8" }).trim()).toBe(expectedVersion);
-		expect(fs.realpathSync(path.join(target, "agent", "extensions", "deck-subagents", "node_modules", "typebox"))).toBe(
-			fs.realpathSync(path.join(REPO_V2, "node_modules", "typebox")),
-		);
 	});
 
 	test("refuses a foreign pi shim before installing anything", () => {
@@ -202,7 +227,7 @@ describe("installer layout", () => {
 		const workspace = path.join(target, "home", "state", "smithers");
 		for (const item of ["package.json", "agents.ts", "bunfig.toml", "preload.ts", "smithers.config.ts", "smithers.toon", "ui/fixture.tsx"]) expect(fs.existsSync(path.join(workspace, ".smithers", item))).toBe(true);
 		expect(fs.readFileSync(path.join(workspace, "pr-pipeline", "lib", "models.ts"), "utf8")).toBe("fixture models\n");
-		expect(fs.readFileSync(path.join(target, "home", "state", "subagents", "lib", "model-policy.ts"), "utf8")).toContain("export interface ModelPolicy");
+		expect(fs.readFileSync(path.join(workspace, "pr-pipeline", "lib", "model-policy.ts"), "utf8")).toBe("fixture policy\n");
 		expect(fs.existsSync(path.join(workspace, ".smithers", "node_modules"))).toBe(true);
 	});
 

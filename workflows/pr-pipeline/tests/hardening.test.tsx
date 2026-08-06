@@ -191,13 +191,13 @@ describe("standing-rules seat injection", () => {
 			expect(prompt.startsWith("--- STANDING-RULES")).toBe(true);
 			expect(prompt).toContain("The \"make PR\" flow");
 			expect(prompt).toContain(
-				"Never run OptMem from a worker or subagent. Route decisions through the workflow's question result.",
+				"Never run OptMem from a workflow seat or RLM child. Route decisions through the workflow's question result.",
 			);
 			expect(prompt).toContain("[CHAT SESSION] **Precedence:**");
-			expect(prompt).toContain(
-				"Use only exact registered ids: worker, worker-gpt, reviewer, reviewer-claude, and scout.",
-			);
-			expect(prompt).toContain("Aliases such as claude, codex, and gpt are invalid.");
+			expect(prompt).toContain("Use Prime's native `rlm()` for bounded delegation when the seat is Prime.");
+			expect(prompt).toContain("deck/gpt-5.6-luna at xhigh");
+			expect(prompt).toContain("deck/claude-fable-5 at high");
+			expect(prompt).toContain("A non-Prime seat has no delegation primitive");
 			expect(prompt).toContain("OUTPUT-FACING BOUNDARY:");
 			expect(prompt).toContain(
 				"Internal paths, worktrees, workflow node names, run or task ids, model labels, and workflow or factory vocabulary are tool-context ONLY.",
@@ -239,7 +239,7 @@ describe("standing-rules seat injection", () => {
 			"[CHAT SESSION] Discharge build, review, and deploy obligations only through ship, adopt, status, and queued questions",
 		);
 		expect(implementPrompt(validBrief, "/tmp/wt", "feature")).toContain(
-			"Never run OptMem from a worker or subagent. Route decisions through the workflow's question result.",
+			"Never run OptMem from a workflow seat or RLM child. Route decisions through the workflow's question result.",
 		);
 		fs.writeFileSync(live, "live doctrine beta\n");
 		expect(implementPrompt(validBrief, "/tmp/wt", "feature")).toContain("live doctrine beta");

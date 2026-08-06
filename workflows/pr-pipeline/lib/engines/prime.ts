@@ -46,6 +46,7 @@ const DEFAULT_TERMINATION_GRACE_MS = 2_000;
 const VERSION_TIMEOUT_MS = 10_000;
 const SHARED_DAEMON_STARTUP_TIMEOUT_MS = 10_000;
 const DEFAULT_HERDR_WORKSPACE_LABEL = "deck-fleet";
+const HERDR_DISCOVERY_TIMEOUT_MS = 2_000;
 const SAFE_ENV_KEYS: Record<string, true> = {
 	PATH: true,
 	HOME: true,
@@ -435,9 +436,84 @@ async function waitForPrimeDaemon(socketPath: string, timeoutMs: number): Promis
 	});
 }
 
-function defaultHerdrSocketPath(): string {
-	const configHome = process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), ".config");
-	return path.join(configHome, "herdr", "herdr.sock");
+function nonEmpty(value: string | undefined): string | undefined {
+	const trimmed = value?.trim();
+	return trimmed === undefined || trimmed === "" ? undefined : trimmed;
+}
+
+async function discoverHerdrSocketPath(): Promise<string> {
+	const binary = nonEmpty(process.env.DECK_HERDR_BIN) ?? "herdr";
+	const env = { ...process.env };
+	if (nonEmpty(env.HERDR_SOCKET_PATH) === undefined) delete env.HERDR_SOCKET_PATH;
+	return new Promise<string>((resolve, reject) => {
+		let child: ChildProcess;
+		try {
+			child = spawn(binary, ["status", "server"], {
+				env,
+				stdio: ["ignore", "pipe", "pipe"],
+			});
+		} catch (cause) {
+			reject(new Error(`Cannot discover Herdr server with ${binary} status server: ${String(cause)}`));
+			return;
+		}
+		let stdout = "";
+		let stderr = "";
+		let settled = false;
+		const finish = (error?: unknown, socketPath?: string) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			if (error === undefined && socketPath !== undefined) resolve(socketPath);
+			else reject(error ?? new Error("Herdr status server returned no socket"));
+		};
+		const timer = setTimeout(() => {
+			child.kill("SIGKILL");
+			finish(new Error(`Herdr socket discovery timed out after ${HERDR_DISCOVERY_TIMEOUT_MS}ms`));
+		}, HERDR_DISCOVERY_TIMEOUT_MS);
+		child.stdout?.on("data", (chunk: Buffer) => {
+			stdout = appendTail(stdout, chunk.toString("utf8"));
+		});
+		child.stderr?.on("data", (chunk: Buffer) => {
+			stderr = appendTail(stderr, chunk.toString("utf8"));
+		});
+		child.once("error", (cause) => {
+			finish(new Error(`Cannot discover Herdr server with ${binary} status server: ${String(cause)}`));
+		});
+		child.once("close", (code, signal) => {
+			if (code !== 0 || signal !== null) {
+				finish(new Error(
+					stderr.trim()
+						|| stdout.trim()
+						|| `Herdr status server exited ${String(code ?? signal)}`,
+				));
+				return;
+			}
+			const match = /^socket:\s*(.+?)\s*$/m.exec(stdout);
+			const socketPath = nonEmpty(match?.[1]);
+			if (socketPath === undefined || !path.isAbsolute(socketPath)) {
+				finish(new Error(`Herdr status server returned no absolute socket path: ${stdout.trim() || "<empty>"}`));
+				return;
+			}
+			finish(undefined, socketPath);
+		});
+	});
+}
+
+async function herdrSplitDirection(socketPath: string, paneId: string): Promise<"right" | "down"> {
+	try {
+		const result = await herdrRequest(socketPath, "pane.layout", { pane_id: paneId });
+		const layout = asRecord(result.layout);
+		const panes = Array.isArray(layout?.panes)
+			? layout.panes.map(asRecord).filter((pane): pane is Record<string, unknown> => pane !== null)
+			: [];
+		const current = panes.find((pane) => pane.pane_id === paneId);
+		const rect = asRecord(current?.rect);
+		const width = typeof rect?.width === "number" ? rect.width : 0;
+		const height = typeof rect?.height === "number" ? rect.height : 0;
+		return width >= height * 2 ? "right" : "down";
+	} catch {
+		return "down";
+	}
 }
 
 
@@ -1586,20 +1662,62 @@ export class PrimeSeatAgent implements AgentLike {
 
 	private async attachHerdrSeat(label: string): Promise<HerdrSeatLease> {
 		return withHerdrAttachLock(async () => {
-			const configuredSocketPath = this.opts.herdrSocketPath
-				?? process.env.DECK_HERDR_SOCKET_PATH;
+			const configuredSocketPath = nonEmpty(this.opts.herdrSocketPath)
+				?? nonEmpty(process.env.DECK_HERDR_SOCKET_PATH);
+			const ambientSocketPath = nonEmpty(process.env.HERDR_SOCKET_PATH);
 			const socketPath = configuredSocketPath
-				?? process.env.HERDR_SOCKET_PATH
-				?? defaultHerdrSocketPath();
-			const workspaceIdHint = this.opts.herdrWorkspaceId
-				?? process.env.DECK_HERDR_WORKSPACE_ID
-				?? (configuredSocketPath === undefined ? process.env.HERDR_WORKSPACE_ID : undefined);
-			const workspaceLabel = this.opts.herdrWorkspaceLabel
-				?? process.env.DECK_HERDR_WORKSPACE_LABEL
+				?? ambientSocketPath
+				?? await discoverHerdrSocketPath();
+			const workspaceIdHint = nonEmpty(this.opts.herdrWorkspaceId)
+				?? nonEmpty(process.env.DECK_HERDR_WORKSPACE_ID)
+				?? (configuredSocketPath === undefined ? nonEmpty(process.env.HERDR_WORKSPACE_ID) : undefined);
+			const workspaceLabel = nonEmpty(this.opts.herdrWorkspaceLabel)
+				?? nonEmpty(process.env.DECK_HERDR_WORKSPACE_LABEL)
 				?? DEFAULT_HERDR_WORKSPACE_LABEL;
+			const ambientParentPaneId = nonEmpty(process.env.HERDR_PANE_ID);
+			const parentPaneId = ambientParentPaneId !== undefined
+				&& (configuredSocketPath === undefined || configuredSocketPath === ambientSocketPath)
+				? ambientParentPaneId
+				: undefined;
 			let workspaceId: string;
 			let pane: Record<string, unknown> | null = null;
 			let tab: Record<string, unknown> | null = null;
+
+			if (parentPaneId !== undefined) {
+				try {
+					const found = await herdrRequest(socketPath, "pane.get", { pane_id: parentPaneId });
+					const parent = asRecord(found.pane);
+					const parentTabId = typeof parent?.tab_id === "string" ? parent.tab_id : undefined;
+					const parentWorkspaceId = typeof parent?.workspace_id === "string" ? parent.workspace_id : undefined;
+					if (parentTabId !== undefined && parentWorkspaceId !== undefined) {
+						const created = await herdrRequest(socketPath, "pane.split", {
+							target_pane_id: parentPaneId,
+							direction: await herdrSplitDirection(socketPath, parentPaneId),
+							cwd: this.opts.cwd,
+							focus: false,
+							env: {},
+						});
+						const splitPane = asRecord(created.pane);
+						const paneId = typeof splitPane?.pane_id === "string" ? splitPane.pane_id : undefined;
+						const tabId = typeof splitPane?.tab_id === "string" ? splitPane.tab_id : parentTabId;
+						const workspaceId = typeof splitPane?.workspace_id === "string"
+							? splitPane.workspace_id
+							: parentWorkspaceId;
+						if (paneId === undefined) {
+							throw new Error("Herdr pane.split returned no pane id");
+						}
+						try {
+							await herdrRequest(socketPath, "pane.rename", { pane_id: paneId, label });
+						} catch (cause) {
+							await herdrRequest(socketPath, "pane.close", { pane_id: paneId }).catch(() => undefined);
+							throw cause;
+						}
+						return { socketPath, paneId, tabId, workspaceId, label };
+					}
+				} catch {
+					// A stale or unsuitable ambient pane must not prevent top-level creation.
+				}
+			}
 
 			if (workspaceIdHint !== undefined) {
 				const found = await herdrRequest(socketPath, "workspace.get", { workspace_id: workspaceIdHint });

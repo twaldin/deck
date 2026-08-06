@@ -251,12 +251,12 @@ describe("home seed", () => {
 	test("is compact and identifies the plain-session boundaries", () => {
 		const seed = fs.readFileSync(path.join(import.meta.dir, "..", "v2", "seed", "AGENTS.md"), "utf8");
 		expect(Buffer.byteLength(seed, "utf8")).toBeLessThan(12 * 1024);
-		expect(seed).toContain("You are a plain pi session");
+		expect(seed).toContain("You are a Deck conversation seat");
 		expect(seed).toContain("## MEMORY CONTRACT");
 		expect(seed).toContain("## THE FACTORY");
 		expect(seed).toContain("## QUESTIONS DISCIPLINE");
 		expect(seed).toContain("## PROJECT POLICY");
-		expect(seed).toContain("## SUBAGENTS");
+		expect(seed).toContain("## DELEGATION");
 		expect(seed).toContain("## THIS SESSION NEVER");
 		expect(seed).not.toContain("single point of contact");
 		const expectedOptMem = fs.readFileSync(path.join(import.meta.dir, "fixtures", "optmem-prompt.txt"), "utf8").trimEnd();

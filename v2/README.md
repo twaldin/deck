@@ -11,13 +11,12 @@ work is delegated to explicit Smithers workflows.
 ## Current shape
 
 Any number of ordinary Pi sessions may start in `~/.deck`. Each session loads
-four independent project-local extensions while those components remain in the
+three independent project-local extensions while those components remain in the
 tree:
 
 - `deck-questions`
 - `deck-ship`
 - `deck-recall`
-- `deck-subagents` (temporary during the Pi-seat migration)
 
 `deck-ship` exposes the factory as tools. `ship` and `adopt` call the same
 headless dispatch code as the CLI; `status` is read-only. There is no
@@ -54,7 +53,6 @@ The installed layout is:
 ~/.deck/.pi/extensions/deck-questions/index.ts
 ~/.deck/.pi/extensions/deck-ship/index.ts
 ~/.deck/.pi/extensions/deck-recall/index.ts
-~/.deck/.pi/extensions/deck-subagents/index.ts
 ~/.deck/.pi/extensions/v2/src/*.ts
 ~/.deck/state/smithers/
 ~/.local/bin/{pi,deck,deck-v2,smithers}
@@ -77,10 +75,10 @@ their own supported subscription or API key in Pi's user configuration, and
 choose it with `/model`. This loads the Deck extensions and public seed without
 using another person's broker.
 
-The current PR-pipeline and `deck-subagents` model seats use the `deck` provider,
-so executing those seats additionally requires this operator's broker process
-and broker login. Merely entering a plain session, reading questions, checking
-status, or recalling a dossier does not.
+The current PR-pipeline model seats use the `deck` provider, so executing those
+seats additionally requires this operator's broker process and broker login.
+Merely entering a plain session, reading questions, checking status, or
+recalling a dossier does not.
 
 ## Library, CLI, and tools
 
@@ -90,7 +88,6 @@ entrypoints import the same functions:
 ```text
 deck-v2 bootstrap
 deck-v2 ship <ticket> --profile <id> --worktree <path> --branch <name> ...
-deck-v2 spawn <id> --task "..." --accept "..." --worktree <path>
 deck-v2 status <id>
 deck-v2 fleet
 ```

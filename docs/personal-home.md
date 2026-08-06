@@ -70,9 +70,8 @@ active `gh auth login` before the home repo clone or pull.
    Laptop agents: `docs/LAPTOP-AGENTS.md` (inbox + project register).
 
 4. **Model access.** For a standalone conversation, start Pi and run `/login`
-   with your own subscription or API key. The current factory and
-   `deck-subagents` seats additionally require a broker configured only with
-   accounts belonging on this host:
+   with your own subscription or API key. The current factory seats additionally
+   require a broker configured only with accounts belonging on this host:
 
    ```sh
    bun ~/dev/deck/broker/src/cli.ts login anthropic

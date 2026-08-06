@@ -225,9 +225,9 @@ describe("the seeded contract is clean", () => {
 			"this conversation seat discharges\n" +
 				"them only through `ship`, `adopt`, `status`, and queued questions",
 		);
-		expect(contract).toContain("Prime seats delegate bounded work through native `rlm()` children");
-		expect(contract).toMatch(/RLM depth is one: children are\s+allowed, grandchildren are not/);
-		expect(contract).toMatch(/Bare children use `deck\/gpt-5\.6-luna` at\s+reasoning `xhigh`/);
+		expect(contract).toContain("Prime seats delegate bounded work only through native `rlm()`");
+		expect(contract).toMatch(/RLM depth is one:\s+children are allowed and grandchildren are not/);
+		expect(contract).toMatch(/A bare child uses\s+`deck\/gpt-5\.6-luna` at reasoning `xhigh`/);
 		expect(contract).not.toMatch(/\b(?:Lindy|captain|twaldin)\b/i);
 		expect(Buffer.byteLength(contract, "utf8")).toBeLessThan(12 * 1024);
 	});

@@ -87,6 +87,7 @@ const ProbeOutputSchema = z.object({
 	stampToken: z.string().nullable(),
 	publisherToken: z.string().nullable(),
 	adminToken: z.string().nullable(),
+	ambientSecret: z.string().nullable(),
 	skipVersionCheck: z.string(),
 	offline: z.string(),
 	maxDepth: z.string(),
@@ -231,6 +232,47 @@ function startHerdrStub(socketPath: string): Promise<HerdrStub> {
 	return promise;
 }
 
+function createHerdrCliStub(running: boolean): {
+	root: string;
+	binary: string;
+	readCalls(): string[][];
+} {
+	const stubRoot = fs.mkdtempSync(path.join(os.tmpdir(), "deck-herdr-cli-"));
+	const log = path.join(stubRoot, "calls.jsonl");
+	const binary = path.join(stubRoot, "herdr");
+	fs.writeFileSync(binary, `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(args) + "\\n");
+const send = (result) => process.stdout.write(JSON.stringify({ id: "stub", result }) + "\\n");
+if (args.length === 0) process.exit(0);
+if (args[0] === "status" && args[1] === "server") {
+  if (!${JSON.stringify(running)}) process.exit(1);
+  process.stdout.write("status: running\\nversion: 0.8.0\\nprotocol: 19\\ncompatible: yes\\nsocket: /tmp/herdr-stub.sock\\n");
+} else if (args[0] === "workspace" && args[1] === "list") {
+  send({ type: "workspace_list", workspaces: [{ workspace_id: "wTEST", label: "deck-fleet" }] });
+} else if (args[0] === "tab" && args[1] === "create") {
+  send({
+    type: "tab_created",
+    root_pane: { pane_id: "wTEST:p2", tab_id: "wTEST:t2", workspace_id: "wTEST" },
+    tab: { tab_id: "wTEST:t2", workspace_id: "wTEST", label: "deck · orch · conversation" },
+  });
+} else {
+  send({ type: "ok" });
+}
+`, { mode: 0o700 });
+	return {
+		root: stubRoot,
+		binary,
+		readCalls: () => {
+			if (!fs.existsSync(log)) return [];
+			return fs.readFileSync(log, "utf8").trim().split("\n")
+				.filter(Boolean)
+				.map((line) => JSON.parse(line) as string[]);
+		},
+	};
+}
+
 beforeAll(() => {
 	primeBinary = process.env.PRIME_CONVERSATION_PRIME_BIN ?? executableOnPath("prime-agent");
 	root = fs.mkdtempSync("/tmp/deck-prime-conv-");
@@ -274,6 +316,7 @@ exit 2
 		HERDR_SOCKET_PATH: "",
 		HERDR_TAB_ID: "",
 		HERDR_WORKSPACE_ID: "",
+		DECK_HERDR_AUTO_ATTACH: "0",
 	};
 	const first = combinedOutput("bash", [INSTALLER, "--apply"], installEnv);
 	if (first.status !== 0) throw new Error(first.output);
@@ -383,13 +426,88 @@ describe("Prime conversation installer", () => {
 			name: "@aliou/pi-processes",
 			version: "0.10.4",
 		});
-		expect(fs.existsSync(path.join(extensions, "deck-subagents"))).toBe(false);
-		expect(fs.existsSync(path.join(extensions, "subagent"))).toBe(false);
+		expect(fs.readdirSync(extensions).sort()).toEqual([
+			"deck-provider.ts",
+			"deck-questions",
+			"deck-recall",
+			"deck-ship",
+			"node_modules",
+			"prime-conversation-guard.ts",
+			"v2",
+		]);
 		expect(fs.existsSync(path.join(extensions, "herdr-agent-state.ts"))).toBe(false);
 	});
 });
 
 describe("Prime conversation runtime guards", () => {
+	test("a plain-terminal conversation creates and enters its own labelled Herdr pane", () => {
+		const herdr = createHerdrCliStub(true);
+		try {
+			const result = combinedOutput(wrapper, ["--mode", "rpc", "--no-session"], {
+				...installEnv,
+				DECK_HERDR_AUTO_ATTACH: "1",
+				DECK_HERDR_BIN: herdr.binary,
+				HERDR_ENV: "0",
+				HERDR_PANE_ID: "",
+				HERDR_SOCKET_PATH: "",
+				HERDR_TAB_ID: "",
+				HERDR_WORKSPACE_ID: "",
+			});
+			expect(result.status).toBe(0);
+			const calls = herdr.readCalls();
+			expect(calls.slice(0, 2)).toEqual([
+				["status", "server"],
+				["workspace", "list"],
+			]);
+			const create = calls.find((args) => args[0] === "tab" && args[1] === "create");
+			expect(create).toEqual([
+				"tab", "create",
+				"--workspace", "wTEST",
+				"--label", "deck · orch · conversation",
+				"--cwd", deckHome,
+				"--env", "DECK_HERDR_RELAUNCHED=1",
+				"--no-focus",
+			]);
+			expect(calls).toContainEqual([
+				"pane", "rename", "wTEST:p2", "deck · orch · conversation",
+			]);
+			const run = calls.find((args) => args[0] === "pane" && args[1] === "run");
+			expect(run?.[2]).toBe("wTEST:p2");
+			expect(run?.[3]).toContain(wrapper);
+			expect(run?.[3]).toContain("--mode rpc --no-session");
+			expect(calls).toContainEqual(["tab", "focus", "wTEST:t2"]);
+			expect(calls.at(-1)).toEqual([]);
+		} finally {
+			fs.rmSync(herdr.root, { recursive: true, force: true });
+		}
+	}, 30_000);
+
+	test("an unavailable Herdr server does not block the conversation seat", async () => {
+		const herdr = createHerdrCliStub(false);
+		try {
+			const result = await runRpc(
+				["--mode", "rpc", "--no-session"],
+				[{ id: "state", type: "get_state" }],
+				{
+					...installEnv,
+					DECK_HERDR_AUTO_ATTACH: "1",
+					DECK_HERDR_BIN: herdr.binary,
+					HERDR_ENV: "0",
+					HERDR_PANE_ID: "",
+					HERDR_SOCKET_PATH: "",
+					HERDR_TAB_ID: "",
+					HERDR_WORKSPACE_ID: "",
+				},
+			);
+			expect(rpcFrames(result.stdout)).toContainEqual(expect.objectContaining({
+				command: "get_state",
+				success: true,
+			}));
+			expect(herdr.readCalls()).toEqual([["status", "server"]]);
+		} finally {
+			fs.rmSync(herdr.root, { recursive: true, force: true });
+		}
+	}, 30_000);
 	test("real Prime excludes the configured process package from a workflow-filtered seat", async () => {
 		const probeExtension = path.join(root, "workflow-tool-probe.ts");
 		const probeOutput = path.join(root, "workflow-tool-probe.json");
@@ -468,6 +586,7 @@ export default function workflowToolProbe(pi: { getAllTools(): Array<{ name: str
 					DECK_STAMP_TOKEN: "must-not-reach-prime",
 					DECK_PUBLISHER_TOKEN: "must-not-reach-prime",
 					ADMIN_TOKEN: "must-not-reach-prime",
+					DECK_TEST_AMBIENT_SECRET: "must-not-reach-prime",
 					HERDR_ENV: "1",
 					HERDR_PANE_ID: "captain-probe",
 					HERDR_SOCKET_PATH: herdrSocket,
@@ -505,6 +624,7 @@ export default function workflowToolProbe(pi: { getAllTools(): Array<{ name: str
 			expect(probe.stampToken).toBeNull();
 			expect(probe.publisherToken).toBeNull();
 			expect(probe.adminToken).toBeNull();
+			expect(probe.ambientSecret).toBeNull();
 			expect(probe.skipVersionCheck).toBe("1");
 			expect(probe.offline).toBe("1");
 			expect(probe.maxDepth).toBe("1");
@@ -518,7 +638,7 @@ export default function workflowToolProbe(pi: { getAllTools(): Array<{ name: str
 				"ipython",
 				"process",
 			]));
-			expect(probe.tools).not.toContain("subagent");
+			expect(probe.tools.some((tool) => /agent|dispatch|spawn/i.test(tool))).toBe(false);
 			expect(typeof probe.systemPrompt).toBe("string");
 			if (typeof probe.systemPrompt !== "string") throw new Error("system prompt missing from probe");
 			const custody = fs.readFileSync(path.join(agentDir, "APPEND_SYSTEM.md"), "utf8").trim();

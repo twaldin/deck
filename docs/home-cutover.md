@@ -80,17 +80,20 @@ the new engine.
 
 ## Delete, then reinstall
 
-Delete only these retired extension entries:
+Delete only this retired extension entry:
 
 - `~/.deck/.pi/extensions/deck-v2`
-- `~/.deck/.pi/extensions/subagent`
+
+On reinstall, Deck also removes the retired copied child-extension layout only
+when its complete Deck-owned file fingerprint is present. Unknown or partial
+extension directories are left untouched.
 
 The old installer may have left a symlink or a repo-managed copied directory at
-these exact paths. Verify the link target or installed contents, then remove the
+this exact path. Verify the link target or installed contents, then remove the
 whole named entry. Stop if it contains user-authored files. Do not wildcard
 `extensions/`. Re-run the repository installers so the plain-session
-`deck-questions`, `deck-ship`, `deck-recall`, and deck-subagents extensions are
-installed at their documented global pi paths.
+`deck-questions`, `deck-ship`, and `deck-recall` extensions are installed at
+their documented global pi paths.
 
 ## Verify and enter
 
@@ -99,8 +102,8 @@ Verify all of the following before declaring cutover complete:
 - `~/.optmem/memo wake` succeeds and returns the reviewed global memory;
 - `~/.deck/AGENTS.md` matches the reviewed v4 seed and contains no personal
   reviewer names;
-- the `ship`, `adopt`, `status`, questions, `recall_effort`, and `subagent` tools
-  load in a fresh session;
+- the `ship`, `adopt`, `status`, questions, and `recall_effort` tools load in a
+  fresh session;
 - the questions queue and broker store are byte-for-byte the kept originals;
 - no retired deck-v2 orchestrator extension resolves from either pi extension
   directory.

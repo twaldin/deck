@@ -91,12 +91,12 @@ summaries, pairs of those as #0-3, and so on -- every `#a-b` line wake
 prints is one node of it. `~/.optmem/memo zoom <a-b>` opens a node into its
 two halves, down to the raw memories.
 
-### If you're a subagent: skip everything above
+### If you're an RLM child: skip everything above
 
-Parallel sessions on this machine are all you, and may all write memories.
-A subagent is not: it must never run `memo`, because it cannot judge what
-is already known, and its notes would arrive duplicated and incorrectly.
-When you spawn one, write: `You are a subagent. Don't run memo.`
+Parallel top-level sessions on this machine are all you, and may all write
+memories. An RLM child is not: it must never run `memo`, because it cannot judge
+what is already known, and its notes would arrive duplicated and incorrectly.
+When delegating with `rlm()`, write: `You are an RLM child. Don't run memo.`
 
 ### Per-effort depth
 
@@ -178,24 +178,18 @@ mechanical work. This is why luna does rebases.
   broker exposes `error.exhausted_tiers: ["fable-7d"]`; `NO_QUOTA` for the
   whole provider and generic `all-accounts-cooling` are not that signal.
 
-Apply this on all three model-pick surfaces. Workflow nodes use their
-`ModelPolicy` role, including `mechanical` for rebase/mechanical work. Spawn
-agents keep an explicit model in their agent definition; otherwise select by
-role: review/judgment to fable, implement/worker to sol, mechanical/side-task
-to luna. Prime RLM children default to the policy's mechanical seat; pass an
-explicit per-child pin only when the task genuinely needs another policy role.
-Never spend fable on bulk implementation, rebasing, mechanical fixes, or
-routine child work.
+Apply this to workflow nodes through their `ModelPolicy` role, including
+`mechanical` for rebase and mechanical work. Never spend fable on bulk
+implementation, rebasing, mechanical fixes, or routine child work.
 
 ## DELEGATION
 
-Prime seats delegate bounded work through native `rlm()` children; plain Pi
-seats use `subagent` when that tool is available. RLM depth is one: children are
-allowed, grandchildren are not. Bare children use `deck/gpt-5.6-luna` at
-reasoning `xhigh`; escalation requires an explicit model pin. Reserve
-`deck/claude-fable-5` at reasoning `high` for judgment and adversarial review:
-fable consumes all three Anthropic quota buckets, while normal models consume
-two. Tell every delegated child not to run `memo`.
+Prime seats delegate bounded work only through native `rlm()`. RLM depth is one:
+children are allowed and grandchildren are not. A bare child uses
+`deck/gpt-5.6-luna` at reasoning `xhigh`; escalation requires an explicit model
+pin. Reserve `deck/claude-fable-5` at reasoning `high` only for judgment and
+adversarial work because fable consumes all three Anthropic quota buckets while
+ordinary models consume two. Tell every RLM child not to run `memo`.
 
 ## THIS SESSION NEVER
 

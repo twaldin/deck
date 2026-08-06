@@ -26,11 +26,11 @@ describe("pipeline Pi binary", () => {
 	test("keeps Deck extensions on the host command", async () => {
 		const agent = createHostPiAgent(
 			PiAgent,
-			{ provider: "deck", model: "gpt-5.6-luna", extension: ["/opt/deck/subagent.ts"], noSession: true },
+			{ provider: "deck", model: "gpt-5.6-luna", extension: ["/opt/deck/example-extension.ts"], noSession: true },
 			"/opt/deck/bin/pi",
 		);
 		const command = await agent.buildCommand({ prompt: "use deck/gpt-5.6-luna", cwd: process.cwd() });
 		expect(command.command).toBe("/opt/deck/bin/pi");
-		expect(command.args).toEqual(expect.arrayContaining(["--extension", "/opt/deck/subagent.ts"]));
+		expect(command.args).toEqual(expect.arrayContaining(["--extension", "/opt/deck/example-extension.ts"]));
 	});
 });

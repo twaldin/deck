@@ -325,9 +325,6 @@ export async function startShip(
 					...process.env,
 					PI_CODING_AGENT_DIR:
 						process.env.PI_CODING_AGENT_DIR ?? path.join(home, ".pi"),
-					DECK_SUBAGENT_EXTENSION:
-						process.env.DECK_SUBAGENT_EXTENSION ??
-						path.join(home, ".pi", "extensions", "deck-subagents", "index.ts"),
 				},
 			},
 		);

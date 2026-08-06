@@ -1,7 +1,7 @@
 /**
  * Standing doctrine shared by Smithers seats. Worker-spawn briefs were retired
- * with the fire-and-forget v2 spawn path; `deck-subagents` owns bounded child
- * prompts and the PR pipeline owns its seat-specific contracts.
+ * with the fire-and-forget v2 spawn path; Prime owns native RLM child prompting
+ * and the PR pipeline owns its seat-specific contracts.
  */
 import * as path from "node:path";
 import { dataDir } from "./home";
@@ -17,7 +17,7 @@ export function buildStandingDoctrine(project?: string): string {
 	const distill = path.join(data, "ref", "distill");
 	const profile = project === undefined ? null : findProfile(project);
 	const workerMemoryContract =
-		"Never run OptMem from a worker or subagent. Route decisions through the workflow's question result.";
+		"Never run OptMem from a workflow seat or RLM child. Route decisions through the workflow's question result.";
 	if (profile !== null && (profile.knowledge.length > 0 || profile.doctrine !== undefined)) {
 		const parts = [
 			`## Standing doctrine (${profile.id})`,

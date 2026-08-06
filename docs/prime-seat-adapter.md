@@ -84,4 +84,4 @@ Stop on any model mismatch, missing provenance, malformed yield, RPC death, stal
 
 Change the affected project's `engine` back to `"pi"` (or remove the field), then start a fresh run. Existing runs retain their recorded engine and are not mutated.
 
-Deck-subagents can be deleted only after the read-only replay, write-capable non-Lindy node, full non-Lindy pipeline, and one reversible Lindy canary have all passed with acceptable paired metrics; every spawn/workflow caller has moved to the canonical Prime profiles; private fetch, if required, uses read-only credentials; and the captain explicitly authorizes removal.
+The captain authorized retirement of the separate delegation extension after the Prime child model, depth, liveness, provenance, and environment boundaries passed. Prime seats now use native `rlm()` for bounded decomposition.

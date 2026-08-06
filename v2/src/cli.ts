@@ -1,10 +1,10 @@
 /**
  * The CLI face for durable Deck library operations.
  *
- * Long-running work enters through `ship`, where Smithers owns liveness. Bounded
- * delegation uses the awaited `deck-subagents` primitive inside a pi session;
- * this CLI deliberately has no fire-and-forget spawn or worker-authored status
- * append.
+ * Long-running work enters through `ship`, where Smithers owns liveness.
+ * Bounded decomposition belongs to Prime's native `rlm()` inside a Prime seat;
+ * this CLI deliberately has no fire-and-forget child launch or worker-authored
+ * status append.
  */
 import * as path from "node:path";
 import * as fs from "node:fs";

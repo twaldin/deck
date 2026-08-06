@@ -1,2 +1,2 @@
-/** Canonical policy lives with the shared spawn primitive; workflows re-export it. */
-export * from "../../../subagents/lib/model-policy.ts";
+/** Stable public surface for the canonical Deck model policy. */
+export * from "./model-policy.ts";

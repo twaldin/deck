@@ -62,9 +62,9 @@ guard, or extension path. It writes only:
   entry wrapper.
 
 This mirrors the extension layout made by `v2/install.sh`, but does not invoke
-that whole installer. The full installer also installs `deck-subagents`, Deck
-and Smithers CLI shims, and a Smithers runtime. Those are deliberately outside
-this conversation profile's custody.
+that whole installer. The full installer also adds Deck and Smithers CLI shims
+and a Smithers runtime. Those are deliberately outside this conversation
+profile's custody.
 
 Enter the seat with exactly:
 
@@ -250,24 +250,16 @@ install a spawn launcher: spawning remains unavailable here until a reviewed
 launcher invokes that adapter-owned profile; it must never be emulated with a
 subprocess or another extension.
 
-### Factory spawn cutover
+### Native RLM delegation
 
-The existing `deck-subagents` factory primitive is not installed here and is
-not replaced yet. Factory spawn flips to Prime-native RLM only after promoted
-Prime worker seats pass, then the child-specific gates also pass:
-
-- exact allowlisted child provider/model is attested and unavailable models
-  fail closed;
-- depth, concurrency, and budget are bounded;
-- every child returns a schema-valid receipt;
-- malformed and deliberately hung children, manual cancellation, root TTL, RPC
-  loss, and parent teardown leave no descendant and cannot advance a node;
-- the separate Smithers cross-family review stays independently pinned;
-- every spawn caller migrates in one cutover and `deck-subagents` is deleted,
-  not retained as a warm alternate.
-
-The captain's depth-one conversation children do not flip either factory gate:
-they are local decomposition with no workflow custody.
+Deck exposes no separate child-agent extension or delegation tool. Prime seats
+decompose bounded work only through native `rlm()`. RLM depth is one: children
+are allowed and grandchildren are not. A bare child uses
+`deck/gpt-5.6-luna` at `xhigh`; escalation requires an explicit model pin.
+Reserve `deck/claude-fable-5` at `high` for judgment and adversarial work
+because it consumes all three Anthropic quota buckets, while ordinary models
+consume two. Smithers cross-family review remains an independently pinned
+workflow seat rather than an RLM child.
 
 ## Guard and manual upgrade
 

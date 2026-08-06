@@ -85,6 +85,25 @@ if [ -e "$OLD_DEST" ] || [ -L "$OLD_DEST" ]; then
   printf 'removed retired deck-v2 orchestrator extension from %s\n' "$OLD_DEST"
 fi
 
+# Older Deck releases copied one child extension instead of linking an
+# entrypoint. Remove only that fully recognizable Deck-owned layout; leave every
+# unknown or partial extension untouched.
+for candidate in "$EXTENSIONS_DIR"/*; do
+  [ -d "$candidate" ] || continue
+  case "$(basename "$candidate")" in
+    deck-questions|deck-ship|deck-recall|deck-usage|deck-v2|node_modules|v2) continue ;;
+  esac
+  if [ -f "$candidate/index.ts" ] &&
+    [ -f "$candidate/lib/spawn.ts" ] &&
+    [ -f "$candidate/lib/agent-registry.ts" ] &&
+    [ -f "$candidate/lib/model-registry.ts" ] &&
+    [ -f "$candidate/agents/worker.md" ] &&
+    [ -f "$candidate/agents/reviewer.md" ]; then
+    rm -rf "$candidate"
+    printf 'removed retired Deck child extension from %s\n' "$candidate"
+  fi
+done
+
 # A stale flat entry is still independently discovered by pi. Remove only one
 # that resolves into this repository.
 stale="$EXTENSIONS_DIR/deck-v2.ts"
@@ -152,9 +171,6 @@ for extension in deck-questions deck-ship deck-recall deck-usage; do
   printf 'installed %s pi extension in %s\n' "$extension" "$dest"
 done
 
-# Plain Deck pi sessions share this pi agent directory. Install the subagent
-# primitive there as its own independent extension.
-INSTALL_TARGET="$INSTALL_TARGET" "$REPO_V2/../subagents/install.sh"
 
 # CLI: a shim on PATH pointing at the repo bin, so both faces run one source.
 mkdir -p "$BIN_TARGET"
@@ -222,16 +238,13 @@ if [ -d "$WORKFLOWS_SOURCE/.smithers" ]; then
     rm -rf "$WORKSPACE_PACK/$name"
     cp -a "$item" "$WORKSPACE_PACK/$name"
   done
-  # agents.ts is part of the pack but its model catalog is owned by the pipeline.
-  # Keep that relative import valid in the isolated runtime workspace.
+  # agents.ts is part of the pack but its model policy is owned by the pipeline.
+  # Copy the stable re-export and canonical implementation together so the
+  # isolated runtime workspace never reaches back into the development checkout.
   mkdir -p "$WORKSPACE_ROOT/pr-pipeline/lib"
-  rm -f "$WORKSPACE_ROOT/pr-pipeline/lib/models.ts"
+  rm -f "$WORKSPACE_ROOT/pr-pipeline/lib/models.ts" "$WORKSPACE_ROOT/pr-pipeline/lib/model-policy.ts"
   cp -a "$WORKFLOWS_SOURCE/pr-pipeline/lib/models.ts" "$WORKSPACE_ROOT/pr-pipeline/lib/models.ts"
-  # models.ts re-exports Deck's one canonical policy. Preserve that relative
-  # import from state/smithers/pr-pipeline/lib into state/subagents/lib.
-  mkdir -p "$DECK_V2_HOME_DIR/state/subagents/lib"
-  rm -f "$DECK_V2_HOME_DIR/state/subagents/lib/model-policy.ts"
-  cp -a "$REPO_V2/../subagents/lib/model-policy.ts" "$DECK_V2_HOME_DIR/state/subagents/lib/model-policy.ts"
+  cp -a "$WORKFLOWS_SOURCE/pr-pipeline/lib/model-policy.ts" "$WORKSPACE_ROOT/pr-pipeline/lib/model-policy.ts"
 fi
 # Keep the old link name only for static compatibility. It is never the runtime
 # workspace and no state is written through it.

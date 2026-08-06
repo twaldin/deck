@@ -114,8 +114,8 @@ prompts; the companion SETUP-CHECKLIST.md is TO-BUILD.
   never ask the captain directly or open a second decision channel.
 - [CHAT SESSION] Queue each captain decision once. Two channels race and lose
   decisions. [~/.deck/AGENTS.md §3]
-- [WORKFLOW SEAT] Never run OptMem from a worker or subagent. Route decisions
-  through the workflow's question result.
+- [WORKFLOW SEAT] Never run OptMem from a workflow seat or RLM child. Route
+  decisions through the workflow's question result.
 - [CHAT SESSION] [WORKFLOW SEAT] Cost is never a hold reason under tens of $k for authorized work; report it
   for correctness only. [~/firstmate/data/captain.md §spend 2026-07-25]
 - [WORKFLOW SEAT] In MAX-CRITICAL program mode, route every seat's uncertainty

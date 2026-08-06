@@ -80,6 +80,50 @@ beforeAll(async () => {
 							? { workspace_id: "deck-test", label: "deck-test" }
 							: null,
 					};
+				} else if (method === "pane.get") {
+					const pane = herdrPanes.get(String(params.pane_id));
+					result = {
+						type: "pane_info",
+						pane: pane === undefined
+							? null
+							: {
+								pane_id: pane.paneId,
+								tab_id: pane.tabId,
+								workspace_id: pane.workspaceId,
+								label: pane.label,
+							},
+					};
+				} else if (method === "pane.layout") {
+					result = {
+						type: "pane_layout",
+						layout: {
+							workspace_id: "deck-test",
+							tab_id: captainPane.tabId,
+							panes: [{
+								pane_id: String(params.pane_id),
+								rect: { width: 160, height: 40, x: 0, y: 0 },
+							}],
+							splits: [],
+						},
+					};
+				} else if (method === "pane.split") {
+					const parent = herdrPanes.get(String(params.target_pane_id));
+					if (parent === undefined) throw new Error(`missing Herdr parent ${String(params.target_pane_id)}`);
+					const paneId = `deck-test:p${++herdrPaneSequence}`;
+					herdrPanes.set(paneId, {
+						paneId,
+						tabId: parent.tabId,
+						workspaceId: parent.workspaceId,
+						label: "",
+					});
+					result = {
+						type: "pane_info",
+						pane: {
+							pane_id: paneId,
+							tab_id: parent.tabId,
+							workspace_id: parent.workspaceId,
+						},
+					};
 				} else if (method === "tab.create") {
 					const sequence = ++herdrPaneSequence;
 					const paneId = `deck-test:p${sequence}`;
@@ -102,7 +146,9 @@ beforeAll(async () => {
 					const pane = herdrPanes.get(String(params.pane_id));
 					if (pane !== undefined && pane.paneId !== captainPane.paneId) {
 						herdrPanes.delete(pane.paneId);
-						herdrTabs.delete(pane.tabId);
+						if (![...herdrPanes.values()].some((candidate) => candidate.tabId === pane.tabId)) {
+							herdrTabs.delete(pane.tabId);
+						}
 					}
 				}
 				socket.end(`${JSON.stringify({ id: request.id, result })}\n`);
@@ -164,7 +210,7 @@ const runRecordSchema = z.object({
 type FakeMode =
 	| "success"
 	| "success-slow"
-	| "success-child"
+	| "success-children"
 	| "malformed"
 	| "depth-two-child"
 	| "missing"
@@ -232,14 +278,18 @@ function persist(answer) {
     { type: "message", id: "answer", parentId: null, timestamp: new Date().toISOString(), message: { role: "assistant", content: [{ type: "text", text: answer }], ...(mode === "no-model-provenance" ? {} : { provider, model }), usage: { input: 12, output: 5, totalTokens: 17 }, stopReason: "stop" } },
   ];
   fs.writeFileSync(path.join(sessionDir, rootId + ".jsonl"), rows.map(JSON.stringify).join("\\n") + "\\n");
-  if (mode === "success-child" || mode === "depth-two-child") {
-    const childDir = path.join(sessionDir, "sub-child");
-    fs.mkdirSync(childDir, { recursive: true });
-    const childRows = [
-      { type: "session", version: 3, id: "child-session", parentSession: rootId, timestamp: new Date().toISOString(), cwd: process.cwd(), rlmDepth: mode === "depth-two-child" ? 2 : 1 },
-      { type: "message", id: "child-answer", parentId: null, timestamp: new Date().toISOString(), message: { role: "assistant", content: [{ type: "text", text: "child" }], provider: "deck", model: "gpt-5.6-luna", usage: { input: 3, output: 2, totalTokens: 5 }, stopReason: "stop" } },
-    ];
-    fs.writeFileSync(path.join(childDir, "child-session.jsonl"), childRows.map(JSON.stringify).join("\\n") + "\\n");
+  if (mode === "success-children" || mode === "depth-two-child") {
+    const childCount = mode === "success-children" ? 3 : 1;
+    for (let index = 1; index <= childCount; index += 1) {
+      const childId = "child-session-" + index;
+      const childDir = path.join(sessionDir, "sub-child-" + index);
+      fs.mkdirSync(childDir, { recursive: true });
+      const childRows = [
+        { type: "session", version: 3, id: childId, parentSession: rootId, timestamp: new Date().toISOString(), cwd: process.cwd(), rlmDepth: mode === "depth-two-child" ? 2 : 1 },
+        { type: "message", id: "child-answer-" + index, parentId: null, timestamp: new Date().toISOString(), message: { role: "assistant", content: [{ type: "text", text: "child " + index }], provider: "deck", model: "gpt-5.6-luna", usage: { input: 3, output: 2, totalTokens: 5 }, stopReason: "stop" } },
+      ];
+      fs.writeFileSync(path.join(childDir, childId + ".jsonl"), childRows.map(JSON.stringify).join("\\n") + "\\n");
+    }
   }
 }
 process.stdin.on("data", (chunk) => {
@@ -462,8 +512,8 @@ async function startIsolatedHerdr(): Promise<IsolatedHerdr | null> {
 }
 
 describe("Prime seat adapter fault contract", () => {
-	test("records exact root and child broker model provenance with exit status and tokens", async () => {
-		const binary = await fakePrime("success-child");
+	test("three RLM children share exactly one labelled Herdr pane with their root seat", async () => {
+		const binary = await fakePrime("success-children");
 		const result = runRecordSchema.parse(await agent(binary, { effortLabel: "lindy#27140" }).generate({
 			prompt: "Return the result",
 			outputSchema: z.object({ ok: z.literal(true) }),
@@ -477,11 +527,14 @@ describe("Prime seat adapter fault contract", () => {
 			paneId: expect.stringMatching(/^deck-test:p/),
 			label: "lindy#27140 · watch-fix · run-abc",
 		});
-		expect(record.childModels).toEqual([
+		expect(record.childModels).toHaveLength(3);
+		expect(record.childModels).toEqual(expect.arrayContaining([
 			expect.objectContaining({ provider: "deck", model: "gpt-5.6-luna", depth: 1 }),
-		]);
+		]));
 		expect(record.exitStatus).toEqual({ code: 0, signal: null });
-		expect(record.tokens).toEqual({ input: 15, output: 7, total: 22 });
+		expect(record.tokens).toEqual({ input: 21, output: 11, total: 32 });
+		expect(herdrRequests.filter((request) => request.method === "tab.create")).toHaveLength(1);
+		expect(herdrRequests.filter((request) => request.method === "pane.split")).toHaveLength(0);
 		expect(herdrRequests.filter((request) => request.method === "pane.close")).toHaveLength(1);
 	});
 
@@ -660,7 +713,96 @@ describe("Prime seat adapter fault contract", () => {
 		expect(tools).toEqual([...PRIME_WORKFLOW_SEAT_TOOLS]);
 		expect(tools).not.toContain("process");
 		expect(captured.args).toContain("--no-extensions");
-		expect(tools.some((tool) => /dispatch|spawn|subagent|task/i.test(tool))).toBe(false);
+		expect(tools.some((tool) => /dispatch|spawn|task/i.test(tool))).toBe(false);
+	});
+
+	test("discovers the active socket through herdr status server with no ambient Herdr variables", async () => {
+		const binary = await fakePrime("success");
+		const cliRoot = await fs.mkdtemp(path.join(os.tmpdir(), "deck-herdr-discovery-"));
+		roots.push(cliRoot);
+		const calls = path.join(cliRoot, "calls.txt");
+		const herdrBinary = path.join(cliRoot, "herdr");
+		writeFileSync(herdrBinary, `#!/bin/sh
+printf '%s\\n' "$*" >> ${JSON.stringify(calls)}
+if [ "$1 $2" = "status server" ]; then
+  printf 'status: running\\nversion: 0.8.0\\nprotocol: 19\\ncompatible: yes\\nsocket: %s\\n' ${JSON.stringify(herdrSocket)}
+  exit 0
+fi
+exit 2
+`, { mode: 0o700 });
+		const herdrKeys = [
+			"HERDR_ENV",
+			"HERDR_SOCKET_PATH",
+			"HERDR_PANE_ID",
+			"HERDR_TAB_ID",
+			"HERDR_WORKSPACE_ID",
+			"DECK_HERDR_BIN",
+			"DECK_HERDR_SOCKET_PATH",
+			"DECK_HERDR_WORKSPACE_ID",
+		] as const;
+		const saved = new Map(herdrKeys.map((key) => [key, process.env[key]]));
+		for (const key of herdrKeys) delete process.env[key];
+		process.env.DECK_HERDR_BIN = herdrBinary;
+		try {
+			const result = runRecordSchema.parse(await agent(binary, {
+				herdrSocketPath: undefined,
+				effortLabel: "headless",
+			}).generate({
+				prompt: "discover",
+				taskContext: { runId: "run-discover", nodeId: "seat", iteration: 0, attempt: 0 },
+			}));
+			expect(result.providerMetadata.prime.herdr).toMatchObject({
+				attached: true,
+				label: "headless · seat · run-discover",
+			});
+			expect(readFileSync(calls, "utf8").trim()).toBe("status server");
+			expect(herdrRequests.filter((request) => request.method === "tab.create")).toHaveLength(1);
+		} finally {
+			for (const [key, value] of saved) {
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
+			}
+		}
+	});
+
+	test("uses an ambient parent pane for sensible placement without requiring it", async () => {
+		const binary = await fakePrime("success");
+		const herdrKeys = [
+			"HERDR_ENV",
+			"HERDR_SOCKET_PATH",
+			"HERDR_PANE_ID",
+			"HERDR_TAB_ID",
+			"HERDR_WORKSPACE_ID",
+			"DECK_HERDR_SOCKET_PATH",
+		] as const;
+		const saved = new Map(herdrKeys.map((key) => [key, process.env[key]]));
+		process.env.HERDR_ENV = "1";
+		process.env.HERDR_SOCKET_PATH = herdrSocket;
+		process.env.HERDR_PANE_ID = captainPane.paneId;
+		process.env.HERDR_TAB_ID = captainPane.tabId;
+		process.env.HERDR_WORKSPACE_ID = captainPane.workspaceId;
+		delete process.env.DECK_HERDR_SOCKET_PATH;
+		try {
+			await agent(binary, { herdrSocketPath: undefined, effortLabel: "ambient" }).generate({
+				prompt: "place",
+				taskContext: { runId: "run-parent", nodeId: "seat", iteration: 0, attempt: 0 },
+			});
+			const splits = herdrRequests.filter((request) => request.method === "pane.split");
+			expect(splits).toHaveLength(1);
+			expect(splits[0]?.params).toMatchObject({
+				target_pane_id: captainPane.paneId,
+				direction: "right",
+				focus: false,
+			});
+			expect(herdrRequests.filter((request) => request.method === "tab.create")).toHaveLength(0);
+			expect(herdrRequests.filter((request) => request.method === "pane.close")).toHaveLength(1);
+			expect(herdrPanes.has(captainPane.paneId)).toBe(true);
+		} finally {
+			for (const [key, value] of saved) {
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
+			}
+		}
 	});
 
 	test("concurrent seats share one supervisor while keeping distinct sessions and top-level panes", async () => {
@@ -710,7 +852,7 @@ describe("Prime seat adapter fault contract", () => {
 		for (const capabilityProfile of ["workflow-seat", "spawn-agent"] as const) {
 			expect(() => agent(binary, { capabilityProfile, tools: ["process"] })).toThrow(/PRIME_CAPABILITY_VIOLATION/);
 			expect(() => agent(binary, { capabilityProfile, tools: ["read", "dispatch"] })).toThrow(/PRIME_CAPABILITY_VIOLATION/);
-			expect(() => agent(binary, { capabilityProfile, extensions: ["/tmp/deck-subagents.ts"] })).toThrow(/PRIME_CAPABILITY_VIOLATION/);
+			expect(() => agent(binary, { capabilityProfile, extensions: ["/tmp/unapproved-extension.ts"] })).toThrow(/PRIME_CAPABILITY_VIOLATION/);
 		}
 	});
 
@@ -720,6 +862,12 @@ describe("Prime seat adapter fault contract", () => {
 		expect(spawned.model).toBe("gpt-5.6-luna");
 		expect(spawned.opts.rlmChildModel).toBe("deck/gpt-5.6-luna");
 		expect(spawned.opts.rlmReasoningByModel["deck/gpt-5.6-luna"]).toBe("xhigh");
+		await spawned.generate({
+			prompt: "spawn",
+			taskContext: { runId: "run-spawn", nodeId: "spawn-agent", iteration: 0, attempt: 0 },
+		});
+		expect(herdrRequests.filter((request) => request.method === "tab.create")).toHaveLength(1);
+		expect(herdrRequests.filter((request) => request.method === "pane.split")).toHaveLength(0);
 		expect(() => agent(binary, { capabilityProfile: "workflow-seat", model: undefined })).toThrow(
 			/Prime workflow seats require an explicit model/,
 		);

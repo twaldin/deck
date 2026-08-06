@@ -10,7 +10,6 @@ plain pi home is `v2/seed/AGENTS.md`.
 - `cli/`: isolated worktree allocation.
 - `intake/`: incoming work poller.
 - `ops/`: launchd installers and resource monitor.
-- `subagents/`: crew agent definitions and installer.
 - `extensions/`: pi extensions and installer tests.
 - `workflows/`: Smithers workflows and pipeline tests.
 

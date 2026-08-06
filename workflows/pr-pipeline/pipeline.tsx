@@ -826,10 +826,6 @@ function makeAgent(
 			}),
 		});
 	}
-	const configuredExtension = process.env.DECK_SUBAGENT_EXTENSION;
-	const bundledExtension = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../subagents/deck-subagents.ts");
-	const subagentExtension = configuredExtension ?? (fs.existsSync(bundledExtension) ? bundledExtension : undefined);
-	const extension = subagentExtension === undefined ? undefined : [subagentExtension];
 	// Pi still needs bash for tests and gh, but receives only the explicit
 	// non-credential seat environment. The deterministic publisher alone keeps
 	// push/merge/stamp credentials and authority.
@@ -847,7 +843,6 @@ function makeAgent(
 		noSession: true,
 		inheritEnv: false,
 		env: buildSeatEnvironment(),
-		...(extension === undefined ? {} : { extension }),
 	});
 }
 

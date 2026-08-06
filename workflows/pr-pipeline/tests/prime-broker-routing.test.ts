@@ -125,7 +125,7 @@ function completionStream(
 	return new Response(stream, { headers: { "content-type": "text/event-stream" } });
 }
 
-function startCaptureBroker(explicitChildModel?: string): CaptureBroker {
+function startCaptureBroker(explicitChildModel?: string, childEnvironmentProbe?: string): CaptureBroker {
 	const requests: CapturedCompletion[] = [];
 	let rootRequests = 0;
 	const server = Bun.serve({
@@ -141,6 +141,22 @@ function startCaptureBroker(explicitChildModel?: string): CaptureBroker {
 				childMarker,
 			});
 			if (childMarker) {
+				const childRequestCount = requests.filter((captured) => captured.childMarker).length;
+				if (childEnvironmentProbe !== undefined && childRequestCount === 1) {
+					const code = [
+						"import os",
+						`assert os.environ.get(${JSON.stringify(childEnvironmentProbe)}) is None, "ambient secret leaked into RLM child"`,
+						'"ENV_ISOLATED"',
+					].join("\n");
+					return completionStream(body.model, {
+						tool_calls: [{
+							index: 0,
+							id: "call_probe_child_environment",
+							type: "function",
+							function: { name: "ipython", arguments: JSON.stringify({ code }) },
+						}],
+					}, "tool_calls");
+				}
 				return completionStream(body.model, { content: "CHILD_DONE" }, "stop");
 			}
 
@@ -206,44 +222,55 @@ function primeOptions(thinking: "low" | "xhigh", origin: string) {
 }
 
 describe("Prime seat broker-only routing and thinking fidelity", () => {
-	testWithPrime("routes root and real rlm child through Deck with exact low and xhigh effort (requires prime-agent 0.7.0)", async () => {
-		for (const thinking of ["low", "xhigh"] as const) {
-			const broker = startCaptureBroker();
-			try {
-				const result = runResultSchema.parse(await new PrimeSeatAgent(primeOptions(thinking, broker.origin)).generate({
-					prompt: "Spawn the required child, then return the requested JSON result.",
-					outputSchema: z.object({ ok: z.literal(true) }),
-					taskContext: { runId: `broker-fidelity-${thinking}`, nodeId: "prime-seat", iteration: 0, attempt: 0 },
-				}));
-				expect(result.providerMetadata.prime.rootModel).toMatchObject({ provider: "deck", model: "gpt-5.6-sol" });
-				expect(result.providerMetadata.prime.childModels).toContainEqual(
-					expect.objectContaining({ provider: "deck", model: "gpt-5.6-luna", depth: 1 }),
-				);
+	testWithPrime("routes root and a secret-isolated real rlm child through Deck with exact low and xhigh effort (requires prime-agent 0.7.0)", async () => {
+		const secretName = "DECK_TEST_AMBIENT_SECRET";
+		const secretValue = `must-not-reach-rlm-child-${crypto.randomUUID()}`;
+		const originalSecret = process.env[secretName];
+		process.env[secretName] = secretValue;
+		try {
+			for (const thinking of ["low", "xhigh"] as const) {
+				const broker = startCaptureBroker(undefined, secretName);
+				try {
+					const result = runResultSchema.parse(await new PrimeSeatAgent(primeOptions(thinking, broker.origin)).generate({
+						prompt: "Spawn the required child, then return the requested JSON result.",
+						outputSchema: z.object({ ok: z.literal(true) }),
+						taskContext: { runId: `broker-fidelity-${thinking}`, nodeId: "prime-seat", iteration: 0, attempt: 0 },
+					}));
+					expect(result.providerMetadata.prime.rootModel).toMatchObject({ provider: "deck", model: "gpt-5.6-sol" });
+					expect(result.providerMetadata.prime.childModels).toContainEqual(
+						expect.objectContaining({ provider: "deck", model: "gpt-5.6-luna", depth: 1 }),
+					);
 
-				const rootRequests = broker.requests.filter((request) => !request.childMarker);
-				const childRequests = broker.requests.filter((request) => request.childMarker);
-				expect(rootRequests.length).toBeGreaterThan(0);
-				expect(childRequests.length).toBeGreaterThan(0);
-				for (const request of rootRequests) {
-					expect(request.pathname).toBe("/v1/chat/completions");
-					expect(request.headers.authorization).toBe("Bearer capture-server-only-key");
-					expect(request.body.model).toBe("gpt-5.6-sol");
-					expect(request.body.reasoning_effort).toBe(thinking);
-					expect(request.body).not.toHaveProperty("reasoning");
-					expect(request.body).not.toHaveProperty("thinking");
+					const rootRequests = broker.requests.filter((request) => !request.childMarker);
+					const childRequests = broker.requests.filter((request) => request.childMarker);
+					expect(rootRequests.length).toBeGreaterThan(0);
+					expect(childRequests.length).toBeGreaterThan(1);
+					for (const request of rootRequests) {
+						expect(request.pathname).toBe("/v1/chat/completions");
+						expect(request.headers.authorization).toBe("Bearer capture-server-only-key");
+						expect(request.body.model).toBe("gpt-5.6-sol");
+						expect(request.body.reasoning_effort).toBe(thinking);
+						expect(request.body).not.toHaveProperty("reasoning");
+						expect(request.body).not.toHaveProperty("thinking");
+					}
+					for (const request of childRequests) {
+						expect(request.pathname).toBe("/v1/chat/completions");
+						expect(request.headers.authorization).toBe("Bearer capture-server-only-key");
+						expect(request.body.model).toBe("gpt-5.6-luna");
+						expect(request.body.reasoning_effort).toBe("xhigh");
+						expect(request.body).not.toHaveProperty("reasoning");
+						expect(request.body).not.toHaveProperty("thinking");
+						expect(JSON.stringify(request.body.messages)).not.toContain(secretValue);
+					}
+					expect(childRequests.some((request) => JSON.stringify(request.body.messages).includes("[task from parent]"))).toBe(true);
+					expect(childRequests.some((request) => JSON.stringify(request.body.messages).includes("ENV_ISOLATED"))).toBe(true);
+				} finally {
+					await broker.stop();
 				}
-				for (const request of childRequests) {
-					expect(request.pathname).toBe("/v1/chat/completions");
-					expect(request.headers.authorization).toBe("Bearer capture-server-only-key");
-					expect(request.body.model).toBe("gpt-5.6-luna");
-					expect(request.body.reasoning_effort).toBe("xhigh");
-					expect(request.body).not.toHaveProperty("reasoning");
-					expect(request.body).not.toHaveProperty("thinking");
-				}
-				expect(childRequests.some((request) => JSON.stringify(request.body.messages).includes("[task from parent]"))).toBe(true);
-			} finally {
-				await broker.stop();
 			}
+		} finally {
+			if (originalSecret === undefined) delete process.env[secretName];
+			else process.env[secretName] = originalSecret;
 		}
 	}, 360_000);
 

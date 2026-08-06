@@ -1,7 +1,7 @@
 /**
  * Read-only compatibility helpers for historical worker sessions and model
- * policy. Fire-and-forget process creation was retired in v4: bounded work uses
- * the awaited `deck-subagents` primitive and long-running work uses `ship`.
+ * policy. Fire-and-forget process creation was retired in v4: bounded
+ * decomposition uses Prime's native `rlm()` and long-running work uses `ship`.
  */
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";

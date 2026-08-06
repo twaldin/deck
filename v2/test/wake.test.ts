@@ -351,7 +351,7 @@ describe("a live worker that stops making progress", () => {
 		});
 		expect(verdicts).toHaveLength(1);
 		expect(verdicts[0]?.reason).toContain("child pid 777");
-		expect(verdicts[0]?.reason).toContain("subagent");
+		expect(verdicts[0]?.reason).toContain("child agent");
 	});
 
 	// The observer writes a pipeline MILESTONE as `resolved:` (observer.ts maps
@@ -694,7 +694,7 @@ describe("a live worker that stops making progress", () => {
 		expect(verdicts).toHaveLength(1);
 		const reason = verdicts[0]?.reason ?? "";
 		expect(reason).toContain("child pid 777 (pi)");
-		expect(reason).toContain("subagent");
+		expect(reason).toContain("child agent");
 		expect(reason).not.toMatch(/[\u0000-\u001f]/);
 		expect(reason).not.toContain("fake");
 		expect(reason.length).toBeLessThan(300);
@@ -709,7 +709,7 @@ describe("a live worker that stops making progress", () => {
 			listChildren: () => [{ pid: 777, command: "" }],
 		});
 		expect(verdicts[0]?.reason).toContain("child pid 777 (unknown)");
-		expect(verdicts[0]?.reason).toContain("subagent");
+		expect(verdicts[0]?.reason).toContain("child agent");
 	});
 
 	// `deck-v2 stale` is a human looking at the fleet. If looking marks the verdict

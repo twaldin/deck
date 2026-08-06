@@ -288,9 +288,6 @@ describe("startShip", () => {
 			command = spawnCommand;
 			args = spawnArgs;
 			options = spawnOptions;
-		expect(options?.env?.DECK_SUBAGENT_EXTENSION).toBe(
-			path.join(home, ".pi", "extensions", "deck-subagents", "index.ts"),
-		);
 			const child = Object.assign(new EventEmitter(), { pid: 123 }) as ChildProcess;
 			child.unref = () => child;
 			queueMicrotask(() => child.emit("spawn"));

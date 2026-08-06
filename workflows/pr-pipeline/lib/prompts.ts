@@ -14,10 +14,10 @@ import type { StackCarSpec } from "./adopt.ts";
 
 const RESULT_OBJECT_RULE =
 	"Return a result object with these keys, NOT the schema. do not include $schema, type, properties, or required.";
-const SUBAGENT_GUIDANCE =
-	"Subagents are a first-class capability. Use only exact registered ids: worker, worker-gpt, reviewer, reviewer-claude, and scout. Aliases such as claude, codex, and gpt are invalid. Follow the subagent tool's model-pick guidance; for adversarial review choose the opposite model family. For stack work, land the schema/base PR first, then fan out subagents for dependent pieces.";
+const RLM_GUIDANCE =
+	"Use Prime's native `rlm()` for bounded delegation when the seat is Prime. A non-Prime seat has no delegation primitive and performs the node directly. RLM depth is one: children are allowed and grandchildren are not. A bare child uses deck/gpt-5.6-luna at xhigh; escalation requires an explicit model pin. Reserve deck/claude-fable-5 at high for judgment and adversarial review because it consumes all three Anthropic quota buckets while ordinary models consume two. For stack work, land the schema/base PR first, then fan out RLM children for dependent pieces.";
 const WORKER_MEMORY_CONTRACT =
-	"Never run OptMem from a worker or subagent. Route decisions through the workflow's question result.";
+	"Never run OptMem from a workflow seat or RLM child. Route decisions through the workflow's question result.";
 const OUTPUT_FACING_BOUNDARY = [
 	"OUTPUT-FACING BOUNDARY:",
 	"- Internal paths, worktrees, workflow node names, run or task ids, model labels, and workflow or factory vocabulary are tool-context ONLY.",
@@ -216,7 +216,7 @@ export function implementPrompt(brief: Brief, worktree: string, branch: string):
 		JSON.stringify(brief, null, 2),
 		"",
 		"Rules:",
-		`- ${SUBAGENT_GUIDANCE}`,
+		`- ${RLM_GUIDANCE}`,
 		"- Implement exactly the brief. No scope creep; open questions were resolved before dispatch.",
 		"- Run the relevant tests locally and record what you ran.",
 		"- Commit your work as one or more plain commits on this branch. DO NOT push.",
@@ -243,7 +243,7 @@ export function stackImplementPrompt(
 		JSON.stringify(brief, null, 2),
 		"",
 		"Rules:",
-		`- ${SUBAGENT_GUIDANCE}`,
+		`- ${RLM_GUIDANCE}`,
 		"- Implement exactly the brief across the declared cars in dependency order.",
 		"- Use every declared branch exactly once and create no extra branches.",
 		"- Each car must contain only its independently reviewable layer. Commit on that car with path-scoped commits.",
@@ -281,7 +281,7 @@ export function localReviewPrompt(
 		"Brief the change claims to implement:",
 		JSON.stringify({ title: brief.title, acceptanceCriteria: brief.acceptanceCriteria }, null, 2),
 		"",
-		SUBAGENT_GUIDANCE,
+		RLM_GUIDANCE,
 		"Hunt for: acceptance criteria not actually met, missing/weak tests, correctness bugs,",
 		"unhandled edge cases, migration hazards, blast-radius surprises, dead code.",
 		...(previous
@@ -308,7 +308,7 @@ export function localFixPrompt(blockingFindings: string[], worktree: string, aft
 	return seatPrompt([
 		"You are the IMPLEMENTER. An adversarial reviewer produced blocking findings on your change.",
 		`Worktree: ${worktree}. Fix them with plain commits on the current branch. DO NOT push.`,
-		SUBAGENT_GUIDANCE,
+		RLM_GUIDANCE,
 		"",
 		"Blocking findings to resolve (all of them):",
 		JSON.stringify(blockingFindings, null, 2),
@@ -356,7 +356,7 @@ export function watchFixPrompt(args: {
 		"Current machine-checked poll state:",
 		args.pollJson,
 		"",
-		SUBAGENT_GUIDANCE,
+		RLM_GUIDANCE,
 		"Do, in order:",
 		"1. Never rebase or push. The pipeline owns publication through rebaseAndPush(),",
 		"   its deterministic bounded-ancestry check, tests, and force-with-lease push.",
@@ -410,7 +410,7 @@ export function falloutPrompt(args: {
 		`Watch window (anchored to deploy): ${args.windowStart} .. ${args.windowEnd}.`,
 		`NAMED break-signal from preflight (your primary probe): ${args.breakSignal}`,
 		`Kill-switch: ${args.killSwitch}`,
-		SUBAGENT_GUIDANCE,
+		RLM_GUIDANCE,
 		args.probes.length > 0
 			? `Additional probe commands to run and interpret:\n${args.probes.map((probe) => `- ${probe}`).join("\n")}`
 			: "No additional probe commands configured.",

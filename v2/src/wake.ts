@@ -934,7 +934,7 @@ export function detectStale(
 					reason:
 						child === undefined
 							? `alive as pid ${pid} but has written nothing for ${silentMin} minute(s)${partial} — likely stuck, not working`
-							: `alive as pid ${pid} but has written nothing for ${silentMin} minute(s); child pid ${child.pid} (${childLabel(child.command)})${childCpuDelta === undefined ? "" : ` has CPU delta ${(childCpuDelta / 1000).toFixed(2)}s`} and is still running${partial} — likely a stuck subagent`,
+							: `alive as pid ${pid} but has written nothing for ${silentMin} minute(s); child pid ${child.pid} (${childLabel(child.command)})${childCpuDelta === undefined ? "" : ` has CPU delta ${(childCpuDelta / 1000).toFixed(2)}s`} and is still running${partial} — likely a stuck child agent`,
 				});
 				const backoffMs =
 					record.emitted === fingerprint

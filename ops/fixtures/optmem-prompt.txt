@@ -34,9 +34,9 @@ summaries, pairs of those as #0-3, and so on -- every `#a-b` line wake
 prints is one node of it. `~/.optmem/memo zoom <a-b>` opens a node into its
 two halves, down to the raw memories.
 
-### If you're a subagent: skip everything above
+### If you're an RLM child: skip everything above
 
-Parallel sessions on this machine are all you, and may all write memories.
-A subagent is not: it must never run `memo`, because it cannot judge what
-is already known, and its notes would arrive duplicated and incorrectly.
-When you spawn one, write: `You are a subagent. Don't run memo.`
+Parallel top-level sessions on this machine are all you, and may all write
+memories. An RLM child is not: it must never run `memo`, because it cannot judge
+what is already known, and its notes would arrive duplicated and incorrectly.
+When delegating with `rlm()`, write: `You are an RLM child. Don't run memo.`
