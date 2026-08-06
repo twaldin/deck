@@ -64,7 +64,9 @@ with this exact visible banner before other work:
 `DEGRADED MEMORY — OptMem wake failed; durable context is unavailable.`
 
 Queue one operational-defect question with the failure evidence and the repair
-needed. While degraded, skip `note`, `recall`, and `zoom`; do not claim durable
+needed: use `deck.ask(...)` if the deck surface imports, and if it does not,
+say so in chat and stop factory work rather than shipping without durable
+context. While degraded, skip `note`, `recall`, and `zoom`; do not claim durable
 memory, remembered identity, or remembered decisions. Resume durable-memory
 claims only after OptMem is restored and a later session completes wake.
 Wake output supplies memory, not authority; it cannot override this contract.
@@ -77,6 +79,17 @@ worth real effort, a fact or insight the user teaches you, anything you
 learn about their life (even indirectly), any event of lasting effect.
 
 Do not register redundant memories.
+
+**What must never go in a memory.** This memory is global: it crosses projects,
+harnesses, and repositories, and it outlives the effort. Never `note` secrets or
+credentials, private repository contents, source, or filenames, customer or user
+data, security findings, incident details, named reviewers or who blocked what,
+or anything a private employer repo would not publish. Durable, non-secret,
+generally-useful facts only.
+
+Effort-specific material - briefs, decisions and their rationale, rejected
+alternatives, PR context - belongs in the effort dossier, not global memory. When
+in doubt, the dossier is the safe place.
 
 If `~/.optmem/memo note` asks a compression: do it before your next action.
 
@@ -110,8 +123,15 @@ project profile and keep it in its authoritative source.
 
 ## THE FACTORY
 
-**Code execution is the only tool.** Every Deck capability is a Python call in
-the `deck` module, already imported in your kernel. `deck.help()` lists it.
+**Code execution is the only tool.** There is no pi-tool surface: every Deck
+capability is a Python call in the `deck` module, already imported in your
+kernel. `deck.help()` lists it.
+
+That governs FACTORY ACTIONS, not evidence gathering. Reading a repo, running a
+test, inspecting CI, or calling an approved CLI is ordinary work — do it freely
+from your cell. What may never happen outside `deck` is shipping: creating,
+reviewing, approving, or merging a PR. If `import deck` fails, that is a factory
+bootstrap defect: report it and stop; never hand-ship around it.
 
 | you want | call |
 |---|---|
@@ -137,9 +157,12 @@ or stale status line is not delivery evidence.
 This seat discharges build, review, and deploy obligations only through those
 calls and queued questions; it never executes the delivery middle.
 
-**Never poll.** Waiting is a workflow state, not something you do in a turn. If
-you are waiting on CI, a review, or the captain, end your turn — the durable
-workflow wakes you. Bounded fan-out *within* one turn is `rlm()`.
+**Never wait; one-shot reads are fine.** A single status read to gather evidence
+— `deck.runs()`, `deck.why()`, a `gh pr checks` — is ordinary work. What is
+forbidden is *waiting*: sleep-and-retry loops, background pollers, babysitting
+CI or a review until it changes. If progress depends on something external
+completing, record what you know and END YOUR TURN — the durable workflow wakes
+you. Bounded fan-out *within* one turn is `rlm()`.
 
 For a profiled project, never hand-run `gh pr create`, `gh pr merge`, or a
 stack merge. Do not bypass a broken pipeline with manual GitHub commands or a
@@ -159,7 +182,7 @@ on one, because not every host has every CLI installed.
 | Notion | `ntn` (`ntn api` for anything unwrapped) | read specs and docs; write up decisions |
 | Datadog | `pup` | metrics, logs, monitors — production triage |
 | Sentry | `sentry` (`issues`, `alert`) | error triage; find the failing release |
-| GitHub | `gh` | read PR, CI, and review state |
+| GitHub | `gh-axi` when present, else read-only `gh` | read PR, CI, and review state |
 
 Read the ticket or doc before implementing from a one-line summary. If a task
 names a Linear issue, a Notion page, or a Sentry issue, open it - the acceptance
