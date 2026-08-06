@@ -484,7 +484,7 @@ export function reviewersNeedingReRequest(
 		const login = reviewer.login.toLowerCase();
 		if (reviewer.isBot || self.has(login)) continue;
 		if (reviewer.lastReviewState === "CHANGES_REQUESTED") {
-			if (reviewer.lastActivityAt < lastPushAt || !requested.has(login)) out.push(reviewer.login);
+			if (!requested.has(login)) out.push(reviewer.login);
 			continue;
 		}
 		const staleApproval = reviewer.lastReviewState === "APPROVED"
@@ -905,7 +905,7 @@ export function evaluateWatchExit(snapshot: WatchSnapshot, options: WatchExitOpt
 		}
 	}
 
-	const actionable = triggers.length > 0;
+	const actionable = triggers.length > 0 || needReRequest.length > 0;
 	const approvalsComplete =
 		(!reviewPolicy.requireHuman || humanApprovedBy !== null)
 		&& botApprovedBy.length === reviewPolicy.requiredBots.length
