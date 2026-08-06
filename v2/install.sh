@@ -85,20 +85,51 @@ if [ -e "$OLD_DEST" ] || [ -L "$OLD_DEST" ]; then
   printf 'removed retired deck-v2 orchestrator extension from %s\n' "$OLD_DEST"
 fi
 
-# Older Deck releases copied one child extension instead of linking an
-# entrypoint. Remove only that fully recognizable Deck-owned layout; leave every
-# unknown or partial extension untouched.
+# Older Deck releases installed one of two recognizable child-extension
+# layouts. Remove a linked layout only when every identifying link points back
+# into this checkout. Remove the earlier copied layout only when its complete
+# file shape and distinctive entrypoint markers match. Unknown or partial
+# extensions are never deleted.
+DECK_REPO_ROOT="$(dirname "$REPO_V2")"
+legacy_helper_file="sub""agents.ts"
+legacy_heading="Sub""agent Tool - Delegate tasks to specialized agents"
 for candidate in "$EXTENSIONS_DIR"/*; do
   [ -d "$candidate" ] || continue
-  case "$(basename "$candidate")" in
-    deck-questions|deck-ship|deck-recall|deck-usage|deck-v2|node_modules|v2) continue ;;
-  esac
+
+  linked_owned=true
+  for relative in \
+    index.ts \
+    lib/spawn.ts \
+    lib/agent-registry.ts \
+    lib/model-registry.ts \
+    agents/worker.md \
+    agents/reviewer.md; do
+    entry="$candidate/$relative"
+    if [ ! -L "$entry" ]; then
+      linked_owned=false
+      break
+    fi
+    target="$(readlink "$entry")"
+    case "$target" in
+      "$DECK_REPO_ROOT"/*) ;;
+      *) linked_owned=false; break ;;
+    esac
+  done
+
+  copied_owned=false
   if [ -f "$candidate/index.ts" ] &&
-    [ -f "$candidate/lib/spawn.ts" ] &&
-    [ -f "$candidate/lib/agent-registry.ts" ] &&
-    [ -f "$candidate/lib/model-registry.ts" ] &&
-    [ -f "$candidate/agents/worker.md" ] &&
-    [ -f "$candidate/agents/reviewer.md" ]; then
+    [ -f "$candidate/agents.ts" ] &&
+    [ -f "$candidate/$legacy_helper_file" ] &&
+    [ -f "$candidate/watchdog.ts" ] &&
+    [ -f "$candidate/activity.ts" ] &&
+    grep -Fq "$legacy_heading" "$candidate/index.ts" &&
+    grep -Fq 'from "./agents.ts"' "$candidate/index.ts" &&
+    grep -Fq "from \"./$legacy_helper_file\"" "$candidate/index.ts" &&
+    grep -Fq 'from "./watchdog.ts"' "$candidate/index.ts"; then
+    copied_owned=true
+  fi
+
+  if [ "$linked_owned" = true ] || [ "$copied_owned" = true ]; then
     rm -rf "$candidate"
     printf 'removed retired Deck child extension from %s\n' "$candidate"
   fi

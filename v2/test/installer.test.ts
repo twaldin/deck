@@ -107,10 +107,9 @@ describe("installer layout", () => {
 		expect(fs.existsSync(retired)).toBe(false);
 	});
 
-	test("removes the fully recognizable retired Deck child extension", () => {
+	test("removes a linked retired Deck child extension owned by this checkout", () => {
 		const retired = extensionDir("retired-child");
-		fs.mkdirSync(path.join(retired, "lib"), { recursive: true });
-		fs.mkdirSync(path.join(retired, "agents"), { recursive: true });
+		const retiredSource = path.join(REPO_V2, "retired-child-source");
 		for (const file of [
 			"index.ts",
 			"lib/spawn.ts",
@@ -119,17 +118,47 @@ describe("installer layout", () => {
 			"agents/worker.md",
 			"agents/reviewer.md",
 		]) {
+			const entry = path.join(retired, file);
+			fs.mkdirSync(path.dirname(entry), { recursive: true });
+			fs.symlinkSync(path.join(retiredSource, file), entry);
+		}
+		install();
+		expect(fs.existsSync(retired)).toBe(false);
+	});
+
+	test("removes the distinctive copied child extension from earlier Deck releases", () => {
+		const retired = extensionDir("retired-copy");
+		fs.mkdirSync(retired, { recursive: true });
+		fs.writeFileSync(
+			path.join(retired, "index.ts"),
+			[
+				" * Sub" + "agent Tool - Delegate tasks to specialized agents",
+				'import { discoverAgents } from "./agents.ts";',
+				"import { structuredError } from \"./sub" + "agents.ts\";",
+				'import { startWatchdog } from "./watchdog.ts";',
+			].join("\n"),
+		);
+		for (const file of ["agents.ts", "sub" + "agents.ts", "watchdog.ts", "activity.ts"]) {
 			fs.writeFileSync(path.join(retired, file), "retired Deck fixture\n");
 		}
 		install();
 		expect(fs.existsSync(retired)).toBe(false);
 	});
 
-	test("preserves an unowned extension with only a partial retired layout", () => {
+	test("preserves an unowned extension with a complete similar layout", () => {
 		const unowned = extensionDir("private-child");
-		fs.mkdirSync(path.join(unowned, "lib"), { recursive: true });
-		fs.writeFileSync(path.join(unowned, "index.ts"), "private extension\n");
-		fs.writeFileSync(path.join(unowned, "lib", "spawn.ts"), "private helper\n");
+		for (const file of [
+			"index.ts",
+			"lib/spawn.ts",
+			"lib/agent-registry.ts",
+			"lib/model-registry.ts",
+			"agents/worker.md",
+			"agents/reviewer.md",
+		]) {
+			const entry = path.join(unowned, file);
+			fs.mkdirSync(path.dirname(entry), { recursive: true });
+			fs.writeFileSync(entry, "private extension\n");
+		}
 		install();
 		expect(fs.readFileSync(path.join(unowned, "index.ts"), "utf8")).toBe("private extension\n");
 	});
