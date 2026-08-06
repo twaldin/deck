@@ -121,6 +121,24 @@ export function existingPrFromFlag(value: string | boolean | undefined): number 
 	return prNumber;
 }
 
+/** `reviewer=claude-fable-5,watcher=gpt-5.6-luna` -> per-run seat assignment. */
+export function parseModelSlots(value: string): Record<string, string> {
+	const slots: Record<string, string> = {};
+	for (const pair of value.split(",")) {
+		const trimmed = pair.trim();
+		if (trimmed === "") continue;
+		const eq = trimmed.indexOf("=");
+		if (eq <= 0) throw new Error(`--models needs slot=model pairs, got "${trimmed}"`);
+		const slot = trimmed.slice(0, eq).trim();
+		const model = trimmed.slice(eq + 1).trim();
+		if (slot === "" || model === "") throw new Error(`--models needs slot=model pairs, got "${trimmed}"`);
+		// Accept a bare canonical id; the deck provider is the only provider.
+		slots[slot] = model.includes("/") ? model : `deck/${model}`;
+	}
+	if (Object.keys(slots).length === 0) throw new Error("--models needs at least one slot=model pair");
+	return slots;
+}
+
 export async function runCli(argv: string[]): Promise<number> {
 	const args = parse(argv);
 	const command = args._[0];
@@ -142,7 +160,7 @@ export async function runCli(argv: string[]): Promise<number> {
 
 	try {
 		if (command === "ship") {
-			const known = ["profile", "worktree", "branch", "title", "summary", "accept", "base", "break-signal", "kill-switch", "blast-radius", "reviewers", "deploy-evidence", "run-id", "dry-run", "skip-reviewer-request", "existing-pr"];
+			const known = ["profile", "worktree", "branch", "title", "summary", "accept", "base", "break-signal", "kill-switch", "blast-radius", "reviewers", "deploy-evidence", "run-id", "dry-run", "skip-reviewer-request", "existing-pr", "models"];
 			const unknown = Object.keys(args.flags).filter((flag) => !known.includes(flag) && flag !== "help");
 			if (unknown.length > 0) throw new Error(`unknown flag(s) for ship: ${unknown.map((flag) => `--${flag}`).join(", ")}`);
 		}
@@ -200,6 +218,10 @@ export async function runCli(argv: string[]): Promise<number> {
 					...(args.flags["dry-run"] === true ? { dryRun: true } : {}),
 					...(args.flags["skip-reviewer-request"] === true ? { skipReviewerRequest: true } : {}),
 					...(existingPr === undefined ? {} : { existingPr }),
+					// `--models reviewer=claude-fable-5,watcher=gpt-5.6-luna`: the
+					// orchestrator picks the seat for this run; the profile only
+					// supplies defaults.
+					...(str(args.flags, "models") === undefined ? {} : { models: parseModelSlots(need(args.flags, "models")) }),
 				});
 				process.stdout.write(
 					`ship ${result.runId} started (pid ${result.pid}) — profile ${result.profile} (${result.pipeline})${result.dryRun ? " [DRY RUN]" : ""}\n` +
