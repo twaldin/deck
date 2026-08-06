@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "upstreamRepository": "PrimeIntellect-ai/prime-agent",
+  "base": {
+    "version": "0.7.0",
+    "tag": "v0.7.0",
+    "commit": "be9e2fa0714e7cd1c6bd9bdb1b554d2cc6550387",
+    "artifactUrl": "https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev/releases/v0.7.0/prime-agent-0.7.0.tgz",
+    "artifactSha256": "88b6578518c72cd51a825bc80f28e0fef9a64c67de4a7d6fd7afd7ca1b34da0b",
+    "pristinePackageTreeSha256": "cfc300ec3f9ebea3105b5d2fc2cdd499e13bc810cb1a0f5d5c476ebed909177b"
+  },
+  "patchedArtifact": {
+    "file": "prime-agent-0.7.0-deck-patched.tgz",
+    "sha256": "aeb924d0636438b0ff66a4ea9ceb09e5060e187ef7d5b18ff41ff89631a1bf94",
+    "packageTreeSha256": "529246c60f49103d9e386e124c75fff3aaa58658d2395e924d44b0314f365186",
+    "cliSha256": "f05c4c220517ec401ae00a40287bb3fd61ed27442ee6d8a13a8fc23fd417e975"
+  },
+  "patches": [
+    {
+      "name": "rlm-child-compaction",
+      "file": "rlm-child-compaction.patch",
+      "sha256": "ad1ed943dde645a410e19e1395eda6325df7f3f9c2fca5c90af7197d853f60af",
+      "fixes": "Waits for a compacted RLM child to resume before declaring its terminal result.",
+      "upstreamPrNumber": 677,
+      "upstreamPrUrl": "https://github.com/PrimeIntellect-ai/prime-agent/pull/677",
+      "upstreamBranch": "fix/rlm-child-compaction-terminal-notice",
+      "sourceCommit": "de041d0e7638a797027860e6da58159862708a28",
+      "baseVersion": "0.7.0",
+      "status": "upstream-open"
+    },
+    {
+      "name": "preserve-live-workers",
+      "file": "preserve-live-workers.patch",
+      "sha256": "ed8829c02b8daae3683b6b2b076807b8e3cef62621eb7c2753203ba4d212374d",
+      "fixes": "Keeps a live daemon worker during recovery instead of replacing it while its state is still loading.",
+      "upstreamPrNumber": 675,
+      "upstreamPrUrl": "https://github.com/PrimeIntellect-ai/prime-agent/pull/675",
+      "upstreamBranch": "fix/preserve-live-workers-during-recovery",
+      "sourceCommit": "03721182018ea62f71298ff5b7525b472eb55c44",
+      "baseVersion": "0.7.0",
+      "status": "upstream-open"
+    },
+    {
+      "name": "herdr-remote-clipboard-wip",
+      "file": "herdr-remote-clipboard-wip.patch",
+      "sha256": "8a5d71846a756674589560e4b05796d735d6120e67302f592a7add289473a3a0",
+      "fixes": "Routes remote clipboard writes through Herdr instead of the local clipboard bridge.",
+      "upstreamPrNumber": null,
+      "upstreamPrUrl": null,
+      "upstreamBranch": "fix/herdr-remote-clipboard",
+      "sourceCommit": "fcd4a446d69405cf76801374ac2f6b6d26b0ef2c",
+      "baseVersion": "0.7.0",
+      "status": "local-only"
+    }
+  ]
+}

@@ -1,6 +1,6 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createReadStream, type Dirent } from "node:fs";
-import { createConnection } from "node:net";
+import { createConnection, type Socket } from "node:net";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -8,19 +8,12 @@ import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline";
 
 import type { AgentLike } from "smithers-orchestrator";
+import primeDeckProfile from "../../../../ops/prime-deck-profile.json" with { type: "json" };
 
 import { DECK_AGENT_CATALOG, DECK_PROVIDER } from "../models.ts";
 
 export const PRIME_AGENT_VERSION = "0.7.0";
-export const PRIME_AGENT_BINARY = path.join(
-	os.homedir(),
-	".nvm",
-	"versions",
-	"node",
-	"v24.8.0",
-	"bin",
-	"prime-agent",
-);
+export const PRIME_AGENT_BINARY = "prime-agent";
 export const PRIME_SEAT_IDLE_TIMEOUT_MS = 5 * 60_000;
 export const PRIME_SEAT_CAPABILITY_PROFILES = {
 	"workflow-seat": {
@@ -42,7 +35,8 @@ export const PRIME_WORKFLOW_SEAT_TOOLS = PRIME_SEAT_CAPABILITY_PROFILES["workflo
 const DEFAULT_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 const DEFAULT_TERMINATION_GRACE_MS = 2_000;
 const VERSION_TIMEOUT_MS = 10_000;
-const DAEMON_SHUTDOWN_TIMEOUT_MS = 10_000;
+const SHARED_DAEMON_STARTUP_TIMEOUT_MS = 10_000;
+const DEFAULT_HERDR_WORKSPACE_LABEL = "deck-fleet";
 const SAFE_ENV_KEYS: Record<string, true> = {
 	PATH: true,
 	HOME: true,
@@ -65,11 +59,9 @@ const SAFE_ENV_KEYS: Record<string, true> = {
 	GIT_COMMITTER_NAME: true,
 	GIT_COMMITTER_EMAIL: true,
 	DECK_PI_MAX_TOKENS: true,
-	HERDR_ENV: true,
-	HERDR_PANE_ID: true,
-	HERDR_SOCKET_PATH: true,
-	HERDR_TAB_ID: true,
-	HERDR_WORKSPACE_ID: true,
+	DECK_GATEWAY_ORIGIN: true,
+	DECK_PRIME_DAEMON_SOCKET: true,
+	// Herdr pane identity is injected only after this adapter creates a seat.
 	HERDR_PI_IDLE_DEBOUNCE_MS: true,
 	HERDR_PI_RETRY_GRACE_MS: true,
 };
@@ -83,7 +75,6 @@ const TASK_CONTEXT_KEYS = [
 export type PrimeSeatFailureCode =
 	| "PRIME_ABORTED"
 	| "PRIME_CHILD_MODEL_INVALID"
-	| "PRIME_DAEMON_TEARDOWN_FAILED"
 	| "PRIME_MALFORMED_YIELD"
 	| "PRIME_HERDR_ATTACH_FAILED"
 	| "PRIME_BROKER_AUTH_FAILED"
@@ -120,8 +111,10 @@ export type PrimeSeatRunRecord = {
 	requestedModel: string;
 	rootModel: PrimeModelProvenance;
 	herdr: {
-		paneId: string;
+		attached: boolean;
+		paneId: string | null;
 		label: string;
+		warning?: string;
 	};
 	childModels: PrimeModelProvenance[];
 	exitStatus: PrimeSeatExitStatus;
@@ -161,6 +154,14 @@ export type PrimeSeatAgentOptions = {
 	cwd: string;
 	/** Effort prefix in the Herdr pane label, e.g. "lindy#27140". */
 	effortLabel?: string;
+	/** Explicit Herdr API socket. Defaults to the active/default Herdr socket. */
+	herdrSocketPath?: string;
+	/** Existing Herdr workspace ID. Defaults to the unique workspace label below. */
+	herdrWorkspaceId?: string;
+	/** Workspace to reuse or create when no ID is configured. */
+	herdrWorkspaceLabel?: string;
+	/** Fail the seat when Herdr visibility cannot be established or released. */
+	herdrStrict?: boolean;
 	capabilityProfile?: PrimeSeatCapabilityProfile;
 	tools?: readonly string[];
 	/** Model-broker credential only; never a GitHub/publisher credential. */
@@ -194,12 +195,39 @@ type TranscriptAttestation = {
 
 type HerdrSeatLease = {
 	socketPath: string;
-	parentPaneId: string;
 	paneId: string;
-	tabId?: string;
-	workspaceId?: string;
+	tabId: string;
+	workspaceId: string;
 	label: string;
 };
+
+export type DeckPrimeProfilePaths = {
+	deckHome: string;
+	agentDir: string;
+	sessionDir: string;
+	daemonSocket: string;
+};
+
+/** Canonical shared profile used by the conversation UI and every Deck seat. */
+export function resolveDeckPrimeProfilePaths(
+	home = os.homedir(),
+	daemonSocketOverride?: string,
+): DeckPrimeProfilePaths {
+	const deckHome = path.resolve(home, ".deck");
+	if (daemonSocketOverride === "") throw new Error("DECK_PRIME_DAEMON_SOCKET must not be empty");
+	const daemonSocket = daemonSocketOverride === undefined
+		? path.resolve(deckHome, primeDeckProfile.daemonSocketRelative)
+		: path.resolve(daemonSocketOverride);
+	if (daemonSocketOverride === undefined && !daemonSocket.startsWith(`${deckHome}${path.sep}`)) {
+		throw new Error(`Invalid Deck Prime daemon socket path: ${primeDeckProfile.daemonSocketRelative}`);
+	}
+	return {
+		deckHome,
+		agentDir: path.join(deckHome, ".prime", "agent"),
+		sessionDir: path.join(deckHome, ".prime", "sessions"),
+		daemonSocket,
+	};
+}
 type ForcedFailure = {
 	code: PrimeSeatFailureCode;
 	message: string;
@@ -314,6 +342,82 @@ async function herdrRequest(
 	});
 	return promise;
 }
+
+let herdrAttachQueue: Promise<void> = Promise.resolve();
+
+async function withHerdrAttachLock<T>(attach: () => Promise<T>): Promise<T> {
+	const previous = herdrAttachQueue;
+	let release!: () => void;
+	herdrAttachQueue = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	await previous;
+	try {
+		return await attach();
+	} finally {
+		release();
+	}
+}
+
+const sharedDaemonStarts = new Map<string, Promise<void>>();
+
+async function waitForPrimeDaemon(socketPath: string, timeoutMs: number): Promise<boolean> {
+	return new Promise<boolean>((resolve) => {
+		let settled = false;
+		let activeSocket: Socket | undefined;
+		let retryTimer: ReturnType<typeof setTimeout> | undefined;
+		const finish = (ready: boolean) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(deadline);
+			clearTimeout(retryTimer);
+			activeSocket?.destroy();
+			resolve(ready);
+		};
+		const retry = () => {
+			if (settled || retryTimer !== undefined) return;
+			retryTimer = setTimeout(() => {
+				retryTimer = undefined;
+				probe();
+			}, 20);
+		};
+		const probe = () => {
+			if (settled) return;
+			const socket = createConnection(socketPath);
+			activeSocket = socket;
+			let input = "";
+			socket.once("error", retry);
+			socket.once("close", retry);
+			socket.on("data", (chunk: Buffer) => {
+				input += chunk.toString("utf8");
+				const newline = input.indexOf("\n");
+				if (newline < 0) return;
+				try {
+					const hello = asRecord(JSON.parse(input.slice(0, newline)));
+					const protocol = asRecord(hello?.protocol);
+					if (hello?.type === "daemon_hello"
+						&& protocol?.name === "prime-agent.daemon"
+						&& protocol.version === 7) {
+						finish(true);
+						return;
+					}
+				} catch {
+					// A stale or unrelated socket is not a compatible Deck daemon.
+				}
+				socket.destroy();
+				retry();
+			});
+		};
+		const deadline = setTimeout(() => finish(false), timeoutMs);
+		probe();
+	});
+}
+
+function defaultHerdrSocketPath(): string {
+	const configHome = process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), ".config");
+	return path.join(configHome, "herdr", "herdr.sock");
+}
+
 
 function herdrLabelSegment(value: string): string {
 	return value.replace(/\s+/g, " ").replaceAll(" · ", " / ").trim().slice(0, 80) || "unknown";
@@ -610,8 +714,8 @@ export class PrimeSeatAgent implements AgentLike {
 	readonly tools = {};
 	readonly model: string;
 	readonly opts: PrimeSeatAgentOptions;
+	private readonly binary: string;
 	private preflightPromise: Promise<void> | undefined;
-
 	constructor(opts: PrimeSeatAgentOptions) {
 		if (opts.provider !== DECK_PROVIDER) {
 			throw new PrimeSeatError({
@@ -623,16 +727,18 @@ export class PrimeSeatAgent implements AgentLike {
 				stderr: "",
 			});
 		}
-		if (opts.binary !== undefined && !path.isAbsolute(opts.binary)) {
+		const configuredBinary = opts.binary ?? process.env.DECK_PRIME_AGENT_BINARY;
+		if (configuredBinary !== undefined && !path.isAbsolute(configuredBinary)) {
 			throw new PrimeSeatError({
 				status: "failed",
 				code: "PRIME_VERSION_MISMATCH",
-				message: "Prime seat binary overrides must be absolute paths",
+				message: "Prime seat binary overrides must be absolute paths; set DECK_PRIME_AGENT_BINARY to the prime-agent executable",
 				exitStatus: { code: null, signal: null },
 				wallClockMs: 0,
 				stderr: "",
 			});
 		}
+		this.binary = configuredBinary ?? PRIME_AGENT_BINARY;
 		if (!DECK_AGENT_CATALOG.includes(opts.model as never)) {
 			throw new PrimeSeatError({
 				status: "failed",
@@ -683,7 +789,7 @@ export class PrimeSeatAgent implements AgentLike {
 
 	private async verifyVersion(): Promise<void> {
 		const startedAt = Date.now();
-		const binary = this.opts.binary ?? PRIME_AGENT_BINARY;
+		const binary = this.binary;
 		const env = buildSeatEnvironment(process.env, this.opts.env);
 		const result = await new Promise<{ stdout: string; stderr: string; code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
 			const child = spawn(binary, ["--version"], {
@@ -707,7 +813,9 @@ export class PrimeSeatAgent implements AgentLike {
 			throw new PrimeSeatError({
 				status: "failed",
 				code: "PRIME_SPAWN_FAILED",
-				message: `Cannot execute ${binary} from PATH`,
+				message: binary === PRIME_AGENT_BINARY
+					? `Cannot execute ${PRIME_AGENT_BINARY} from PATH; install prime-agent ${PRIME_AGENT_VERSION} or set DECK_PRIME_AGENT_BINARY to its absolute path`
+					: `Cannot execute ${binary}; install prime-agent ${PRIME_AGENT_VERSION} or set DECK_PRIME_AGENT_BINARY to its absolute path`,
 				exitStatus: { code: null, signal: null },
 				wallClockMs: Date.now() - startedAt,
 				stderr: "",
@@ -749,15 +857,19 @@ export class PrimeSeatAgent implements AgentLike {
 			} as never)).catch(() => undefined);
 			throw failure;
 		}
+		const sourceEnv = buildSeatEnvironment(process.env, this.opts.env);
+		const sharedProfile = resolveDeckPrimeProfilePaths(
+			sourceEnv.HOME ?? os.homedir(),
+			sourceEnv.DECK_PRIME_DAEMON_SOCKET,
+		);
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "deck-prime-seat-"));
-		const agentDir = path.join(root, "agent");
 		const sessionDir = path.join(root, "sessions");
 		const seatHome = path.join(root, "home");
-		const daemonSocket = path.join(root, "daemon.sock");
-		await fs.mkdir(agentDir, { recursive: true, mode: 0o700 });
 		await fs.mkdir(sessionDir, { recursive: true, mode: 0o700 });
 		await fs.mkdir(seatHome, { recursive: true, mode: 0o700 });
-		const sourceEnv = buildSeatEnvironment(process.env, this.opts.env);
+		await fs.mkdir(sharedProfile.agentDir, { recursive: true, mode: 0o700 });
+		await fs.mkdir(sharedProfile.sessionDir, { recursive: true, mode: 0o700 });
+		await fs.mkdir(path.dirname(sharedProfile.daemonSocket), { recursive: true, mode: 0o700 });
 		const gitName = (sourceEnv.GIT_AUTHOR_NAME ?? sourceEnv.USER ?? "deck-seat").replace(/[\r\n]/g, " ");
 		const gitEmail = (sourceEnv.GIT_AUTHOR_EMAIL ?? "deck-seat@localhost").replace(/[\r\n]/g, " ");
 		await fs.writeFile(
@@ -769,39 +881,55 @@ export class PrimeSeatAgent implements AgentLike {
 		const stage = herdrLabelSegment(String(options.taskContext?.nodeId ?? "seat"));
 		const effort = herdrLabelSegment(this.opts.effortLabel ?? path.basename(this.opts.cwd));
 		const herdrLabel = `${effort} · ${stage} · ${runId}`;
-		let herdr: HerdrSeatLease;
+		let herdr: HerdrSeatLease | undefined;
+		let herdrWarning: string | undefined;
+		const herdrStrict = this.opts.herdrStrict ?? process.env.DECK_HERDR_STRICT === "1";
 		try {
 			herdr = await this.attachHerdrSeat(herdrLabel);
 		} catch (cause) {
-			await fs.rm(root, { recursive: true, force: true });
-			throw new PrimeSeatError({
-				status: "failed",
-				code: "PRIME_HERDR_ATTACH_FAILED",
-				message: String(cause),
-				exitStatus: { code: null, signal: null },
-				wallClockMs: Date.now() - startedAt,
-				stderr: "",
-			}, { cause });
+			if (herdrStrict) {
+				await fs.rm(root, { recursive: true, force: true });
+				const failure = new PrimeSeatError({
+					status: "failed",
+					code: "PRIME_HERDR_ATTACH_FAILED",
+					message: String(cause),
+					exitStatus: { code: null, signal: null },
+					wallClockMs: Date.now() - startedAt,
+					stderr: "",
+				}, { cause });
+				await Promise.resolve(options.onEvent?.({
+					type: "completed",
+					engine: this.cliEngine,
+					ok: false,
+					error: JSON.stringify(failure.result),
+				} as never)).catch(() => undefined);
+				throw failure;
+			}
+			herdrWarning = `Prime seat continuing without Herdr board visibility: ${cause instanceof Error ? cause.message : String(cause)}`;
+			console.warn(herdrWarning);
+			options.onStderr?.(`${herdrWarning}\n`);
 		}
 		const env = withTaskContext({
 			...sourceEnv,
 			HOME: seatHome,
 			GIT_TERMINAL_PROMPT: "0",
 			GCM_INTERACTIVE: "never",
-			PRIME_AGENT_CODING_AGENT_DIR: agentDir,
+			PRIME_AGENT_CODING_AGENT_DIR: sharedProfile.agentDir,
 			PRIME_AGENT_SESSION_DIR: sessionDir,
 			PI_SKIP_VERSION_CHECK: "1",
 			RLM_DEPTH: "0",
 			RLM_MAX_DEPTH: "1",
 			...(brokerApiKey === undefined ? {} : { DECK_GATEWAY_API_KEY: brokerApiKey }),
-			HERDR_ENV: "1",
-			HERDR_PANE_ID: herdr.paneId,
-			HERDR_SOCKET_PATH: herdr.socketPath,
-			...(herdr.tabId === undefined ? {} : { HERDR_TAB_ID: herdr.tabId }),
-			...(herdr.workspaceId === undefined ? {} : { HERDR_WORKSPACE_ID: herdr.workspaceId }),
+			...(herdr === undefined ? {} : {
+				HERDR_ENV: "1",
+				HERDR_PANE_ID: herdr.paneId,
+				HERDR_SOCKET_PATH: herdr.socketPath,
+				HERDR_TAB_ID: herdr.tabId,
+				HERDR_WORKSPACE_ID: herdr.workspaceId,
+			}),
 		}, options.taskContext);
 		const extensions = this.opts.extensions ?? [defaultProviderExtension()];
-		const binary = this.opts.binary ?? PRIME_AGENT_BINARY;
+		const binary = this.binary;
 		const args = [
 			"--mode", "rpc",
 			"--cwd", this.opts.cwd,
@@ -809,7 +937,7 @@ export class PrimeSeatAgent implements AgentLike {
 			"--model", this.opts.model,
 			"--thinking", this.opts.thinking ?? "medium",
 			"--session-dir", sessionDir,
-			"--daemon-socket", daemonSocket,
+			"--daemon-socket", sharedProfile.daemonSocket,
 			"--tools", (this.opts.tools ?? PRIME_WORKFLOW_SEAT_TOOLS).join(","),
 			"--no-skills",
 			"--no-prompt-templates",
@@ -818,6 +946,17 @@ export class PrimeSeatAgent implements AgentLike {
 		for (const extension of extensions) args.push("--extension", extension);
 		const daemonArgs = [...args];
 		daemonArgs[1] = "daemon";
+		daemonArgs[daemonArgs.indexOf("--session-dir") + 1] = sharedProfile.sessionDir;
+		const daemonEnv: Record<string, string> = {
+			...env,
+			HOME: sourceEnv.HOME ?? os.homedir(),
+			PRIME_AGENT_SESSION_DIR: sharedProfile.sessionDir,
+		};
+		delete daemonEnv.HERDR_ENV;
+		delete daemonEnv.HERDR_PANE_ID;
+		delete daemonEnv.HERDR_SOCKET_PATH;
+		delete daemonEnv.HERDR_TAB_ID;
+		delete daemonEnv.HERDR_WORKSPACE_ID;
 		const prompt = typeof options.prompt === "string" ? options.prompt : extractText(options.prompt ?? options.messages);
 		const timeoutMs = typeof options.timeout === "number" && Number.isFinite(options.timeout)
 			? Math.min(options.timeout, this.opts.timeoutMs)
@@ -841,7 +980,6 @@ export class PrimeSeatAgent implements AgentLike {
 		let stateAfterRequested = false;
 		let childExited = false;
 		let child: ChildProcessWithoutNullStreams | undefined;
-		let daemon: ChildProcessWithoutNullStreams | undefined;
 		const emit = (event: Record<string, unknown>) => {
 			if (options.onEvent !== undefined) void Promise.resolve(options.onEvent(event as never)).catch(() => undefined);
 		};
@@ -870,15 +1008,12 @@ export class PrimeSeatAgent implements AgentLike {
 		let runError: unknown;
 		let runRecord: PrimeSeatRunRecord | undefined;
 		try {
-			daemon = await this.launchIsolatedDaemon(
+			await this.ensureSharedDaemon(
 				binary,
 				daemonArgs,
-				env,
-				Math.min(timeoutMs, DAEMON_SHUTDOWN_TIMEOUT_MS),
-				(text) => {
-					stderrTail = appendTail(stderrTail, text);
-					options.onStderr?.(text);
-				},
+				daemonEnv,
+				sharedProfile.daemonSocket,
+				Math.min(timeoutMs, SHARED_DAEMON_STARTUP_TIMEOUT_MS),
 			);
 			const remainingTtlMs = timeoutMs - (Date.now() - startedAt);
 			if (remainingTtlMs <= 0) {
@@ -1070,6 +1205,21 @@ export class PrimeSeatAgent implements AgentLike {
 				});
 			});
 			await closed;
+			if (forcedFailure !== undefined && rpcSessionId !== undefined) {
+				try {
+					await this.stopSharedSessionTree(
+						binary,
+						sharedProfile.daemonSocket,
+						daemonEnv,
+						rpcSessionId,
+						Math.max(terminationGraceMs, 1_000),
+					);
+				} catch (cause) {
+					const warning = `Prime shared daemon could not confirm cleanup for seat ${rpcSessionId}; owner-loss recovery remains active: ${cause instanceof Error ? cause.message : String(cause)}`;
+					console.warn(warning);
+					options.onStderr?.(`${warning}\n`);
+				}
+			}
 			if (forcedFailure !== undefined) {
 				throw new PrimeSeatError({
 					status: forcedFailure.status ?? "failed",
@@ -1148,8 +1298,10 @@ export class PrimeSeatAgent implements AgentLike {
 				requestedModel: `${this.opts.provider}/${this.opts.model}`,
 				rootModel: attestation.rootModel,
 				herdr: {
-					paneId: herdr.paneId,
-					label: herdr.label,
+					attached: herdr !== undefined,
+					paneId: herdr?.paneId ?? null,
+					label: herdrLabel,
+					...(herdrWarning === undefined ? {} : { warning: herdrWarning }),
 				},
 				childModels: attestation.childModels,
 				exitStatus,
@@ -1175,14 +1327,6 @@ export class PrimeSeatAgent implements AgentLike {
 				},
 				ok: true,
 			});
-			emit({
-				type: "completed",
-				engine: this.cliEngine,
-				ok: true,
-				answer: finalAnswer.trim(),
-				resume: runRecord.rootModel.sessionId,
-				usage: runRecord.tokens,
-			});
 			return buildGenerateResult(finalAnswer.trim(), output, this.opts.model, runRecord);
 		} catch (error) {
 			runError = error;
@@ -1204,22 +1348,47 @@ export class PrimeSeatAgent implements AgentLike {
 			});
 			throw primeError;
 		} finally {
-			try {
-				await this.shutdownIsolatedDaemon(daemon, daemonSocket, terminationGraceMs);
-				await herdrRequest(herdr.socketPath, "pane.close", { pane_id: herdr.paneId });
-			} catch (cause) {
-				if (runError === undefined && runRecord !== undefined) {
-					throw new PrimeSeatError({
-						status: "failed",
-						code: "PRIME_DAEMON_TEARDOWN_FAILED",
-						message: String(cause),
-						exitStatus,
-						wallClockMs: Date.now() - startedAt,
-						stderr: stderrTail.trim(),
-					}, { cause });
+			let herdrTeardownCause: unknown;
+			if (herdr !== undefined) {
+				try {
+					await herdrRequest(herdr.socketPath, "pane.close", { pane_id: herdr.paneId });
+				} catch (cause) {
+					if (herdrStrict) {
+						herdrTeardownCause = cause;
+					} else {
+						const warning = `Prime seat continuing without Herdr board visibility: ${cause instanceof Error ? cause.message : String(cause)}`;
+						console.warn(warning);
+						options.onStderr?.(`${warning}\n`);
+					}
 				}
-			} finally {
-				await fs.rm(root, { recursive: true, force: true });
+			}
+			await fs.rm(root, { recursive: true, force: true });
+			if (herdrTeardownCause !== undefined && runError === undefined && runRecord !== undefined) {
+				const failure = new PrimeSeatError({
+					status: "failed",
+					code: "PRIME_HERDR_ATTACH_FAILED",
+					message: String(herdrTeardownCause),
+					exitStatus,
+					wallClockMs: Date.now() - startedAt,
+					stderr: stderrTail.trim(),
+				}, { cause: herdrTeardownCause });
+				emit({
+					type: "completed",
+					engine: this.cliEngine,
+					ok: false,
+					error: JSON.stringify(failure.result),
+				});
+				throw failure;
+			}
+			if (runError === undefined && runRecord !== undefined) {
+				emit({
+					type: "completed",
+					engine: this.cliEngine,
+					ok: true,
+					answer: finalAnswer.trim(),
+					resume: runRecord.rootModel.sessionId,
+					usage: runRecord.tokens,
+				});
 			}
 		}
 	}
@@ -1229,7 +1398,6 @@ export class PrimeSeatAgent implements AgentLike {
 			if (this.opts.brokerApiKey.trim() === "") throw new Error("Deck broker token is empty");
 			return this.opts.brokerApiKey;
 		}
-		if (this.opts.binary !== undefined) return undefined;
 		const tokenPath = process.env.DECK_GATEWAY_TOKEN_FILE
 			?? path.join(os.homedir(), ".deck", "broker", "gateway.token");
 		const token = (await fs.readFile(tokenPath, "utf8")).trim();
@@ -1238,160 +1406,176 @@ export class PrimeSeatAgent implements AgentLike {
 	}
 
 	private async attachHerdrSeat(label: string): Promise<HerdrSeatLease> {
-		const socketPath = process.env.HERDR_SOCKET_PATH;
-		const parentPaneId = process.env.HERDR_PANE_ID;
-		if (socketPath === undefined || parentPaneId === undefined || process.env.HERDR_ENV !== "1") {
-			throw new Error("Prime seats require an active Herdr socket and parent pane");
-		}
-		const result = await herdrRequest(socketPath, "pane.split", {
-			target_pane_id: parentPaneId,
-			direction: "down",
-			ratio: 0.2,
-			cwd: this.opts.cwd,
-			focus: false,
-			env: {},
+		return withHerdrAttachLock(async () => {
+			const configuredSocketPath = this.opts.herdrSocketPath
+				?? process.env.DECK_HERDR_SOCKET_PATH;
+			const socketPath = configuredSocketPath
+				?? process.env.HERDR_SOCKET_PATH
+				?? defaultHerdrSocketPath();
+			const workspaceIdHint = this.opts.herdrWorkspaceId
+				?? process.env.DECK_HERDR_WORKSPACE_ID
+				?? (configuredSocketPath === undefined ? process.env.HERDR_WORKSPACE_ID : undefined);
+			const workspaceLabel = this.opts.herdrWorkspaceLabel
+				?? process.env.DECK_HERDR_WORKSPACE_LABEL
+				?? DEFAULT_HERDR_WORKSPACE_LABEL;
+			let workspaceId: string;
+			let pane: Record<string, unknown> | null = null;
+			let tab: Record<string, unknown> | null = null;
+
+			if (workspaceIdHint !== undefined) {
+				const found = await herdrRequest(socketPath, "workspace.get", { workspace_id: workspaceIdHint });
+				const workspace = asRecord(found.workspace);
+				if (typeof workspace?.workspace_id !== "string") {
+					throw new Error(`Herdr workspace ${workspaceIdHint} is unavailable`);
+				}
+				workspaceId = workspace.workspace_id;
+			} else {
+				const listed = await herdrRequest(socketPath, "workspace.list", {});
+				const workspaces = Array.isArray(listed.workspaces)
+					? listed.workspaces.map(asRecord).filter((workspace): workspace is Record<string, unknown> => workspace !== null)
+					: [];
+				const matching = workspaces.filter((workspace) => workspace.label === workspaceLabel);
+				if (matching.length > 1) {
+					throw new Error(`Herdr workspace label ${workspaceLabel} is ambiguous`);
+				}
+				const existingId = matching[0]?.workspace_id;
+				if (typeof existingId === "string") {
+					workspaceId = existingId;
+				} else {
+					const created = await herdrRequest(socketPath, "workspace.create", {
+						label: workspaceLabel,
+						cwd: this.opts.cwd,
+						focus: false,
+						env: {},
+					});
+					const workspace = asRecord(created.workspace);
+					if (typeof workspace?.workspace_id !== "string") {
+						throw new Error("Herdr workspace.create returned no workspace id");
+					}
+					workspaceId = workspace.workspace_id;
+					pane = asRecord(created.root_pane);
+					tab = asRecord(created.tab);
+				}
+			}
+
+			if (pane === null || tab === null) {
+				const created = await herdrRequest(socketPath, "tab.create", {
+					workspace_id: workspaceId,
+					label,
+					cwd: this.opts.cwd,
+					focus: false,
+					env: {},
+				});
+				pane = asRecord(created.root_pane);
+				tab = asRecord(created.tab);
+			}
+			const paneId = typeof pane?.pane_id === "string" ? pane.pane_id : undefined;
+			const tabId = typeof tab?.tab_id === "string" ? tab.tab_id : undefined;
+			if (paneId === undefined || tabId === undefined) {
+				throw new Error("Herdr top-level pane creation returned no pane or tab id");
+			}
+			try {
+				await herdrRequest(socketPath, "tab.rename", { tab_id: tabId, label });
+				await herdrRequest(socketPath, "pane.rename", { pane_id: paneId, label });
+			} catch (cause) {
+				await herdrRequest(socketPath, "pane.close", { pane_id: paneId }).catch(() => undefined);
+				throw cause;
+			}
+			return { socketPath, paneId, tabId, workspaceId, label };
 		});
-		const pane = asRecord(result.pane);
-		const paneId = typeof pane?.pane_id === "string" ? pane.pane_id : undefined;
-		if (paneId === undefined) throw new Error("Herdr pane.split returned no pane id");
-		try {
-			await herdrRequest(socketPath, "pane.rename", { pane_id: paneId, label });
-		} catch (cause) {
-			await herdrRequest(socketPath, "pane.close", { pane_id: paneId }).catch(() => undefined);
-			throw cause;
-		}
-		return {
-			socketPath,
-			parentPaneId,
-			paneId,
-			label,
-			...(typeof pane?.tab_id === "string" ? { tabId: pane.tab_id } : {}),
-			...(typeof pane?.workspace_id === "string" ? { workspaceId: pane.workspace_id } : {}),
-		};
 	}
 
-	private async launchIsolatedDaemon(
+	private async ensureSharedDaemon(
 		binary: string,
 		args: string[],
 		env: Record<string, string>,
+		socketPath: string,
 		timeoutMs: number,
-		onStderr: (text: string) => void,
-	): Promise<ChildProcessWithoutNullStreams> {
-		const daemon = spawn(binary, args, {
-			cwd: this.opts.cwd,
-			env,
-			detached: process.platform !== "win32",
-			stdio: ["pipe", "pipe", "pipe"],
-		});
-		daemon.stderr.on("data", (chunk: Buffer) => onStderr(chunk.toString("utf8")));
-		const socketPath = args[args.indexOf("--daemon-socket") + 1];
-		await new Promise<void>((resolve, reject) => {
-			let settled = false;
-			const timer = setTimeout(() => {
-				if (settled) return;
-				settled = true;
+	): Promise<void> {
+		if (await waitForPrimeDaemon(socketPath, 100)) return;
+		const activeStart = sharedDaemonStarts.get(socketPath);
+		if (activeStart !== undefined) {
+			await activeStart;
+			return;
+		}
+		// The shared supervisor is a common failure point, but Prime workers own
+		// recovery: a live worker can relaunch the supervisor and rehydrate its
+		// session from JSONL plus the kernel snapshot. This startup path only
+		// ensures the first Deck client has a compatible supervisor to join.
+		const start = (async () => {
+			if (await waitForPrimeDaemon(socketPath, 100)) return;
+			let daemon: ChildProcess;
+			try {
+				daemon = spawn(binary, args, {
+					cwd: this.opts.cwd,
+					env,
+					detached: process.platform !== "win32",
+					stdio: "ignore",
+				});
+			} catch (cause) {
+				throw new Error(`Cannot start shared Deck Prime daemon at ${socketPath}: ${String(cause)}`);
+			}
+			let spawnError: unknown;
+			daemon.once("error", (error) => {
+				spawnError = error;
+			});
+			daemon.unref();
+			if (await waitForPrimeDaemon(socketPath, timeoutMs)) return;
+			if (daemon.exitCode === null && daemon.signalCode === null) {
 				signalProcessTree(daemon.pid, "SIGKILL");
-				reject(new Error(`isolated Prime daemon did not accept connections within ${timeoutMs}ms`));
-			}, timeoutMs);
+			}
+			throw new Error(
+				`Shared Deck Prime daemon did not become ready at ${socketPath}`
+				+ (spawnError === undefined ? "" : `: ${String(spawnError)}`),
+			);
+		})();
+		sharedDaemonStarts.set(socketPath, start);
+		try {
+			await start;
+		} finally {
+			if (sharedDaemonStarts.get(socketPath) === start) sharedDaemonStarts.delete(socketPath);
+		}
+	}
+
+	private async stopSharedSessionTree(
+		binary: string,
+		socketPath: string,
+		env: Record<string, string>,
+		sessionId: string,
+		timeoutMs: number,
+	): Promise<void> {
+		await new Promise<void>((resolve, reject) => {
+			const stop = spawn(binary, [
+				"--daemon-socket", socketPath,
+				"stop", sessionId,
+				"--json",
+			], {
+				cwd: this.opts.cwd,
+				env,
+				detached: process.platform !== "win32",
+				stdio: ["ignore", "pipe", "pipe"],
+			});
+			let stderr = "";
+			let settled = false;
 			const finish = (error?: unknown) => {
 				if (settled) return;
 				settled = true;
 				clearTimeout(timer);
-				daemon.off("error", finish);
-				daemon.off("close", onClose);
 				if (error === undefined) resolve();
 				else reject(error);
 			};
-			const onClose = (code: number | null, signal: NodeJS.Signals | null) => {
-				finish(new Error(`isolated Prime daemon exited during startup (${String(code ?? signal)})`));
-			};
-			const probe = () => {
-				if (settled) return;
-				const socket = createConnection(socketPath);
-				socket.once("connect", () => {
-					socket.destroy();
-					finish();
-				});
-				socket.once("error", () => {
-					socket.destroy();
-					setTimeout(probe, 20);
-				});
-			};
-			daemon.once("error", finish);
-			daemon.once("close", onClose);
-			probe();
-		});
-		return daemon;
-	}
-
-	private async shutdownIsolatedDaemon(
-		daemon: ChildProcessWithoutNullStreams | undefined,
-		daemonSocket: string,
-		terminationGraceMs: number,
-	): Promise<void> {
-		if (daemon === undefined || daemon.exitCode !== null || daemon.signalCode !== null) return;
-		let shutdownAcknowledged = false;
-		try {
-			await fs.access(daemonSocket);
-			shutdownAcknowledged = await new Promise<boolean>((resolve) => {
-				const socket = createConnection(daemonSocket);
-				let buffer = "";
-				const timer = setTimeout(() => {
-					socket.destroy();
-					resolve(false);
-				}, DAEMON_SHUTDOWN_TIMEOUT_MS);
-				socket.once("connect", () => {
-					socket.write(`${JSON.stringify({ id: "deck-seat-shutdown", type: "shutdown", force: true })}\n`);
-				});
-				socket.on("data", (chunk: Buffer) => {
-					buffer += chunk.toString("utf8");
-					let newline = buffer.indexOf("\n");
-					while (newline >= 0) {
-						const line = buffer.slice(0, newline).replace(/\r$/, "");
-						buffer = buffer.slice(newline + 1);
-						try {
-							const response = asRecord(JSON.parse(line));
-							if (response?.id === "deck-seat-shutdown" && response.success === true) {
-								clearTimeout(timer);
-								socket.end();
-								resolve(true);
-								return;
-							}
-						} catch {
-							// Ignore daemon hello and unrelated lifecycle events.
-						}
-						newline = buffer.indexOf("\n");
-					}
-				});
-				socket.once("error", () => {
-					clearTimeout(timer);
-					resolve(false);
-				});
-			});
-		} catch {
-			shutdownAcknowledged = false;
-		}
-		const waitForExit = (timeoutMs: number) => new Promise<boolean>((resolve) => {
-			if (daemon.exitCode !== null || daemon.signalCode !== null) {
-				resolve(true);
-				return;
-			}
 			const timer = setTimeout(() => {
-				daemon.off("close", onClose);
-				resolve(false);
+				signalProcessTree(stop.pid, "SIGKILL");
+				finish(new Error(`Timed out stopping shared Prime session ${sessionId}`));
 			}, timeoutMs);
-			const onClose = () => {
-				clearTimeout(timer);
-				resolve(true);
-			};
-			daemon.once("close", onClose);
+			stop.stderr.on("data", (chunk: Buffer) => {
+				stderr = appendTail(stderr, chunk.toString("utf8"));
+			});
+			stop.once("error", finish);
+			stop.once("close", (code, signal) => {
+				if (code === 0 && signal === null) finish();
+				else finish(new Error(stderr.trim() || `prime-agent stop exited ${String(code ?? signal)}`));
+			});
 		});
-		if (shutdownAcknowledged && await waitForExit(DAEMON_SHUTDOWN_TIMEOUT_MS)) return;
-		signalProcessTree(daemon.pid, "SIGTERM");
-		if (await waitForExit(terminationGraceMs)) return;
-		signalProcessTree(daemon.pid, "SIGKILL");
-		if (!await waitForExit(DAEMON_SHUTDOWN_TIMEOUT_MS)) {
-			throw new Error(`isolated Prime daemon ${String(daemon.pid)} survived SIGKILL`);
-		}
 	}
 }

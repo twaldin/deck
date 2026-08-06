@@ -1,0 +1,280 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: twaldin <timothy@waldin.net>
+Date: Wed, 5 Aug 2026 20:14:38 -0700
+Subject: [PATCH] fix(coding-agent): wait for child compaction continuation
+
+---
+ .../coding-agent/src/core/agent-session.ts    |  42 ++++-
+ .../rlm-child-compaction-terminal.test.ts     | 154 ++++++++++++++++++
+ 2 files changed, 193 insertions(+), 3 deletions(-)
+ create mode 100644 packages/coding-agent/test/suite/regressions/rlm-child-compaction-terminal.test.ts
+
+diff --git a/packages/coding-agent/src/core/agent-session.ts b/packages/coding-agent/src/core/agent-session.ts
+index 1699088f9a70a5194e0fb0cba07646e118889d34..32dd578e7ebe5e6e016a5de5d2cbf84f10a10063 100644
+--- a/packages/coding-agent/src/core/agent-session.ts
++++ b/packages/coding-agent/src/core/agent-session.ts
+@@ -937,6 +937,7 @@ interface RlmChildRun {
+ 	status: RlmChildAgentStatus;
+ 	error?: string;
+ 	abort: () => void;
++	abortCompletion?: Promise<void>;
+ 	publication: AgentMessageDeferred;
+ 	/** Child session, once its runtime exists. Used to cancel nested child runs. */
+ 	session?: AgentSession;
+@@ -963,6 +964,9 @@ const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "hi
+ 
+ /** Cap on the post-compaction kernel namespace probe so a wedged kernel can't stall recovery. */
+ const KERNEL_STATE_LISTING_TIMEOUT_MS = 5000;
++/** Delay before a stopped tool loop resumes after compaction, and the poll interval used to wait it out. */
++const POST_COMPACTION_CONTINUATION_DELAY_MS = 100;
++const RLM_CHILD_ABORT_SETTLE_TIMEOUT_MS = 1000;
+ const RLM_MAX_DEPTH_STATE_CUSTOM_TYPE = "rlm_max_depth_state";
+ 
+ function noopRlmChildAbort(): void {}
+@@ -6438,6 +6442,22 @@ export class AgentSession {
+ 		}
+ 	}
+ 
++	/** Wait through autonomous work scheduled after a spawned task's originating turn. */
++	private async _waitForSpawnedTaskSettled(throwIfCancelled: () => void, cancelled: Promise<void>): Promise<void> {
++		const waitOrCancel = async (operation: Promise<void>) => {
++			await Promise.race([operation, cancelled]);
++			throwIfCancelled();
++		};
++		while (true) {
++			throwIfCancelled();
++			await waitOrCancel(this.waitForIdle());
++			if (!this._postCompactionContinuationScheduled && !this.isCompacting && !this.isRetrying) {
++				return;
++			}
++			await waitOrCancel(sleep(POST_COMPACTION_CONTINUATION_DELAY_MS));
++		}
++	}
++
+ 	getPendingNextTurnMessageSnapshots(): readonly CustomMessage[] {
+ 		const messages = this._pendingNextTurnMessages.map((message) => cloneCustomMessage(message));
+ 		for (const action of this._actionStore.unfinishedActions()) {
+@@ -7282,7 +7302,7 @@ export class AgentSession {
+ 		this._postCompactionContinuationTimer = setTimeout(() => {
+ 			this._postCompactionContinuationTimer = undefined;
+ 			void this._runScheduledPostCompactionContinue();
+-		}, 100);
++		}, POST_COMPACTION_CONTINUATION_DELAY_MS);
+ 	}
+ 
+ 	/** Whether any snapshot of scheduled continuation messages is still session-owned. */
+@@ -9627,6 +9647,10 @@ export class AgentSession {
+ 		let runningToolCount = 0;
+ 		let activity: RlmChildAgentActivity | undefined;
+ 		let childSession: AgentSession | undefined;
++		let resolveRunCancelled: () => void = () => {};
++		const runCancelled = new Promise<void>((resolve) => {
++			resolveRunCancelled = resolve;
++		});
+ 		const run: RlmChildRun = {
+ 			id: childNodeId,
+ 			prompt,
+@@ -9634,7 +9658,7 @@ export class AgentSession {
+ 			sessionDir: childSessionDir,
+ 			status: "queued",
+ 			settled: false,
+-			abort: noopRlmChildAbort,
++			abort: resolveRunCancelled,
+ 			publication: createAgentMessageDeferred(),
+ 		};
+ 		const throwIfCancelled = () => {
+@@ -9671,7 +9695,10 @@ export class AgentSession {
+ 			childSession = child;
+ 			if (this._activeRlmChildRuns.get(run.id) !== run) return;
+ 			run.session = child;
+-			run.abort = () => void child.abort();
++			run.abort = () => {
++				resolveRunCancelled();
++				run.abortCompletion ??= child.abort().catch(() => undefined);
++			};
+ 			run.publication.resolve();
+ 		};
+ 		const subagentOptions: CreateRlmSubagentRuntimeOptions = {
+@@ -9811,6 +9838,13 @@ export class AgentSession {
+ 					customMessage: spawnMessage,
+ 				});
+ 				if (run.error) throw new Error(run.error);
++				// promptAndWait resolves at the originating turn; a threshold/overflow compaction
++				// can stop the loop mid-task and resume autonomously. Wait for that to drain before
++				// judging whether the child finished without replying, so a live child mid-compaction
++				// is not reported as completed.
++				await child._waitForSpawnedTaskSettled(throwIfCancelled, runCancelled);
++				throwIfCancelled();
++				if (run.error) throw new Error(run.error);
+ 				run.status = "done";
+ 				durationMs = Date.now() - startedAt;
+ 				activity = undefined;
+@@ -9841,6 +9875,8 @@ export class AgentSession {
+ 				if (run.status !== "cancelled") {
+ 					run.status = "error";
+ 					run.error = runError.message;
++				} else if (run.abortCompletion) {
++					await Promise.race([run.abortCompletion, sleep(RLM_CHILD_ABORT_SETTLE_TIMEOUT_MS)]);
+ 				}
+ 				durationMs = Date.now() - startedAt;
+ 				activity = undefined;
+diff --git a/packages/coding-agent/test/suite/regressions/rlm-child-compaction-terminal.test.ts b/packages/coding-agent/test/suite/regressions/rlm-child-compaction-terminal.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..15d43f8512ad6d1d13ab496fbaa770a93279ffd6
+--- /dev/null
++++ b/packages/coding-agent/test/suite/regressions/rlm-child-compaction-terminal.test.ts
+@@ -0,0 +1,154 @@
++import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
++import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
++import { Type } from "typebox";
++import { afterEach, describe, expect, it, vi } from "vitest";
++import { createHarness, type Harness } from "../harness.js";
++
++type ParentInternals = {
++	_activeRlmChildRuns: Map<string, unknown>;
++};
++
++type ChildInternals = {
++	_parentReplyCount: number;
++	_postCompactionContinuationScheduled: boolean;
++	_runScheduledPostCompactionContinue(): Promise<void>;
++	_schedulePostCompactionContinue(): void;
++};
++
++function terminalNotices(harness: Harness): Array<Extract<AgentMessage, { role: "custom" }>> {
++	return harness.session.messages.filter(
++		(message): message is Extract<AgentMessage, { role: "custom" }> =>
++			message.role === "custom" && message.customType === "rlm_child_terminal_notice",
++	);
++}
++
++describe("RLM child compaction terminal notices", () => {
++	let parent: Harness | undefined;
++	let child: Harness | undefined;
++
++	afterEach(() => {
++		child?.cleanup();
++		parent?.cleanup();
++		child = undefined;
++		parent = undefined;
++	});
++
++	it("preserves cancellation while waiting for a post-compaction continuation", async () => {
++		let markContinuationStarted: () => void = () => {};
++		const continuationStarted = new Promise<void>((resolve) => {
++			markContinuationStarted = resolve;
++		});
++		child = await createHarness({ rlmDepth: 1, rlmMaxDepth: 1 });
++		vi.spyOn(child.session, "abort").mockImplementation(async () => new Promise(() => {}));
++		parent = await createHarness({
++			rlmDepth: 0,
++			rlmMaxDepth: 1,
++			subagentRuntimeHost: {
++				createRlmSubagentRuntime: async () => ({ session: child!.session }),
++				deleteRlmSubagentRuntime: async () => {},
++			},
++		});
++		const internals = child.session as unknown as ChildInternals;
++		vi.spyOn(child.session, "promptAndWait").mockImplementation(async () => {
++			internals._schedulePostCompactionContinue();
++		});
++		vi.spyOn(internals, "_runScheduledPostCompactionContinue").mockImplementation(async () => {
++			markContinuationStarted();
++			await new Promise(() => {});
++		});
++
++		const spawned = await parent.session.runRlmChild("wait after compaction", { name: "cancelled-worker" });
++		await continuationStarted;
++		expect(parent.session.cancelRlmChildRun(spawned.rlm_child_id)).toBe(true);
++
++		const parentInternals = parent.session as unknown as ParentInternals;
++		expect(parentInternals._activeRlmChildRuns.has(spawned.rlm_child_id)).toBe(true);
++		expect(terminalNotices(parent)).toHaveLength(0);
++		await expect
++			.poll(() => parentInternals._activeRlmChildRuns.has(spawned.rlm_child_id), { timeout: 2000 })
++			.toBe(false);
++		expect(terminalNotices(parent)).toHaveLength(1);
++		expect(terminalNotices(parent)[0]?.details).toMatchObject({
++			kind: "cancelled",
++			reason: "Cancelled by user",
++		});
++	});
++
++	it("waits for a real threshold-compaction continuation to reply", async () => {
++		const sentMessages: string[] = [];
++		const replyTool: AgentTool = {
++			name: "reply-parent",
++			label: "Reply to parent",
++			description: "Reply after compaction",
++			parameters: Type.Object({}),
++			execute: async () => {
++				const internals = child!.session as unknown as ChildInternals;
++				internals._parentReplyCount += 1;
++				sentMessages.push("work finished after threshold compaction");
++				return { content: [{ type: "text", text: "reply delivered" }], details: {} };
++			},
++		};
++		child = await createHarness({
++			rlmDepth: 1,
++			rlmMaxDepth: 1,
++			tools: [replyTool],
++			autonomous: {
++				enabled: true,
++				maxContinuations: 1,
++				maxTurns: 100,
++				gates: {
++					commands: [`${process.execPath} -e "process.exit(1)"`],
++					maxRetries: 1,
++				},
++			},
++			settings: { compaction: { enabled: true, reserveTokens: 400, keepRecentTokens: 1 } },
++			models: [{ id: "faux-compacting-child", contextWindow: 1000 }],
++			extensionFactories: [
++				(pi) => {
++					pi.on("session_before_compact", async (event) => ({
++						compaction: {
++							summary: "threshold summary",
++							firstKeptEntryId: event.preparation.firstKeptEntryId,
++							tokensBefore: event.preparation.tokensBefore,
++							details: { source: "test" },
++						},
++					}));
++				},
++			],
++		});
++		parent = await createHarness({
++			rlmDepth: 0,
++			rlmMaxDepth: 1,
++			subagentRuntimeHost: {
++				createRlmSubagentRuntime: async () => ({ session: child!.session }),
++				deleteRlmSubagentRuntime: async () => {},
++			},
++		});
++		for (let index = 0; index < 3; index++) {
++			const userMessage = {
++				role: "user" as const,
++				content: `history ${index} ${"x".repeat(200)}`,
++				timestamp: index * 2 + 1,
++			};
++			const assistantMessage = fauxAssistantMessage(`history response ${index}`, { timestamp: index * 2 + 2 });
++			child.sessionManager.appendMessage(userMessage);
++			child.sessionManager.appendMessage(assistantMessage);
++			child.session.agent.state.messages.push(userMessage, assistantMessage);
++		}
++		child.setResponses([
++			fauxAssistantMessage("initial pass"),
++			fauxAssistantMessage(fauxToolCall("reply-parent", {}), { stopReason: "toolUse" }),
++			fauxAssistantMessage("finished"),
++		]);
++
++		const spawned = await parent.session.runRlmChild("finish across compaction", { name: "threshold-worker" });
++
++		await expect.poll(() => sentMessages, { timeout: 10_000 }).toEqual(["work finished after threshold compaction"]);
++		const parentInternals = parent.session as unknown as ParentInternals;
++		await expect
++			.poll(() => parentInternals._activeRlmChildRuns.has(spawned.rlm_child_id), { timeout: 10_000 })
++			.toBe(false);
++		expect(child.eventsOfType("compaction_start")).toContainEqual(expect.objectContaining({ reason: "threshold" }));
++		expect(terminalNotices(parent)).toHaveLength(0);
++	}, 15_000);
++});

@@ -15,7 +15,7 @@ The PR pipeline can select the pinned Prime Agent `0.7.0` adapter per project pr
 
 ## Runtime contract
 
-`PrimeSeatAgent` runs Prime in JSON/RPC mode through the Deck broker and verifies the PATH-resolved binary reports exactly `0.7.0`. Every invocation receives a new temporary agent directory, session directory, HOME, and daemon socket. The adapter starts and owns that daemon, applies wall-clock and no-output deadlines, terminates the complete RPC process group with TERM then KILL, shuts the daemon down over its socket, and removes the temporary tree.
+`PrimeSeatAgent` runs Prime in JSON/RPC mode through the Deck broker and verifies the PATH-resolved binary reports exactly `0.7.0`. Every seat receives a temporary HOME and session directory, while all Deck Prime surfaces share the pinned profile under `~/.deck/.prime/agent` and the Deck-scoped supervisor socket `~/.deck/.prime/run/conversation.sock`. `DECK_PRIME_DAEMON_SOCKET` can explicitly override the socket. Startup is concurrency-safe: the first seat starts the detached supervisor, later seats join it, and no seat shuts it down. Each seat still owns its RPC process group and session: deadlines terminate only that process group, forced failure requests `prime-agent stop <session>` when the session ID is known, and the per-seat temporary tree is removed. A live Prime worker can recover a failed shared supervisor and rehydrate its session from JSONL and the kernel snapshot, so the single Agents View does not make every active seat dependent on an immortal process.
 
 The returned Smithers result contains typed output or a typed `PrimeSeatError`, exit code/signal, wall clock, steer count, token usage, and transcript-attested root and RLM-child provider/model provenance. A missing or malformed final yield is an error, never success. An invalid requested model, a broker-substituted root model, or an invalid child model fails closed.
 
@@ -25,17 +25,21 @@ The canonical `workflow-seat` and `spawn-agent` capability profiles export only 
 
 ## Herdr auto-attach
 
-Herdr attachment is mandatory. The adapter refuses a Prime launch without an active Herdr socket and parent pane, creates one child pane per seat, forces Prime's built-in reporter environment, and renames the pane using exactly:
+Prime Agent `0.7.0` includes `HerdrAgentStateExtension`, but source inspection and an isolated headless probe showed that it is a reporter, not a pane allocator: without inherited `HERDR_ENV` and pane identity its factory is a no-op and no pane appears. Deck therefore discovers the configured Herdr socket/workspace and creates a new top-level tab and root pane for every seat. It never calls `pane.split` and never uses an inherited captain pane. Only after allocation does the adapter inject that seat's pane identity so Prime's built-in reporter can publish lifecycle state.
+
+The tab and root pane use exactly:
 
 ```text
-{repository}#{ticket number} · {Smithers node id} · {Smithers run id}
+{effort label} · {Smithers node id} · {Smithers run id}
 ```
 
-For example: `lindy#27140 · watch-fix · run-abc`. No workflow-specific Herdr wiring or Deck-side lifecycle projection is used.
+For example: `lindy#27140 · watch-fix · run-abc`. The adapter closes only that pane when the seat exits, including stalled-process termination; concurrent seats retain distinct session and pane identities while sharing the Prime supervisor.
 
-Headless RPC verification against an isolated test socket observed `idle -> working -> idle -> pane.release_agent` for normal exit and stall-kill. Two simultaneous real Prime seats produced two distinct pane IDs and independent lifecycle streams. Prime's known limit remains: RLM children share the root seat's Herdr pane. Per-child status and cancellation therefore live in Prime's Agents View / `prime-agent agents`, while Herdr is intentionally per root seat.
+Herdr visibility is fail-soft by default. If Herdr is absent, has no matching workspace, or refuses the socket, the seat runs normally, emits a warning, and receives no ambient `HERDR_*` identity. Set `DECK_HERDR_STRICT=1` (or the explicit adapter option) only when loss of board visibility must fail the seat.
 
-Do not point lifecycle tests at the captain's default Herdr socket. Tests create a `deck-test-<pid>` socket, allocate only synthetic `deck-test:*` panes, and tear it down.
+Prime's known limit remains: RLM children share the root seat's Herdr pane. Per-child status and cancellation therefore live in the shared Prime Agents View / `prime-agent agents`, while Herdr is intentionally per root seat.
+
+Do not point lifecycle tests at the captain's default Herdr socket. Tests create isolated sockets and workspaces, allocate only synthetic panes, close them, stop their fixture processes, and remove their temporary homes.
 
 ## Canary sequence
 
