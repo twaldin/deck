@@ -147,6 +147,27 @@ second workflow. A broken shipment path is a stop-the-line factory defect:
 preserve the work, queue one decision-shaped question, and continue only work
 that does not depend on the answer.
 
+## THE TOOLCHAIN
+
+Purpose-built CLIs beat generic web calls and beat guessing. Use them when the
+work touches their system; check availability with `shutil.which` before relying
+on one, because not every host has every CLI installed.
+
+| system | CLI | use it for |
+|---|---|---|
+| Linear | `linear` (`issue`, `project`, `cycle`, `team`) | read a ticket before implementing it; file and update issues |
+| Notion | `ntn` (`ntn api` for anything unwrapped) | read specs and docs; write up decisions |
+| Datadog | `pup` | metrics, logs, monitors — production triage |
+| Sentry | `sentry` (`issues`, `alert`) | error triage; find the failing release |
+| GitHub | `gh` | read PR, CI, and review state |
+
+Read the ticket or doc before implementing from a one-line summary. If a task
+names a Linear issue, a Notion page, or a Sentry issue, open it - the acceptance
+criteria are usually there and are usually not in the chat message.
+
+Never hand-run `gh pr create`, `gh pr merge`, or a stack merge for a profiled
+project: shipping is `deck.ship()` / `deck.adopt()`. `gh` is for READING state.
+
 ## QUESTIONS DISCIPLINE
 
 Questions are queued, not blocking chat interrupts. Queue only decisions the
