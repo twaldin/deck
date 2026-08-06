@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { deckV2Home } from "./home";
+import { ARCHIVE_ONCE_NAMES, DURABLE_LINK_NAMES } from "./bootstrap";
 
 export type HomeSyncProfile = "full" | "personal";
 
@@ -52,8 +53,23 @@ function cloneHome(selectedProfile: HomeSyncProfile): { root: string; repo: stri
 	return { root, repo };
 }
 
+const NEVER_SYNC_HOME_ENTRIES: Record<string, true> = {
+	".git": true,
+	".prime": true,
+	"AGENTS.md": true,
+	"logs": true,
+	"run": true,
+	...Object.fromEntries(ARCHIVE_ONCE_NAMES.map((name) => [name, true as const])),
+	...Object.fromEntries(DURABLE_LINK_NAMES.map((name) => [name, true as const])),
+};
+
+/** Host-private durable state and retired profiles never enter the home git repository. */
+export function homeSyncMayCopyEntry(name: string): boolean {
+	return NEVER_SYNC_HOME_ENTRIES[name] !== true;
+}
+
 function identityEntries(home: string): string[] {
-	return fs.readdirSync(home).filter((name) => ![".git", ".prime", ".env", ".deck-profile", "AGENTS.md", "data", "state", "wt", "logs", "run", "questions", "broker"].includes(name));
+	return fs.readdirSync(home).filter(homeSyncMayCopyEntry);
 }
 
 function copyIdentity(from: string, to: string): void {

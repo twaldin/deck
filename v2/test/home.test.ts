@@ -5,10 +5,18 @@
  * from capturing private home state.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import {
+	ARCHIVE_ONCE_NAMES,
+	DURABLE_LINK_NAMES,
+	bootstrapHome,
+} from "../src/bootstrap";
+import { openQuestions } from "../src/questions-store";
+import { homeSyncMayCopyEntry } from "../src/home-sync";
 
 const REPO_V2 = path.resolve(import.meta.dir, "..");
 let sandbox: string;
@@ -43,6 +51,13 @@ describe("home sync profile resolution", () => {
 		expect(resolveHomeSyncProfile(home)).toBe("personal");
 	});
 });
+
+	test("never copies host-local durable links or retired Pi state between hosts", () => {
+		for (const name of [...DURABLE_LINK_NAMES, ...ARCHIVE_ONCE_NAMES]) {
+			expect(homeSyncMayCopyEntry(name)).toBe(false);
+		}
+		expect(homeSyncMayCopyEntry("operator-prompt.txt")).toBe(true);
+	});
 
 describe("home is not a checkout", () => {
 	test("REGRESSION: refuses a home inside a git working tree", async () => {
@@ -136,6 +151,247 @@ describe("bootstrap", () => {
 		expect(second.created).toHaveLength(0);
 		expect(second.linked).toHaveLength(0);
 	});
+
+	test("rejects foreign durable symlinks before claiming or changing them", () => {
+		const home = path.join(sandbox, "home");
+		const durableRoot = path.join(sandbox, "durable");
+		const foreign = path.join(sandbox, "foreign-data");
+		fs.mkdirSync(home);
+		fs.mkdirSync(foreign);
+		fs.symlinkSync(foreign, path.join(home, "data"));
+
+		expect(() => bootstrapHome({ repoV2Dir: REPO_V2, home, durableRoot, optMem: false }))
+			.toThrow(/unowned durable Deck link/);
+		expect(fs.readlinkSync(path.join(home, "data"))).toBe(foreign);
+		expect(fs.existsSync(durableRoot)).toBe(false);
+	});
+
+	test("rejects a durable root inside the wipe path before writing the home", () => {
+		const home = path.join(sandbox, "absent-home");
+		expect(() => bootstrapHome({
+			repoV2Dir: REPO_V2,
+			home,
+			durableRoot: path.join(home, "not-durable"),
+			optMem: false,
+		})).toThrow(/must live outside the wipe path/);
+		expect(fs.existsSync(home)).toBe(false);
+	});
+
+	test("rejects a durable-root symlink that resolves back inside the wipe path", () => {
+		const home = path.join(sandbox, "home-with-alias");
+		const inside = path.join(home, "inside");
+		const alias = path.join(sandbox, "durable-alias");
+		fs.mkdirSync(inside, { recursive: true });
+		fs.symlinkSync(inside, alias);
+		expect(() => bootstrapHome({
+			repoV2Dir: REPO_V2,
+			home,
+			durableRoot: alias,
+			optMem: false,
+		})).toThrow(/must live outside the wipe path/);
+	});
+
+	test("rename-wipe and reinstall preserve every host-local durable authority", async () => {
+		const home = path.join(sandbox, ".deck");
+		const durableRoot = path.join(sandbox, ".deck-durable");
+		const memo = path.join(sandbox, ".optmem", "memo");
+		const repo = path.join(sandbox, "repo");
+		const worktree = path.join(home, "wt", "wipe-proof");
+		const brokerDir = path.join(home, "broker");
+		const brokerDb = path.join(brokerDir, "store.db");
+
+		fs.mkdirSync(path.join(home, "data", "wipe-proof"), { recursive: true, mode: 0o700 });
+		fs.mkdirSync(path.join(home, "state", "smithers"), { recursive: true, mode: 0o700 });
+		fs.mkdirSync(path.join(home, "questions"), { recursive: true, mode: 0o700 });
+		fs.mkdirSync(brokerDir, { recursive: true, mode: 0o700 });
+		fs.mkdirSync(path.join(home, "config"), { recursive: true, mode: 0o700 });
+		fs.mkdirSync(path.join(home, "efforts", "legacy"), { recursive: true, mode: 0o700 });
+		fs.mkdirSync(path.join(home, "intake"), { recursive: true, mode: 0o700 });
+		fs.mkdirSync(path.join(home, ".pi", "skills", "operator"), { recursive: true, mode: 0o700 });
+		fs.mkdirSync(path.join(home, ".prime", "sessions"), { recursive: true, mode: 0o700 });
+		fs.mkdirSync(path.join(home, "logs"), { recursive: true, mode: 0o700 });
+		fs.mkdirSync(path.dirname(memo), { recursive: true, mode: 0o700 });
+		fs.writeFileSync(path.join(home, "data", "wipe-proof", "brief.md"), "# irreplaceable dossier\n");
+		fs.writeFileSync(path.join(home, "state", "wipe-proof.status"), "2026-08-06T00:00:00Z\tWORKING\tresume\n");
+		fs.writeFileSync(path.join(home, "state", "wipe-proof.meta"), '{"task":"wipe-proof"}\n');
+		fs.writeFileSync(path.join(home, "state", "wipe-proof.queue"), "continue\n");
+		fs.writeFileSync(
+			path.join(home, "questions", "queue.jsonl"),
+			`${JSON.stringify({
+				kind: "ask",
+				id: "wipe-question",
+				question: "Keep the durable queue?",
+				urgency: "normal",
+				sessionId: "wipe-session",
+				cwd: worktree,
+				askedAt: Date.now(),
+			})}\n`,
+		);
+		fs.writeFileSync(path.join(brokerDir, "control.token"), "host-secret-control\n", { mode: 0o644 });
+		fs.writeFileSync(path.join(brokerDir, "gateway.token"), "host-secret-gateway\n", { mode: 0o644 });
+		fs.writeFileSync(path.join(home, "config", "projects.json"), '[{"id":"local-only"}]\n');
+		fs.writeFileSync(path.join(home, "efforts", "legacy", "manifest.json"), '{"effort":"legacy"}\n');
+		fs.writeFileSync(path.join(home, "intake", "events.jsonl"), '{"kind":"review","id":"edge-triggered"}\n');
+		fs.writeFileSync(path.join(home, ".pi", "skills", "operator", "prompt.txt"), "retired technique\n");
+		fs.writeFileSync(path.join(home, ".prime", "sessions", "disposable.jsonl"), "runtime transcript\n");
+		fs.writeFileSync(path.join(home, "logs", "disposable.log"), "reconstructible diagnostics\n");
+		fs.writeFileSync(path.join(home, ".env"), "HOST_ONLY_SECRET=still-here\n", { mode: 0o600 });
+		fs.writeFileSync(path.join(home, ".deck-profile"), "personal\n", { mode: 0o600 });
+		fs.writeFileSync(
+			memo,
+			'#!/bin/sh\n[ "${1:-}" = wake ] || exit 2\nprintf "memory awake: durable fact\\n"\n',
+			{ mode: 0o700 },
+		);
+
+		execFileSync("git", ["init", "-q", "--initial-branch=main", repo]);
+		execFileSync("git", ["-C", repo, "config", "user.email", "deck-test@example.invalid"]);
+		execFileSync("git", ["-C", repo, "config", "user.name", "Deck Test"]);
+		fs.writeFileSync(path.join(repo, "README"), "base\n");
+		execFileSync("git", ["-C", repo, "add", "README"]);
+		execFileSync("git", ["-C", repo, "commit", "-q", "-m", "base"]);
+		fs.mkdirSync(path.dirname(worktree), { recursive: true, mode: 0o700 });
+		execFileSync("git", ["-C", repo, "worktree", "add", "-q", "-b", "deck/wipe-proof", worktree]);
+		fs.writeFileSync(
+			path.join(home, "worktrees.json"),
+			`${JSON.stringify({
+				v: 1,
+				entries: [{
+					id: "wt:repo:1",
+					repo,
+					path: worktree,
+					effort: "wipe-proof",
+					branch: "deck/wipe-proof",
+					created: new Date().toISOString(),
+					state: "active",
+				}],
+			}, null, "\t")}\n`,
+			{ mode: 0o600 },
+		);
+
+		const brokerRoot = path.resolve(REPO_V2, "..", "broker");
+		execFileSync(
+			"bun",
+			["-e", `
+				import { SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
+				const store = await SqliteAuthCredentialStore.open(${JSON.stringify(brokerDb)});
+				store.upsertAuthCredentialForProvider("anthropic", {
+					type: "oauth",
+					access: "test-access-token",
+					refresh: "test-refresh-token",
+					expires: Date.now() + 3_600_000,
+					email: "wipe-proof@example.invalid"
+				});
+				store.close();
+			`],
+			{ cwd: brokerRoot, stdio: "pipe" },
+		);
+		const smithersDb = path.join(home, "state", "smithers", "smithers.db");
+		const smithers = new Database(smithersDb, { create: true });
+		smithers.exec("CREATE TABLE proof (value TEXT NOT NULL); INSERT INTO proof VALUES ('live-run');");
+		smithers.close();
+
+		const optMem = {
+			memoPath: memo,
+			installerPath: path.join(sandbox, "must-not-run"),
+			runInstaller: () => {
+				throw new Error("existing memory executable should be adopted without reinstall");
+			},
+		};
+		bootstrapHome({ repoV2Dir: REPO_V2, home, durableRoot, optMem });
+
+		for (const name of DURABLE_LINK_NAMES) {
+			expect(fs.lstatSync(path.join(home, name)).isSymbolicLink()).toBe(true);
+		}
+		for (const name of ARCHIVE_ONCE_NAMES) expect(fs.existsSync(path.join(home, name))).toBe(false);
+		expect(fs.readFileSync(path.join(durableRoot, "archive", "retired-pi-profile", "skills", "operator", "prompt.txt"), "utf8")).toBe("retired technique\n");
+		expect(fs.statSync(durableRoot).mode & 0o777).toBe(0o700);
+		expect(fs.statSync(path.join(durableRoot, ".deck-durable.json")).mode & 0o777).toBe(0o600);
+		expect(fs.statSync(path.join(durableRoot, "broker", "store.db")).mode & 0o777).toBe(0o600);
+		expect(fs.statSync(path.join(durableRoot, "broker", "control.token")).mode & 0o777).toBe(0o600);
+
+		const archivedHome = path.join(sandbox, ".deck.pre-cutover");
+		fs.renameSync(home, archivedHome);
+		bootstrapHome({ repoV2Dir: REPO_V2, home, durableRoot, optMem });
+
+		const linkTargets = Object.fromEntries(
+			DURABLE_LINK_NAMES.map((name) => [name, fs.readlinkSync(path.join(home, name))]),
+		);
+		const emptyWorkflows = path.join(sandbox, "workflows");
+		const binTarget = path.join(sandbox, "bin");
+		fs.mkdirSync(emptyWorkflows);
+		execFileSync("bash", [path.join(REPO_V2, "install.sh")], {
+			env: {
+				...process.env,
+				HOME: sandbox,
+				DECK_V2_HOME: home,
+				DECK_DURABLE_HOME: durableRoot,
+				BIN_TARGET: binTarget,
+				WORKFLOWS_SOURCE: emptyWorkflows,
+			},
+			stdio: "pipe",
+		});
+		const converged = bootstrapHome({ repoV2Dir: REPO_V2, home, durableRoot, optMem });
+		expect(converged.linked).toHaveLength(0);
+		for (const [name, target] of Object.entries(linkTargets)) {
+			expect(fs.readlinkSync(path.join(home, name))).toBe(target);
+		}
+
+		expect(fs.readFileSync(path.join(home, "data", "wipe-proof", "brief.md"), "utf8")).toBe("# irreplaceable dossier\n");
+		expect(fs.readFileSync(path.join(home, "state", "wipe-proof.meta"), "utf8")).toBe('{"task":"wipe-proof"}\n');
+		expect(fs.readFileSync(path.join(home, "intake", "events.jsonl"), "utf8")).toContain("edge-triggered");
+		const questionIds = openQuestions(path.join(home, "questions", "queue.jsonl"))
+			.map((question) => question.id);
+		expect(questionIds).toEqual(["wipe-question"]);
+		const reopenedSmithers = new Database(path.join(home, "state", "smithers", "smithers.db"), { readonly: true });
+		expect(reopenedSmithers.query<{ value: string }, []>("SELECT value FROM proof").get()?.value).toBe("live-run");
+		reopenedSmithers.close();
+		expect(execFileSync(memo, ["wake"], { encoding: "utf8" })).toBe("memory awake: durable fact\n");
+		expect(execFileSync("git", ["-C", worktree, "status", "--porcelain"], { encoding: "utf8" })).toBe("");
+
+		execFileSync(
+			"bun",
+			["-e", `
+				import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
+				const store = await SqliteAuthCredentialStore.open(${JSON.stringify(path.join(home, "broker", "store.db"))});
+				const storage = new AuthStorage(store);
+				await storage.reload();
+				const live = storage.exportSnapshot().credentials.some(
+					(row) => row.provider === "anthropic" && row.credential.type === "oauth" &&
+						row.credential.email === "wipe-proof@example.invalid"
+				);
+				storage.close();
+				if (!live) throw new Error("OAuth account did not survive the home rebuild");
+			`],
+			{ cwd: brokerRoot, stdio: "pipe" },
+		);
+
+		const allocated = execFileSync(
+			"bun",
+			[
+				path.resolve(REPO_V2, "..", "cli", "bin", "deck"),
+				"wt",
+				"alloc",
+				"--repo",
+				repo,
+				"--effort",
+				"wipe-proof-2",
+				"--base",
+				"main",
+				"--branch",
+				"deck/wipe-proof-2",
+			],
+			{ env: { ...process.env, DECK_HOME: home }, encoding: "utf8" },
+		);
+		const [allocatedId, allocatedPath] = allocated.trim().split("\t");
+		expect(allocatedId).toBe("wt:repo:2");
+		expect(fs.lstatSync(path.join(home, "worktrees.json")).isSymbolicLink()).toBe(true);
+		expect(allocatedPath).toBeDefined();
+		expect(fs.existsSync(path.join(allocatedPath!, ".git"))).toBe(true);
+		expect(fs.readFileSync(path.join(home, ".env"), "utf8")).toContain("HOST_ONLY_SECRET=still-here");
+		expect(fs.readFileSync(path.join(home, "config", "projects.json"), "utf8")).toContain("local-only");
+		expect(fs.existsSync(path.join(home, ".prime", "sessions", "disposable.jsonl"))).toBe(false);
+		expect(fs.existsSync(path.join(home, "logs", "disposable.log"))).toBe(false);
+	}, 30_000);
 
 	test("backs up local AGENTS.md drift before restoring the managed seed", async () => {
 		const home = path.join(sandbox, "home");

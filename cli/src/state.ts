@@ -66,7 +66,15 @@ export function writeWorktreesState(state: WorktreesState): void {
 		throw new DeckError("E_IO", `refusing to write invalid worktree state: ${ioMessage(error)}`);
 	}
 
-	const temporary = `${WORKTREES_STATE}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+	let storagePath = WORKTREES_STATE;
+	try {
+		if (fs.lstatSync(WORKTREES_STATE).isSymbolicLink()) {
+			storagePath = path.resolve(path.dirname(WORKTREES_STATE), fs.readlinkSync(WORKTREES_STATE));
+		}
+	} catch (error) {
+		if (!hasNodeErrorCode(error, "ENOENT")) throw error;
+	}
+	const temporary = `${storagePath}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
 	let descriptor: number | undefined;
 	let directoryDescriptor: number | undefined;
 	try {
@@ -75,9 +83,8 @@ export function writeWorktreesState(state: WorktreesState): void {
 		fs.fsyncSync(descriptor);
 		fs.closeSync(descriptor);
 		descriptor = undefined;
-		fs.renameSync(temporary, WORKTREES_STATE);
-		directoryDescriptor = fs.openSync(path.dirname(WORKTREES_STATE), "r");
-		fs.fsyncSync(directoryDescriptor);
+		fs.renameSync(temporary, storagePath);
+		directoryDescriptor = fs.openSync(path.dirname(storagePath), "r");
 		fs.closeSync(directoryDescriptor);
 		directoryDescriptor = undefined;
 	} catch (error) {

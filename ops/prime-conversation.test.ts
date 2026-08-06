@@ -8,6 +8,7 @@ import * as path from "node:path";
 import { assertProductWorkspace } from "../workflows/pr-pipeline/lib/workspace-guard";
 import type { ProjectProfile } from "../workflows/pr-pipeline/lib/profiles";
 import { z } from "../broker/node_modules/zod";
+import { DURABLE_LINK_NAMES, bootstrapHome } from "../v2/src/bootstrap";
 
 const PINNED_VERSION = "0.7.0";
 const PINNED_TAG = "v0.7.0";
@@ -310,8 +311,11 @@ beforeAll(() => {
 	agentDir = path.join(deckHome, ".prime", "agent");
 	wrapper = path.join(deckHome, ".prime", "bin", "prime-conversation");
 	daemonSocket = path.join(deckHome, DECK_PRIME_PROFILE.daemonSocketRelative);
-	fs.mkdirSync(deckHome, { recursive: true });
-	fs.writeFileSync(path.join(deckHome, "AGENTS.md"), SEED);
+	bootstrapHome({
+		repoV2Dir: path.join(import.meta.dir, "..", "v2"),
+		home: deckHome,
+		optMem: false,
+	});
 	const globalPrimeAgent = path.join(home, ".prime", "agent");
 	fs.mkdirSync(globalPrimeAgent, { recursive: true });
 	fs.writeFileSync(path.join(globalPrimeAgent, "settings.json"), JSON.stringify({
@@ -368,6 +372,14 @@ afterAll(() => {
 	}
 	if (root !== undefined) fs.rmSync(root, { recursive: true, force: true });
 }, 30_000);
+
+	test("keeps bootstrap-owned durable links intact across the convergent reinstall", () => {
+		for (const name of DURABLE_LINK_NAMES) {
+			const visible = path.join(deckHome, name);
+			expect(fs.lstatSync(visible).isSymbolicLink()).toBe(true);
+			expect(fs.realpathSync(visible)).toBe(fs.realpathSync(path.join(`${deckHome}-durable`, name)));
+		}
+	});
 
 describe("Prime conversation installer", () => {
 	test("is dry-run by default and writes no profile", () => {

@@ -26,7 +26,7 @@ build_profile() {
   for item in "$source"/* "$source"/.[!.]*; do
     [ -e "$item" ] || continue
     base="$(basename "$item")"
-    case "$base" in .git|.env|.pi|AGENTS.md|data|state|wt|logs|run|questions|broker) continue ;; esac
+    case "$base" in .git|.pi|.prime|.env|.deck-profile|AGENTS.md|archive|backups|broker|config|data|efforts|intake|questions|repos|state|wt|worktrees.json|logs|run) continue ;; esac
     cp -a "$item" "$TEMP/repo/"
   done
   git -C "$TEMP/repo" add -A

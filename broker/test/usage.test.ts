@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -10,12 +10,17 @@ describe("usage roster refresh", () => {
 		try {
 			const paths = await import("../src/paths");
 			paths.ensureDirs();
+			const token = join(paths.BROKER_DIR, "mode.token");
+			writeFileSync(token, "existing-secret\n", { mode: 0o644 });
+			expect(paths.ensureToken(token)).toBe("existing-secret");
+			expect(statSync(token).mode & 0o777).toBe(0o600);
 			paths.writeJsonAtomic(paths.USAGE_JSON, {
 				generatedAt: "2020-01-01T00:00:00.000Z",
 				accounts: [],
 				dead: [{ id: 7, provider: "anthropic", email: "dead@example.com", accountId: null, cause: "invalid_grant", disabledAtMs: 1 }],
 				reports: [{ provider: "anthropic", metadata: { email: "cached@example.com" }, limits: [] }],
 			});
+			expect(statSync(paths.USAGE_JSON).mode & 0o777).toBe(0o600);
 			const { refreshUsageRoster } = await import("../src/usage");
 			const storage = {
 				fetchUsageReports: async () => { throw new Error("provider timeout"); },
