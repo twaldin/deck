@@ -6,7 +6,7 @@ import { renderWorkflow } from "smithers-orchestrator/testing";
 import { openQuestions } from "../../../v2/src/questions-store.ts";
 import { routeWorkflowQuestionAnswer } from "../../../v2/src/workflow-questions.ts";
 import { reviewCommand, shouldSubmitReview } from "../decision.ts";
-import workflow, { assessCi, createReviewGateAgent, queueReviewGateDecision, reviewSubmissionMarker } from "../pipeline.tsx";
+import workflow, { assessCi, createReviewGateAgent, queueReviewGateDecision, reviewDecisionBlockers, reviewSubmissionMarker } from "../pipeline.tsx";
 import { PrimeSeatAgent } from "../../pr-pipeline/lib/engines/prime.ts";
 import { DECK_PROVIDER } from "../../pr-pipeline/lib/models.ts";
 import {
@@ -274,6 +274,39 @@ test("renders one durable Poller with timer pacing and a bounded continuation re
   expect(source).not.toContain("async function sleep");
 });
 
+test("a durable poll handoff renders every per-head review and decision task", async () => {
+  const worktree = mkdtempSync(join(tmpdir(), "review-gate-handoff-"));
+  writeFileSync(join(worktree, ".review-gate-queue.json"), JSON.stringify([{
+    poll: 0,
+    prs: [{
+      number: 7,
+      url: "https://github.test/owner/repo/pull/7",
+      title: "Queued review",
+      headRefName: "queued-review",
+      headRefOid: "head-7",
+    }],
+    at: "2026-08-06T00:00:00.000Z",
+    satisfied: true,
+  }]));
+  const rendered = await renderWorkflow(workflow, {
+    workflowPath: new URL("../pipeline.tsx", import.meta.url).pathname,
+    input: {
+      repo: "owner/repo",
+      worktree,
+      captainLogin: "captain",
+      dryRun: true,
+      limits: { polls: 1, intervalMs: 1 },
+      fixtures: { requested: false },
+    },
+  });
+  const nodeIds = rendered.tasks.map((task) => task.nodeId);
+  expect(nodeIds).toContain("gate-review-7-head-7");
+  expect(nodeIds).toContain("gate-report-7-head-7");
+  expect(nodeIds).toContain("captain-question-7-head-7");
+  expect(nodeIds).toContain("review-approval-gate-7-head-7");
+  expect(nodeIds).toContain("submit-review-7-head-7");
+});
+
 test("a recycled run gets a fresh poller id instead of reusing carried poll output", async () => {
   const worktree = mkdtempSync(join(tmpdir(), "review-gate-recycle-"));
   const rendered = await renderWorkflow(workflow, {
@@ -333,6 +366,20 @@ test("blocker reports draft findings and submit only follows captain approval", 
   expect(source).toContain("— automated review");
   expect(source).toContain("posted: false, requestedChanges: false");
   expect(source).not.toContain('posted[`comment:${fingerprint}`]');
+  expect(reviewDecisionBlockers(
+    { approvable: true, blockers: [], headSha: "head-7", summary: "review clean" },
+    {
+      mergeable: false,
+      ciGreen: false,
+      ciPending: false,
+      mergeStateStatus: "DIRTY",
+      headSha: "head-7",
+      summary: "mergeable=CONFLICTING checks=1",
+    },
+  )).toEqual([
+    "PR is not mergeable (DIRTY): mergeable=CONFLICTING checks=1",
+    "CI is not green: mergeable=CONFLICTING checks=1",
+  ]);
 });
 
 test("clean and exhausted rounds use different captain decisions without self-approval", () => {
