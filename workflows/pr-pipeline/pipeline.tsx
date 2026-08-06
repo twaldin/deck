@@ -123,7 +123,7 @@ import {
 	watchFixPrompt,
 } from "./lib/prompts.ts";
 import { executeReviewerRequest } from "./lib/reviewers.ts";
-import { evaluateWatchExit } from "./lib/watch.ts";
+import { evaluateWatchExit, observeHeadAge } from "./lib/watch.ts";
 import {
 	RebaseDecisionRequired,
 	rebaseAndPushAgentic,
@@ -277,6 +277,7 @@ const stackWatchCarSchema = z.object({
 	branch: z.string().min(1),
 	baseBranch: z.string().min(1),
 	headSha: z.string(),
+	headObservedAt: z.string().optional(),
 	exitOk: z.boolean(),
 	actionable: z.boolean(),
 	ci: z.string(),
@@ -535,6 +536,7 @@ export const schemas = {
 		round: z.number().int(),
 		poll: z.number().int(),
 		headSha: z.string(),
+		headObservedAt: z.string().optional(),
 		exitOk: z.boolean(),
 		disposition: z.enum(["complete", "wait", "fix", "escalate"]),
 		actionable: z.boolean(),
@@ -2670,15 +2672,29 @@ export default smithers((ctx) => {
 																	car.prNumber,
 																	github.selfLogins,
 																);
+																const previousCar = latestWatch?.cars?.find(
+																	(candidate) => candidate.prNumber === car.prNumber,
+																);
+																const previousObservation = previousCar
+																	?? (!stackMode ? latestWatch : undefined);
+																const observed = observeHeadAge(
+																	snapshot.headSha,
+																	previousObservation,
+																	nowIso(),
+																);
+																const headObservedAt = observed.headObservedAt;
+																if (snapshot.ciEvidence !== undefined) {
+																	snapshot.ciEvidence = {
+																		...snapshot.ciEvidence,
+																		currentHeadAgeSeconds: observed.ageSeconds,
+																	};
+																}
 																const verdict = evaluateWatchExit(snapshot, {
 																	selfLogins: github.selfLogins,
 																	handledTriggerIds,
 																	reviewPolicy: github.reviewPolicy,
 																	infraRetryAttempts,
 																});
-																const previousCar = latestWatch?.cars?.find(
-																	(candidate) => candidate.prNumber === car.prNumber,
-																);
 																const previousTriggers = previousCar?.triggers
 																	?? (!stackMode ? latestWatch?.triggers : undefined)
 																	?? [];
@@ -2712,6 +2728,7 @@ export default smithers((ctx) => {
 																	branch: car.branch,
 																	baseBranch: car.baseBranch,
 																	headSha: snapshot.headSha,
+																	headObservedAt,
 																	exitOk,
 																	actionable,
 																	ci: verdict.ci,
@@ -2747,6 +2764,7 @@ export default smithers((ctx) => {
 																round: k,
 																poll: pollNo,
 																headSha: cars.at(-1)?.headSha ?? pr.headSha,
+																headObservedAt: cars.at(-1)?.headObservedAt,
 																exitOk,
 																disposition: exitOk
 																	? "complete"

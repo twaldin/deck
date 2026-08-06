@@ -21,6 +21,24 @@ import type {
 	WatchReviewPolicy,
 } from "./types.ts";
 
+export function observeHeadAge(
+	headSha: string,
+	previous: { headSha: string; headObservedAt?: string } | undefined,
+	observedAt: string,
+): { headObservedAt: string; ageSeconds: number } {
+	const headObservedAt = previous?.headSha === headSha
+		? previous.headObservedAt ?? observedAt
+		: observedAt;
+	const firstSeenMs = Date.parse(headObservedAt);
+	const observedMs = Date.parse(observedAt);
+	return {
+		headObservedAt,
+		ageSeconds: Number.isFinite(firstSeenMs) && Number.isFinite(observedMs)
+			? Math.max(0, Math.floor((observedMs - firstSeenMs) / 1000))
+			: 0,
+	};
+}
+
 
 export function needsRebase(snapshot: Pick<WatchSnapshot, "mergeable" | "mergeStateStatus">): boolean {
 	return snapshot.mergeable === "CONFLICTING"

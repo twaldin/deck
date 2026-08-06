@@ -32,6 +32,7 @@ import {
 	reviewersNeedingReRequest,
 	unansweredComments,
 	isReviewFinding,
+	observeHeadAge,
 } from "../lib/watch.ts";
 import type { MigrationEvidenceEntry, WatchSnapshot } from "../lib/types.ts";
 import ciFailureFixtures from "./fixtures/ci-failures.json";
@@ -564,6 +565,7 @@ describe("evaluateWatchExit", () => {
 			}],
 			comments: [
 				{
+
 					id: "claude-finished",
 					author: "claude[bot]",
 					isBot: true,
@@ -592,6 +594,24 @@ describe("evaluateWatchExit", () => {
 		expect(verdict.botApprovedBy).toEqual([]);
 	});
 
+	test("CI grace starts when this durable watcher first observes a head, not at commit author time", () => {
+		const first = observeHeadAge("head-a", undefined, "2026-08-06T16:00:00Z");
+		expect(first).toEqual({
+			headObservedAt: "2026-08-06T16:00:00Z",
+			ageSeconds: 0,
+		});
+		expect(observeHeadAge("head-a", {
+			headSha: "head-a",
+			headObservedAt: first.headObservedAt,
+		}, "2026-08-06T16:02:31Z").ageSeconds).toBe(151);
+		expect(observeHeadAge("head-b", {
+			headSha: "head-a",
+			headObservedAt: first.headObservedAt,
+		}, "2026-08-06T17:00:00Z")).toEqual({
+			headObservedAt: "2026-08-06T17:00:00Z",
+			ageSeconds: 0,
+		});
+	});
 	test("zero checks with no required contexts terminates as no CI configured, never success", () => {
 		const verdict = evaluateWatchExit(snapshot({
 			checkRuns: [],
