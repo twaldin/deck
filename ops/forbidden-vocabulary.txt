@@ -1,0 +1,23 @@
+# Words that must never appear in anything Deck ships publicly.
+#
+# ONE list, read by every check. There used to be three - two shell patterns and
+# a test regex - and none was a superset of the others, so a leak caught by one
+# said nothing about the other two. Add a term here and every check picks it up.
+#
+# Blank lines and `#` comments are ignored. Each entry is matched as a whole
+# word, case-insensitively.
+#
+# Operator and deployment vocabulary: internal role and host names.
+captain
+deckbox
+tailnet
+# Identities: the operator, the company, and reviewer logins.
+twaldin
+lindy
+ali
+mackcooper1408
+spencer-negri
+daniel-covelli
+akshat-lindy
+Sathiral
+Jeremy

@@ -268,8 +268,16 @@ PERSONAL_SCAN_FILES=(
   workflows/review-gate/launch.ts
   workflows/review-gate/pipeline.tsx
 )
-PERSONAL_PATTERN='/Users/[^/[:space:]]+|deckbox|(^|[^[:alnum:]_])(twaldin|ali|mackcooper1408|spencer-negri|daniel-covelli|akshat-lindy|Tim|Sathiral|Jeremy)([^[:alnum:]_]|$)'
-if git -C "$CLONE_DIR" grep -nEI "$PERSONAL_PATTERN" -- "${PERSONAL_SCAN_FILES[@]}"; then
+# Both scans below derive their word list from ops/forbidden-vocabulary.txt.
+# Three hand-maintained patterns used to disagree, so a term caught by one check
+# could still ship through another.
+FORBIDDEN_WORDS="$(grep -vE '^[[:space:]]*(#|$)' "$CLONE_DIR/ops/forbidden-vocabulary.txt" | paste -sd '|' -)"
+[ -n "$FORBIDDEN_WORDS" ] || fail "ops/forbidden-vocabulary.txt is empty or missing"
+VOCAB_PATTERN="(^|[^[:alnum:]_])($FORBIDDEN_WORDS)([^[:alnum:]_]|$)"
+
+# Machine-specific surfaces additionally must not carry absolute home paths.
+PERSONAL_PATTERN="/Users/[^/[:space:]]+|$VOCAB_PATTERN"
+if git -C "$CLONE_DIR" grep -nEIi "$PERSONAL_PATTERN" -- "${PERSONAL_SCAN_FILES[@]}"; then
   fail "shipped defaults or onboarding surfaces contain machine-specific identities"
 fi
 
@@ -294,8 +302,7 @@ PUBLIC_COPY_FILES=(
   docs/gateway-auth.md
   docs/personal-home.md
 )
-PUBLIC_VOCAB_PATTERN='(^|[^[:alnum:]_])(captain|deckbox|tailnet)([^[:alnum:]_]|$)'
-if git -C "$CLONE_DIR" grep -nEI "$PUBLIC_VOCAB_PATTERN" -- "${PUBLIC_COPY_FILES[@]}"; then
+if git -C "$CLONE_DIR" grep -nEIi "$VOCAB_PATTERN" -- "${PUBLIC_COPY_FILES[@]}"; then
   fail "public onboarding copy contains operator-specific vocabulary"
 fi
 

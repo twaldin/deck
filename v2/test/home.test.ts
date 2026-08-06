@@ -522,7 +522,19 @@ describe("the seeded contract is clean", () => {
 		// allowlist by the launch guard. Prose about them is pure token tax.
 		expect(contract).not.toMatch(/RLM depth is one/);
 		expect(contract).not.toMatch(/quota bucket/i);
-		expect(contract).not.toMatch(/\b(?:Lindy|captain|twaldin)\b/i);
+		// Same list ops/verify-clean-install.sh uses. A second regex here is how
+		// the three checks drifted apart in the first place.
+		const forbidden = fs.readFileSync(
+			path.join(import.meta.dir, "..", "..", "ops", "forbidden-vocabulary.txt"),
+			"utf8",
+		)
+			.split("\n")
+			.map((line) => line.trim())
+			.filter((line) => line !== "" && !line.startsWith("#"));
+		expect(forbidden.length).toBeGreaterThan(0);
+		for (const word of forbidden) {
+			expect(contract, `seed leaks "${word}"`).not.toMatch(new RegExp(`\\b${word}\\b`, "i"));
+		}
 		// The human-reviewer contract, the memory privacy boundary, and the CLI
 		// table are all load-bearing for a production repo, so the budget moved
 		// once, deliberately. Keep it tight: this is injected into every session.
