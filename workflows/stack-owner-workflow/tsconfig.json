@@ -1,1 +1,0 @@
-{"extends":"../pr-pipeline/tsconfig.json","compilerOptions":{"jsx":"react-jsx","jsxImportSource":"smithers-orchestrator","noEmit":true},"include":["**/*.ts","**/*.tsx","../pr-pipeline/lib/**/*.ts","../../v2/src/wake*.ts"]}

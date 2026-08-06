@@ -10,6 +10,7 @@ import * as path from "node:path";
 
 import { AGENT_COMMENT_SIGNATURE, commentCommand, isSignatureProject, reviewReplyCommand } from "./comments.ts";
 import type { Brief } from "./types.ts";
+import type { StackCarSpec } from "./adopt.ts";
 
 const RESULT_OBJECT_RULE =
 	"Return a result object with these keys, NOT the schema. do not include $schema, type, properties, or required.";
@@ -222,6 +223,38 @@ export function implementPrompt(brief: Brief, worktree: string, branch: string):
 		"- Do not create branches, PRs, or use GitHub merge commands.",
 		"",
 		...resultContract('{"commits":["abc123"],"summary":"Implemented the brief.","testEvidence":"bun test workflows/pr-pipeline/tests/pipeline.test.tsx"}'),
+	]);
+}
+
+export function stackImplementPrompt(
+	brief: Brief,
+	worktree: string,
+	rootBaseBranch: string,
+	specs: StackCarSpec[],
+): string {
+	return seatPrompt([
+		"You are the IMPLEMENTER for one ordered native GitHub PR stack.",
+		`Worktree: ${worktree}`,
+		`Root base branch: ${rootBaseBranch}`,
+		"Declared cars, parent first:",
+		JSON.stringify(specs, null, 2),
+		"",
+		"Brief:",
+		JSON.stringify(brief, null, 2),
+		"",
+		"Rules:",
+		`- ${SUBAGENT_GUIDANCE}`,
+		"- Implement exactly the brief across the declared cars in dependency order.",
+		"- Use every declared branch exactly once and create no extra branches.",
+		"- Each car must contain only its independently reviewable layer. Commit on that car with path-scoped commits.",
+		"- Build the first car from the declared root, then each child from the preceding car.",
+		"- Run focused tests for every layer and record the evidence per car.",
+		"- Do not push, open PRs, invoke gh stack, or use GitHub merge commands. The deterministic pipeline owns publication.",
+		"- Leave the worktree clean with the final/top car checked out.",
+		"",
+		...resultContract(
+			'{"commits":[],"summary":"Implemented the ordered stack.","testEvidence":"All layer tests passed.","stackCars":[{"branch":"parent","commits":["abc123"],"testEvidence":"bun test parent"},{"branch":"child","commits":["def456"],"testEvidence":"bun test child"}]}',
+		),
 	]);
 }
 

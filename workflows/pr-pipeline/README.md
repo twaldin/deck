@@ -22,7 +22,7 @@ bun install --frozen-lockfile
 bun test tests/
 ```
 
-The expected result is 187 passing tests and 0 failures.
+The package suite and typecheck must both finish with zero failures.
 
 ## This is the DEFAULT ship path
 
@@ -43,6 +43,47 @@ deck-v2 ship deck-42 --profile deck --worktree ~/.deck/wt/deck-3 --branch deck/m
   --base v2 --title "fix(x): y" --summary "..." --accept "tests green;behavior proven"
 ```
 
+### PR and stack effort input
+
+One run owns one effort: either a single PR or one ordered parent-to-child
+stack. The optional `stack` input is a mutually exclusive union:
+
+```ts
+type StackInput =
+  | {
+      specs: Array<{
+        branch: string;
+        baseBranch?: string;
+        title?: string;
+        body?: string;
+      }>;
+    }
+  | {
+      existingPrNumbers: number[];
+    };
+```
+
+`specs` is parent first. An omitted first `baseBranch` inherits the run's
+`baseBranch` (default `main`); every later omitted base inherits the preceding
+car's branch. An explicit base must describe that same chain. The run's
+top-level `branch` is the final car. `stack` and the single-PR `existingPr`
+input cannot both be present.
+
+`specs` implements every declared layer, verifies the exact commits attributed
+to each car, then uses native `gh stack init`, `gh stack submit --auto --open`,
+and `gh stack view --json`. `existingPrNumbers` adopts only those live PR
+identities after validating their repo, state, head SHA, and PR-base topology;
+it never invokes PR creation or stack submission. A single `existingPr`
+continues to use the unchanged single-PR adoption path.
+
+The graph watches every car. `BLOCKED` is benign when it is only the expected
+open-parent base relationship. One approval records every car's
+`{prNumber, branch, baseBranch, headSha}` in `stackTopology.cars`. The merge
+boundary re-fetches every stamped head; movement in one car invalidates the
+whole approval before any enqueue. Only the lowest unlanded car enters the queue. After it lands, the next car is retargeted to the root base, all remaining stamped heads are rechecked, and that car is enqueued. Rework
+uses `gh stack rebase --upstack` plus `gh stack push`; completed stacks run
+`gh stack sync --prune`.
+
 Enforcement is machine-shaped on both sides: here, `push-pr` renders only after
 `local-review` approves (or a human approves `review-escalation`) — no input
 can skip it. Local review loops up to eight rounds, fixes only blocking findings,
@@ -59,14 +100,14 @@ bare worker cannot open the PR that skips this graph. Incident: doctrine PR
 | 0 preflight gate | `preflight`, `preflight-refusal` | compute; **refuses** with the open-question list |
 | 1 implement | `implement` | agent (implementer model) |
 | 2 local adversarial review | `local-review-loop` / `local-review` + `local-fix`, `review-escalation` | agent loop, cross-model, fresh context |
-| 3 push + PR | `push-pr` | compute; PR registered in the watch-set **as a side effect of this node** |
+| 3 push + PR | `push-pr` | compute; creates/adopts one PR or publishes/adopts every ordered stack car; each car is registered in the watch-set |
 | 3b request reviewers | `request-reviewers` | compute; CODEOWNERS + recent-author fallback, verified via `requested_reviewers` |
 | 4 watch-ci-review | `r{N}-watch-loop` / `r{N}-watch-poll` + `r{N}-watch-fix`, `r{N}-watch-escalation` | persisted compute polls; bounded agent fixes |
 | 5 migration gate (conditional) | `migration-check`, `migration-gate` (Approval), `migration-scope`, `migration-{stg,prod}-{run,verify}` | mandatory when diff touches `migrations/` or `packages/database-migrations/` |
 | 6 ready-for-stamp | `r{N}-ready-loop` / `r{N}-ready-poll`, `r{N}-ready-exhausted` | human approval + CI green-or-**will-be**-green |
-| 7 stamp + merge word | `r{N}-stamp` (Approval), `r{N}-stamp-validity` | durable park; head-change invalidates |
-| 8 MQ merge | `r{N}-merge-head-check`, `enqueue-merge` | fresh head re-check at merge time, then compute; GitHub merge queue; receipted; idempotent |
-| 8b landing verification | `landing-loop` / `landing-poll`, `landing-exhausted` | squash commit `(#N)` on main — **never** the merged flag |
+| 7 stamp + merge word | `r{N}-stamp` (Approval), `r{N}-stamp-validity` | one durable effort-wide park; every stamped car head is commit-bound; one change invalidates all |
+| 8 MQ merge | `r{N}-merge-head-check`, `enqueue-merge`, `queue-loop` | re-checks every effort head, enqueues only the lowest unlanded car, then advances parent first after each verified parent landing and child retarget |
+| 8b landing verification | `queue-loop`, `landing-loop`, `stack-sync-prune`, exhausted nodes | every squash commit `(#N)` on its live base — **never** the merged flag; native stacks finish with `gh stack sync --prune` |
 | 9 fallout watch | `deploy-evidence`, `fallout-window`, `fallout-wait`, `fallout-watch`, `fallout-escalation` | anchored to deploy; NAMED break-signal |
 | 10 evidence-gated done | `done` | refuses without landing + deploy evidence + fallout verdict (+ migration evidence when triggered) |
 
@@ -211,9 +252,9 @@ crewmate NEVER approves the stamp itself.
 - Input is immutable after the first frame — fix the brief, start a NEW run.
 - The run store lives in the nearest `.smithers/` anchor (`workflows/.smithers`).
   Dispatch from this directory so every pipeline run lands in the same store.
-- `push-pr` appends `{ticket, repo, pr, url, registeredAt, runId}` to
-  `watchSetPath` (default `~/dev/fm2/data/watch-set.jsonl`) — the intake
-  watch-set gets the PR the moment it exists; nothing untracked.
+- `push-pr` appends one watch-set row per car, with the complete ordered stack
+  topology on every row. Single-PR efforts append one row. The intake watch-set
+  gets the effort the moment it exists; nothing is left untracked.
 - Rework lands as plain commits on the existing PR branch (agent prompts
   hard-forbid child PRs).
 - Workers own code and push only. They exit after each bounded implementation or
@@ -285,6 +326,7 @@ lib/types.ts            pure domain types
 lib/brief.ts            preflight validation
 lib/models.ts           deck catalog + deck/ provider guard + family opposition
 tests/engine.test.ts    pi-only engine invariant (whole workspace)
+lib/adopt.ts            single-PR and ordered-stack adoption/publication safety
 lib/watch.ts            watch-ci-review machine-checked exit
 lib/migrations.ts       migration detection + evidence completeness
 lib/ready.ts            ready-for-stamp evaluation

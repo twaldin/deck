@@ -992,3 +992,100 @@ describe("full graph traversal (bypassApprovals, dry-run only)", () => {
 		expect(sim.executed).not.toContain("r0-watch-fix");
 	});
 });
+
+describe("stack graph traversal (bypassApprovals, dry-run only)", () => {
+	const stackInput = {
+		...baseInput,
+		branch: "fm/lin-123-child",
+		bypassApprovals: true,
+		stack: {
+			specs: [
+				{ branch: "fm/lin-123-parent" },
+				{ branch: "fm/lin-123-child" },
+			],
+		},
+		fixtures: { changedFiles: ["src/feature.ts"] },
+	};
+
+	test("one approval stamps the ordered topology and every merge car is parent first", async () => {
+		const { sim, error } = await run(stackInput);
+		expect(error).toBeUndefined();
+		expect(sim.status).toBe("finished");
+
+		const pushed = (sim.outputs.prRecord as Array<{
+			cars?: Array<{
+				prNumber: number;
+				url: string;
+				branch: string;
+				baseBranch: string;
+				headSha: string;
+				landed: boolean;
+			}>;
+		}>)[0];
+		expect(pushed.cars).toEqual([
+			{ prNumber: 4242, url: "https://github.com/lindy-ai/lindy/pull/4242", branch: "fm/lin-123-parent", baseBranch: "main", headSha: "dryrun-head-sha-4242", landed: false },
+			{ prNumber: 4243, url: "https://github.com/lindy-ai/lindy/pull/4243", branch: "fm/lin-123-child", baseBranch: "fm/lin-123-parent", headSha: "dryrun-head-sha-4243", landed: false },
+		]);
+
+		const stamped = (sim.outputs.stampValidity as Array<{
+			cars?: Array<{ prNumber: number; headSha: string }>;
+		}>)[0];
+		expect(stamped.cars?.map((car) => [car.prNumber, car.headSha])).toEqual([
+			[4242, "dryrun-head-sha-4242"],
+			[4243, "dryrun-head-sha-4243"],
+		]);
+
+		const attempt = (sim.outputs.mergeHeadCheck as Array<{
+			ok: boolean;
+			cars?: Array<{ prNumber: number; receipt: string | null }>;
+		}>)[0];
+		expect(attempt.ok).toBe(true);
+		expect(attempt.cars?.map((car) => car.prNumber)).toEqual([4242, 4243]);
+		expect(attempt.cars?.map((car) => car.receipt)).toEqual([
+			"dry-run: submitted lowest PR #4242",
+			null,
+		]);
+		expect(sim.executed).toContain("stack-sync-prune");
+		expect((sim.outputs.doneRecord as Array<{ prNumbers?: number[] }>)[0]?.prNumbers).toEqual([4242, 4243]);
+	});
+
+	test("one moved car invalidates the stack at the merge boundary before any enqueue", async () => {
+		const { sim, error } = await run({
+			...stackInput,
+			fixtures: {
+				changedFiles: ["src/feature.ts"],
+				stackMovedPrNumbers: [4243],
+			},
+		});
+		expect(error).toBeUndefined();
+		expect(sim.status).toBe("finished");
+
+		const validity = sim.outputs.stampValidity as Array<{
+			round: number;
+			valid: boolean;
+		}>;
+		expect(validity.find((row) => row.round === 0)?.valid).toBe(true);
+
+		const attempts = sim.outputs.mergeHeadCheck as Array<{
+			round: number;
+			ok: boolean;
+			receipt: string | null;
+			cars?: Array<{ prNumber: number; ok: boolean; receipt: string | null }>;
+		}>;
+		const rejected = attempts.find((row) => row.round === 0);
+		expect(rejected?.ok).toBe(false);
+		expect(rejected?.receipt).toBeNull();
+		expect(rejected?.cars?.map((car) => [car.prNumber, car.ok])).toEqual([
+			[4242, true],
+			[4243, false],
+		]);
+		expect(rejected?.cars?.every((car) => car.receipt === null)).toBe(true);
+
+		expect(sim.executed).toContain("r1-watch-poll");
+		expect(sim.executed).toContain("r1-stamp");
+		const accepted = attempts.find((row) => row.round === 1);
+		expect(accepted?.ok).toBe(true);
+		expect(accepted?.cars?.map((car) => car.prNumber)).toEqual([4242, 4243]);
+		expect((sim.outputs.mergeReceipt as Array<{ round: number }>)[0]?.round).toBe(1);
+	});
+});

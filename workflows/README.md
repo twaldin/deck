@@ -10,8 +10,10 @@ watch + stamp + land, or anything with approvals, retries, or an overnight tail
 fleet the things ad-hoc loops do not have: durable state that survives SIGKILL
 and reboot (see the drill below), replayable per-node attempts, real approval
 gates, and one read-only surface (`smithers ps|inspect --json`) that the fleet
-dashboard already reads. Start from `pr-pipeline/` — it is the enforced lindy
-SOP — and reach for a new workflow only when the shape genuinely differs.
+dashboard already reads. `pr-pipeline/` is the single enforced lindy SOP for
+both one-PR efforts and ordered stacks (creation or adoption); do not create a
+sibling stack workflow. Reach for a new workflow only when the shape genuinely
+differs.
 
 ## Engine policy: pi only
 
@@ -42,9 +44,11 @@ families (anthropic <-> openai) rather than crossing engines, which is what
 adversarial review actually needs.
 
 - `spike/hello-deck.tsx` — the durability spike (kill -9 drill accepted; see below).
-- `pr-pipeline/` — the executable lindy PR pipeline (enforced SOP workflow on plain
-  smithers; own `package.json` pinning smithers-orchestrator 0.30.0). See
-  `pr-pipeline/README.md` for dispatch/babysit instructions. Version note: run it
+- `pr-pipeline/` — the executable lindy PR-and-stack pipeline (enforced SOP
+  workflow on plain smithers; own `package.json` pinning
+  smithers-orchestrator 0.30.0). It creates or adopts ordered stacks without
+  duplicating PRs, stamps the full topology once, and enqueues cars parent first.
+  See `pr-pipeline/README.md` for dispatch/babysit instructions. Version note: run it
   with `bunx smithers-orchestrator@0.30.0 ...` — an unpinned `bunx` from a directory
   without a package.json can auto-resolve a NEWER cached CLI and skew against the
   workspace's pinned runtime.

@@ -433,7 +433,6 @@ const mounts: WorkflowMount[] = [
   packWorkflow("docs-driven-development", "Docs Driven Development"),
   packWorkflow("share-pack", "Share Pack"),
   deckWorkflow("pr-pipeline", "PR Pipeline approvals", "pr-pipeline/pipeline.tsx"),
-  deckWorkflow("stack-owner", "Stack Owner approvals", "stack-owner-workflow/pipeline.tsx"),
 ];
 
 // Mount each workflow independently: one that fails to import (a broken prompt,
