@@ -11,6 +11,8 @@ import { z } from "zod";
 import {
 	buildSeatEnvironment,
 	PrimeSeatAgent,
+	PRIME_MIN_NODE_VERSION,
+	PRIME_SEAT_DEFAULT_MAX_OUTPUT_BYTES,
 	PRIME_WORKFLOW_SEAT_TOOLS,
 	resolveDeckPrimeProfilePaths,
 	PrimeSeatError,
@@ -216,6 +218,7 @@ type FakeMode =
 	| "missing"
 	| "missing-transcript"
 	| "no-model-provenance"
+	| "output-burst"
 	| "transport-death"
 	| "wrong-model"
 	| "stall"
@@ -303,6 +306,9 @@ process.stdin.on("data", (chunk) => {
       send({ id: request.id, type: "response", command: "get_state", success: true, data: { model: { provider, id: mode === "wrong-model" ? "gpt-5.4" : model } } });
     } else if (request.type === "prompt") {
       send({ id: request.id, type: "response", command: "prompt", success: true });
+      if (mode === "output-burst") {
+        send({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "" }, padding: "x".repeat(300_000) });
+      }
       if (mode === "transport-death") {
         send({ type: "session", version: 3, id: "root-session", timestamp: new Date().toISOString(), cwd: process.cwd() });
         process.exit(7);
@@ -339,6 +345,30 @@ process.stdin.on("data", (chunk) => {
 `;
 	writeFileSync(binary, script, { mode: 0o700 });
 	chmodSync(binary, 0o700);
+	return binary;
+}
+
+async function writeFakeNode(binary: string, version: string, executeScripts = true): Promise<void> {
+	await fs.mkdir(path.dirname(binary), { recursive: true });
+	writeFileSync(binary, `#!/bin/sh
+if [ "$1" = "--version" ]; then
+  printf '%s\\n' ${JSON.stringify(version)}
+  exit 0
+fi
+if [ ${executeScripts ? "0" : "1"} -eq 1 ]; then
+  printf 'unsupported Node invoked\\n' >&2
+  exit 91
+fi
+exec ${JSON.stringify(process.execPath)} "$@"
+`, { mode: 0o700 });
+	chmodSync(binary, 0o700);
+}
+
+async function fakeNode(version: string, executeScripts = true): Promise<string> {
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "deck-node-fake-"));
+	roots.push(root);
+	const binary = path.join(root, "node");
+	await writeFakeNode(binary, version, executeScripts);
 	return binary;
 }
 
@@ -644,6 +674,48 @@ describe("Prime seat adapter fault contract", () => {
 
 		const wrongVersion = await fakePrime("version-mismatch");
 		await expectPrimeError(agent(wrongVersion).generate({ prompt: "version" }), "PRIME_VERSION_MISMATCH");
+	});
+
+	test("pins a supported NVM Node ahead of an unsupported non-interactive PATH", async () => {
+		const runtimeHome = await fs.mkdtemp(path.join(os.tmpdir(), "deck-node-home-"));
+		roots.push(runtimeHome);
+		const unsupported = await fakeNode("v18.19.1", false);
+		const supported = path.join(runtimeHome, ".nvm", "versions", "node", "v24.18.0", "bin", "node");
+		await writeFakeNode(supported, "v24.18.0");
+		const binary = await fakePrime("success");
+
+		await agent(binary, {
+			env: { HOME: runtimeHome, PATH: path.dirname(unsupported) },
+		}).preflight();
+	});
+
+	test("fails closed with actionable Node requirements when an explicit runtime is unsupported", async () => {
+		const unsupported = await fakeNode("v18.19.1", false);
+		const binary = await fakePrime("success");
+		const failure = await expectPrimeError(agent(binary, {
+			env: { DECK_PRIME_NODE_BINARY: unsupported },
+		}).preflight(), "PRIME_VERSION_MISMATCH");
+		expect(failure.message).toContain(`Node ${PRIME_MIN_NODE_VERSION}+`);
+		expect(failure.message).toContain("DECK_PRIME_NODE_BINARY");
+		expect(failure.result.stderr).toContain("v18.19.1");
+	});
+
+	test("gives Prime RPC a 16 MiB floor and names every supported override on overflow", async () => {
+		const binary = await fakePrime("output-burst");
+		const result = runRecordSchema.parse(await agent(binary).generate({
+			prompt: "large RPC",
+			maxOutputBytes: 200_000,
+		}));
+		expect(result.providerMetadata.prime.exitStatus).toEqual({ code: 0, signal: null });
+
+		const failure = await expectPrimeError(agent(binary, {
+			env: { DECK_PRIME_MAX_OUTPUT_BYTES: "200000" },
+		}).generate({ prompt: "bounded RPC" }), "PRIME_OUTPUT_LIMIT");
+		expect(failure.message).toContain("200000 bytes");
+		expect(failure.message).toContain("DECK_PRIME_MAX_OUTPUT_BYTES");
+		expect(failure.message).toContain("PrimeSeatAgent.maxOutputBytes");
+		expect(failure.message).toContain("Smithers --max-output-bytes");
+		expect(failure.message).toContain(String(PRIME_SEAT_DEFAULT_MAX_OUTPUT_BYTES));
 	});
 	test("requires the repository patch fingerprint when its verifier is present", async () => {
 		const binary = await fakePrime("success");

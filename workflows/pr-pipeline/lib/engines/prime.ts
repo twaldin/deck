@@ -23,6 +23,8 @@ import {
 
 export const PRIME_AGENT_VERSION = "0.7.0";
 export const PRIME_AGENT_BINARY = "prime-agent";
+export const PRIME_MIN_NODE_VERSION = "22.8.0";
+export const PRIME_SEAT_DEFAULT_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 export const PRIME_SEAT_IDLE_TIMEOUT_MS = 5 * 60_000;
 export const PRIME_SEAT_CAPABILITY_PROFILES = {
 	"workflow-seat": {
@@ -41,7 +43,7 @@ export const PRIME_SEAT_CAPABILITY_PROFILES = {
 export type PrimeSeatCapabilityProfile = keyof typeof PRIME_SEAT_CAPABILITY_PROFILES;
 export const PRIME_WORKFLOW_SEAT_TOOLS = PRIME_SEAT_CAPABILITY_PROFILES["workflow-seat"].tools;
 
-const DEFAULT_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
+const PRIME_MIN_NODE_VERSION_PARTS = [22, 8, 0] as const;
 const DEFAULT_TERMINATION_GRACE_MS = 2_000;
 const VERSION_TIMEOUT_MS = 10_000;
 const SHARED_DAEMON_STARTUP_TIMEOUT_MS = 10_000;
@@ -69,6 +71,7 @@ const SAFE_ENV_KEYS: Record<string, true> = {
 	GIT_AUTHOR_EMAIL: true,
 	GIT_COMMITTER_NAME: true,
 	GIT_COMMITTER_EMAIL: true,
+	DECK_PRIME_MAX_OUTPUT_BYTES: true,
 	DECK_PRIME_MAX_TOKENS: true,
 	DECK_GATEWAY_ORIGIN: true,
 	DECK_PRIME_DAEMON_SOCKET: true,
@@ -292,6 +295,164 @@ export function buildSeatEnvironment(
 		if (value !== undefined) env[key] = value;
 	}
 	return env;
+}
+
+type NodeRuntimeProbe = {
+	binary: string;
+	version?: string;
+	detail: string;
+};
+
+function parseNodeVersion(value: string): { parts: [number, number, number]; prerelease: boolean } | undefined {
+	const match = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?/.exec(value.trim());
+	if (match === null) return undefined;
+	return {
+		parts: [Number(match[1]), Number(match[2]), Number(match[3])],
+		prerelease: match[4] !== undefined,
+	};
+}
+
+function isSupportedNodeVersion(value: string): boolean {
+	const parsed = parseNodeVersion(value);
+	if (parsed === undefined) return false;
+	for (let index = 0; index < PRIME_MIN_NODE_VERSION_PARTS.length; index += 1) {
+		const part = parsed.parts[index] ?? 0;
+		const minimum = PRIME_MIN_NODE_VERSION_PARTS[index] ?? 0;
+		if (part !== minimum) return part > minimum;
+	}
+	return !parsed.prerelease;
+}
+
+async function resolvePathExecutable(name: string, searchPath: string | undefined, cwd: string): Promise<string | undefined> {
+	for (const directory of (searchPath ?? "").split(path.delimiter)) {
+		if (directory === "") continue;
+		const candidate = path.resolve(cwd, directory, name);
+		try {
+			await fs.access(candidate);
+			return candidate;
+		} catch {
+			// Keep searching PATH.
+		}
+	}
+	return undefined;
+}
+
+async function probeNodeRuntime(binary: string, env: Record<string, string>, cwd: string): Promise<NodeRuntimeProbe> {
+	try {
+		const result = await new Promise<{ stdout: string; stderr: string; code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
+			const child = spawn(binary, ["--version"], {
+				cwd,
+				env,
+				stdio: ["ignore", "pipe", "pipe"],
+			});
+			let stdout = "";
+			let stderr = "";
+			const timer = setTimeout(() => child.kill("SIGKILL"), VERSION_TIMEOUT_MS);
+			child.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
+			child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+			child.once("error", reject);
+			child.once("close", (code, signal) => {
+				clearTimeout(timer);
+				resolve({ stdout, stderr, code, signal });
+			});
+		});
+		const version = (result.stdout.trim() || result.stderr.trim()).split(/\s+/)[0];
+		return {
+			binary,
+			version,
+			detail: result.code === 0 && result.signal === null
+				? `${binary}=${version || "empty version"}`
+				: `${binary}=exit ${String(result.code ?? result.signal)} (${version || "no output"})`,
+		};
+	} catch (cause) {
+		return { binary, detail: `${binary}=${cause instanceof Error ? cause.message : String(cause)}` };
+	}
+}
+
+async function resolvePrimeNodeBinary(
+	source: NodeJS.ProcessEnv,
+	overrides: Record<string, string | undefined>,
+	cwd: string,
+): Promise<string> {
+	const merged = { ...source, ...overrides };
+	const explicit = merged.DECK_PRIME_NODE_BINARY?.trim();
+	if (explicit !== undefined && explicit !== "" && !path.isAbsolute(explicit)) {
+		throw new PrimeSeatError({
+			status: "failed",
+			code: "PRIME_VERSION_MISMATCH",
+			message: `DECK_PRIME_NODE_BINARY must be an absolute path to Node ${PRIME_MIN_NODE_VERSION}+`,
+			exitStatus: { code: null, signal: null },
+			wallClockMs: 0,
+			stderr: "",
+		});
+	}
+	const candidates: string[] = [];
+	if (explicit !== undefined && explicit !== "") {
+		candidates.push(explicit);
+	} else {
+		const fromPath = await resolvePathExecutable("node", merged.PATH, cwd);
+		if (fromPath !== undefined) candidates.push(fromPath);
+		const inheritedNvmBin = overrides.PATH === undefined ? source.NVM_BIN : undefined;
+		const nvmBin = overrides.NVM_BIN ?? inheritedNvmBin;
+		if (nvmBin !== undefined && nvmBin !== "") candidates.push(path.resolve(nvmBin, "node"));
+		const home = merged.HOME ?? os.homedir();
+		const inheritedNvmDir = overrides.PATH === undefined ? source.NVM_DIR : undefined;
+		const nvmDir = overrides.NVM_DIR ?? inheritedNvmDir ?? path.join(home, ".nvm");
+		const versionsRoot = path.join(nvmDir, "versions", "node");
+		try {
+			const entries = await fs.readdir(versionsRoot, { withFileTypes: true });
+			for (const entry of entries.filter((candidate) => candidate.isDirectory()).sort((left, right) =>
+				right.name.localeCompare(left.name, undefined, { numeric: true }))) {
+				candidates.push(path.join(versionsRoot, entry.name, "bin", "node"));
+			}
+		} catch {
+			// An absent NVM install is normal; the diagnostics below name every checked source.
+		}
+	}
+	const probeEnv = buildSeatEnvironment(source, overrides);
+	const probes: NodeRuntimeProbe[] = [];
+	for (const candidate of [...new Set(candidates)]) {
+		const probe = await probeNodeRuntime(candidate, probeEnv, cwd);
+		probes.push(probe);
+		if (probe.version !== undefined && isSupportedNodeVersion(probe.version)) return candidate;
+	}
+	const checked = probes.length === 0 ? "no Node executables found" : probes.map((probe) => probe.detail).join("; ");
+	throw new PrimeSeatError({
+		status: "failed",
+		code: "PRIME_VERSION_MISMATCH",
+		message: `prime-agent ${PRIME_AGENT_VERSION} requires Node ${PRIME_MIN_NODE_VERSION}+; no supported runtime was found. Checked DECK_PRIME_NODE_BINARY, PATH, NVM_BIN, and ~/.nvm/versions/node. Install a supported Node or set DECK_PRIME_NODE_BINARY to its absolute executable (${checked}).`,
+		exitStatus: { code: null, signal: null },
+		wallClockMs: 0,
+		stderr: checked,
+	});
+}
+
+function pinNodeRuntime(env: Record<string, string>, nodeBinary: string): Record<string, string> {
+	const nodeDirectory = path.dirname(nodeBinary);
+	const existing = (env.PATH ?? "").split(path.delimiter).filter(
+		(directory) => directory !== "" && path.resolve(directory) !== nodeDirectory,
+	);
+	return { ...env, PATH: [nodeDirectory, ...existing].join(path.delimiter) };
+}
+
+function primeMaxOutputBytes(agentLimit: number | undefined, environmentLimit: string | undefined, smithersLimit: number | undefined): number {
+	const raw = agentLimit ?? (environmentLimit === undefined ? undefined : Number(environmentLimit));
+	if (raw !== undefined) {
+		if (!Number.isSafeInteger(raw) || raw <= 0) {
+			throw new PrimeSeatError({
+				status: "failed",
+				code: "PRIME_OUTPUT_LIMIT",
+				message: "PrimeSeatAgent.maxOutputBytes and DECK_PRIME_MAX_OUTPUT_BYTES must be positive integers",
+				exitStatus: { code: null, signal: null },
+				wallClockMs: 0,
+				stderr: "",
+			});
+		}
+		return raw;
+	}
+	// Prime RPC deltas repeat accumulated messages and tool arguments. A normal
+	// xhigh coding seat can cross Smithers' 200 KiB tool default in seconds.
+	return Math.max(smithersLimit ?? 0, PRIME_SEAT_DEFAULT_MAX_OUTPUT_BYTES);
 }
 
 function withTaskContext(
@@ -888,6 +1049,8 @@ export class PrimeSeatAgent implements AgentLike {
 		rlmReasoningByModel: Record<string, ModelPolicy["reasoning"]>;
 	};
 	private readonly binary: string;
+	private nodeBinary: string | undefined;
+	private resolvedBinary: string | undefined;
 	private preflightPromise: Promise<void> | undefined;
 	constructor(opts: PrimeSeatAgentOptions) {
 		if (opts.provider !== DECK_PROVIDER) {
@@ -1017,10 +1180,37 @@ export class PrimeSeatAgent implements AgentLike {
 		return this.preflightPromise;
 	};
 
+	private async primeBinary(): Promise<string> {
+		if (this.resolvedBinary !== undefined) return this.resolvedBinary;
+		if (path.isAbsolute(this.binary)) {
+			this.resolvedBinary = this.binary;
+			return this.resolvedBinary;
+		}
+		const env = buildSeatEnvironment(process.env, this.opts.env);
+		const resolved = await resolvePathExecutable(this.binary, env.PATH, this.opts.cwd);
+		if (resolved === undefined) {
+			throw new PrimeSeatError({
+				status: "failed",
+				code: "PRIME_SPAWN_FAILED",
+				message: `Cannot execute ${this.binary} from PATH; install prime-agent ${PRIME_AGENT_VERSION} or set DECK_PRIME_AGENT_BINARY to its absolute path`,
+				exitStatus: { code: null, signal: null },
+				wallClockMs: 0,
+				stderr: "",
+			});
+		}
+		this.resolvedBinary = resolved;
+		return resolved;
+	}
+
+	private async runtimeEnvironment(): Promise<Record<string, string>> {
+		this.nodeBinary ??= await resolvePrimeNodeBinary(process.env, this.opts.env ?? {}, this.opts.cwd);
+		return pinNodeRuntime(buildSeatEnvironment(process.env, this.opts.env), this.nodeBinary);
+	}
+
 	private async verifyVersion(): Promise<void> {
 		const startedAt = Date.now();
-		const binary = this.binary;
-		const env = buildSeatEnvironment(process.env, this.opts.env);
+		const binary = await this.primeBinary();
+		const env = await this.runtimeEnvironment();
 		const result = await new Promise<{ stdout: string; stderr: string; code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
 			const child = spawn(binary, ["--version"], {
 				cwd: this.opts.cwd,
@@ -1143,7 +1333,7 @@ export class PrimeSeatAgent implements AgentLike {
 		let sessionDir: string;
 		let seatHome: string;
 		try {
-			sourceEnv = buildSeatEnvironment(process.env, this.opts.env);
+			sourceEnv = await this.runtimeEnvironment();
 			sourceEnv.DECK_RLM_CHILD_MODEL = this.opts.rlmChildModel;
 			sourceEnv.DECK_RLM_REASONING_BY_MODEL = JSON.stringify(this.opts.rlmReasoningByModel);
 			sharedProfile = resolveDeckPrimeProfilePaths(
@@ -1234,7 +1424,7 @@ export class PrimeSeatAgent implements AgentLike {
 			}),
 		}, options.taskContext);
 		const extensions = this.opts.extensions ?? [defaultProviderExtension()];
-		const binary = this.binary;
+		const binary = await this.primeBinary();
 		// The shared Deck agent config includes conversation-only packages.
 		// Durable seats reset discovery, then load only the reviewed adapter
 		// extensions below; their explicit tool allowlist remains ipython.
@@ -1273,7 +1463,11 @@ export class PrimeSeatAgent implements AgentLike {
 			? Math.min(options.timeout, this.opts.timeoutMs)
 			: this.opts.timeoutMs;
 		const idleTimeoutMs = Math.min(this.opts.idleTimeoutMs ?? PRIME_SEAT_IDLE_TIMEOUT_MS, timeoutMs);
-		const maxOutputBytes = options.maxOutputBytes ?? this.opts.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
+		const maxOutputBytes = primeMaxOutputBytes(
+			this.opts.maxOutputBytes,
+			this.opts.env?.DECK_PRIME_MAX_OUTPUT_BYTES ?? process.env.DECK_PRIME_MAX_OUTPUT_BYTES,
+			options.maxOutputBytes,
+		);
 		const terminationGraceMs = this.opts.terminationGraceMs ?? DEFAULT_TERMINATION_GRACE_MS;
 		let stderrTail = "";
 		let stdoutBytes = 0;
@@ -1477,7 +1671,10 @@ export class PrimeSeatAgent implements AgentLike {
 					options.onStdout?.(text);
 					armIdleTimer();
 					if (stdoutBytes > maxOutputBytes) {
-						forceStop({ code: "PRIME_OUTPUT_LIMIT", message: `Prime RPC output exceeded ${maxOutputBytes} bytes` });
+						forceStop({
+							code: "PRIME_OUTPUT_LIMIT",
+							message: `Prime RPC output exceeded ${maxOutputBytes} bytes. Raise DECK_PRIME_MAX_OUTPUT_BYTES, PrimeSeatAgent.maxOutputBytes, or Smithers --max-output-bytes above the ${PRIME_SEAT_DEFAULT_MAX_OUTPUT_BYTES}-byte Prime floor.`,
+						});
 						return;
 					}
 					stdoutBuffer += text;
