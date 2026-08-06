@@ -1,11 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { resolve } from "node:path";
+import { tmpdir } from "node:os";
 
 import { classifyCiEvidence, evaluateWatchExit } from "../lib/watch.ts";
 import type { WatchSnapshot } from "../lib/types.ts";
 import {
 	analyzeFixture,
+	assertCaptureCollectionsComplete,
 	assertPublicStructuralFixture,
 	CAPTAIN_REVIEW_POLICY,
 	rehydrateFixture,
@@ -75,6 +77,40 @@ describe("sanitized captain corpus", () => {
 		expect(Bun.file(forbidden).size).toBe(0);
 	});
 
+	test("capture rejects a dangling outside symlink into the public repository", () => {
+		const forbidden = resolve(import.meta.dir, "fixtures/raw-private-via-link.json");
+		const link = resolve(tmpdir(), `deck-pr-capture-${process.pid}.json`);
+		rmSync(link, { force: true });
+		rmSync(forbidden, { force: true });
+		symlinkSync(forbidden, link);
+		try {
+			const result = Bun.spawnSync([
+				process.execPath,
+				resolve(import.meta.dir, "../scripts/pr-state-dry-run.ts"),
+				"capture",
+				"--repo", "example/repository",
+				"--self", "author",
+				"--out", link,
+				"1",
+			], { stdout: "pipe", stderr: "pipe" });
+			expect(result.exitCode).not.toBe(0);
+			expect(result.stderr.toString()).toContain("MUST be written outside the repository");
+			expect(Bun.file(forbidden).size).toBe(0);
+		} finally {
+			rmSync(link, { force: true });
+			rmSync(forbidden, { force: true });
+		}
+	});
+
+	test("structural validation rejects synthetic-looking raw strings in enum fields", () => {
+		const privateDecision = structuredClone(fixtures[0]!);
+		privateDecision.real.reviewDecision = "human-alice";
+		expect(() => assertPublicStructuralFixture(privateDecision)).toThrow("unsafe structural string");
+		const privateStatus = structuredClone(fixtures[0]!);
+		privateStatus.checks[0]!.status = "workflow-private";
+		expect(() => assertPublicStructuralFixture(privateStatus)).toThrow("unsafe structural string");
+	});
+
 	test("contains no raw Lindy identifiers, prose, URLs, SHAs, branches, or timestamps", () => {
 		const forbiddenKey = /^(?:body|url|title|login|repository|prNumber|headSha|baseRefName|lastPushAt|workflowName|name)$/i;
 		const forbiddenValue = /https?:|github|lindy|twaldin|\b[0-9a-f]{40}\b|\bLIN-\d+\b|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/i;
@@ -104,6 +140,31 @@ describe("sanitized captain corpus", () => {
 			expect(row.verdict, `${fixture.caseId}: ${row.action}`).not.toBe("crashes");
 			expect(row.classification).not.toBe("");
 		}
+	});
+
+	test("transient UNKNOWN observations are analyzed before the refreshed state", () => {
+		for (const fixture of fixtures.filter((candidate) =>
+			candidate.real.transientMergeableObservation === "UNKNOWN"
+		)) {
+			const row = analyzeFixture(fixture);
+			expect(row.classification, fixture.caseId).toStartWith("MERGEABILITY_STALE → ");
+			expect(row.node, fixture.caseId).toStartWith("UNKNOWN: ");
+			expect(row.action, fixture.caseId).toContain("refreshed:");
+		}
+	});
+
+	test("capture fails closed at an unpaginated GitHub collection boundary", () => {
+		const hydrated = rehydrateFixture(fixtures[0]!);
+		const comments = Array.from({ length: 100 }, (_, index) => ({
+			author: `human-${index}`,
+			isBot: false,
+			createdAt: hydrated.watchSnapshot.lastPushAt,
+			body: "synthetic",
+		}));
+		expect(() => assertCaptureCollectionsComplete(
+			{ ...hydrated.watchSnapshot, comments },
+			hydrated.approvals,
+		)).toThrow("page cap");
 	});
 
 	test("preserves all named messy situations from the real corpus", () => {
@@ -227,7 +288,7 @@ describe("exact-head CI evidence", () => {
 });
 
 describe("SPEC.md step 4/5 — approval and stamp contract", () => {
-	test.skip("desired: GitHub CHANGES_REQUESTED remains blocking even when historical review rows look resolved", () => {
+	test("GitHub CHANGES_REQUESTED remains blocking even when historical review rows look resolved", () => {
 		const cases = fixtures.filter((fixture) => fixture.real.reviewDecision === "CHANGES_REQUESTED");
 		expect(cases.length).toBeGreaterThan(0);
 		for (const fixture of cases) {

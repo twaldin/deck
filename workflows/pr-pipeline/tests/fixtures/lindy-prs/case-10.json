@@ -19,7 +19,7 @@
       "observed": 2
     }
   },
-  "headAgeSeconds": 464501,
+  "headAgeSeconds": 466807,
   "actors": [
     {
       "id": "self",
@@ -443,7 +443,7 @@
       "actorId": "human-2",
       "state": "APPROVED",
       "afterHeadSeconds": -38523,
-      "onCurrentHead": false
+      "onCurrentHead": true
     },
     {
       "actorId": "human-2",

@@ -6,7 +6,7 @@
  * repository. `sanitize` converts them into identifier-free structural cases
  * suitable for committed, deterministic tests.
  */
-import { existsSync, realpathSync } from "node:fs";
+import { lstatSync, readlinkSync, realpathSync } from "node:fs";
 import { chmod, mkdir, readdir, rm } from "node:fs/promises";
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,6 +16,7 @@ import {
 	execOrThrow,
 	fetchPrApprovalsAndCi,
 	fetchWatchSnapshot,
+	parseCheckRuns,
 	type ExecFn,
 } from "../lib/gh.ts";
 import { evaluateWatchExit, failedCheckRuns } from "../lib/watch.ts";
@@ -198,7 +199,10 @@ export function assertPublicStructuralFixture(value: unknown): asserts value is 
 			return;
 		}
 		if (typeof candidate === "string") {
-			if (!SAFE_STRUCTURAL_ENUMS.has(candidate) && !SAFE_SYNTHETIC_ID.test(candidate)) {
+			const syntheticSlot = /\.(?:caseId|id|actorId|authorId|lastAuthorId|threadId|contextId|workflowId|appId|checkSuiteId|head)$/.test(path)
+				|| /\.requestedReviewerIds\[\d+\]$/.test(path);
+			if (!SAFE_STRUCTURAL_ENUMS.has(candidate)
+				&& !(syntheticSlot && SAFE_SYNTHETIC_ID.test(candidate))) {
 				throw new Error(`unsafe structural string at ${path}`);
 			}
 			return;
@@ -240,18 +244,31 @@ function valueAfter(args: string[], flag: string): string | undefined {
 	const index = args.indexOf(flag);
 	return index < 0 ? undefined : args[index + 1];
 }
+function pathEntryExists(path: string): boolean {
+	try {
+		lstatSync(path);
+		return true;
+	} catch {
+		return false;
+	}
+}
 
 function canonicalPath(path: string): string {
 	let existing = resolve(path);
 	const missing: string[] = [];
-	while (!existsSync(existing)) {
+	while (!pathEntryExists(existing)) {
 		const parent = dirname(existing);
 		if (parent === existing) break;
 		missing.unshift(basename(existing));
 		existing = parent;
 	}
-	const canonicalExisting = existsSync(existing) ? realpathSync(existing) : existing;
-	return resolve(canonicalExisting, ...missing);
+	if (!pathEntryExists(existing)) return resolve(existing, ...missing);
+	const stat = lstatSync(existing);
+	if (stat.isSymbolicLink()) {
+		const target = resolve(dirname(existing), readlinkSync(existing));
+		return canonicalPath(resolve(target, ...missing));
+	}
+	return resolve(realpathSync(existing), ...missing);
 }
 
 function insideRepo(path: string): boolean {
@@ -281,6 +298,60 @@ async function fetchMetadata(repo: string, prNumber: number): Promise<RawMetadat
 	return value;
 }
 
+
+async function fetchAllCheckRuns(repo: string, headSha: string): Promise<CheckRun[]> {
+	const all: CheckRun[] = [];
+	for (let page = 1; ; page++) {
+		const out = await execOrThrow(readOnlyExec, [
+			"gh",
+			"api",
+			`repos/${repo}/commits/${encodeURIComponent(headSha)}/check-runs?per_page=100&page=${page}`,
+		]);
+		const batch = parseCheckRuns(JSON.parse(out));
+		all.push(...batch);
+		if (batch.length < 100) return all;
+	}
+}
+function reviewActivityFingerprint(approvals: ReviewApproval[]): string {
+	const latest = new Map<string, ReviewApproval>();
+	for (const review of approvals) {
+		const key = review.login.toLowerCase();
+		const prior = latest.get(key);
+		if (prior === undefined || review.submittedAt > prior.submittedAt) latest.set(key, review);
+	}
+	return [...latest.values()]
+		.map((review) => `${review.login.toLowerCase()}:${review.state}:${review.submittedAt}`)
+		.sort()
+		.join("|");
+}
+
+function snapshotReviewFingerprint(snapshot: WatchSnapshot): string {
+	return snapshot.reviewers
+		.map((reviewer) => `${reviewer.login.toLowerCase()}:${reviewer.lastReviewState ?? ""}:${reviewer.lastActivityAt}`)
+		.sort()
+		.join("|");
+}
+
+export function assertCaptureCollectionsComplete(
+	snapshot: WatchSnapshot,
+	approvals: ReviewApproval[],
+	checkRunsPaginated = false,
+): void {
+	const possibleTruncation = [
+		["reviews", approvals.length],
+		["comments", snapshot.comments.length],
+		["review threads", snapshot.threads.length],
+		["check runs", checkRunsPaginated ? 0 : snapshot.checkRuns.length],
+		["current workflow runs", snapshot.ciEvidence?.currentRuns.length ?? 0],
+		["stale workflow runs", snapshot.ciEvidence?.staleActiveRuns.length ?? 0],
+		["commit statuses", snapshot.ciEvidence?.statuses.length ?? 0],
+		["workflow jobs", Math.max(0, ...(snapshot.ciEvidence?.currentRuns ?? []).map((run) => run.jobs.length))],
+	].find(([, count]) => (count as number) >= 100);
+	if (possibleTruncation !== undefined) {
+		throw new Error(`${possibleTruncation[0]} reached the GitHub page cap; refusing a possibly truncated capture`);
+	}
+}
+
 async function capturePr(
 	repo: string,
 	prNumber: number,
@@ -290,15 +361,22 @@ async function capturePr(
 	const ctx = { gh: "gh", repo, exec: readOnlyExec };
 	for (let attempt = 1; attempt <= 3; attempt++) {
 		const before = await fetchMetadata(repo, prNumber);
-		const [watchSnapshot, approvalState] = await Promise.all([
-			fetchWatchSnapshot(ctx, prNumber, selfLogins),
-			fetchPrApprovalsAndCi(ctx, prNumber),
-		]);
+		const approvalState = await fetchPrApprovalsAndCi(ctx, prNumber);
+		const capturedSnapshot = await fetchWatchSnapshot(ctx, prNumber, selfLogins);
+		const checkRunsPaginated = capturedSnapshot.checkRuns.length >= 100;
+		const watchSnapshot: WatchSnapshot = capturedSnapshot.checkRuns.length < 100
+			? capturedSnapshot
+			: { ...capturedSnapshot, checkRuns: await fetchAllCheckRuns(repo, capturedSnapshot.headSha) };
 		const after = await fetchMetadata(repo, prNumber);
-		if (before.headRefOid !== after.headRefOid || watchSnapshot.headSha !== after.headRefOid || approvalState.headSha !== after.headRefOid) {
-			if (attempt === 3) throw new Error(`PR #${prNumber} moved during all three capture attempts`);
+		const moved = before.headRefOid !== after.headRefOid
+			|| watchSnapshot.headSha !== after.headRefOid
+			|| approvalState.headSha !== after.headRefOid
+			|| reviewActivityFingerprint(approvalState.approvals) !== snapshotReviewFingerprint(watchSnapshot);
+		if (moved) {
+			if (attempt === 3) throw new Error(`PR #${prNumber} changed during all three capture attempts`);
 			continue;
 		}
+		assertCaptureCollectionsComplete(watchSnapshot, approvalState.approvals, checkRunsPaginated);
 		if (after.state.toUpperCase() !== "OPEN") throw new Error(`PR #${prNumber} is not open`);
 		return {
 			capturedAt: new Date().toISOString(),
@@ -618,6 +696,7 @@ export function rehydrateFixture(fixture: StructuralFixture): {
 		selfLogins: ["pr-author"],
 		watchSnapshot: {
 			headSha,
+			reviewDecision: fixture.real.reviewDecision,
 			mergeable: fixture.real.mergeable,
 			mergeStateStatus: fixture.real.mergeStateStatus,
 			behindBy: fixture.real.behindBy,
@@ -937,13 +1016,36 @@ export function analyzeSnapshot(args: {
 		}
 		if (bothApproved && !handled.exitOk && !handled.terminalEscalation) failures.push("human + Claude approval does not make the captain's stamp available");
 		if (githubReviewSatisfied && !bothApproved && handled.exitOk) failures.push("watch exits without both human and Claude approval");
+		let displayedClassification = actualClassification;
+		let displayedNode = actual.node;
+		let displayedAction = actual.action;
+		if (args.surveyUnknown) {
+			const unknownSnapshot: WatchSnapshot = {
+				...args.watchSnapshot,
+				mergeable: "UNKNOWN",
+				mergeStateStatus: "UNKNOWN",
+				behindBy: 0,
+			};
+			const unknownVerdict = evaluateWatchExit(unknownSnapshot, {
+				selfLogins: args.selfLogins,
+				handledTriggerIds: [],
+				reviewPolicy: CAPTAIN_REVIEW_POLICY,
+			});
+			const unknownRoute = route(unknownVerdict);
+			if (unknownVerdict.ciClassification !== "MERGEABILITY_STALE" || unknownVerdict.rebaseRequired) {
+				failures.push("transient UNKNOWN mergeability is not treated as stale evidence");
+			}
+			displayedClassification = `${classification(unknownVerdict)} → ${actualClassification}`;
+			displayedNode = `UNKNOWN: ${unknownRoute.node}; refreshed: ${actual.node}`;
+			displayedAction = `UNKNOWN: ${unknownRoute.action}; refreshed: ${actual.action}`;
+		}
 		return {
 			caseId: args.caseId,
 			...(args.prNumber === undefined ? {} : { prNumber: args.prNumber }),
 			realState: `${args.surveyUnknown ? "UNKNOWN→" : ""}${args.real.mergeable}/${args.real.reviewDecision ?? "∅"}/${expectedClassification} checks=${args.real.requiredChecks.observed}/${args.real.requiredChecks.configured}`,
-			classification: actualClassification,
-			node: actual.node,
-			action: actual.action,
+			classification: displayedClassification,
+			node: displayedNode,
+			action: displayedAction,
 			verdict: noChecksHang ? "hangs" : failures.length === 0 ? "correct" : "wrong",
 			failures,
 		};

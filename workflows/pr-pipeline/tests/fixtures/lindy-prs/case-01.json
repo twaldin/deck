@@ -14,10 +14,10 @@
     "behindBy": 18,
     "requiredChecks": {
       "configured": 2,
-      "observed": 0
+      "observed": 1
     }
   },
-  "headAgeSeconds": 170,
+  "headAgeSeconds": 2469,
   "actors": [
     {
       "id": "self",
@@ -80,10 +80,10 @@
       "id": "check-1",
       "contextId": "other-3",
       "workflowId": "workflow-1",
-      "status": "completed",
-      "conclusion": "skipped",
-      "startedAfterHeadSeconds": 77,
-      "completedAfterHeadSeconds": 77,
+      "status": "in_progress",
+      "conclusion": null,
+      "startedAfterHeadSeconds": 2026,
+      "completedAfterHeadSeconds": null,
       "appId": "app-1",
       "checkSuiteId": "suite-1"
     },
@@ -91,34 +91,89 @@
       "id": "check-2",
       "contextId": "other-4",
       "workflowId": "workflow-2",
-      "status": "queued",
-      "conclusion": null,
-      "startedAfterHeadSeconds": 77,
-      "completedAfterHeadSeconds": null,
+      "status": "completed",
+      "conclusion": "skipped",
+      "startedAfterHeadSeconds": 1097,
+      "completedAfterHeadSeconds": 1097,
       "appId": "app-1",
-      "checkSuiteId": "suite-1"
+      "checkSuiteId": "suite-2"
     },
     {
       "id": "check-3",
-      "contextId": "other-5",
+      "contextId": "required-1",
       "workflowId": "workflow-3",
-      "status": "in_progress",
-      "conclusion": null,
-      "startedAfterHeadSeconds": 159,
-      "completedAfterHeadSeconds": null,
+      "status": "completed",
+      "conclusion": "failure",
+      "startedAfterHeadSeconds": 1178,
+      "completedAfterHeadSeconds": 1290,
       "appId": "app-1",
       "checkSuiteId": "suite-2"
     },
     {
       "id": "check-4",
+      "contextId": "other-5",
+      "workflowId": "workflow-4",
+      "status": "completed",
+      "conclusion": "skipped",
+      "startedAfterHeadSeconds": 522,
+      "completedAfterHeadSeconds": 522,
+      "appId": "app-1",
+      "checkSuiteId": "suite-3"
+    },
+    {
+      "id": "check-5",
       "contextId": "other-6",
+      "workflowId": "workflow-5",
+      "status": "completed",
+      "conclusion": "failure",
+      "startedAfterHeadSeconds": 837,
+      "completedAfterHeadSeconds": 1097,
+      "appId": "app-1",
+      "checkSuiteId": "suite-2"
+    },
+    {
+      "id": "check-6",
+      "contextId": "other-7",
+      "workflowId": "workflow-6",
+      "status": "queued",
+      "conclusion": null,
+      "startedAfterHeadSeconds": 312,
+      "completedAfterHeadSeconds": null,
+      "appId": "app-1",
+      "checkSuiteId": "suite-4"
+    },
+    {
+      "id": "check-7",
+      "contextId": "other-8",
+      "workflowId": "workflow-7",
+      "status": "completed",
+      "conclusion": "skipped",
+      "startedAfterHeadSeconds": 77,
+      "completedAfterHeadSeconds": 77,
+      "appId": "app-1",
+      "checkSuiteId": "suite-5"
+    },
+    {
+      "id": "check-8",
+      "contextId": "other-9",
+      "workflowId": "workflow-8",
+      "status": "completed",
+      "conclusion": "cancelled",
+      "startedAfterHeadSeconds": 77,
+      "completedAfterHeadSeconds": 979,
+      "appId": "app-1",
+      "checkSuiteId": "suite-5"
+    },
+    {
+      "id": "check-9",
+      "contextId": "other-5",
       "workflowId": "workflow-4",
       "status": "queued",
       "conclusion": null,
       "startedAfterHeadSeconds": 12,
       "completedAfterHeadSeconds": null,
       "appId": "app-1",
-      "checkSuiteId": "suite-3"
+      "checkSuiteId": "suite-6"
     }
   ],
   "ci": {
@@ -137,17 +192,57 @@
     "currentRuns": [
       {
         "id": "run-1",
-        "checkSuiteId": "suite-4",
+        "checkSuiteId": "suite-3",
         "head": "current",
-        "status": "pending",
-        "conclusion": null,
-        "createdAfterHeadSeconds": 11,
-        "startedAfterHeadSeconds": 11,
-        "jobs": []
+        "status": "completed",
+        "conclusion": "skipped",
+        "createdAfterHeadSeconds": 521,
+        "startedAfterHeadSeconds": 521,
+        "jobs": [
+          {
+            "id": "job-1-1",
+            "status": "completed",
+            "conclusion": "skipped",
+            "startedAfterHeadSeconds": 522,
+            "completedAfterHeadSeconds": 522
+          }
+        ]
       },
       {
         "id": "run-2",
-        "checkSuiteId": "suite-3",
+        "checkSuiteId": "suite-2",
+        "head": "current",
+        "status": "completed",
+        "conclusion": "failure",
+        "createdAfterHeadSeconds": 11,
+        "startedAfterHeadSeconds": 11,
+        "jobs": [
+          {
+            "id": "job-2-1",
+            "status": "completed",
+            "conclusion": "failure",
+            "startedAfterHeadSeconds": 837,
+            "completedAfterHeadSeconds": 1097
+          },
+          {
+            "id": "job-2-2",
+            "status": "completed",
+            "conclusion": "failure",
+            "startedAfterHeadSeconds": 1178,
+            "completedAfterHeadSeconds": 1290
+          },
+          {
+            "id": "job-2-3",
+            "status": "completed",
+            "conclusion": "skipped",
+            "startedAfterHeadSeconds": 1097,
+            "completedAfterHeadSeconds": 1097
+          }
+        ]
+      },
+      {
+        "id": "run-3",
+        "checkSuiteId": "suite-6",
         "head": "current",
         "status": "queued",
         "conclusion": null,
@@ -155,7 +250,7 @@
         "startedAfterHeadSeconds": 10,
         "jobs": [
           {
-            "id": "job-2-1",
+            "id": "job-3-1",
             "status": "queued",
             "conclusion": null,
             "startedAfterHeadSeconds": 12,
@@ -164,30 +259,20 @@
         ]
       },
       {
-        "id": "run-3",
+        "id": "run-4",
         "checkSuiteId": "suite-5",
         "head": "current",
-        "status": "pending",
-        "conclusion": null,
-        "createdAfterHeadSeconds": 10,
-        "startedAfterHeadSeconds": 10,
-        "jobs": []
-      },
-      {
-        "id": "run-4",
-        "checkSuiteId": "suite-1",
-        "head": "current",
-        "status": "queued",
-        "conclusion": null,
+        "status": "completed",
+        "conclusion": "failure",
         "createdAfterHeadSeconds": 10,
         "startedAfterHeadSeconds": 10,
         "jobs": [
           {
             "id": "job-4-1",
-            "status": "queued",
-            "conclusion": null,
+            "status": "completed",
+            "conclusion": "cancelled",
             "startedAfterHeadSeconds": 77,
-            "completedAfterHeadSeconds": null
+            "completedAfterHeadSeconds": 979
           },
           {
             "id": "job-4-2",
@@ -197,60 +282,27 @@
             "completedAfterHeadSeconds": 77
           }
         ]
-      }
-    ],
-    "staleActiveRuns": [
+      },
       {
         "id": "run-5",
-        "checkSuiteId": "suite-6",
-        "head": "stale-1",
+        "checkSuiteId": "suite-4",
+        "head": "current",
         "status": "queued",
         "conclusion": null,
-        "createdAfterHeadSeconds": -457,
-        "startedAfterHeadSeconds": -457,
+        "createdAfterHeadSeconds": 10,
+        "startedAfterHeadSeconds": 10,
         "jobs": [
           {
             "id": "job-5-1",
-            "status": "completed",
-            "conclusion": "cancelled",
-            "startedAfterHeadSeconds": -447,
-            "completedAfterHeadSeconds": 11
-          },
-          {
-            "id": "job-5-2",
             "status": "queued",
             "conclusion": null,
-            "startedAfterHeadSeconds": 12,
-            "completedAfterHeadSeconds": null
-          },
-          {
-            "id": "job-5-3",
-            "status": "completed",
-            "conclusion": "skipped",
-            "startedAfterHeadSeconds": 12,
-            "completedAfterHeadSeconds": 12
-          }
-        ]
-      },
-      {
-        "id": "run-6",
-        "checkSuiteId": "suite-7",
-        "head": "stale-1",
-        "status": "in_progress",
-        "conclusion": null,
-        "createdAfterHeadSeconds": -457,
-        "startedAfterHeadSeconds": -457,
-        "jobs": [
-          {
-            "id": "job-6-1",
-            "status": "in_progress",
-            "conclusion": null,
-            "startedAfterHeadSeconds": -41,
+            "startedAfterHeadSeconds": 312,
             "completedAfterHeadSeconds": null
           }
         ]
       }
     ],
+    "staleActiveRuns": [],
     "statuses": []
   }
 }
