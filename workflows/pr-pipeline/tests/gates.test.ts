@@ -366,6 +366,19 @@ describe("evaluateWatchExit", () => {
 		expect(noCi.ok).toBe(false);
 		expect(noCi.retryable).toBe(false);
 		expect(noCi.ciClassification).toBe("NO_REQUIRED_CHECKS");
+		const failed = assessMergeSafety(snapshot({
+			checkRuns: [{
+				name: "ci",
+				status: "completed",
+				conclusion: "failure",
+				headSha: "abc123",
+			}],
+		}), "abc123");
+		expect(failed).toMatchObject({
+			ok: false,
+			retryable: false,
+			ciClassification: "TERMINAL_FAILURE",
+		});
 		expect(assessMergeSafety(snapshot(), "different-head").ok).toBe(false);
 		expect(assessMergeSafety(snapshot({ mergeable: "CONFLICTING" }), "abc123").ok).toBe(false);
 	});

@@ -322,6 +322,7 @@ const stackQueueCarSchema = z.object({
 	baseBranch: z.string().min(1),
 	autoMergeRequest: z.boolean(),
 	ejected: z.boolean(),
+	requeueRequired: z.boolean().optional(),
 });
 
 const stackLandingCarSchema = z.object({
@@ -631,11 +632,14 @@ export const schemas = {
 		cars: z.array(stackMergeCarSchema).optional(),
 	}),
 	queuePoll: z.object({
+		round: z.number().int().optional(),
 		poll: z.number().int(),
 		state: z.enum(["open", "closed"]),
 		baseBranch: z.string().min(1),
 		autoMergeRequest: z.boolean(),
 		ejected: z.boolean(),
+		requeueRequired: z.boolean().optional(),
+		hardInvalidation: z.boolean().optional(),
 		reason: z.string(),
 		cars: z.array(stackQueueCarSchema).optional(),
 	}),
@@ -1123,6 +1127,11 @@ export default smithers((ctx) => {
 			&& headCheck.ok === false
 			&& headCheck.retryable !== true
 		) return true;
+		const queueInvalidated = (ctx.outputs.queuePoll ?? []).some((row) => {
+			const value = row as { round?: number; hardInvalidation?: boolean };
+			return value.round === k && value.hardInvalidation === true;
+		});
+		if (queueInvalidated) return true;
 		return false;
 	};
 
@@ -1171,6 +1180,7 @@ export default smithers((ctx) => {
 	// Retryable pending CI preserves the stamp; hard drift/failure ends the round.
 	const stampedRound = (() => {
 		for (let k = 0; k <= currentRound && k < limits.stampRounds; k++) {
+			if (roundEnded(k)) continue;
 			const stamp = ctx.latest(outputs.approvals, `r${k}-stamp`);
 			const validity = ctx.latest(outputs.stampValidity, `r${k}-stamp-validity`);
 			const headCheck = ctx.latest(outputs.mergeHeadCheck, `r${k}-merge-head-check`);
@@ -1204,21 +1214,40 @@ export default smithers((ctx) => {
 				}
 			: null;
 
-	const mergeReceipt = ctx.latest(outputs.mergeReceipt, "enqueue-merge");
-	const latestQueue = ctx.latest(outputs.queuePoll, "queue-poll");
-	const queueRows = (ctx.outputs.queuePoll ?? []) as Array<{
+	const recordedMergeReceipt = ctx.latest(outputs.mergeReceipt, "enqueue-merge");
+	const allQueueRows = (ctx.outputs.queuePoll ?? []) as Array<{
+		round?: number;
 		poll: number;
 		state: string;
 		baseBranch: string;
 		autoMergeRequest: boolean;
 		ejected: boolean;
+		requeueRequired?: boolean;
+		hardInvalidation?: boolean;
 		cars?: Array<{
 			prNumber: number;
+			merged: boolean;
 			state: "open" | "closed";
+			baseBranch: string;
 			autoMergeRequest: boolean;
 			ejected: boolean;
+			requeueRequired?: boolean;
 		}>;
 	}>;
+	const invalidatedReceipt =
+		recordedMergeReceipt !== undefined
+		&& allQueueRows.some(
+			(row) =>
+				row.round === recordedMergeReceipt.round
+				&& row.hardInvalidation === true,
+		);
+	const mergeReceipt = invalidatedReceipt ? undefined : recordedMergeReceipt;
+	const queueRows = mergeReceipt === undefined
+		? []
+		: allQueueRows.filter(
+				(row) => row.round === undefined || row.round === mergeReceipt.round,
+			);
+	const latestQueue = queueRows.at(-1);
 	const latestLanding = ctx.latest(outputs.landingPoll, "landing-poll");
 	const landingRows = (ctx.outputs.landingPoll ?? []) as Array<{ poll: number; landed: boolean }>;
 	const stackSync = ctx.latest(outputs.stackSync, "stack-sync-prune");
@@ -4449,7 +4478,10 @@ export default smithers((ctx) => {
 				{mergeReceipt !== undefined && pr !== undefined ? (
 					<Loop
 						id="queue-loop"
-						until={ctx.latest(outputs.queuePoll, "queue-poll")?.state === "closed"}
+						until={
+							ctx.latest(outputs.queuePoll, "queue-poll")?.state === "closed"
+							|| ctx.latest(outputs.queuePoll, "queue-poll")?.hardInvalidation === true
+						}
 						maxIterations={limits.landingPolls}
 						onMaxReached="return-last"
 					>
@@ -4481,6 +4513,7 @@ export default smithers((ctx) => {
 										baseBranch: lifecycle.baseBranch || car.baseBranch,
 										autoMergeRequest: ejected ? true : lifecycle.autoMergeRequest,
 										ejected,
+										requeueRequired: false,
 									});
 								}
 								const ejectedCars = lifecycles.filter((lifecycle) => lifecycle.ejected);
@@ -4520,7 +4553,16 @@ export default smithers((ctx) => {
 								const enqueueNumbers = new Set([
 									...ejectedCars.map((car) => car.prNumber),
 									...(newlyEligiblePr === undefined ? [] : [newlyEligiblePr]),
+									...(
+										stackMode
+											? prior?.cars?.filter((car) => car.requeueRequired === true).map((car) => car.prNumber) ?? []
+											: prior?.requeueRequired === true
+												? [pr.prNumber]
+												: []
+									),
 								]);
+								let queueSafetyReason: string | undefined;
+								let hardInvalidation = false;
 								if (enqueueNumbers.size > 0 && !dryRun) {
 									const validity = ctx.latest(
 										outputs.stampValidity,
@@ -4544,45 +4586,68 @@ export default smithers((ctx) => {
 													drifted.map((car) => `#${car.prNumber} ${car.headSha} -> ${car.currentHead}`).join("; "),
 											);
 										}
-										await enqueueStackParentFirst(
-											stampedCars.filter((car) => enqueueNumbers.has(car.prNumber)),
-											async (prNumber) => {
-												if (prNumber === newlyEligiblePr) {
-													await execOrThrow(
-														bunExec,
-														[
-															github.gh,
-															"pr",
-															"edit",
-															String(prNumber),
-															"--repo",
-															input.repo,
-															"--base",
-															baseBranch,
-														],
-														{ cwd: input.worktree },
-													);
-												}
-												const merge = await runMerge({
-													exec: bunExec,
-													gh: github.gh,
-													prNumber,
-													cwd: input.worktree,
-													args: ["--auto", "--squash"],
-												});
-												return merge.output;
-											},
+										const targets = stampedCars.filter((car) => enqueueNumbers.has(car.prNumber));
+										if (newlyEligiblePr !== undefined && enqueueNumbers.has(newlyEligiblePr)) {
+											await execOrThrow(
+												bunExec,
+												[
+													github.gh,
+													"pr",
+													"edit",
+													String(newlyEligiblePr),
+													"--repo",
+													input.repo,
+													"--base",
+													baseBranch,
+												],
+												{ cwd: input.worktree },
+											);
+										}
+										const safetyResults = await Promise.all(
+											targets.map(async (car) => {
+												const snapshot = await fetchWatchSnapshot(
+													ghCtx,
+													car.prNumber,
+													github.selfLogins,
+												);
+												return {
+													car,
+													safety: assessMergeSafety(snapshot, car.headSha),
+												};
+											}),
 										);
+										const unsafe = safetyResults.filter(({ safety }) => !safety.ok);
+										if (unsafe.length > 0) {
+											queueSafetyReason = unsafe
+												.map(({ car, safety }) => `PR #${car.prNumber}: ${safety.reason}`)
+												.join("; ");
+											hardInvalidation = unsafe.some(({ safety }) => !safety.retryable);
+										} else {
+											await enqueueStackParentFirst(
+												targets,
+												async (prNumber) => {
+													const merge = await runMerge({
+														exec: bunExec,
+														gh: github.gh,
+														prNumber,
+														cwd: input.worktree,
+														args: ["--auto", "--squash"],
+													});
+													return merge.output;
+												},
+											);
+										}
 										for (const lifecycle of lifecycles) {
 											if (!enqueueNumbers.has(lifecycle.prNumber)) continue;
-											lifecycle.autoMergeRequest = true;
+											lifecycle.autoMergeRequest = unsafe.length === 0;
+											lifecycle.requeueRequired = unsafe.length > 0 && !hardInvalidation;
 											if (lifecycle.prNumber === newlyEligiblePr) {
 												lifecycle.baseBranch = baseBranch;
 											}
 										}
 									} else {
 										const approvedHead = validity?.stampedHead;
-										const ejectedCar = ejectedCars[0];
+										const ejectedCar = lifecycles.find((car) => enqueueNumbers.has(car.prNumber));
 										if (!approvedHead || ejectedCar === undefined) {
 											throw new Error(
 												"[escalate] merge queue re-submit has no commit-bound stamp.",
@@ -4619,13 +4684,28 @@ export default smithers((ctx) => {
 													`not approved PR state ${input.branch}@${comparison.currentHead}; refusing to enqueue.`,
 											);
 										}
-										await runMerge({
-											exec: bunExec,
-											gh: github.gh,
-											prNumber: ejectedCar.prNumber,
-											cwd: input.worktree,
-											args: ["--auto", "--squash"],
-										});
+										const freshSnapshot = await fetchWatchSnapshot(
+											ghCtx,
+											ejectedCar.prNumber,
+											github.selfLogins,
+										);
+										const safety = assessMergeSafety(freshSnapshot, approvedHead);
+										if (!safety.ok) {
+											queueSafetyReason = `PR #${ejectedCar.prNumber}: ${safety.reason}`;
+											hardInvalidation = !safety.retryable;
+											ejectedCar.autoMergeRequest = false;
+											ejectedCar.requeueRequired = safety.retryable;
+										} else {
+											await runMerge({
+												exec: bunExec,
+												gh: github.gh,
+												prNumber: ejectedCar.prNumber,
+												cwd: input.worktree,
+												args: ["--auto", "--squash"],
+											});
+											ejectedCar.autoMergeRequest = true;
+											ejectedCar.requeueRequired = false;
+										}
 									}
 								}
 								const state = lifecycles.every((lifecycle) => lifecycle.state === "closed")
@@ -4638,11 +4718,16 @@ export default smithers((ctx) => {
 									baseBranch: lifecycles.at(-1)?.baseBranch ?? baseBranch,
 									autoMergeRequest: lifecycles.some((lifecycle) => lifecycle.autoMergeRequest),
 									ejected,
-									reason: ejected
-										? "one or more stack cars were ejected; auto-merge re-submitted"
-										: state === "closed"
-											? "effort closed; verify every squash on its live base"
-											: "waiting in merge queue",
+									requeueRequired: lifecycles.some((lifecycle) => lifecycle.requeueRequired === true),
+									hardInvalidation,
+									round: mergeReceipt.round,
+									reason: queueSafetyReason !== undefined
+										? `${hardInvalidation ? "merge safety invalidated" : "merge safety pending"}: ${queueSafetyReason}`
+										: ejected
+											? "one or more stack cars were ejected; auto-merge re-submitted"
+											: state === "closed"
+												? "effort closed; verify every squash on its live base"
+												: "waiting in merge queue",
 									...(stackMode ? { cars: lifecycles } : {}),
 								};
 							})()}
@@ -4709,7 +4794,8 @@ export default smithers((ctx) => {
 					</Loop>
 				) : null}
 
-				{latestQueue?.state === "open" && queueRows.length >= limits.landingPolls ? (
+
+				{latestQueue?.state === "open" && latestQueue.hardInvalidation !== true && queueRows.length >= limits.landingPolls ? (
 					<Task id="queue-exhausted" output={outputs.queuePoll} retries={0}>
 						{() => { throw new Error(`[escalate] PR #${pr?.prNumber} remained in the merge queue after ${queueRows.length} polls.`); }}
 					</Task>
