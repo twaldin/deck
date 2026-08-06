@@ -136,9 +136,9 @@ ENTER_PI="$(env HOME="$SANDBOX_HOME" PATH="$INSTALL_PATH" \
   fail "enter.sh did not activate remediated BIN_TARGET (got $ENTER_PI)"
 
 KERNEL_PROBE="$SANDBOX_HOME/kernel-tool-runtime.txt"
-HOME="$SANDBOX_HOME" "$DECK_BIN/uv" \
-  run --isolated --no-project --python 3.11 --with ipykernel python -I - "$KERNEL_PROBE" <<'PY' ||
-  fail "installed uv could not bootstrap and execute the seat's IPython tool runtime"
+if ! HOME="$SANDBOX_HOME" "$DECK_BIN/uv" \
+  run --isolated --no-project --python 3.11 --with ipykernel \
+  python -I - "$KERNEL_PROBE" <<'PY'
 from pathlib import Path
 import sys
 
@@ -186,6 +186,9 @@ finally:
         if kernel.has_kernel:
             kernel.shutdown_kernel(now=True)
 PY
+then
+  fail "installed uv could not bootstrap and execute the seat's IPython tool runtime"
+fi
 [ "$(cat "$KERNEL_PROBE" 2>/dev/null)" = "kernel-tool-runtime-ok" ] ||
   fail "IPython kernel started but did not execute its filesystem probe"
 
