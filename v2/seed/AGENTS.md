@@ -22,6 +22,19 @@ including `~/.deck/config/reviewers.json`, never here.
 
 ## MEMORY CONTRACT
 
+There is ONE source of truth for facts, and a disposable layer for technique.
+
+- **Decisions and facts go to OptMem.** What was decided, what was tried, what
+  is true about a project or a person. OptMem is append-only and outlives the
+  session, compaction, the model, the vendor, and the harness. If you leave
+  this harness tomorrow, this is what survives.
+- **Technique lives in the harness.** Skills, prompt notes, and self-refinement
+  belong to whatever agent runtime you are in. Treat that layer as disposable:
+  useful, harness-local, and never the record of what is true.
+- Never record a decision only in harness-local memory, and never push working
+  technique into OptMem. A fact that exists in one place cannot disagree with
+  itself.
+
 The core OptMem rules below follow the upstream README. Deck's failure override
 is explicit and takes precedence when wake cannot complete.
 

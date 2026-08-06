@@ -86,7 +86,11 @@ import {
 import { findLandingCommit } from "./lib/landing.ts";
 import { runMerge } from "./lib/merge.ts";
 import { detectMigrations, MIGRATION_STAGES, migrationEvidenceComplete } from "./lib/migrations.ts";
-import { generatePullRequestDescription, sanitizeDescriptionInput } from "./lib/description.ts";
+import {
+	formatPullRequestTitle,
+	generatePullRequestDescription,
+	sanitizeDescriptionInput,
+} from "./lib/description.ts";
 import { buildSeatEnvironment, PrimeSeatAgent } from "./lib/engines/prime.ts";
 import {
 	DECK_PROVIDER,
@@ -1874,7 +1878,10 @@ export default smithers((ctx) => {
 											.map((file) => file.trim())
 											.filter(Boolean);
 										const descriptionInput = sanitizeDescriptionInput({
-											title: spec.title ?? `${brief?.title ?? input.ticket} (${index + 1}/${cars.length})`,
+											title: formatPullRequestTitle(
+												input.ticket,
+												spec.title ?? `${brief?.title ?? input.ticket} (${index + 1}/${cars.length})`,
+											),
 											summary: spec.body ?? brief?.summary ?? "",
 											acceptanceCriteria: brief?.acceptanceCriteria ?? [],
 											testing: implementation.stackCars[index].testEvidence,
@@ -1997,7 +2004,7 @@ export default smithers((ctx) => {
 									// that (create --reviewer is the silent-no-op path with no
 									// verification read).
 									const descriptionInput = sanitizeDescriptionInput({
-										title: brief?.title ?? input.ticket,
+										title: formatPullRequestTitle(input.ticket, brief?.title ?? input.ticket),
 										summary: brief?.summary ?? "",
 										acceptanceCriteria: brief?.acceptanceCriteria ?? [],
 										testing: implementation.testEvidence,

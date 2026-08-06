@@ -29,21 +29,21 @@ const INTERNAL_CONTEXT_PATTERNS = [
 	/\b(?:CAPTAIN\s+)?DOCTRINE(?:\s+\d{4}-\d{2}-\d{2})?(?:\s*\([^)]+\))?/i,
 	/\b(?:MEETING|DEBATE)\s+FOLD-IN(?:\s+\d{4}-\d{2}-\d{2})?/i,
 	/\b(?:STANDING[- ]RULES|REPORT\.md)\b/i,
-	/(?:\/Users\/|\/home\/|\/tmp\/|\/private\/var\/|\/opt\/|\/mnt\/|\/workspace\/|~\/|\.deck\/|(?<![A-Za-z])[A-Za-z]:[\\/])/i,
+	/(?:file:\/\/\/(?:Users|home|tmp|private|var|opt|mnt|workspace|srv|etc|root)\/|(?:^|[\s("'`=:])(?:\/(?:Users|home|tmp|private|var|opt|mnt|workspace|srv|etc|root)\/|~\/|\.deck\/|[A-Za-z]:[\\/]))/i,
 	/\$(?:DECK_HOME|HOME)\b/i,
 	/\b(?:effort|implementation|decision)\s+dossier\b|(?:^|[/\\])(?:efforts?|dossiers?)(?:[/\\]|$)/i,
 	/\bali-eval-fix-[a-z0-9-]*\b/i,
 	/\b(?:eval-harness|factory|selfloop|retro)-[a-z0-9][a-z0-9-]*\b/i,
 	/\b[a-z][a-z0-9]*-(?:eval|pipeline|retro|selfloop)-(?:fix|slice|spike|run|rewrite|hardening)-\d+\b/i,
 	/\b(?:lane\s+[A-Z]\d*|lane-[a-z0-9][a-z0-9-]*)\b/i,
-	/\b(?:run|execution|task)[-_ ]?id[:= ]+?[A-Za-z0-9_-]{6,}\b/i,
+	/\b(?:run|execution|task|effort|lane)[-_ ]?id[:= ]+?[A-Za-z0-9_-]{6,}\b/i,
 	/\bworkflow\s+run\s+[A-Za-z0-9_-]{6,}\b/i,
 	/\b[0-9a-f]{40}\b/i,
 	/\b(?:captain|orch(?:estrator)?|fleet|stamp(?:able)?|yolo|smithers|worktree|implementer|adversar(?:y|ial)|factory)\b/i,
 	/\b(?:workflow seat|watch-loop|push-pr|rebase-and-push|recut)\b/i,
-	/\b(?:priority\s*#?\s*\d+|Spec\s*=|PR\s*\d+[A-Z]?\s+of|Managed by|Local review nits|review round|round[- ]?\d+)\b/i,
+	/\b(?:priority\s*#?\s*\d+|Spec\s*[:=]|PR\s*\d+[A-Z]?\s+of|Managed by|Local review nits|review round|round[- ]?\d+|must approve)\b/i,
 	/\b(?:implementation brief|task brief|brief acceptance criteria)\b/i,
-	/(?:^|\n)--\s+[^ \n]+(?:'s)?\s+agent\s*$/im,
+	/(?:^|\n)(?:--\s+[^ \n]+(?:'s)?\s+agent|(?:generated|written|authored|prepared)\s+by\s+[^.\n]{1,80}\bagent)[.!]?\s*$/im,
 ];
 
 const MALFORMED_TEXT_PATTERNS = [
@@ -60,68 +60,92 @@ const TITLE_FORMATS = [
 	/^(?:build|chore|ci|docs|feat|fix|perf|refactor|revert|test)\([a-z0-9._-]+\):\s+\S/i,
 ];
 
-/** Drop private context at the input boundary before body generation sees it. */
-export function sanitizeDescriptionInput(input: PullRequestDescriptionInput): TeamFacingPullRequestDescriptionInput {
-	const filter = (value: string) =>
-		value
-			.split(/(?<=[.!?])\s+|\n+/)
-			.map((segment) => segment.trim())
-			.filter(
-				(segment) =>
-					segment.length > 0 && !INTERNAL_CONTEXT_PATTERNS.some((pattern) => pattern.test(segment)),
-			)
-			.join(" ")
-			.trim();
+export function formatPullRequestTitle(ticket: string, title: string): string {
+	const ticketId = assertTeamFacingInput(ticket, "ticket", true);
+	if (!/^[A-Z][A-Z0-9]+-\d+$/.test(ticketId)) {
+		throw new Error("PR ticket must use `TICKET-123` format.");
+	}
+	const teamTitle = assertTeamFacingInput(title, "title", true);
+	const existingTicket = teamTitle.match(/^\[([A-Z][A-Z0-9]+-\d+)\]\s+\S/);
+	if (existingTicket !== null && existingTicket[1] !== ticketId) {
+		throw new Error(`PR title ticket ${existingTicket[1]} does not match ${ticketId}.`);
+	}
+	return existingTicket === null ? `[${ticketId}] ${teamTitle}` : teamTitle;
+}
 
+/** Validate and brand team-facing input before body generation can receive it. */
+export function sanitizeDescriptionInput(input: PullRequestDescriptionInput): TeamFacingPullRequestDescriptionInput {
 	return {
-		title: filter(input.title),
-		summary: filter(input.summary),
-		acceptanceCriteria: input.acceptanceCriteria.map(filter).filter(Boolean),
-		testing: input.testing === undefined ? undefined : filter(input.testing),
-		reviewOutcome: input.reviewOutcome === undefined ? undefined : filter(input.reviewOutcome),
-		changedFiles: input.changedFiles?.filter(
-			(file) => !INTERNAL_CONTEXT_PATTERNS.some((pattern) => pattern.test(file)),
+		title: assertTeamFacingInput(input.title, "title", true),
+		summary: assertTeamFacingInput(input.summary, "summary", true),
+		acceptanceCriteria: input.acceptanceCriteria.map((criterion, index) =>
+			assertTeamFacingInput(criterion, `acceptance criterion ${index + 1}`, true),
+		),
+		testing:
+			input.testing === undefined ? undefined : assertTeamFacingInput(input.testing, "testing evidence"),
+		reviewOutcome:
+			input.reviewOutcome === undefined
+				? undefined
+				: assertTeamFacingInput(input.reviewOutcome, "review outcome"),
+		changedFiles: input.changedFiles?.map((file, index) =>
+			assertTeamFacingInput(file, `changed file ${index + 1}`, true),
 		),
 		formatInstruction: PULL_REQUEST_GENERATION_INSTRUCTION,
 	} as TeamFacingPullRequestDescriptionInput;
 }
 
-function assertTeamFacingInput(value: string): string {
+function assertTeamFacingInput(value: string, field = "generated text", required = false): string {
 	const hit = INPUT_DENYLIST.find((pattern) => pattern.test(value));
-	if (hit !== undefined) throw new Error(`PR description contains internal vocabulary or malformed text: ${hit}`);
-	return value.trim();
+	if (hit !== undefined) {
+		throw new Error(
+			`PR description ${field} contains internal context or malformed text; regenerate it in team-facing English: ${hit}`,
+		);
+	}
+	const trimmed = value.trim();
+	if (required && trimmed.length === 0) {
+		throw new Error(`PR description ${field} is empty; regenerate it in team-facing English.`);
+	}
+	return trimmed;
 }
 
-function summarize(text: string): string {
-	const cleaned = assertTeamFacingInput(text).replace(/^[\s.]+/, "").trim();
-	if (!cleaned) return "This change updates product behavior.";
-	const sentences = cleaned
-		.split(/(?<=[.!?])\s+/)
-		.map((sentence) => sentence.trim())
-		.filter((sentence) => /[A-Za-z]{3,}/.test(sentence) && sentence.length > 15);
-	const body = (sentences.length > 0 ? sentences : [cleaned]).join(" ");
-	if (body.length <= 480) return body;
-
-	const completeSentences: string[] = [];
-	let completeLength = 0;
-	for (const sentence of sentences) {
-		const candidateLength = completeLength + (completeLength > 0 ? 1 : 0) + sentence.length;
-		if (candidateLength > 480) break;
-		completeSentences.push(sentence);
-		completeLength = candidateLength;
+function assertTeamFacingSummary(text: string): string {
+	const summary = assertTeamFacingInput(text, "summary", true);
+	const wordCount = summary.split(/\s+/).length;
+	const sentenceCount = summary.match(/[.!?](?=\s|$)/g)?.length ?? 1;
+	if (sentenceCount < 2 || sentenceCount > 4 || wordCount > 80) {
+		throw new Error(
+			`PR description summary must contain 2-4 sentences and at most 80 words; regenerate it in team-facing English (received ${sentenceCount} sentences and ${wordCount} words).`,
+		);
 	}
-	if (completeSentences.length > 0) return completeSentences.join(" ");
+	return summary;
+}
 
-	const prefix = body.slice(0, 477);
-	const wordBoundary = prefix.lastIndexOf(" ");
-	return `${prefix.slice(0, wordBoundary > 0 ? wordBoundary : prefix.length).trimEnd()}...`;
+function buildTeamFacingSummary(summary: string, acceptanceCriteria: string[]): string {
+	const source = assertTeamFacingInput(summary, "summary", true);
+	const sourceSentenceCount = source.match(/[.!?](?=\s|$)/g)?.length ?? 1;
+	if (sourceSentenceCount !== 1) return assertTeamFacingSummary(source);
+	const secondSentence = acceptanceCriteria[0];
+	if (secondSentence === undefined) {
+		throw new Error(
+			"PR description summary has one sentence and no acceptance criterion to preserve as a second sentence; regenerate it in team-facing English.",
+		);
+	}
+	const first = /[.!?]$/.test(source) ? source : `${source}.`;
+	const second = /[.!?]$/.test(secondSentence) ? secondSentence : `${secondSentence}.`;
+	return assertTeamFacingSummary(`${first} ${second}`);
 }
 
 export function assertTeamFacingPullRequestDescription(body: string): string {
 	const normalized = body.trim();
 	const leak = INTERNAL_CONTEXT_PATTERNS.find((pattern) => pattern.test(normalized));
 	if (leak !== undefined) throw new Error(`PR description contains internal context: ${leak}`);
-	if (/^## Test[- ]plan\b/im.test(normalized)) throw new Error('PR description must not include a "Test plan" section.');
+	if (/^[ \t]*#{1,6}\s+Test[- ]plan\b/im.test(normalized)) {
+		throw new Error('PR description must not include a "Test plan" section.');
+	}
+	const markdownHeadings = normalized.match(/^[ \t]*#{1,6}\s+.+$/gm) ?? [];
+	if (markdownHeadings.some((heading) => !heading.startsWith("## "))) {
+		throw new Error("PR description contains an unsupported heading level.");
+	}
 
 	const sections: Array<{ heading: string; content: string[] }> = [];
 	for (const line of normalized.split("\n")) {
@@ -152,11 +176,18 @@ export function assertTeamFacingPullRequestDescription(body: string): string {
 	if (sections.some((section) => section.content.join("\n").trim().length === 0)) {
 		throw new Error("PR description contains an empty section.");
 	}
-	const malformedSection = sections.find(
-		(section) =>
-			section.heading !== "## Checklist" &&
-			MALFORMED_TEXT_PATTERNS.some((pattern) => pattern.test(section.content.join("\n"))),
+	assertTeamFacingSummary(
+		sections.find((section) => section.heading === "## Summary")?.content.join("\n") ?? "",
 	);
+	const malformedSection = sections.find((section) => {
+		const content =
+			section.heading === "## Checklist"
+				? section.content
+						.map((line) => line.replace(/^[ \t]*[-*+][ \t]+/, ""))
+						.join("\n")
+				: section.content.join("\n");
+		return MALFORMED_TEXT_PATTERNS.some((pattern) => pattern.test(content));
+	});
 	if (malformedSection !== undefined) throw new Error("PR description contains malformed text.");
 	return normalized;
 }
@@ -165,22 +196,22 @@ export function generatePullRequestDescription(input: TeamFacingPullRequestDescr
 	if (input.formatInstruction !== PULL_REQUEST_GENERATION_INSTRUCTION) {
 		throw new Error("PR description generation format contract is missing.");
 	}
-	const title = assertTeamFacingInput(input.title);
+	const title = assertTeamFacingInput(input.title, "title", true);
 	if (!TITLE_FORMATS.some((pattern) => pattern.test(title))) {
 		throw new Error("PR title must use `[TICKET-123] Title` or `feat(username): Title` format.");
 	}
 
-	const summarySource = input.summary || input.acceptanceCriteria.find(Boolean) || "";
-	const problem = summarize(summarySource);
-	const acceptance = input.acceptanceCriteria
-		.map((criterion) => assertTeamFacingInput(criterion))
-		.filter((criterion) => criterion.length > 8 && /[A-Za-z]{4,}/.test(criterion))
-		.filter((criterion) => !/^must approve\.?$/i.test(criterion))
-		.map((criterion) => `- ${criterion}`)
-		.join("\n");
-	const testing = assertTeamFacingInput(input.testing ?? "");
-	const testingLine = testing.length > 8 ? testing : "Relevant automated checks were run.";
-	const pipelineNote = (input.changedFiles ?? []).some((file) => /(?:^|\/)pipeline\.tsx$/i.test(file))
+	const acceptanceCriteria = input.acceptanceCriteria.map((criterion) =>
+		assertTeamFacingInput(criterion, "acceptance criterion", true),
+	);
+	const problem = buildTeamFacingSummary(input.summary, acceptanceCriteria);
+	const acceptance = acceptanceCriteria.map((criterion) => `- ${criterion}`).join("\n");
+	const testing = assertTeamFacingInput(input.testing ?? "", "testing evidence");
+	const testingLine = testing || "No test evidence was provided.";
+	const changedFiles = (input.changedFiles ?? []).map((file, index) =>
+		assertTeamFacingInput(file, `changed file ${index + 1}`, true),
+	);
+	const pipelineNote = changedFiles.some((file) => /(?:^|\/)pipeline\.tsx$/i.test(file))
 		? "This changes the pull-request automation. Start new runs after merge instead of resuming runs started on the previous version."
 		: "";
 	const review = input.reviewOutcome === undefined ? "" : assertTeamFacingInput(input.reviewOutcome);

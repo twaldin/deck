@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
 	assertTeamFacingPullRequestDescription,
+	formatPullRequestTitle,
 	generatePullRequestDescription,
 	PULL_REQUEST_GENERATION_INSTRUCTION,
 	sanitizeDescriptionInput,
@@ -10,7 +11,7 @@ import { changedFilesForBranch } from "../pipeline.tsx";
 const safeInput = (overrides: Partial<Parameters<typeof sanitizeDescriptionInput>[0]> = {}) =>
 	sanitizeDescriptionInput({
 		title: "fix(deck): Improve pull request descriptions",
-		summary: "Reviewers need a clear explanation of the product change.",
+		summary: "Reviewers need a clear explanation of the product change. The behavior is now explicit.",
 		acceptanceCriteria: [],
 		...overrides,
 	});
@@ -31,42 +32,65 @@ describe("pull request description", () => {
 		expect(generatePullRequestDescription(safeInput({ changedFiles }))).toContain("Start new runs after merge");
 	});
 
-	test("drops private context at the boundary before generation", () => {
+	test.each([
+		["an internal decision wrapper", "Captain decided fallback X because Y"],
+		["an internal file reference", "DECISIONS-FOR-.md records that fallback X is required because Y."],
+	] as const)("fails closed on %s instead of deleting its product claim", (_case, summary) => {
+		expect(() =>
+			generatePullRequestDescription(
+				sanitizeDescriptionInput({
+					title: "fix(evals): Preserve fallback behavior",
+					summary,
+					acceptanceCriteria: [],
+				}),
+			),
+		).toThrow(/summary contains internal context.*regenerate it in team-facing English/);
+	});
+
+	test("fails closed instead of deleting an acceptance criterion", () => {
+		expect(() =>
+			generatePullRequestDescription(
+				sanitizeDescriptionInput({
+					title: "fix(evals): Preserve fallback behavior",
+					summary: "Fallback behavior must remain stable. The failure reason must stay visible.",
+					acceptanceCriteria: ["Captain requires fallback X because Y."],
+				}),
+			),
+		).toThrow(/acceptance criterion 1 contains internal context.*regenerate it in team-facing English/);
+	});
+
+	test("rejects an empty summary instead of publishing a generic fallback", () => {
+		expect(() =>
+			generatePullRequestDescription(
+				sanitizeDescriptionInput({
+					title: "fix(evals): Preserve fallback behavior",
+					summary: " ",
+					acceptanceCriteria: ["Fallback X remains because Y."],
+				}),
+			),
+		).toThrow(/summary is empty.*regenerate it in team-facing English/);
+	});
+
+	test("revalidates changed files at the runtime generation boundary", () => {
+		const forgedInput = {
+			...safeInput(),
+			changedFiles: ["/Users/private/.deck/wt/src/internal.ts"],
+		};
+		expect(() => generatePullRequestDescription(forgedInput)).toThrow(
+			/changed file 1 contains internal context.*regenerate it in team-facing English/,
+		);
+	});
+
+	test("formats the documented plain brief without losing its one-sentence summary", () => {
 		const input = sanitizeDescriptionInput({
-			title: "fix(deck): Explain expired sessions",
-			summary: [
-				"Customers lose access when a session expires.",
-				"Read DECISIONS-FOR-CAPTAIN.md.",
-				"DOCTRINE 2026-08-04 (evening) overrides older text.",
-				"MEETING FOLD-IN 2026-08-04 defines the lane.",
-				"STANDING-RULES says to use ali-eval-fix-1 in Lane A1.",
-				"The effort dossier is under /Users/private/.deck/data/eval-fix.",
-				"The API now returns a clear 401 response.",
-			].join(" "),
-			acceptanceCriteria: [
-				"Expired sessions return 401 with a clear message.",
-				"captain must stamp the factory lane",
-			],
-			testing: "The auth regression test passed. Managed by workflow run abc1234 in /home/user/wt.",
-			reviewOutcome: "Round 4 approved. No auth regression remains.",
-			changedFiles: ["src/auth.ts", "/Users/private/.deck/wt/src/internal.ts"],
+			title: formatPullRequestTitle("TEST-1", "Add rate limiting to /api/foo"),
+			summary: "Rate-limit the /api/foo endpoint to 100 requests per minute per user.",
+			acceptanceCriteria: ["The API returns 429 after 100 requests in one minute."],
 		});
-		const { formatInstruction: _, ...generationFields } = input;
-		const serialized = JSON.stringify(generationFields);
-
-		expect(serialized).not.toMatch(
-			/DECISIONS-FOR|DOCTRINE|MEETING FOLD-IN|STANDING-RULES|ali-eval-fix|Lane A1|dossier|\/Users|\/home|\.deck|captain|factory|Managed by|Round 4/i,
-		);
-		expect(input.summary).toBe(
-			"Customers lose access when a session expires. The API now returns a clear 401 response.",
-		);
-		expect(input.acceptanceCriteria).toEqual(["Expired sessions return 401 with a clear message."]);
-		expect(input.testing).toBe("The auth regression test passed.");
-		expect(input.reviewOutcome).toBe("No auth regression remains.");
-		expect(input.changedFiles).toEqual(["src/auth.ts"]);
-
 		const body = generatePullRequestDescription(input);
-		expect(body).not.toMatch(/DECISIONS-FOR|DOCTRINE|MEETING FOLD-IN|ali-eval-fix|\/Users|\.deck/i);
+		expect(input.title).toBe("[TEST-1] Add rate limiting to /api/foo");
+		expect(body).toContain("Rate-limit the /api/foo endpoint to 100 requests per minute per user.");
+		expect(body).toContain("The API returns 429 after 100 requests in one minute.");
 	});
 
 	test("carries and enforces the explicit Lindy format contract", () => {
@@ -104,6 +128,10 @@ describe("pull request description", () => {
 		["a dated internal meeting reference", "MEETING FOLD-IN 2026-08-04"],
 		["an internal effort codename", "ali-eval-fix-1"],
 		["a machine path", "/Users/private/.deck/data/effort/REPORT.md"],
+		["an absolute var path", "/var/lib/deck/output.json"],
+		["an effort identifier", "effort id: abc12345"],
+		["a lane identifier", "lane id: release_42"],
+		["generated-agent attribution", "\nGenerated by Tim's agent."],
 		["a standing-rules reference", "STANDING-RULES"],
 		["an effort dossier reference", "implementation dossier"],
 		["an internal lane name", "Lane A1"],
@@ -132,7 +160,7 @@ describe("pull request description", () => {
 		["a stripped subject before a comma", "The , decided fallback policy"],
 	] as const)("fails closed on %s", (_case, malformedText) => {
 		expect(() => generatePullRequestDescription(safeInput({ summary: malformedText }))).toThrow(
-			/internal vocabulary or malformed text/,
+			/internal context or malformed text/,
 		);
 	});
 
@@ -153,6 +181,16 @@ describe("pull request description", () => {
 		).toThrow(/unsupported section/);
 		expect(() =>
 			assertTeamFacingPullRequestDescription(
+				"## Summary\nThe behavior is clear. The reason stays visible.\n\n## Testing\nTests passed.\n\n   ### Test plan\nDo not use this section.",
+			),
+		).toThrow(/Test plan/);
+		expect(() =>
+			assertTeamFacingPullRequestDescription(
+				"## Summary\nThe behavior is clear. The reason stays visible.\n\n## Testing\nTests passed.\n\n# Internals\nPrivate details.",
+			),
+		).toThrow(/unsupported heading level/);
+		expect(() =>
+			assertTeamFacingPullRequestDescription(
 				"## Summary\nClear change.\n\n## Review\nApproved.\n\n## Testing\nTests passed.",
 			),
 		).toThrow(/out of order/);
@@ -161,6 +199,29 @@ describe("pull request description", () => {
 				"## Summary\nClear change.\n\n## Testing\nTests passed.\n\n## Review\nApproved.\n\n## Review\nApproved again.",
 			),
 		).toThrow(/duplicated/);
+	});
+
+	test("the final assertion checks checklist prose after its Markdown bullet", () => {
+		expect(() =>
+			assertTeamFacingPullRequestDescription(
+				"## Summary\nThe fallback remains stable. Its reason stays visible.\n\n## Testing\nThe focused test passed.\n\n## Checklist\n- -decided fallback policy",
+			),
+		).toThrow(/malformed text/);
+		expect(
+			assertTeamFacingPullRequestDescription(
+				"## Summary\nThe fallback remains stable. Its reason stays visible.\n\n## Testing\nThe focused test passed.\n\n## Checklist\n- Approved fallback behavior remains stable.",
+			),
+		).toContain("Approved fallback behavior");
+	});
+
+	test("fails closed when the summary violates its sentence or word limits", () => {
+		expect(() =>
+			generatePullRequestDescription(safeInput({ summary: "Only one sentence is present." })),
+		).toThrow(/one sentence and no acceptance criterion/);
+		const overlongSummary = `${Array.from({ length: 78 }, () => "detail").join(" ")}. The reason remains visible.`;
+		expect(() => generatePullRequestDescription(safeInput({ summary: overlongSummary }))).toThrow(
+			/at most 80 words/,
+		);
 	});
 
 	test("requires a Lindy title format before publication", () => {
@@ -173,10 +234,10 @@ describe("pull request description", () => {
 		const body = generatePullRequestDescription(
 			safeInput({
 				summary:
-					"Upgrade react-router-dom-6 while preserving navigation behavior. See https://example.com/change for public details.",
+					"Upgrade react-router-dom-6 while preserving navigation behavior. See https://example.com/home/setup for public details.",
 			}),
 		);
 		expect(body).toContain("react-router-dom-6");
-		expect(body).toContain("https://example.com/change");
+		expect(body).toContain("https://example.com/home/setup");
 	});
 });

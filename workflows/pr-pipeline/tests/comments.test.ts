@@ -72,7 +72,7 @@ describe("agent comment signatures", () => {
 		const body = generatePullRequestDescription(
 			sanitizeDescriptionInput({
 				title: "fix(deck): Change behavior",
-				summary: "A change",
+				summary: "This change updates behavior. It remains team-facing.",
 				acceptanceCriteria: ["It works"],
 			}),
 		);
