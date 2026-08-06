@@ -33,13 +33,15 @@ interface PiExtensionApi {
 import { z } from "zod";
 
 const GATEWAY_ORIGIN = "http://127.0.0.1:8377";
-const GATEWAY_API_KEY = "!cat ~/.deck/broker/gateway.token";
 
 const extensionEnv = z
 	.looseObject({
 		DECK_PI_MAX_TOKENS: z.coerce.number().int().positive().optional(),
+		DECK_GATEWAY_API_KEY: z.string().min(1).optional(),
 	})
 	.parse(process.env);
+
+const GATEWAY_API_KEY = extensionEnv.DECK_GATEWAY_API_KEY ?? "!cat ~/.deck/broker/gateway.token";
 
 function maxTokens(supportedMaxTokens: number): number {
 	return Math.min(extensionEnv.DECK_PI_MAX_TOKENS ?? supportedMaxTokens, supportedMaxTokens);

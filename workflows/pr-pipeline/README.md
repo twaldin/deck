@@ -122,9 +122,9 @@ Enforcement notes (each maps to a cited incident in the SOP):
   Explicit entries (`brief.suggestedReviewers` merged with `github.reviewers`)
   may be display names - they resolve to logins via the gh-reviewer-lookup
   pattern (`/users/{login}` first, then commit-author name search); an entry
-  that resolves to nothing **escalates instead of being dropped**. Self and
-  `github.excludedApprovers` (ali, by default) are never requested. After the
-  POST the node re-reads `requested_reviewers` and **escalates on any login GH
+  that resolves to nothing **escalates instead of being dropped**. Logins in
+  per-project `github.selfLogins` or `github.excludedApprovers` are never requested.
+  After the POST the node re-reads `requested_reviewers` and **escalates on any login GH
   silently dropped** (review requests silently no-op on plausible-but-wrong
   logins). Zero candidates also escalates - the only empty-reviewer path is an
   explicit `github.skipReviewerRequest: true`, recorded as `explicit-skip`.
@@ -171,12 +171,12 @@ Enforcement notes (each maps to a cited incident in the SOP):
   approval; ready → synthetic regression + fresh round; rounds → hard throw at
   `limits.stampRounds`; landing → hard throw. No infinite loops.
 
-## Model selection (captain addendum)
+## Model and engine selection
 
-`lib/models.ts` — agent models are **agent-pickable config from the deck
-catalog** (pi harness + `deck/` provider). Pi is the only engine: every agent in
-this pipeline is a `PiAgent` on `provider: "deck"`, so auth is broker-held and
-quota-aware. See `../README.md` "Engine policy: pi only". Defaults:
+`lib/models.ts` defines agent-pickable Deck broker models. Each project profile
+may select the reviewed `pi` or `prime` engine; omission defaults to Pi and no
+shipped profile currently selects Prime. See `../../docs/prime-seat-adapter.md`
+for Prime safety, canary, metrics, and rollback. Defaults:
 
 | Role | Default |
 |---|---|
@@ -310,9 +310,10 @@ bun run graph            # render-without-execute sanity check
   check, re-request detection, migration detection + evidence, ready-for-stamp
   (bot/excluded/self approvals never count; will-be-green ruling), landing
   `(#N)` matching, evidence-gated done, model catalog + family opposition.
-- `tests/engine.test.ts` — the pi-only engine invariant across the whole
-  `workflows/` workspace (see `../README.md` "Engine policy: pi only"). It
-  imports `../.smithers/agents.ts`, so it needs `.smithers` deps installed.
+- `tests/engine.test.ts` — the reviewed Pi/Prime profile allowlist, Deck-model
+  invariants, and direct vendor CLI-agent ban across the workspace.
+- `tests/prime-engine.test.ts` — Prime RPC, isolation, provenance, liveness,
+  malformed-yield, transport-death, model-pin, Herdr, and credential boundaries.
 - `tests/pipeline.test.tsx` — drives the REAL workflow module through
   `smithers-orchestrator/testing` `simulate()`: preflight refusal paths, parks
   at migration-gate/stamp without bypass, full-graph traversal (clean + migration

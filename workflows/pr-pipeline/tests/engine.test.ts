@@ -1,10 +1,7 @@
 /**
- * Engine invariant: pi is deck's ONLY Smithers engine.
- *
- * Every agent seat used by any workflow in this workspace must be a PiAgent on
- * the deck provider with an agent-pickable deck model. Direct `codex` /
- * `claude-code` CLI engines are banned (mono-account auth, ambient local CLI
- * config, no broker quota accounting).
+ * Engine invariant: each project profile selects an explicitly reviewed seat
+ * engine. Pi and the pinned Prime adapter are allowed; raw vendor CLI agents
+ * remain banned because they bypass the Deck broker and seat safety boundary.
  */
 
 import { readdirSync, readFileSync } from "node:fs";
@@ -14,7 +11,9 @@ import { describe, expect, test } from "bun:test";
 import { PiAgent } from "smithers-orchestrator";
 
 import { agents, providers } from "../../.smithers/agents.ts";
+import { PrimeSeatAgent } from "../lib/engines/prime.ts";
 import { assertDeckModel, DECK_AGENT_CATALOG, DECK_PROVIDER } from "../lib/models.ts";
+import { SEAT_ENGINES, validateProfiles } from "../lib/profiles.ts";
 
 const workflowsDir = join(import.meta.dir, "..", "..");
 const generatedSmithersAgentsDir = join(workflowsDir, ".smithers", "agents");
@@ -34,23 +33,26 @@ function sourceFiles(dir: string): string[] {
 	return out;
 }
 
-describe("pi is the only engine", () => {
-	test("every pack agent seat is a PiAgent on the deck provider", () => {
+describe("reviewed seat engine allowlist", () => {
+	test("pack seats use an allowlisted broker-routed engine", () => {
 		const seats = Object.entries(agents);
 		expect(seats.length).toBeGreaterThan(0);
 		for (const [seat, pool] of seats) {
 			expect(pool.length, `seat ${seat} has no agents`).toBeGreaterThan(0);
 			for (const agent of pool) {
-				// CI installs the pack and the workflow workspace separately, so each
-				// can load its own copy of smithers-orchestrator. Check the public
-				// PiAgent contract instead of relying on cross-copy constructor identity.
-				expect(agent.constructor.name, `seat ${seat}`).toBe("PiAgent");
-				expect(agent.cliEngine, `seat ${seat}`).toBe("pi");
-				const opts = (agent as PiAgent).opts;
-				expect(opts.provider, `seat ${seat}`).toBe(DECK_PROVIDER);
-				expect(DECK_AGENT_CATALOG, `seat ${seat}`).toContain(opts.model ?? "<unset>");
-				// Never carry a raw key: broker auth only.
-				expect(opts.apiKey, `seat ${seat}`).toBeUndefined();
+				expect("cliEngine" in agent, `seat ${seat} does not expose its engine`).toBe(true);
+				const cliEngine = "cliEngine" in agent ? String(agent.cliEngine) : "";
+				expect(SEAT_ENGINES, `seat ${seat}`).toContain(cliEngine);
+				if (cliEngine === "pi") {
+					const opts = (agent as PiAgent).opts;
+					expect(opts.provider, `seat ${seat}`).toBe(DECK_PROVIDER);
+					expect(DECK_AGENT_CATALOG, `seat ${seat}`).toContain(opts.model ?? "<unset>");
+					expect(opts.apiKey, `seat ${seat}`).toBeUndefined();
+				} else {
+					expect(agent.constructor.name, `seat ${seat}`).toBe(PrimeSeatAgent.name);
+					const opts = (agent as PrimeSeatAgent).opts;
+					assertDeckModel(`${opts.provider}/${opts.model}`);
+				}
 			}
 		}
 	});
@@ -58,11 +60,34 @@ describe("pi is the only engine", () => {
 	test("every declared provider is a deck pi agent", () => {
 		for (const [name, agent] of Object.entries(providers)) {
 			expect(agent.constructor.name, name).toBe("PiAgent");
-			assertDeckModel(`${(agent as PiAgent).opts.provider}/${(agent as PiAgent).opts.model}`);
+			const piAgent = agent as PiAgent;
+			assertDeckModel(`${piAgent.opts.provider}/${piAgent.opts.model}`);
 		}
 	});
 
-	test("no workflow source constructs a direct codex / claude-code engine agent", () => {
+	test("profiles default to pi and reject every engine outside pi or prime", () => {
+		const base = {
+			id: "engine-test",
+			repo: "example/engine-test",
+			primary: "/tmp/engine-test",
+			pipeline: "yolo-ship",
+			yolo: true,
+			stamp: false,
+			knowledge: [],
+			depsWarm: true,
+		};
+		expect(SEAT_ENGINES).toEqual(["pi", "prime"]);
+		expect(validateProfiles([base], "test")[0]?.engine).toBe("pi");
+		expect(validateProfiles([{ ...base, engine: "prime" }], "test")[0]?.engine).toBe("prime");
+		expect(() => validateProfiles([{ ...base, engine: "codex" }], "test")).toThrow(
+			/engine must be one of pi \\| prime/,
+		);
+		expect(() => validateProfiles([{ ...base, engine: "claude-code" }], "test")).toThrow(
+			/engine must be one of pi \\| prime/,
+		);
+	});
+
+	test("no workflow source constructs a direct vendor CLI engine agent", () => {
 		const banned = /\b(CodexAgent|ClaudeCodeAgent|OpenCodeAgent|AntigravityAgent)\b/;
 		const offenders = sourceFiles(workflowsDir)
 			.filter((file) => file !== import.meta.path)

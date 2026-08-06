@@ -161,7 +161,7 @@ describe("workflow rendering contracts", () => {
 		profile: Record<string, unknown>,
 		inputModels: Record<string, unknown> | null | undefined,
 		repo: string,
-	): Promise<{ seats: Record<string, { model: string; thinking: string }>; model: string; thinking: string }> {
+	): Promise<{ seats: Record<string, { engine: string; model: string; thinking: string }>; model: string; thinking: string }> {
 		const savedHome = process.env.DECK_V2_HOME;
 		const home = fs.mkdtempSync(path.join(os.tmpdir(), "deck-pipeline-models-"));
 		try {
@@ -183,19 +183,23 @@ describe("workflow rendering contracts", () => {
 				} satisfies PipelineOutputFixtures,
 				workflowPath: path.join(import.meta.dir, "..", "pipeline.tsx"),
 			});
-			const seats: Record<string, { model: string; thinking: string }> = {};
+			const seats: Record<string, { engine: string; model: string; thinking: string }> = {};
 			for (const task of rendered.tasks) {
 				const agent = task.agent;
 				if (agent !== undefined) {
-					expect(Array.isArray(agent)).toBe(false);
+					if (Array.isArray(agent)) throw new Error(`unexpected agent chain on ${task.nodeId}`);
+					const opts = "opts" in agent && agent.opts !== null && typeof agent.opts === "object"
+						? agent.opts
+						: {};
 					seats[task.nodeId] = {
-						model: String((agent as unknown as { model: string }).model),
-						thinking: String((agent as { opts?: { thinking?: string }; thinking?: string }).opts?.thinking ?? (agent as { thinking?: string }).thinking ?? ""),
+						engine: "cliEngine" in agent ? String(agent.cliEngine) : "",
+						model: "model" in agent ? String(agent.model) : "",
+						thinking: "thinking" in opts ? String(opts.thinking ?? "") : "",
 					};
 				}
 			}
 			const implementer = seats.implement;
-			return { seats, model: implementer.model, thinking: implementer.thinking };
+			return { seats, model: implementer?.model ?? "", thinking: implementer?.thinking ?? "" };
 		} finally {
 			if (savedHome === undefined) delete process.env.DECK_V2_HOME;
 			else process.env.DECK_V2_HOME = savedHome;
@@ -227,6 +231,30 @@ describe("workflow rendering contracts", () => {
 		expect(rendered.seats["r0-watch-poll"]).toBeUndefined();
 		expect(rendered.seats["fallout-watch"]).toBeUndefined();
 		expect(rendered.seats["implement"]?.model).toBe("claude-fable-5");
+	});
+
+	test("profile engine selects Prime while omitted profiles remain on pi", async () => {
+		const pi = await renderWithProfile({ ...profileBase, models: fullModels }, undefined, "example/test");
+		expect(pi.seats.implement?.engine).toBe("pi");
+		const prime = await renderWithProfile(
+			{ ...profileBase, engine: "prime", models: fullModels },
+			undefined,
+			"example/test",
+		);
+		expect(prime.seats.implement).toMatchObject({
+			engine: "prime",
+			model: "claude-fable-5",
+			thinking: "medium",
+		});
+	});
+
+	test("invalid Prime model policy renders the preflight refusal path without constructing a seat", async () => {
+		const invalid = await renderWithProfile(
+			{ ...profileBase, engine: "prime", models: { ...fullModels, implementer: "deck/not-a-model" } },
+			undefined,
+			"example/test",
+		);
+		expect(invalid.seats.implement).toBeUndefined();
 	});
 
 	test.each([
@@ -327,13 +355,10 @@ describe("reviewer selection contracts", () => {
 		expect(prompt).not.toContain("\\n");
 	});
 
-	test("default ex-employee denylist is configured", () => {
-		expect(DEFAULT_GITHUB.reviewerDenylist).toEqual([
-			"mackcooper1408",
-			"spencer-negri",
-			"daniel-covelli",
-			"akshat-lindy",
-		]);
+	test("reviewer identity defaults are empty and configured per project", () => {
+		expect(DEFAULT_GITHUB.selfLogins).toEqual([]);
+		expect(DEFAULT_GITHUB.excludedApprovers).toEqual([]);
+		expect(DEFAULT_GITHUB.reviewerDenylist).toEqual([]);
 	});
 });
 
