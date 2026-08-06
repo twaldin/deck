@@ -31,7 +31,7 @@ if (!process.env.DECK_PI_BINARY) {
 
 const portValue = process.env.PORT?.trim();
 const parsedPort = Number(portValue || "7331");
-const port = Number.isInteger(parsedPort) && parsedPort > 0 ? parsedPort : 7331;
+const port = Number.isInteger(parsedPort) && parsedPort >= 0 && parsedPort <= 65_535 ? parsedPort : 7331;
 const host = process.env.HOST ?? "127.0.0.1";
 const bearer = process.env.SMITHERS_GATEWAY_TOKEN?.trim();
 if (!bearer) {
@@ -45,8 +45,8 @@ if (!issuedGrant) {
 if (issuedGrant.revokedAtMs !== undefined) {
   throw new Error("SMITHERS_GATEWAY_TOKEN has been revoked");
 }
-const expiresAtMs = issuedGrant.expiresAtMs;
-if (expiresAtMs === undefined || expiresAtMs <= Date.now()) {
+const expiresAtMs = issuedGrant.expiresAtMs ?? 0;
+if (expiresAtMs <= Date.now()) {
   throw new Error("SMITHERS_GATEWAY_TOKEN has expired or has no expiry");
 }
 if (!issuedGrant.scopes.includes("*")) {
@@ -427,33 +427,43 @@ function armGatewayExpiry() {
  * Gateway looks for `<entryFile>/../../ui/<key>.tsx`, which resolves inside
  * `.smithers/` for the pack workflows but outside it for the deck pipelines.
  */
-type WorkflowMount = { key: string; title: string; entryFile: string; ui?: string };
+type WorkflowMount = {
+  key: string;
+  title: string;
+  entryFile: string;
+  classification: "core" | "optional-example";
+  ui?: string;
+};
 
-const packWorkflow = (key: string, title: string): WorkflowMount => ({
+const optionalPackWorkflow = (key: string, title: string): WorkflowMount => ({
   key,
   title,
   entryFile: resolve(here, "workflows", `${key}.tsx`),
+  classification: "optional-example",
 });
 
-const deckWorkflow = (key: string, title: string, entry: string): WorkflowMount => ({
+const coreDeckWorkflow = (key: string, title: string, entry: string): WorkflowMount => ({
   key,
   title,
   entryFile: resolve(workflowsRoot, entry),
+  classification: "core",
   ui: resolve(here, "ui", `${key}.tsx`),
 });
 
 const mounts: WorkflowMount[] = [
-  packWorkflow("create-workflow", "Create Workflow"),
-  packWorkflow("create-skill", "Create Skill"),
-  packWorkflow("docs-driven-development", "Docs Driven Development"),
-  packWorkflow("share-pack", "Share Pack"),
-  deckWorkflow("pr-pipeline", "PR Pipeline approvals", "pr-pipeline/pipeline.tsx"),
+  optionalPackWorkflow("create-workflow", "Create Workflow"),
+  optionalPackWorkflow("create-skill", "Create Skill"),
+  optionalPackWorkflow("docs-driven-development", "Docs Driven Development"),
+  optionalPackWorkflow("share-pack", "Share Pack"),
+  coreDeckWorkflow("pr-pipeline", "PR Pipeline approvals", "pr-pipeline/pipeline.tsx"),
 ];
 
-// Mount each workflow independently: one that fails to import (a broken prompt,
-// a bad export) disables only itself, and the rest of the gateway still serves.
-async function mountWorkflow({ key, title, entryFile, ui }: WorkflowMount) {
+// Optional pack examples fail independently. A core workflow failure aborts
+// startup before either listener or the public health endpoint can come up.
+async function mountWorkflow({ key, title, entryFile, classification, ui }: WorkflowMount) {
   try {
+    // Workflow entries are runtime mount configuration; optional examples must
+    // remain independently importable rather than becoming static dependencies.
     const mod = await import(pathToFileURL(entryFile).href);
     gateway.register(key, mod.default, {
       entryFile,
@@ -463,7 +473,10 @@ async function mountWorkflow({ key, title, entryFile, ui }: WorkflowMount) {
     console.log(mounted ? `  ${title} UI -> http://${host}:${port}/workflows/${key}` : `  ${title} (no UI)`);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.warn(`[gateway] skipped ${key}: ${message}`);
+    if (classification === "core") {
+      throw new Error(`[gateway] failed to mount core workflow ${key}: ${message}`);
+    }
+    console.warn(`[gateway] skipped optional workflow ${key}: ${message}`);
   }
 }
 

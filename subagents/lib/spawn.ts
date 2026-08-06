@@ -28,6 +28,49 @@ const DEFAULT_KILL_GRACE_MS = 1_000;
 const DEFAULT_CHILD_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"] as const;
 const STDERR_LIMIT_BYTES = 64 * 1024;
 
+/**
+ * Complete ambient environment allowlist for a subagent child. This mirrors
+ * Prime's seat-environment convention: copy known-safe keys instead of trying
+ * to enumerate credentials to redact.
+ */
+const SAFE_ENV_KEYS: Record<string, true> = {
+	PATH: true,
+	HOME: true,
+	SHELL: true,
+	TMPDIR: true,
+	TMP: true,
+	TEMP: true,
+	LANG: true,
+	LC_ALL: true,
+	LC_CTYPE: true,
+	TERM: true,
+	COLORTERM: true,
+	NO_COLOR: true,
+	FORCE_COLOR: true,
+	USER: true,
+	LOGNAME: true,
+	TZ: true,
+	GIT_AUTHOR_NAME: true,
+	GIT_AUTHOR_EMAIL: true,
+	GIT_COMMITTER_NAME: true,
+	GIT_COMMITTER_EMAIL: true,
+	DECK_PI_MAX_TOKENS: true,
+	DECK_GATEWAY_ORIGIN: true,
+	DECK_SUBAGENT_CHILD: true,
+};
+
+export function buildSubagentEnvironment(
+	source: NodeJS.ProcessEnv = process.env,
+	overrides: Record<string, string | undefined> = {},
+): Record<string, string> {
+	const env: Record<string, string> = {};
+	for (const key of Object.keys(SAFE_ENV_KEYS)) {
+		const value = overrides[key] ?? source[key];
+		if (value !== undefined) env[key] = value;
+	}
+	return env;
+}
+
 const canonicalPolicy = defaultModelPolicy();
 const canonicalImplementer = resolveSeat(canonicalPolicy.implementer, canonicalPolicy.reasoningImplementer);
 const canonicalReviewer = resolveSeat(canonicalPolicy.reviewer!, canonicalPolicy.reasoningReviewer);
@@ -353,7 +396,7 @@ export function createSubagentSpawner(dependencies: SubagentSpawnerDependencies 
 				try {
 					child = spawnChild(piCommand, args, {
 						cwd,
-						env: { ...process.env, DECK_SUBAGENT_CHILD: "1" },
+						env: buildSubagentEnvironment(process.env, { DECK_SUBAGENT_CHILD: "1" }),
 						stdio: ["ignore", "pipe", "pipe"],
 						shell: false,
 					});

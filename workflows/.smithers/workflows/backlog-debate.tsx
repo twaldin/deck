@@ -89,7 +89,7 @@ export default smithers(() => (
 				// Cross-family by construction: proposer anthropic, opponent openai.
 				proposer={providers.claudeOpus}
 				opponent={providers.gptSol}
-				judge={agents.planning}
+				judge={agents.planning[0]}
 				rounds={2}
 				argumentOutput={outputs.argument}
 				verdictOutput={outputs.verdict}

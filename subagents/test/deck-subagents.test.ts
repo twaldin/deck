@@ -125,6 +125,100 @@ describe("deck subagent primitive", () => {
 		});
 	});
 
+	test("passes only the explicit safe environment to a spawned child", async () => {
+		const files = await fixture();
+		const parentValues: Record<string, string> = {
+			DECK_GATEWAY_ORIGIN: "http://127.0.0.1:8377",
+			DECK_PI_MAX_TOKENS: "1024",
+			GIT_AUTHOR_NAME: "Deck Test",
+			LC_ALL: "C",
+			TERM: "xterm-256color",
+			SMITHERS_GATEWAY_TOKEN: "smithers-secret",
+			GITHUB_TOKEN: "github-secret",
+			OPENAI_API_KEY: "provider-secret",
+			SSH_AUTH_SOCK: "/tmp/ssh-agent-secret.sock",
+			DECK_GATEWAY_API_KEY: "broker-secret",
+			DECK_STAMP_TOKEN: "stamp-secret",
+			DECK_PUBLISHER_TOKEN: "publisher-secret",
+			DECK_ADMIN_TOKEN: "admin-secret",
+		};
+		const originalValues = Object.fromEntries(
+			Object.keys(parentValues).map((key) => [key, process.env[key]]),
+		) as Record<string, string | undefined>;
+		try {
+			Object.assign(process.env, parentValues);
+			const child = new FakeChild();
+			const calls: Array<{ command: string; args: readonly string[]; options: SpawnOptions }> = [];
+			const spawned = Promise.withResolvers<void>();
+			const run = createSubagentSpawner({
+				agentDirectory: path.join(files.directory, "agents"),
+				loadModels: async () => ["deck/gpt-5.6-luna"],
+				spawnChild: spawnFactory(child, calls, spawned.resolve),
+			});
+			const resultPromise = run({ agent: "worker", task: "Inspect the environment", cwd: files.directory });
+			await spawned.promise;
+
+			const childEnv = calls[0]?.options.env ?? {};
+			const allowedKeys: Record<string, true> = {
+				PATH: true,
+				HOME: true,
+				SHELL: true,
+				TMPDIR: true,
+				TMP: true,
+				TEMP: true,
+				LANG: true,
+				LC_ALL: true,
+				LC_CTYPE: true,
+				TERM: true,
+				COLORTERM: true,
+				NO_COLOR: true,
+				FORCE_COLOR: true,
+				USER: true,
+				LOGNAME: true,
+				TZ: true,
+				GIT_AUTHOR_NAME: true,
+				GIT_AUTHOR_EMAIL: true,
+				GIT_COMMITTER_NAME: true,
+				GIT_COMMITTER_EMAIL: true,
+				DECK_PI_MAX_TOKENS: true,
+				DECK_GATEWAY_ORIGIN: true,
+				DECK_SUBAGENT_CHILD: true,
+			};
+			expect(Object.keys(childEnv).filter((key) => !(key in allowedKeys))).toEqual([]);
+			expect(childEnv).toEqual(expect.objectContaining({
+				DECK_GATEWAY_ORIGIN: parentValues.DECK_GATEWAY_ORIGIN,
+				DECK_PI_MAX_TOKENS: parentValues.DECK_PI_MAX_TOKENS,
+				GIT_AUTHOR_NAME: parentValues.GIT_AUTHOR_NAME,
+				LC_ALL: parentValues.LC_ALL,
+				TERM: parentValues.TERM,
+				DECK_SUBAGENT_CHILD: "1",
+			}));
+			for (const secret of [
+				"SMITHERS_GATEWAY_TOKEN",
+				"GITHUB_TOKEN",
+				"OPENAI_API_KEY",
+				"SSH_AUTH_SOCK",
+				"DECK_GATEWAY_API_KEY",
+				"DECK_STAMP_TOKEN",
+				"DECK_PUBLISHER_TOKEN",
+				"DECK_ADMIN_TOKEN",
+			]) {
+				expect(childEnv[secret]).toBeUndefined();
+			}
+
+			child.stdout.write(`${JSON.stringify({ type: "tool_execution_end", toolName: "deck_subagent_yield", result: { details: { deckSubagentYield: { filesTouched: [], summary: "Environment is isolated" } } } })}\n`);
+			child.exitCode = 0;
+			child.emit("close", 0, null);
+			expect((await resultPromise).ok).toBe(true);
+		} finally {
+			for (const [key, value] of Object.entries(originalValues)) {
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
+			}
+			await files.cleanup();
+		}
+	});
+
 	test("intersects provider selectors with the authenticated broker pool", async () => {
 		const files = await fixture();
 		try {

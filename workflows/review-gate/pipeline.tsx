@@ -7,7 +7,6 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { askIfAbsent, openQuestions, queueFile, readQuestionHistory, readQuestions } from "../../v2/src/questions-store.ts";
 import { defaultModelPolicy } from "../pr-pipeline/lib/models.ts";
 import { createHostPiAgent } from "../pr-pipeline/lib/host-pi.ts";

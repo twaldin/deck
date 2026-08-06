@@ -1,5 +1,5 @@
-import { mkdtempSync } from "node:fs";
-import { mkdir, readFile, rm } from "node:fs/promises";
+import { existsSync, mkdtempSync } from "node:fs";
+import { copyFile, mkdir, readFile, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -37,10 +37,11 @@ function assertGatewayStartupRejected(
   label: string,
   env: NodeJS.ProcessEnv,
   expectedMessage: string,
+  gatewayEntry = join(here, "gateway.ts"),
 ): void {
   const result = Bun.spawnSync({
-    cmd: [process.execPath, join(here, "gateway.ts")],
-    cwd: here,
+    cmd: [process.execPath, gatewayEntry],
+    cwd: dirname(gatewayEntry),
     env,
     stdout: "pipe",
     stderr: "pipe",
@@ -116,15 +117,36 @@ try {
   if (!requestedWorkspace) await mkdir(workspaceRoot);
   tokenStore = join(testRoot, "tokens.json");
 
-  token = issueTestToken(tokenStore, "30s", "gateway-auth-test");
 
-  const startupEnv = {
+  const startupEnv: NodeJS.ProcessEnv = {
     ...process.env,
     HOST: host,
     PORT: "1",
     SMITHERS_WORKSPACE_ROOT: workspaceRoot,
     SMITHERS_TOKEN_STORE: tokenStore,
   };
+  const missingCoreRoot = join(testRoot, "missing-core-workflows");
+  const missingCoreSmithers = join(missingCoreRoot, ".smithers");
+  await mkdir(missingCoreSmithers, { recursive: true });
+  const missingCoreGateway = join(missingCoreSmithers, "gateway.ts");
+  await copyFile(join(here, "gateway.ts"), missingCoreGateway);
+  await symlink(join(here, "node_modules"), join(missingCoreSmithers, "node_modules"), "dir");
+  const coreFailureToken = issueTestToken(tokenStore, "5m", "gateway-core-mount-failure-test");
+  const missingCorePortFile = join(missingCoreRoot, "gateway.port");
+  assertGatewayStartupRejected(
+    "missing core workflow startup",
+    {
+      ...startupEnv,
+      PORT: "0",
+      SMITHERS_GATEWAY_TOKEN: coreFailureToken,
+      SMITHERS_GATEWAY_PORT_FILE: missingCorePortFile,
+    },
+    "failed to mount core workflow pr-pipeline",
+    missingCoreGateway,
+  );
+  if (existsSync(missingCorePortFile)) {
+    throw new Error("missing core workflow startup: Gateway published a healthy-listener port");
+  }
   const missingTokenEnv = { ...startupEnv };
   delete missingTokenEnv.SMITHERS_GATEWAY_TOKEN;
   assertGatewayStartupRejected("missing-token startup", missingTokenEnv, "SMITHERS_GATEWAY_TOKEN is required");
@@ -170,6 +192,8 @@ try {
     { ...startupEnv, SMITHERS_GATEWAY_TOKEN: expiredToken },
     "has expired or has no expiry",
   );
+  token = issueTestToken(tokenStore, "30s", "gateway-auth-test");
+
 
   const portFile = join(testRoot, "gateway.port");
   gateway = Bun.spawn({
@@ -203,7 +227,11 @@ try {
   const portDeadline = Date.now() + 30_000;
   while (!baseUrl && Date.now() < portDeadline) {
     if (gateway.exitCode !== null) {
-      throw new Error(`Gateway exited before publishing its ephemeral port with code ${gateway.exitCode}`);
+      const [startupStdout, startupStderr] = await Promise.all([stdoutText, stderrText]);
+      throw new Error(
+        `Gateway exited before publishing its ephemeral port with code ${gateway.exitCode}\n` +
+        `--- gateway stdout ---\n${startupStdout}\n--- gateway stderr ---\n${startupStderr}`,
+      );
     }
     try {
       const publishedPort = Number((await readFile(portFile, "utf8")).trim());
@@ -621,6 +649,7 @@ try {
   });
 
   console.log(`gateway auth negative test passed on ephemeral port ${port}`);
+  console.log("  missing core pr-pipeline mount: startup rejected before health listener");
   console.log("  GET /, /metrics, /workflows, /v1/api/runs without bearer: rejected");
   console.log("  POST /rpc without bearer: rejected");
   console.log("  POST /rpc with wrong bearer: rejected");
