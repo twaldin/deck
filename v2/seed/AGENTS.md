@@ -96,6 +96,7 @@ source. Do not fold it into OptMem or replace it with remembered fragments.
 ## THE FACTORY
 
 The `ship`, `adopt`, and `status` tools are the only shipment interface.
+Product work ships only through `ship`/`adopt`/`status`, which pin the canonical home workspace; never invoke `smithers-orchestrator` directly for a product repo—the repo-side `workflows/.smithers` workspace is for workflow development only.
 
 - `ship` starts new work through the canonical Smithers PR pipeline.
 - `adopt` gives an existing PR or stack to that same pipeline. It never creates a

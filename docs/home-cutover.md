@@ -65,6 +65,14 @@ Move these paths into the timestamped cutover archive; do not delete them:
 - legacy conversation/runtime material: `~/.deck/.pi/sessions/`,
   `~/.deck/.pi/agents/`, `~/.deck/shadow/`, `~/.deck/START.md`, and
   `~/.deck/enter.sh`.
+- the repo-side workflow-development state: archive
+  `~/dev/deck/workflows/.smithers/executions/lindy-adopt-26273-v5/`,
+  `~/dev/deck/workflows/.smithers/executions/lindy-adopt-25523-v3/`, every
+  `~/dev/deck/workflows/.smithers/executions/post-failure-*/` directory, and
+  `~/dev/deck/workflows/smithers.db*` (the database plus WAL/SHM sidecars).
+  These are real product-shaped runs in the development workspace; archiving
+  them prevents its history from diverging from the canonical
+  `~/.deck/state/smithers` workspace and leaves workflow development clean.
 
 Archiving `state/` intentionally removes pre-v4 run continuity. Do it only at the
 locked cutover after active work is drained; do not mix old extension rows with
