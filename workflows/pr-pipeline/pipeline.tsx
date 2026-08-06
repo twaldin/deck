@@ -1111,6 +1111,17 @@ export default smithers((ctx) => {
 		afterPoll: number;
 		handledTriggerIds?: string[];
 	}>;
+	const mergeWatchOptions = (round: number) => ({
+		selfLogins: github.selfLogins,
+		reviewPolicy: github.reviewPolicy,
+		handledTriggerIds: [
+			...new Set(
+				watchFixRows
+					.filter((row) => row.round === round)
+					.flatMap((row) => row.handledTriggerIds ?? []),
+			),
+		],
+	});
 
 	const roundEnded = (k: number): boolean => {
 		const ready = ctx.latest(outputs.readyPoll, `r${k}-ready-poll`);
@@ -4226,7 +4237,11 @@ export default smithers((ctx) => {
 											nextCar.prNumber,
 											github.selfLogins,
 										);
-										const safety = assessMergeSafety(freshSnapshot, nextCar.headSha);
+										const safety = assessMergeSafety(
+											freshSnapshot,
+											nextCar.headSha,
+											mergeWatchOptions(stampedRound!.round),
+										);
 										if (!safety.ok) {
 											const cars = final.map(({ car, comparison }) => ({
 												...car,
@@ -4407,7 +4422,11 @@ export default smithers((ctx) => {
 									pr.prNumber,
 									github.selfLogins,
 								);
-								const safety = assessMergeSafety(freshSnapshot, finalComparison.currentHead);
+								const safety = assessMergeSafety(
+									freshSnapshot,
+									finalComparison.currentHead,
+									mergeWatchOptions(stampedRound!.round),
+								);
 								if (!safety.ok) {
 									return {
 										round: stampedRound.round,
@@ -4612,7 +4631,11 @@ export default smithers((ctx) => {
 												);
 												return {
 													car,
-													safety: assessMergeSafety(snapshot, car.headSha),
+													safety: assessMergeSafety(
+														snapshot,
+														car.headSha,
+														mergeWatchOptions(stampedRound!.round),
+													),
 												};
 											}),
 										);
@@ -4689,7 +4712,11 @@ export default smithers((ctx) => {
 											ejectedCar.prNumber,
 											github.selfLogins,
 										);
-										const safety = assessMergeSafety(freshSnapshot, approvedHead);
+										const safety = assessMergeSafety(
+											freshSnapshot,
+											approvedHead,
+											mergeWatchOptions(stampedRound!.round),
+										);
 										if (!safety.ok) {
 											queueSafetyReason = `PR #${ejectedCar.prNumber}: ${safety.reason}`;
 											hardInvalidation = !safety.retryable;

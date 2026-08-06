@@ -399,6 +399,25 @@ describe("evaluateWatchExit", () => {
 			retryable: false,
 			ciClassification: "TERMINAL_FAILURE",
 		});
+		const lateReview = assessMergeSafety(snapshot({
+			comments: [{
+				id: "late-review",
+				author: "reviewer",
+				isBot: false,
+				createdAt: "2026-07-27T11:00:00Z",
+				body: "Please change this before merge.",
+				source: "review",
+			}],
+		}), "abc123", {
+			selfLogins: ["twaldin"],
+			reviewPolicy: TEST_REVIEW_POLICY,
+		});
+		expect(lateReview).toMatchObject({
+			ok: false,
+			retryable: false,
+			ciClassification: "TERMINAL_SUCCESS",
+		});
+		expect(lateReview.reason).toContain("Fresh review watch regressed before merge");
 		expect(assessMergeSafety(snapshot({ mergeable: "CONFLICTING" }), "abc123").ok).toBe(false);
 	});
 	test("UNKNOWN GitHub mergeability is stale metadata, not a rebase trigger", () => {
