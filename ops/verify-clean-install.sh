@@ -268,15 +268,22 @@ PERSONAL_SCAN_FILES=(
   workflows/review-gate/launch.ts
   workflows/review-gate/pipeline.tsx
 )
-# Both scans below derive their word list from ops/forbidden-vocabulary.txt.
-# Three hand-maintained patterns used to disagree, so a term caught by one check
-# could still ship through another.
-FORBIDDEN_WORDS="$(grep -vE '^[[:space:]]*(#|$)' "$CLONE_DIR/ops/forbidden-vocabulary.txt" | paste -sd '|' -)"
-[ -n "$FORBIDDEN_WORDS" ] || fail "ops/forbidden-vocabulary.txt is empty or missing"
-VOCAB_PATTERN="(^|[^[:alnum:]_])($FORBIDDEN_WORDS)([^[:alnum:]_]|$)"
+# Both scans derive their words from ops/forbidden-vocabulary.txt, which is
+# split into [identities] (banned everywhere, including source) and
+# [vocabulary] (banned in human-facing copy only, because some of those words
+# are persisted workflow and node identifiers).
+vocab_section() {
+  awk -v want="[$1]" '
+    /^\[/ { inside = ($0 == want); next }
+    inside && !/^[[:space:]]*(#|$)/ { print }
+  ' "$CLONE_DIR/ops/forbidden-vocabulary.txt" | paste -sd '|' -
+}
+IDENTITY_WORDS="$(vocab_section identities)"
+VOCAB_WORDS="$(vocab_section vocabulary)"
+[ -n "$IDENTITY_WORDS" ] && [ -n "$VOCAB_WORDS" ] || fail "ops/forbidden-vocabulary.txt is empty or malformed"
 
-# Machine-specific surfaces additionally must not carry absolute home paths.
-PERSONAL_PATTERN="/Users/[^/[:space:]]+|$VOCAB_PATTERN"
+# Shipped source and defaults: identities and absolute home paths only.
+PERSONAL_PATTERN="/Users/[^/[:space:]]+|(^|[^[:alnum:]_])($IDENTITY_WORDS)([^[:alnum:]_]|$)"
 if git -C "$CLONE_DIR" grep -nEIi "$PERSONAL_PATTERN" -- "${PERSONAL_SCAN_FILES[@]}"; then
   fail "shipped defaults or onboarding surfaces contain machine-specific identities"
 fi
@@ -302,7 +309,8 @@ PUBLIC_COPY_FILES=(
   docs/gateway-auth.md
   docs/personal-home.md
 )
-if git -C "$CLONE_DIR" grep -nEIi "$VOCAB_PATTERN" -- "${PUBLIC_COPY_FILES[@]}"; then
+# Human-facing copy: identities AND internal role/product vocabulary.
+if git -C "$CLONE_DIR" grep -nEIi "(^|[^[:alnum:]_])($IDENTITY_WORDS|$VOCAB_WORDS)([^[:alnum:]_]|$)" -- "${PUBLIC_COPY_FILES[@]}"; then
   fail "public onboarding copy contains operator-specific vocabulary"
 fi
 

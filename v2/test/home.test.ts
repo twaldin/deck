@@ -524,13 +524,14 @@ describe("the seeded contract is clean", () => {
 		expect(contract).not.toMatch(/quota bucket/i);
 		// Same list ops/verify-clean-install.sh uses. A second regex here is how
 		// the three checks drifted apart in the first place.
+		// The seed is human-facing copy, so BOTH sections apply.
 		const forbidden = fs.readFileSync(
 			path.join(import.meta.dir, "..", "..", "ops", "forbidden-vocabulary.txt"),
 			"utf8",
 		)
 			.split("\n")
 			.map((line) => line.trim())
-			.filter((line) => line !== "" && !line.startsWith("#"));
+			.filter((line) => line !== "" && !line.startsWith("#") && !line.startsWith("["));
 		expect(forbidden.length).toBeGreaterThan(0);
 		for (const word of forbidden) {
 			expect(contract, `seed leaks "${word}"`).not.toMatch(new RegExp(`\\b${word}\\b`, "i"));
