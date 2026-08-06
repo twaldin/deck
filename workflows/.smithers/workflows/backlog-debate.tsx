@@ -87,8 +87,8 @@ export default smithers(() => (
 			<Debate
 				id="backlog"
 				// Cross-family by construction: proposer anthropic, opponent openai.
-				proposer={providers.claudeOpus}
-				opponent={providers.gptSol}
+				proposer={providers.reviewer}
+				opponent={providers.implementer}
 				judge={agents.planning[0]}
 				rounds={2}
 				argumentOutput={outputs.argument}

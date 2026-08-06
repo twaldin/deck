@@ -6,6 +6,7 @@ import type { AgentLike } from "smithers-orchestrator";
 import { PrimeSeatAgent } from "../pr-pipeline/lib/engines/prime.ts";
 import {
   assertDeckModel,
+  DECK_PROVIDER,
   defaultModelPolicy,
   parseModelRef,
   type ModelSeat,
@@ -18,9 +19,9 @@ const modelPolicy = defaultModelPolicy();
 function deckAgent(seat: ModelSeat, thinking: Thinking): PrimeSeatAgent {
   const ref = typeof seat === "string" ? seat : seat.model;
   assertDeckModel(ref);
-  const { provider, model } = parseModelRef(ref);
+  const { model } = parseModelRef(ref);
   return new PrimeSeatAgent({
-    provider,
+    provider: DECK_PROVIDER,
     model,
     thinking,
     cwd,
