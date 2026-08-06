@@ -25,7 +25,7 @@ but bootstrap rejects one inside `~/.deck` and records home/host ownership in a
 |---|---|---|
 | `data/` | DURABLE | Effort dossiers, inbox inputs, and recorded facts are the cold-resume record. |
 | `state/` | DURABLE | Effort status/meta/queue/receipts and Smithers databases, executions, approvals, and ship inputs form one integrity unit. Some caches inside are derivable, but selectively wiping the directory can corrupt a live effort. |
-| `questions/` | DURABLE | The append-only captain decision queue must retain open and answered decisions. |
+| `questions/` | DURABLE | The append-only operator decision queue must retain open and answered decisions. |
 | `worktrees.json` | DURABLE | It binds effort, repository, branch, and worktree identities; those relationships cannot be inferred safely. |
 | `wt/` | DURABLE | Worktrees may contain uncommitted or unpushed work. The registry and trees survive together. |
 | `broker/` | DURABLE | OAuth accounts and local capabilities must remain authenticated on this host. Directories are 0700; every regular file, including `store.db` and tokens, is forced to 0600. |

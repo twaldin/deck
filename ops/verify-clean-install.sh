@@ -154,7 +154,11 @@ fi
 cmp "$CLONE_DIR/v2/seed/AGENTS.md" "$DECK_HOME/AGENTS.md" >/dev/null ||
   fail "installed AGENTS.md does not match the public seed"
 AGENTS_SIZE="$(wc -c < "$DECK_HOME/AGENTS.md" | tr -d '[:space:]')"
-[ "$AGENTS_SIZE" -lt 12288 ] || fail "installed AGENTS.md is $AGENTS_SIZE bytes (must be under 12288)"
+# Budget is injected into EVERY session, so it stays tight. It moved from 12288
+# once, deliberately, to fit three things a production repo cannot ship without:
+# the human-reviewer contract, the global-memory privacy boundary, and the CLI
+# table. Keep this in lockstep with v2/test/home.test.ts.
+[ "$AGENTS_SIZE" -lt 15360 ] || fail "installed AGENTS.md is $AGENTS_SIZE bytes (must be under 15360)"
 
 REVIEWERS_FILE="$DECK_HOME/config/reviewers.json"
 [ -f "$REVIEWERS_FILE" ] || fail "fresh install is missing private reviewer config"
