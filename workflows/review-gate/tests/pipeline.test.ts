@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { renderWorkflow } from "smithers-orchestrator/testing";
 import { askIfAbsent, openQuestions } from "../../../v2/src/questions-store.ts";
 import { reviewCommand, shouldSubmitReview } from "../decision.ts";
-import workflow, { createReviewGateAgent } from "../pipeline.tsx";
+import workflow, { assessCi, createReviewGateAgent } from "../pipeline.tsx";
 import { PrimeSeatAgent } from "../../pr-pipeline/lib/engines/prime.ts";
 import { DECK_PROVIDER } from "../../pr-pipeline/lib/models.ts";
 import {
@@ -247,6 +247,8 @@ test("gate has a hard no-approval rule and verifies state before queueing", () =
   expect(source).toContain("review-approval-gate-");
   expect(source).not.toMatch(/"pr",\s*"merge"/);
   expect(source).toContain("mergeStateStatus");
+  expect(assessCi([])).toEqual({ ciGreen: false, ciPending: true });
+  expect(assessCi([{ conclusion: "SUCCESS" }])).toEqual({ ciGreen: true, ciPending: false });
   expect(source).toContain('questionKind: clean ? "stamp" : "agent"');
   expect(source).toContain('workflowDir: process.cwd(), workflowFile: fileURLToPath(import.meta.url)');
 });

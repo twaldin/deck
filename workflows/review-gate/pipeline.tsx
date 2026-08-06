@@ -43,13 +43,18 @@ async function ghRun(cli: string, args: string[], cwd: string): Promise<void> {
   if (await proc.exited !== 0) throw new Error(await new Response(proc.stderr).text());
 }
 async function requested(cli: string, repo: string, login: string): Promise<Pr[]> { return ghJson(cli, ["pr", "list", "--repo", repo, "--search", `review-requested:${login}`, "--state", "open", "--json", "number,url,title,headRefName,headRefOid"]); }
+export function assessCi(checks: Array<{ conclusion?: unknown; status?: unknown; state?: unknown }>): { ciGreen: boolean; ciPending: boolean } {
+  const states = checks.map((check) => String(check.conclusion || check.status || check.state).toUpperCase());
+  return {
+    ciPending: checks.length === 0 || states.some((state) => ["PENDING", "QUEUED", "IN_PROGRESS"].includes(state)),
+    ciGreen: checks.length > 0 && states.every((state) => ["SUCCESS", "SKIPPED", "NEUTRAL"].includes(state)),
+  };
+}
 async function state(cli: string, repo: string, pr: number) {
   const v = await ghJson(cli, ["pr", "view", String(pr), "--repo", repo, "--json", "mergeable,mergeStateStatus,statusCheckRollup,headRefOid"]);
   const checks = Array.isArray(v.statusCheckRollup) ? v.statusCheckRollup : [];
   const mergeStateStatus = String(v.mergeStateStatus ?? "UNKNOWN");
-  const checkStates = checks.map((c: any) => String(c.conclusion || c.status || c.state).toUpperCase());
-  const ciPending = checkStates.some((state: string) => ["PENDING", "QUEUED", "IN_PROGRESS"].includes(state));
-  const ciGreen = checks.length === 0 || checkStates.every((state: string) => ["SUCCESS", "SKIPPED", "NEUTRAL"].includes(state));
+  const { ciGreen, ciPending } = assessCi(checks);
   return { mergeable: v.mergeable === "MERGEABLE" && !["DIRTY", "BEHIND", "UNSTABLE"].includes(mergeStateStatus), ciGreen, ciPending, mergeStateStatus, headSha: String(v.headRefOid ?? ""), summary: `mergeable=${v.mergeable} mergeStateStatus=${mergeStateStatus} checks=${checks.length}` };
 }
 export function createReviewGateAgent(model: string, cwd: string, effortLabel = "review-gate"): PrimeSeatAgent {

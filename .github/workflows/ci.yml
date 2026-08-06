@@ -151,6 +151,9 @@ jobs:
       - name: Install broker dependencies
         working-directory: broker
         run: bun install
+      - name: Run broker tests
+        working-directory: broker
+        run: bun test
       - name: Typecheck broker
         working-directory: broker
         run: bunx tsc --noEmit
