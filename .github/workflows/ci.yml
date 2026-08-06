@@ -58,6 +58,15 @@ jobs:
       - name: Run extension tests
         working-directory: extensions-prime
         run: bun test test/
+      - name: Typecheck Prime extensions
+        working-directory: extensions-prime
+        run: bun run typecheck
+      - name: Run CLI tests
+        working-directory: cli
+        run: bun test
+      - name: Typecheck CLI
+        working-directory: cli
+        run: bun run typecheck
   pipeline-tests:
     name: pipeline tests
     runs-on: ubuntu-latest

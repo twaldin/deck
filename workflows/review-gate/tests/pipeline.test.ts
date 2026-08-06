@@ -3,9 +3,10 @@ import { existsSync, mkdirSync, readFileSync, mkdtempSync, writeFileSync } from 
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { renderWorkflow } from "smithers-orchestrator/testing";
-import { askIfAbsent, openQuestions } from "../../../v2/src/questions-store.ts";
+import { openQuestions } from "../../../v2/src/questions-store.ts";
+import { routeWorkflowQuestionAnswer } from "../../../v2/src/workflow-questions.ts";
 import { reviewCommand, shouldSubmitReview } from "../decision.ts";
-import workflow, { assessCi, createReviewGateAgent } from "../pipeline.tsx";
+import workflow, { assessCi, createReviewGateAgent, queueReviewGateDecision } from "../pipeline.tsx";
 import { PrimeSeatAgent } from "../../pr-pipeline/lib/engines/prime.ts";
 import { DECK_PROVIDER } from "../../pr-pipeline/lib/models.ts";
 import {
@@ -162,14 +163,64 @@ test("run-count evidence distinguishes the old per-poll explosion from one activ
   expect(summarizeRunCounts(after)).toEqual({ reviewGate: 1, activeReviewGate: 1, continuedReviewGate: 0, postFailure: 0 });
 });
 
-test("atomic global asks queue one event under concurrent callers", () => {
+test("review-gate queues one Smithers approval and closes it only after Gateway accepts it", async () => {
   const dir = mkdtempSync(join(tmpdir(), "review-gate-"));
   const file = join(dir, "queue.jsonl");
-  const input = { id: "review-gate-pr-7-head", idScope: "global" as const, question: "Approve PR 7?", sessionId: "run", cwd: dir };
-  const first = askIfAbsent(file, input);
-  const second = askIfAbsent(file, input);
+  const request = {
+    runId: "run-review-gate",
+    repo: "owner/repo",
+    worktree: dir,
+    pr: { number: 7, url: "https://github.test/owner/repo/pull/7", title: "Prime gate" },
+    headSha: "head-7",
+    originalIssue: "Review PR 7.",
+    draftBody: "No blockers remain.",
+    evidence: "CI green.",
+    reviewSummary: "Clean.",
+    mergeStateStatus: "CLEAN",
+    ciGreen: true,
+    verdict: "comment" as const,
+  };
+  const first = queueReviewGateDecision(file, request);
+  const second = queueReviewGateDecision(file, request);
   expect(first.id).toBe(second.id);
   expect(openQuestions(file)).toHaveLength(1);
+  expect(first.workflow).toMatchObject({
+    runId: "run-review-gate",
+    nodeId: "review-approval-gate-7",
+    answerLane: "smithers-approval",
+    approvalValue: { prNumber: 7, headSha: "head-7", verdict: "comment" },
+  });
+
+  let submitted: unknown;
+  const routed = await routeWorkflowQuestionAnswer(file, openQuestions(file)[0]!, "Acknowledge evidence", {
+    env: {
+      SMITHERS_GATEWAY_TOKEN: "review-gate-token",
+      SMITHERS_GATEWAY_URL: "http://gateway.test/",
+    },
+    fetch: async (_url, init) => {
+      submitted = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({
+        ok: true,
+        payload: {
+          runId: "run-review-gate",
+          nodeId: "review-approval-gate-7",
+          iteration: 0,
+          approved: true,
+        },
+      }), { status: 200 });
+    },
+  }, "approve");
+  expect(routed).toEqual({ lane: "smithers-approval", choice: "approve", applied: true });
+  expect(submitted).toMatchObject({
+    runId: "run-review-gate",
+    nodeId: "review-approval-gate-7",
+    approved: true,
+    decision: {
+      approved: true,
+      value: { prNumber: 7, headSha: "head-7", verdict: "comment" },
+    },
+  });
+  expect(openQuestions(file)).toEqual([]);
 });
 
 test("polls the captain review-request queue programmatically", () => {
@@ -250,8 +301,8 @@ test("gate has a hard no-approval rule and verifies state before queueing", () =
   expect(source).toContain("mergeStateStatus");
   expect(assessCi([])).toEqual({ ciGreen: false, ciPending: true });
   expect(assessCi([{ conclusion: "SUCCESS" }])).toEqual({ ciGreen: true, ciPending: false });
-  expect(source).toContain('questionKind: clean ? "stamp" : "agent"');
-  expect(source).toContain('workflowDir: process.cwd(), workflowFile: fileURLToPath(import.meta.url)');
+  expect(source).toContain('answerLane: "smithers-approval"');
+  expect(source).toContain('workflowFile: fileURLToPath(import.meta.url)');
 });
 
 test("blockers dispatch a fix and rebase is an agent task", () => {
@@ -273,8 +324,8 @@ test("blocker reports draft findings and submit only follows captain approval", 
 test("clean and exhausted rounds use different captain decisions without self-approval", () => {
   expect(source).toContain('maxIterations={rounds}');
   expect(source).toContain('Math.min(input.limits?.rounds ?? 3, 3)');
-  expect(source).toContain('questionKind: clean ? "stamp" : "agent"');
-  expect(source).toContain('const cleanCaptainOptions = ["Approve", "Hold", "Deny gate"]');
+  expect(source).toContain('const clean = request.verdict === "comment"');
+  expect(source).toContain('["Acknowledge evidence", "Hold", "Deny gate"]');
   expect(source).toContain('reviewCommand(pr.number, input.repo, blockers.length === 0)');
   expect(source).toContain('shouldSubmitReview(decision)');
 });
