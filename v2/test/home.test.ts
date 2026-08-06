@@ -515,14 +515,21 @@ describe("the seeded contract is clean", () => {
 		expect(contract).toContain("## QUESTIONS DISCIPLINE");
 		expect(contract).toContain("## THIS SESSION NEVER");
 		expect(contract).toContain(
-			"this conversation seat discharges\n" +
-				"them only through `ship`, `adopt`, `status`, and queued questions",
+			"This seat discharges build, review, and deploy obligations only through those\n" +
+				"calls and queued questions",
 		);
+		// Named explicitly: pointing the factory at a repo with human reviewers is
+		// the change most likely to make a seat call a blocked PR "done".
+		expect(contract).toContain("### Repos with human reviewers");
+		expect(contract).toContain("green CI is not delivery evidence");
 		expect(contract).toContain("Prime seats delegate bounded work only through native `rlm()`");
 		expect(contract).toMatch(/RLM depth is one:\s+children are allowed and grandchildren are not/);
 		expect(contract).toMatch(/A bare child uses\s+`deck\/gpt-5\.6-luna` at reasoning `xhigh`/);
 		expect(contract).not.toMatch(/\b(?:Lindy|captain|twaldin)\b/i);
-		expect(Buffer.byteLength(contract, "utf8")).toBeLessThan(12 * 1024);
+		// The human-reviewer contract, the memory privacy boundary, and the CLI
+		// table are all load-bearing for a production repo, so the budget moved
+		// once, deliberately. Keep it tight: this is injected into every session.
+		expect(Buffer.byteLength(contract, "utf8")).toBeLessThan(15 * 1024);
 	});
 });
 
