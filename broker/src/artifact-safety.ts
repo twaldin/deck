@@ -91,12 +91,12 @@ function eventFor(
 }
 
 /**
- * OpenAI OAuth dispatch can rotate again inside pi-ai after the broker selects
- * an account (refresh/auth/quota failover). The outer broker cannot bind one
- * request to a credential through that retry, so no encrypted blob is safe to
- * forward: retain only the wire identity and visible summary.
- * Compaction is dropped because the current auth-gateway has no compaction
- * transport and would discard it later anyway.
+ * OpenAI ciphertext is bound to the producing model and organization. Even
+ * though the broker pins the request that creates it, a later replay may be
+ * imported or deliberately quota-routed to another account/model. Strip it
+ * unconditionally: retain only the visible summary in an ordinary assistant
+ * item. Compaction is dropped because the current auth-gateway has no
+ * compaction transport and would discard it later anyway.
  */
 export function stripOpenAIEncryptedArtifacts(
 	body: Record<string, unknown>,
