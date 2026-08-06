@@ -50,6 +50,7 @@ HARNESS_DIR="$AGENT_DIR/harness"
 SETTINGS_FILE="$AGENT_DIR/settings.json"
 CUSTODY_FILE="$AGENT_DIR/APPEND_SYSTEM.md"
 GUARD_FILE="$EXTENSIONS_DIR/prime-conversation-guard.ts"
+AUTH_FILE="$AGENT_DIR/auth.json"
 MANIFEST_FILE="$AGENT_DIR/deck-prime-conversation.json"
 WRAPPER="$PROFILE_ROOT/bin/prime-conversation"
 RUN_DIR="$PROFILE_ROOT/run"
@@ -65,8 +66,10 @@ if [[ -n "${PRIME_CONVERSATION_PRIME_BIN:-}" ]]; then
 else
   PRIME_BIN="$(command -v prime-agent || true)"
   if [[ -z "$PRIME_BIN" ]]; then
-    printf 'error: prime-agent is not installed globally. Install the reviewed pin with:\n' >&2
-    printf '  npm install -g prime-agent@%s\n' "$PINNED_VERSION" >&2
+    printf 'error: prime-agent is not installed. Install the reviewed release artifact:\n' >&2
+    printf '  curl -fsSL %s -o /tmp/prime-agent-%s.tgz\n' "$PINNED_ARTIFACT_URL" "$PINNED_VERSION" >&2
+    printf '  printf "%s  /tmp/prime-agent-%s.tgz\\n" | shasum -a 256 -c -\n' "$PINNED_ARTIFACT_SHA256" "$PINNED_VERSION" >&2
+    printf '  npm install -g /tmp/prime-agent-%s.tgz\n' "$PINNED_VERSION" >&2
     exit 1
   fi
 fi
@@ -157,12 +160,18 @@ try {
   managed=true
 fi
 if [[ "$managed" != true ]]; then
-  for path_to_claim in "$SETTINGS_FILE" "$CUSTODY_FILE" "$GUARD_FILE" "$WRAPPER"; do
+  for path_to_claim in "$SETTINGS_FILE" "$CUSTODY_FILE" "$GUARD_FILE" "$AUTH_FILE" "$WRAPPER"; do
     if [[ -e "$path_to_claim" || -L "$path_to_claim" ]]; then
       printf 'error: refusing to overwrite unowned conversation profile path %s\n' "$path_to_claim" >&2
       exit 1
     fi
   done
+fi
+
+if [[ ! -f "$DECK_HOME/AGENTS.md" ]] || ! cmp -s "$SEED_SOURCE" "$DECK_HOME/AGENTS.md"; then
+  printf 'error: %s must exactly match the Deck v4 seed %s\n' \
+    "$DECK_HOME/AGENTS.md" "$SEED_SOURCE" >&2
+  exit 1
 fi
 
 if [[ "$apply" != true ]]; then
@@ -182,11 +191,27 @@ EOF
   exit 0
 fi
 
-if [[ ! -f "$DECK_HOME/AGENTS.md" ]] || ! cmp -s "$SEED_SOURCE" "$DECK_HOME/AGENTS.md"; then
-  printf 'error: %s must exactly match the Deck v4 seed %s before applying this profile\n' \
-    "$DECK_HOME/AGENTS.md" "$SEED_SOURCE" >&2
-  exit 1
+
+# Reject every unowned auto-discovery entry before creating profile state. Prime
+# loads top-level *.ts files and */index.ts automatically.
+if [[ -d "$EXTENSIONS_DIR" ]]; then
+  for existing in "$EXTENSIONS_DIR"/*; do
+    [[ -e "$existing" || -L "$existing" ]] || continue
+    case "$(basename "$existing")" in
+      deck-questions|deck-ship|deck-recall|deck-provider.ts|prime-conversation-guard.ts|node_modules|v2) ;;
+      *)
+        printf 'error: unapproved conversation-profile extension is present: %s\n' "$existing" >&2
+        exit 1
+        ;;
+    esac
+  done
 fi
+for forbidden in "$EXTENSIONS_DIR/deck-subagents" "$EXTENSIONS_DIR/subagent" "$EXTENSIONS_DIR/herdr-agent-state.ts" "$EXTENSIONS_DIR/herdr-agent-state.js"; do
+  if [[ -e "$forbidden" || -L "$forbidden" ]]; then
+    printf 'error: forbidden conversation-profile extension is present: %s\n' "$forbidden" >&2
+    exit 1
+  fi
+done
 
 umask 077
 mkdir -p "$AGENT_DIR" "$EXTENSIONS_DIR" "$HARNESS_DIR" "$PROFILE_ROOT/bin" "$RUN_DIR" "$SESSIONS_DIR"
@@ -251,18 +276,25 @@ ensure_symlink "$ZOD_SOURCE" "$EXTENSIONS_DIR/node_modules/zod"
 
 guard_tmp="$GUARD_FILE.tmp.$$"
 cat > "$guard_tmp" <<'GUARD'
+import * as fs from "node:fs";
+
 interface PrimeModel {
   provider: string;
+}
+interface PrimeTool {
+  name: string;
 }
 interface PrimeContext {
   model: PrimeModel | undefined;
   abort(): void;
   shutdown(): void;
+  getSystemPrompt(): string;
 }
 interface ModelSelectEvent {
   model: PrimeModel;
 }
 interface PrimeGuardApi {
+  getAllTools(): PrimeTool[];
   on(event: string, handler: (event: ModelSelectEvent, context: PrimeContext) => void): void;
 }
 
@@ -272,7 +304,26 @@ export default function primeConversationGuard(pi: PrimeGuardApi): void {
     context.abort();
     context.shutdown();
   };
-  pi.on("session_start", (_event, context) => enforceDeck(context.model, context));
+  pi.on("session_start", (_event, context) => {
+    enforceDeck(context.model, context);
+    const output = process.env.PRIME_CONVERSATION_PROBE;
+    if (output === undefined) return;
+    fs.writeFileSync(output, JSON.stringify({
+      cwd: process.cwd(),
+      systemPrompt: context.getSystemPrompt(),
+      tools: pi.getAllTools().map((tool) => tool.name).sort(),
+      gatewayToken: process.env.SMITHERS_GATEWAY_TOKEN ?? null,
+      tokenStore: process.env.SMITHERS_TOKEN_STORE ?? null,
+      stampToken: process.env.DECK_STAMP_TOKEN ?? null,
+      publisherToken: process.env.DECK_PUBLISHER_TOKEN ?? null,
+      adminToken: process.env.ADMIN_TOKEN ?? null,
+      skipVersionCheck: process.env.PI_SKIP_VERSION_CHECK,
+      offline: process.env.PI_OFFLINE,
+      maxDepth: process.env.RLM_MAX_DEPTH,
+      agentDir: process.env.PRIME_AGENT_CODING_AGENT_DIR,
+      sessionDir: process.env.PRIME_AGENT_SESSION_DIR,
+    }, null, 2));
+  });
   pi.on("model_select", (event, context) => enforceDeck(event.model, context));
   pi.on("before_agent_start", (_event, context) => enforceDeck(context.model, context));
   pi.on("before_provider_request", (_event, context) => enforceDeck(context.model, context));
@@ -281,12 +332,7 @@ GUARD
 mv -f "$guard_tmp" "$GUARD_FILE"
 chmod 444 "$GUARD_FILE"
 
-for forbidden in "$EXTENSIONS_DIR/deck-subagents" "$EXTENSIONS_DIR/subagent" "$EXTENSIONS_DIR/herdr-agent-state.ts" "$EXTENSIONS_DIR/herdr-agent-state.js"; do
-  if [[ -e "$forbidden" || -L "$forbidden" ]]; then
-    printf 'error: forbidden conversation-profile extension is present: %s\n' "$forbidden" >&2
-    exit 1
-  fi
-done
+
 
 settings_tmp="$SETTINGS_FILE.tmp.$$"
 cat > "$settings_tmp" <<'SETTINGS'
@@ -304,6 +350,7 @@ chmod 600 "$SETTINGS_FILE"
 custody_tmp="$CUSTODY_FILE.tmp.$$"
 cat > "$custody_tmp" <<'CUSTODY'
 # PRIME CONVERSATION CUSTODY CONTRACT v1
+
 
 This is the captain's long-running conversation interface. It is not a factory
 worker, workflow engine, supervisor, publisher, or source of authoritative state.
@@ -348,14 +395,31 @@ validation, or modify Smithers succession, review, stamp, or merge policy.
 CUSTODY
 mv -f "$custody_tmp" "$CUSTODY_FILE"
 chmod 444 "$CUSTODY_FILE"
+auth_tmp="$AUTH_FILE.tmp.$$"
+printf '{}\n' > "$auth_tmp"
+mv -f "$auth_tmp" "$AUTH_FILE"
+chmod 400 "$AUTH_FILE"
+
 
 custody_sha="$(shasum -a 256 "$CUSTODY_FILE" | cut -d ' ' -f 1)"
 guard_sha="$(shasum -a 256 "$GUARD_FILE" | cut -d ' ' -f 1)"
+settings_sha="$(shasum -a 256 "$SETTINGS_FILE" | cut -d ' ' -f 1)"
+auth_sha="$(shasum -a 256 "$AUTH_FILE" | cut -d ' ' -f 1)"
+seed_sha="$(shasum -a 256 "$DECK_HOME/AGENTS.md" | cut -d ' ' -f 1)"
 
 printf -v prime_bin_q '%q' "$PRIME_BIN"
 printf -v deck_home_q '%q' "$DECK_HOME"
 printf -v socket_q '%q' "$SOCKET"
 printf -v custody_file_q '%q' "$CUSTODY_FILE"
+printf -v settings_file_q '%q' "$SETTINGS_FILE"
+printf -v auth_file_q '%q' "$AUTH_FILE"
+printf -v seed_file_q '%q' "$DECK_HOME/AGENTS.md"
+printf -v extensions_dir_q '%q' "$EXTENSIONS_DIR"
+printf -v extension_source_q '%q' "$EXTENSION_SOURCE"
+printf -v provider_source_q '%q' "$PROVIDER_SOURCE"
+printf -v zod_source_q '%q' "$ZOD_SOURCE"
+printf -v lib_root_q '%q' "$LIB_ROOT"
+printf -v prime_package_root_q '%q' "$prime_package_root"
 printf -v guard_file_q '%q' "$GUARD_FILE"
 printf -v run_dir_q '%q' "$RUN_DIR"
 printf -v sessions_dir_q '%q' "$SESSIONS_DIR"
@@ -375,8 +439,21 @@ CUSTODY_FILE=$custody_file_q
 GUARD_FILE=$guard_file_q
 RUN_DIR=$run_dir_q
 SESSIONS_DIR=$sessions_dir_q
+PRIME_PACKAGE_ROOT=$prime_package_root_q
+EXTENSIONS_DIR=$extensions_dir_q
+EXTENSION_SOURCE=$extension_source_q
+PROVIDER_SOURCE=$provider_source_q
+ZOD_SOURCE=$zod_source_q
+LIB_ROOT=$lib_root_q
+SETTINGS_FILE=$settings_file_q
+AUTH_FILE=$auth_file_q
+SEED_FILE=$seed_file_q
 AGENT_DIR=$agent_dir_q
 CUSTODY_SHA256='$custody_sha'
+PINNED_PACKAGE_TREE_SHA256='$PINNED_PACKAGE_TREE_SHA256'
+SETTINGS_SHA256='$settings_sha'
+AUTH_SHA256='$auth_sha'
+SEED_SHA256='$seed_sha'
 GUARD_SHA256='$guard_sha'
 
 if ! actual_version="\$("\$PRIME_AGENT_BIN" --version 2>&1)"; then

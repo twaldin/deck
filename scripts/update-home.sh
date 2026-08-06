@@ -11,6 +11,13 @@ if [ ! -d "$REPO/.git" ]; then
   exit 1
 fi
 
+for prerequisite in bun curl git python3; do
+  command -v "$prerequisite" >/dev/null 2>&1 || {
+    echo "error: $prerequisite is required before updating" >&2
+    exit 1
+  }
+done
+
 cd "$REPO"
 git fetch origin "$BRANCH"
 git checkout -B "$BRANCH" "origin/$BRANCH"

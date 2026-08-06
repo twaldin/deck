@@ -245,6 +245,19 @@ describe("startShip", () => {
 		await expect(startShip(request({ acceptance: [] }), home)).rejects.toThrow(/acceptance/);
 	});
 
+	test("malformed private reviewer policy fails closed before dispatch", async () => {
+		fs.writeFileSync(
+			path.join(home, "config", "reviewers.json"),
+			JSON.stringify({
+				selfLogins: "operator-login",
+				excludedApprovers: [],
+				reviewerDenylist: [],
+				reviewers: [],
+			}),
+		);
+		await expect(startShip(request(), home)).rejects.toThrow(/selfLogins must be an array/);
+	});
+
 	test("missing pipeline dir refuses with the override hint", async () => {
 		process.env.DECK_PIPELINE_DIR = path.join(home, "not-there");
 		await expect(startShip(request(), home)).rejects.toThrow(/DECK_PIPELINE_DIR/);
@@ -254,11 +267,20 @@ describe("startShip", () => {
 		expect(fs.existsSync(path.join(pipelineDir(), "pipeline.tsx"))).toBe(true);
 	});
 
-	test("REGRESSION: spawn uses the shared workspace cwd and an absolute pipeline path", async () => {
+	test("REGRESSION: production dispatch carries private reviewer policy into the shared workspace input", async () => {
 		const fakeDir = path.join(home, "fake-pipeline");
 		fs.mkdirSync(fakeDir, { recursive: true });
 		fs.writeFileSync(path.join(fakeDir, "pipeline.tsx"), "// fake\\n");
 		process.env.DECK_PIPELINE_DIR = fakeDir;
+		fs.writeFileSync(
+			path.join(home, "config", "reviewers.json"),
+			JSON.stringify({
+				selfLogins: ["operator-login"],
+				excludedApprovers: ["non-counting-approver"],
+				reviewerDenylist: ["unavailable-reviewer"],
+				reviewers: ["default-reviewer"],
+			}),
+		);
 		let command = "";
 		let args: string[] = [];
 		let options: SpawnOptions | undefined;
@@ -277,6 +299,20 @@ describe("startShip", () => {
 		expect(options?.cwd).toBe(path.join(home, "state", "smithers"));
 		expect(args[2]).toBe(path.join(fakeDir, "pipeline.tsx"));
 		expect(args).toContain("--no-post-failure");
+		const inputIndex = args.indexOf("--input");
+		const dispatched = JSON.parse(args[inputIndex + 1]!) as {
+			github: {
+				selfLogins: string[];
+				excludedApprovers: string[];
+				reviewerDenylist: string[];
+				reviewers: string[];
+			};
+		};
+		expect(dispatched.github.selfLogins).toEqual(["operator-login"]);
+		expect(dispatched.github.excludedApprovers).toEqual(["non-counting-approver"]);
+		expect(dispatched.github.reviewerDenylist).toEqual(["unavailable-reviewer"]);
+		expect(dispatched.github.reviewers).toEqual(["default-reviewer"]);
+		expect(dispatched.github).not.toHaveProperty("skipReviewerRequest");
 	});
 
 	test("REGRESSION: a launch that never starts REJECTS instead of reporting started", async () => {

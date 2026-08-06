@@ -144,6 +144,7 @@ PERSONAL_SCAN_FILES=(
   workflows/pr-pipeline/lib/ready.ts
   workflows/pr-pipeline/lib/reviewers.ts
   workflows/review-gate/launch.ts
+  workflows/review-gate/pipeline.tsx
 )
 PERSONAL_PATTERN='/Users/[^/[:space:]]+|deckbox|(^|[^[:alnum:]_])(twaldin|ali|mackcooper1408|spencer-negri|daniel-covelli|akshat-lindy|Tim|Sathiral|Jeremy)([^[:alnum:]_]|$)'
 if git -C "$CLONE_DIR" grep -nEI "$PERSONAL_PATTERN" -- "${PERSONAL_SCAN_FILES[@]}"; then

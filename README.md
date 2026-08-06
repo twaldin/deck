@@ -145,6 +145,12 @@ posture:
 Bootstrap creates an empty profile list. Copy and review an example or write a
 profile for your own repository before using `ship`.
 
+Reviewer identity and routing are private machine configuration in
+`~/.deck/config/reviewers.json`. Before shipping, set `selfLogins` to every
+GitHub login whose approval must not count as independent, plus any
+`excludedApprovers`, `reviewerDenylist`, and default `reviewers`. Bootstrap
+creates all four arrays empty; no operator identity ships in the repository.
+
 ## More detail
 
 | Document | Subject |

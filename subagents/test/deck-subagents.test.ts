@@ -200,7 +200,18 @@ describe("deck subagent primitive", () => {
 			});
 			const firstExtension = installedArgs.indexOf("--extension");
 			expect(await realpath(installedArgs[firstExtension + 1]!)).toBe(await realpath(providerPath));
-			const loaded = Bun.spawn(["pi", "--no-extensions", "--extension", extensionPath, "--help"], {
+			const piCli = path.resolve(
+				import.meta.dir,
+				"..",
+				"..",
+				"v2",
+				"node_modules",
+				"@earendil-works",
+				"pi-coding-agent",
+				"dist",
+				"cli.js",
+			);
+			const loaded = Bun.spawn([process.execPath, piCli, "--no-extensions", "--extension", extensionPath, "--help"], {
 				env: { ...process.env, PI_CODING_AGENT_DIR: installTarget },
 				stdout: "pipe",
 				stderr: "pipe",

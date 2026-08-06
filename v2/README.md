@@ -102,8 +102,10 @@ and for non-shipping research, not a pipeline bypass.
 
 Project profiles are loaded wholesale from
 `~/.deck/config/projects.json`. Bootstrap writes an empty list and selects no
-personal or company profile. Reviewer exclusions and reviewer routing belong in
-`~/.deck/config/reviewers.json`, not in this repository's public seed.
+personal or company profile. Every `ship` and `adopt` dispatch also loads
+`selfLogins`, `excludedApprovers`, `reviewerDenylist`, and default `reviewers`
+from `~/.deck/config/reviewers.json`; bootstrap seeds empty arrays, never public
+operator identities.
 
 ## Questions
 

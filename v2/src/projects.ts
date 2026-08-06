@@ -22,6 +22,9 @@ import * as path from "node:path";
 export const PIPELINES = ["lindy-full", "yolo-ship", "ask-then-yolo"] as const;
 export type PipelineId = (typeof PIPELINES)[number];
 
+export const SEAT_ENGINES = ["pi", "prime"] as const;
+export type SeatEngine = (typeof SEAT_ENGINES)[number];
+
 export type ModelSeat = string | { model: string; reasoning?: string };
 
 export type ModelSeats = {
@@ -46,6 +49,8 @@ export type ProjectProfile = {
 	/** Absolute path to the primary checkout. Never edited; worktrees only. */
 	primary: string;
 	pipeline: PipelineId;
+	/** LLM seat runtime. Omitted legacy profiles fail safely to pi. */
+	engine?: SeatEngine;
 	/** Merge green work without per-PR captain word. */
 	yolo: boolean;
 	/** Every merge needs the captain's per-PR stamp. */
@@ -126,6 +131,9 @@ export function validateProfiles(parsed: unknown, source: string): ProjectProfil
 				`${where} (${p.id}): pipeline "${pipeline}" implies yolo=${implied.yolo} stamp=${implied.stamp}; the file says yolo=${p.yolo} stamp=${p.stamp}. Fix the contradiction.`,
 			);
 		}
+		if (p.engine !== undefined && !SEAT_ENGINES.includes(p.engine as SeatEngine)) {
+			throw new Error(`${where} (${p.id}): engine must be one of ${SEAT_ENGINES.join(" | ")}`);
+		}
 		if (p.production !== undefined && typeof p.production !== "boolean") {
 			throw new Error(`${where} (${p.id}): production must be a boolean`);
 		}
@@ -196,6 +204,7 @@ export function validateProfiles(parsed: unknown, source: string): ProjectProfil
 			pipeline,
 			yolo: p.yolo,
 			stamp: p.stamp,
+			engine: (p.engine ?? "pi") as SeatEngine,
 			...(p.production === undefined ? {} : { production: p.production }),
 			knowledge: knowledge as string[],
 			...(p.doctrine === undefined ? {} : { doctrine: p.doctrine }),

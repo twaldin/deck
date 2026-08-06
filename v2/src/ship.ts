@@ -27,6 +27,53 @@ import { SMITHERS_SPEC } from "./smithers";
 import { smithersWorkspaceCwd, uiWarn, warnOnShadowWorkspace } from "./workspace";
 import { claimWorktree, updateWorktreePid } from "./worktree-lock";
 
+export type ReviewersConfig = {
+	selfLogins: string[];
+	excludedApprovers: string[];
+	reviewerDenylist: string[];
+	reviewers: string[];
+};
+
+const EMPTY_REVIEWERS_CONFIG: ReviewersConfig = {
+	selfLogins: [],
+	excludedApprovers: [],
+	reviewerDenylist: [],
+	reviewers: [],
+};
+
+function reviewerList(value: unknown, key: keyof ReviewersConfig, file: string): string[] {
+	if (
+		!Array.isArray(value) ||
+		value.some((item) => typeof item !== "string" || item.trim().length === 0)
+	) {
+		throw new Error(`${file}: ${key} must be an array of non-empty strings`);
+	}
+	return value.map((item) => item.trim());
+}
+
+export function loadReviewersConfig(home = deckV2Home()): ReviewersConfig {
+	const file = path.join(home, "config", "reviewers.json");
+	if (!fs.existsSync(file)) return { ...EMPTY_REVIEWERS_CONFIG };
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+	} catch (error) {
+		throw new Error(
+			`${file}: invalid JSON: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+	if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+		throw new Error(`${file}: expected a JSON object`);
+	}
+	const record = parsed as Record<string, unknown>;
+	return {
+		selfLogins: reviewerList(record.selfLogins, "selfLogins", file),
+		excludedApprovers: reviewerList(record.excludedApprovers, "excludedApprovers", file),
+		reviewerDenylist: reviewerList(record.reviewerDenylist, "reviewerDenylist", file),
+		reviewers: reviewerList(record.reviewers, "reviewers", file),
+	};
+}
+
 function pipelineWorkflowHash(dir: string): string {
 	const hash = createHash("sha256");
 	hash.update(fs.readFileSync(path.join(dir, "pipeline.tsx")));
@@ -95,6 +142,7 @@ export function pipelineDir(): string {
 export function buildPipelineInput(
 	request: ShipRequest,
 	profile: ProjectProfile,
+	reviewersConfig?: ReviewersConfig,
 ): Record<string, unknown> {
 	const input: Record<string, unknown> = {
 		__smithersDurability: { entryWorkflowHash: pipelineWorkflowHash(pipelineDir()) },
@@ -128,15 +176,25 @@ export function buildPipelineInput(
 	};
 	if (request.baseBranch !== undefined) input.baseBranch = request.baseBranch;
 	if (request.existingPr !== undefined) input.existingPr = request.existingPr;
+	const github: Record<string, unknown> = {};
+	if (reviewersConfig !== undefined) {
+		github.selfLogins = reviewersConfig.selfLogins;
+		github.excludedApprovers = reviewersConfig.excludedApprovers;
+		github.reviewerDenylist = reviewersConfig.reviewerDenylist;
+		github.reviewers = reviewersConfig.reviewers;
+	}
 	// A yolo profile with no reviewers named would park every run at the
 	// zero-candidates escalation; personal repos have no review bench, so the
 	// skip is recorded explicitly unless reviewers are given.
 	if (
 		request.skipReviewerRequest === true ||
-		(profile.yolo && (request.reviewers === undefined || request.reviewers.length === 0))
+		(profile.yolo &&
+			(request.reviewers === undefined || request.reviewers.length === 0) &&
+			(reviewersConfig === undefined || reviewersConfig.reviewers.length === 0))
 	) {
-		input.github = { skipReviewerRequest: true };
+		github.skipReviewerRequest = true;
 	}
+	if (Object.keys(github).length > 0) input.github = github;
 	// Done is evidence-gated. For a yolo repo with no deploy step, landing on
 	// the base branch IS the deploy, so a git-log probe is honest evidence.
 	// An explicit-approval profile may have real deploys: no weak default there.
@@ -222,7 +280,7 @@ export async function startShip(
 		request.runId ??
 		`${request.ticket.toLowerCase().replace(/[^a-z0-9-]+/g, "-")}-pipeline`;
 	let releaseWorktreeLock: (() => void) | undefined;
-	const input = buildPipelineInput(request, profile);
+	const input = buildPipelineInput(request, profile, loadReviewersConfig(home));
 	// Keep the task-to-workflow join durable when the caller already created a
 	// deck task with the ticket id. Smithers ps does not expose a unique worktree.
 	try {

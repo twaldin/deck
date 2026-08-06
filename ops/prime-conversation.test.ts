@@ -315,37 +315,7 @@ describe("Prime conversation installer", () => {
 
 describe("Prime conversation runtime guards", () => {
 	test("loads Deck tools/provider, OptMem wake, custody base prompt, and the cwd seed", async () => {
-		const probePath = path.join(agentDir, "extensions", "profile-probe.ts");
 		const probeOutput = path.join(root, "profile-probe.json");
-		fs.writeFileSync(probePath, `import * as fs from "node:fs";
-interface ToolInfo { name: string }
-interface ProbeContext { getSystemPrompt(): string }
-interface ProbeApi {
-  getAllTools(): ToolInfo[];
-  on(event: string, handler: (event: unknown, context: ProbeContext) => void): void;
-}
-export default function profileProbe(pi: ProbeApi): void {
-  pi.on("session_start", (_event, context) => {
-    const output = process.env.PRIME_CONVERSATION_PROBE;
-    if (output === undefined) return;
-    fs.writeFileSync(output, JSON.stringify({
-      cwd: process.cwd(),
-      systemPrompt: context.getSystemPrompt(),
-      tools: pi.getAllTools().map((tool) => tool.name).sort(),
-      gatewayToken: process.env.SMITHERS_GATEWAY_TOKEN ?? null,
-      tokenStore: process.env.SMITHERS_TOKEN_STORE ?? null,
-      stampToken: process.env.DECK_STAMP_TOKEN ?? null,
-      publisherToken: process.env.DECK_PUBLISHER_TOKEN ?? null,
-      adminToken: process.env.ADMIN_TOKEN ?? null,
-      skipVersionCheck: process.env.PI_SKIP_VERSION_CHECK,
-      offline: process.env.PI_OFFLINE,
-      maxDepth: process.env.RLM_MAX_DEPTH,
-      agentDir: process.env.PRIME_AGENT_CODING_AGENT_DIR,
-      sessionDir: process.env.PRIME_AGENT_SESSION_DIR,
-    }, null, 2));
-  });
-}
-`);
 		const herdrSocket = path.join(root, "herdr-probe.sock");
 		const herdr = await startHerdrStub(herdrSocket);
 		try {
@@ -407,7 +377,6 @@ export default function profileProbe(pi: ProbeApi): void {
 			expect(herdrReport?.params?.pane_id).toBe("captain-probe");
 			expect(herdrReport?.params?.state).toBe("idle");
 		} finally {
-			fs.rmSync(probePath, { force: true });
 			await herdr.close();
 		}
 	}, 30_000);

@@ -61,7 +61,7 @@ function agent(model: string, tools = true) {
   return new PiAgent({ provider: "deck", model, timeoutMs: 30 * 60_000, thinking: "medium", noSession: true, ...(tools ? { tools: ["read", "grep", "edit", "write", "bash"] } : { noTools: true }), ...(extension === undefined ? {} : { extension: [extension] }) });
 }
 function reviewComment(pr: Pr, blockers: string[]): string {
-  return [`Review found ${blockers.length} blocker(s) on PR #${pr.number}.`, ...blockers.map((item, i) => `${i + 1}. ${item}`), "Fix each blocker, then push the branch.", "— Tim's agent"].join("\n");
+  return [`Review found ${blockers.length} blocker(s) on PR #${pr.number}.`, ...blockers.map((item, i) => `${i + 1}. ${item}`), "Fix each blocker, then push the branch.", "— automated review"].join("\n");
 }
 function cleanComment(pr: Pr, summary: string): string {
   return [`Review checked the full diff, tests, security, failure modes, CI, and merge state for PR #${pr.number}.`, `Result: ${summary}`, "No blockers remain.", "The operator must approve this PR.", "— automated review"].join("\n");
