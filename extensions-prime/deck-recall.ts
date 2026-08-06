@@ -126,7 +126,7 @@ const defaultDependencies: DeckRecallDependencies = {
 
 /** Register only OptMem wake injection and explicit effort hydration. */
 export function registerDeckRecall(
-	pi: DeckRecallApi,
+	agent: DeckRecallApi,
 	dependencies: DeckRecallDependencies = defaultDependencies,
 ): void {
 	let injectedSession = false;
@@ -140,7 +140,7 @@ export function registerDeckRecall(
 		try {
 			const wake = await dependencies.wake();
 			if (wake === null || wake.trim() === "") return;
-			await pi.sendMessage(
+			await agent.sendMessage(
 				{
 					customType: "deck.optmem-wake.v1",
 					content: wake,
@@ -159,7 +159,7 @@ export function registerDeckRecall(
 		}
 	};
 
-	pi.registerTool({
+	agent.registerTool({
 		name: "recall_effort",
 		label: "Recall Effort",
 		description:
@@ -188,19 +188,19 @@ export function registerDeckRecall(
 		},
 	});
 
-	pi.on("session_start", async (_event, ctx) => {
+	agent.on("session_start", async (_event, ctx) => {
 		injectedSession = false;
 		injectedCompactions.clear();
 		compactionSequence = 0;
 		await injectWake(ctx, "session_start");
 	});
-	pi.on("session_compact", async (event, ctx) => {
+	agent.on("session_compact", async (event, ctx) => {
 		const value = event as { compactionEntry?: { id?: unknown }; id?: unknown } | undefined;
 		const key = String(value?.compactionEntry?.id ?? value?.id ?? `compaction-${compactionSequence++}`);
 		await injectWake(ctx, key);
 	});
 }
 
-export default function deckRecall(pi: DeckRecallApi): void {
-	registerDeckRecall(pi);
+export default function deckRecall(agent: DeckRecallApi): void {
+	registerDeckRecall(agent);
 }

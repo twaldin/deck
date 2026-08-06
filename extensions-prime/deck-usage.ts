@@ -458,9 +458,9 @@ function setStatus(ctx: UsageContext, value: string): void {
 	}
 }
 
-/** Register the standalone status chip and `/quota` breakdown in pi or prime. */
+/** Register the Prime conversation status chip and `/quota` breakdown. */
 export function registerDeckUsage(
-	pi: DeckUsageApi,
+	agent: DeckUsageApi,
 	env: Record<string, string | undefined> = process.env,
 	overrides: Partial<DeckUsageRuntime> = {},
 ): void {
@@ -485,7 +485,7 @@ export function registerDeckUsage(
 		});
 	};
 
-	pi.registerCommand("quota", {
+	agent.registerCommand("quota", {
 		description: "Show broker quota by account and window",
 		async handler(_args, ctx) {
 			const roster = await client.read();
@@ -499,7 +499,7 @@ export function registerDeckUsage(
 		},
 	});
 
-	pi.on("session_start", (_event, ctx) => {
+	agent.on("session_start", (_event, ctx) => {
 		sessionActive = true;
 		sessionGeneration += 1;
 		setStatus(ctx, asTheme(ctx.ui?.theme).fg("dim", NEUTRAL_USAGE_STATUS));
@@ -510,8 +510,8 @@ export function registerDeckUsage(
 		}, USAGE_REFRESH_INTERVAL_MS);
 		statusPoll.unref?.();
 	});
-	pi.on("agent_settled", (_event, ctx) => startRefresh(ctx));
-	pi.on("session_shutdown", () => {
+	agent.on("agent_settled", (_event, ctx) => startRefresh(ctx));
+	agent.on("session_shutdown", () => {
 		sessionActive = false;
 		sessionGeneration += 1;
 		if (statusPoll !== undefined) runtime.clearInterval(statusPoll);
@@ -520,6 +520,6 @@ export function registerDeckUsage(
 	});
 }
 
-export default function deckUsage(pi: DeckUsageApi): void {
-	registerDeckUsage(pi);
+export default function deckUsage(agent: DeckUsageApi): void {
+	registerDeckUsage(agent);
 }

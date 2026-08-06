@@ -124,10 +124,10 @@ const defaultDependencies: DeckShipDependencies = {
 
 /** Register only factory dispatch, adoption and read-only Smithers state. */
 export function registerDeckShip(
-	pi: DeckShipApi,
+	agent: DeckShipApi,
 	dependencies: DeckShipDependencies = defaultDependencies,
 ): void {
-	pi.registerTool({
+	agent.registerTool({
 		name: "ship",
 		label: "Ship",
 		description:
@@ -138,7 +138,7 @@ export function registerDeckShip(
 		},
 	});
 
-	pi.registerTool({
+	agent.registerTool({
 		name: "adopt",
 		label: "Adopt PR",
 		description:
@@ -155,7 +155,7 @@ export function registerDeckShip(
 		},
 	});
 
-	pi.registerTool({
+	agent.registerTool({
 		name: "status",
 		label: "Factory Status",
 		description: "Read Smithers' durable run state. This tool never resumes, retries, approves or mutates a run.",
@@ -186,6 +186,6 @@ export function registerDeckShip(
 	});
 }
 
-export default function deckShip(pi: DeckShipApi): void {
-	registerDeckShip(pi);
+export default function deckShip(agent: DeckShipApi): void {
+	registerDeckShip(agent);
 }

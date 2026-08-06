@@ -71,7 +71,7 @@ export function setQuestionsStatus(ctx: unknown, file: string): number {
 
 /** Register only Deck's durable question queue surface. */
 export function registerDeckQuestions(
-	pi: DeckQuestionsApi,
+	agent: DeckQuestionsApi,
 	env: Record<string, string | undefined> = process.env,
 	runtime?: QuestionsRuntime,
 ): void {
@@ -83,7 +83,7 @@ export function registerDeckQuestions(
 	// decorating its ask tool and command with the standalone status chip.
 	const questionsApi: QuestionsExtensionApi = {
 		registerTool(tool) {
-			pi.registerTool({
+			agent.registerTool({
 				...tool,
 				async execute(...args) {
 					const result = await tool.execute(...args);
@@ -93,7 +93,7 @@ export function registerDeckQuestions(
 			});
 		},
 		registerCommand(name, options) {
-			pi.registerCommand(name, {
+			agent.registerCommand(name, {
 				...options,
 				async handler(args, ctx) {
 					try {
@@ -104,13 +104,13 @@ export function registerDeckQuestions(
 				},
 			});
 		},
-		on: (event, handler) => pi.on(event, handler),
-		sendMessage: (message, options) => pi.sendMessage(message, options),
+		on: (event, handler) => agent.on(event, handler),
+		sendMessage: (message, options) => agent.sendMessage(message, options),
 	};
 	if (runtime === undefined) registerQuestions(questionsApi, env);
 	else registerQuestions(questionsApi, env, runtime);
 
-	pi.registerTool({
+	agent.registerTool({
 		name: "list_questions",
 		label: "List Questions",
 		description: "List queued operator questions without changing the append-only queue.",
@@ -132,7 +132,7 @@ export function registerDeckQuestions(
 		},
 	});
 
-	pi.registerTool({
+	agent.registerTool({
 		name: "answer_question",
 		label: "Answer Question",
 		description:
@@ -190,7 +190,7 @@ export function registerDeckQuestions(
 		latestStatusContext = ctx;
 		setQuestionsStatus(ctx, file);
 	};
-	pi.on("session_start", (_event, ctx) => {
+	agent.on("session_start", (_event, ctx) => {
 		refreshStatus(_event, ctx);
 		if (statusPoll !== undefined) return;
 		const clock = runtime ?? {
@@ -205,8 +205,8 @@ export function registerDeckQuestions(
 		}, QUESTIONS_POLL_INTERVAL_MS);
 		statusPoll.unref?.();
 	});
-	pi.on("agent_settled", refreshStatus);
-	pi.on("session_shutdown", () => {
+	agent.on("agent_settled", refreshStatus);
+	agent.on("session_shutdown", () => {
 		if (statusPoll !== undefined) {
 			if (runtime === undefined) clearInterval(statusPoll);
 			else runtime.clearInterval(statusPoll);
@@ -216,6 +216,6 @@ export function registerDeckQuestions(
 	});
 }
 
-export default function deckQuestions(pi: DeckQuestionsApi): void {
-	registerDeckQuestions(pi);
+export default function deckQuestions(agent: DeckQuestionsApi): void {
+	registerDeckQuestions(agent);
 }

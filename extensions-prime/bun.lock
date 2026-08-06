@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "@deck/extensions-pi",
+      "name": "@deck/extensions-prime",
       "dependencies": {
         "@earendil-works/pi-tui": "^0.83.0",
         "typebox": "^1.1.24",
