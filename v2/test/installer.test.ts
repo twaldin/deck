@@ -145,6 +145,38 @@ describe("installer layout", () => {
 		expect(fs.existsSync(retired)).toBe(false);
 	});
 
+	test("removes the copied-library and linked-agent layout from the latest retired installer", () => {
+		const retired = extensionDir("retired-hybrid");
+		fs.mkdirSync(path.join(retired, "lib"), { recursive: true });
+		fs.writeFileSync(path.join(retired, "index.ts"), 'import { spawnChild } from "./lib/spawn.ts";\n');
+		for (const file of ["spawn.ts", "agent-registry.ts", "model-registry.ts", "model-policy.ts"]) {
+			fs.writeFileSync(path.join(retired, "lib", file), "retired Deck fixture\n");
+		}
+		for (const file of ["agents/worker.md", "agents/reviewer.md", "node_modules/typebox"]) {
+			const entry = path.join(retired, file);
+			fs.mkdirSync(path.dirname(entry), { recursive: true });
+			fs.symlinkSync(path.join(REPO_V2, "retired-hybrid-source", file), entry);
+		}
+		install();
+		expect(fs.existsSync(retired)).toBe(false);
+	});
+
+	test("preserves a foreign copied-library layout with externally owned agent links", () => {
+		const unowned = extensionDir("private-hybrid");
+		fs.mkdirSync(path.join(unowned, "lib"), { recursive: true });
+		fs.writeFileSync(path.join(unowned, "index.ts"), 'import { spawnChild } from "./lib/spawn.ts";\n');
+		for (const file of ["spawn.ts", "agent-registry.ts", "model-registry.ts", "model-policy.ts"]) {
+			fs.writeFileSync(path.join(unowned, "lib", file), "private extension\n");
+		}
+		for (const file of ["agents/worker.md", "agents/reviewer.md", "node_modules/typebox"]) {
+			const entry = path.join(unowned, file);
+			fs.mkdirSync(path.dirname(entry), { recursive: true });
+			fs.symlinkSync(path.join(target, "foreign-extension-source", file), entry);
+		}
+		install();
+		expect(fs.readFileSync(path.join(unowned, "index.ts"), "utf8")).toContain("./lib/spawn.ts");
+	});
+
 	test("preserves an unowned extension with a complete similar layout", () => {
 		const unowned = extensionDir("private-child");
 		for (const file of [

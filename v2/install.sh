@@ -93,6 +93,16 @@ fi
 DECK_REPO_ROOT="$(dirname "$REPO_V2")"
 legacy_helper_file="sub""agents.ts"
 legacy_heading="Sub""agent Tool - Delegate tasks to specialized agents"
+
+points_into_checkout() {
+  [ -L "$1" ] || return 1
+  local target
+  target="$(readlink "$1")"
+  case "$target" in
+    "$DECK_REPO_ROOT"/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 for candidate in "$EXTENSIONS_DIR"/*; do
   [ -d "$candidate" ] || continue
 
@@ -105,15 +115,10 @@ for candidate in "$EXTENSIONS_DIR"/*; do
     agents/worker.md \
     agents/reviewer.md; do
     entry="$candidate/$relative"
-    if [ ! -L "$entry" ]; then
+    if ! points_into_checkout "$entry"; then
       linked_owned=false
       break
     fi
-    target="$(readlink "$entry")"
-    case "$target" in
-      "$DECK_REPO_ROOT"/*) ;;
-      *) linked_owned=false; break ;;
-    esac
   done
 
   copied_owned=false
@@ -129,7 +134,23 @@ for candidate in "$EXTENSIONS_DIR"/*; do
     copied_owned=true
   fi
 
-  if [ "$linked_owned" = true ] || [ "$copied_owned" = true ]; then
+  hybrid_owned=false
+  if [ -f "$candidate/index.ts" ] &&
+    [ -f "$candidate/lib/spawn.ts" ] &&
+    [ -f "$candidate/lib/agent-registry.ts" ] &&
+    [ -f "$candidate/lib/model-registry.ts" ] &&
+    [ -f "$candidate/lib/model-policy.ts" ] &&
+    grep -Fq 'from "./lib/spawn.ts"' "$candidate/index.ts"; then
+    hybrid_owned=true
+    for relative in agents/worker.md agents/reviewer.md node_modules/typebox; do
+      if ! points_into_checkout "$candidate/$relative"; then
+        hybrid_owned=false
+        break
+      fi
+    done
+  fi
+
+  if [ "$linked_owned" = true ] || [ "$copied_owned" = true ] || [ "$hybrid_owned" = true ]; then
     rm -rf "$candidate"
     printf 'removed retired Deck child extension from %s\n' "$candidate"
   fi
