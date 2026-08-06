@@ -170,6 +170,8 @@ export type PrimeSeatAgentOptions = {
 	idleTimeoutMs?: number;
 	thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 	binary?: string;
+	/** Test/packaging override; production resolves the repository verifier. */
+	patchVerifierPath?: string;
 	env?: Record<string, string | undefined>;
 	extensions?: string[];
 	maxOutputBytes?: number;
@@ -214,10 +216,10 @@ export function resolveDeckPrimeProfilePaths(
 	daemonSocketOverride?: string,
 ): DeckPrimeProfilePaths {
 	const deckHome = path.resolve(home, ".deck");
-	if (daemonSocketOverride === "") throw new Error("DECK_PRIME_DAEMON_SOCKET must not be empty");
-	const daemonSocket = daemonSocketOverride === undefined
+	const configuredSocket = daemonSocketOverride?.trim() || undefined;
+	const daemonSocket = configuredSocket === undefined
 		? path.resolve(deckHome, primeDeckProfile.daemonSocketRelative)
-		: path.resolve(daemonSocketOverride);
+		: path.resolve(configuredSocket);
 	if (daemonSocketOverride === undefined && !daemonSocket.startsWith(`${deckHome}${path.sep}`)) {
 		throw new Error(`Invalid Deck Prime daemon socket path: ${primeDeckProfile.daemonSocketRelative}`);
 	}
@@ -832,6 +834,56 @@ export class PrimeSeatAgent implements AgentLike {
 				stderr: result.stderr.trim(),
 			});
 		}
+		const verifier = this.opts.patchVerifierPath
+			?? fileURLToPath(new URL("../../../../ops/prime-patches.sh", import.meta.url));
+		try {
+			await fs.access(verifier);
+		} catch (cause) {
+			if (asRecord(cause)?.code === "ENOENT") return;
+			throw new PrimeSeatError({
+				status: "failed",
+				code: "PRIME_VERSION_MISMATCH",
+				message: `Cannot access Prime patch verifier ${verifier}: ${String(cause)}`,
+				exitStatus: { code: null, signal: null },
+				wallClockMs: Date.now() - startedAt,
+				stderr: "",
+			}, { cause });
+		}
+		const verification = await new Promise<{ stderr: string; code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
+			const child = spawn(verifier, ["verify"], {
+				cwd: this.opts.cwd,
+				env: { ...env, PRIME_AGENT_BIN: binary },
+				stdio: ["ignore", "ignore", "pipe"],
+			});
+			let stderr = "";
+			const timer = setTimeout(() => child.kill("SIGKILL"), VERSION_TIMEOUT_MS);
+			child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+			child.once("error", reject);
+			child.once("close", (code, signal) => {
+				clearTimeout(timer);
+				resolve({ stderr, code, signal });
+			});
+		}).catch((cause) => {
+			throw new PrimeSeatError({
+				status: "failed",
+				code: "PRIME_VERSION_MISMATCH",
+				message: `Cannot execute Prime patch verifier ${verifier}: ${String(cause)}`,
+				exitStatus: { code: null, signal: null },
+				wallClockMs: Date.now() - startedAt,
+				stderr: "",
+			}, { cause });
+		});
+		if (verification.code !== 0 || verification.signal !== null) {
+			const stderr = verification.stderr.trim();
+			throw new PrimeSeatError({
+				status: "failed",
+				code: "PRIME_VERSION_MISMATCH",
+				message: stderr || `Prime patch verification exited ${String(verification.code ?? verification.signal)}`,
+				exitStatus: { code: verification.code, signal: verification.signal },
+				wallClockMs: Date.now() - startedAt,
+				stderr,
+			});
+		}
 	}
 
 	async generate(options: AgentGenerateOptions = {}): Promise<unknown> {
@@ -857,26 +909,50 @@ export class PrimeSeatAgent implements AgentLike {
 			} as never)).catch(() => undefined);
 			throw failure;
 		}
-		const sourceEnv = buildSeatEnvironment(process.env, this.opts.env);
-		const sharedProfile = resolveDeckPrimeProfilePaths(
-			sourceEnv.HOME ?? os.homedir(),
-			sourceEnv.DECK_PRIME_DAEMON_SOCKET,
-		);
-		const root = await fs.mkdtemp(path.join(os.tmpdir(), "deck-prime-seat-"));
-		const sessionDir = path.join(root, "sessions");
-		const seatHome = path.join(root, "home");
-		await fs.mkdir(sessionDir, { recursive: true, mode: 0o700 });
-		await fs.mkdir(seatHome, { recursive: true, mode: 0o700 });
-		await fs.mkdir(sharedProfile.agentDir, { recursive: true, mode: 0o700 });
-		await fs.mkdir(sharedProfile.sessionDir, { recursive: true, mode: 0o700 });
-		await fs.mkdir(path.dirname(sharedProfile.daemonSocket), { recursive: true, mode: 0o700 });
-		const gitName = (sourceEnv.GIT_AUTHOR_NAME ?? sourceEnv.USER ?? "deck-seat").replace(/[\r\n]/g, " ");
-		const gitEmail = (sourceEnv.GIT_AUTHOR_EMAIL ?? "deck-seat@localhost").replace(/[\r\n]/g, " ");
-		await fs.writeFile(
-			path.join(seatHome, ".gitconfig"),
-			`[user]\n\tname = ${gitName}\n\temail = ${gitEmail}\n[credential]\n\thelper =\n`,
-			{ mode: 0o600 },
-		);
+		let root: string | undefined;
+		let sourceEnv: Record<string, string>;
+		let sharedProfile: DeckPrimeProfilePaths;
+		let sessionDir: string;
+		let seatHome: string;
+		try {
+			sourceEnv = buildSeatEnvironment(process.env, this.opts.env);
+			sharedProfile = resolveDeckPrimeProfilePaths(
+				sourceEnv.HOME ?? os.homedir(),
+				sourceEnv.DECK_PRIME_DAEMON_SOCKET,
+			);
+			root = await fs.mkdtemp(path.join(os.tmpdir(), "deck-prime-seat-"));
+			sessionDir = path.join(root, "sessions");
+			seatHome = path.join(root, "home");
+			await fs.mkdir(sessionDir, { recursive: true, mode: 0o700 });
+			await fs.mkdir(seatHome, { recursive: true, mode: 0o700 });
+			await fs.mkdir(sharedProfile.agentDir, { recursive: true, mode: 0o700 });
+			await fs.mkdir(sharedProfile.sessionDir, { recursive: true, mode: 0o700 });
+			await fs.mkdir(path.dirname(sharedProfile.daemonSocket), { recursive: true, mode: 0o700 });
+			const gitName = (sourceEnv.GIT_AUTHOR_NAME ?? sourceEnv.USER ?? "deck-seat").replace(/[\r\n]/g, " ");
+			const gitEmail = (sourceEnv.GIT_AUTHOR_EMAIL ?? "deck-seat@localhost").replace(/[\r\n]/g, " ");
+			await fs.writeFile(
+				path.join(seatHome, ".gitconfig"),
+				`[user]\n\tname = ${gitName}\n\temail = ${gitEmail}\n[credential]\n\thelper =\n`,
+				{ mode: 0o600 },
+			);
+		} catch (cause) {
+			if (root !== undefined) await fs.rm(root, { recursive: true, force: true });
+			const failure = new PrimeSeatError({
+				status: "failed",
+				code: "PRIME_SPAWN_FAILED",
+				message: `Cannot initialize Prime seat profile: ${String(cause)}`,
+				exitStatus: { code: null, signal: null },
+				wallClockMs: Date.now() - startedAt,
+				stderr: "",
+			}, { cause });
+			await Promise.resolve(options.onEvent?.({
+				type: "completed",
+				engine: this.cliEngine,
+				ok: false,
+				error: JSON.stringify(failure.result),
+			} as never)).catch(() => undefined);
+			throw failure;
+		}
 		const runId = herdrLabelSegment(String(options.taskContext?.runId ?? path.basename(root)));
 		const stage = herdrLabelSegment(String(options.taskContext?.nodeId ?? "seat"));
 		const effort = herdrLabelSegment(this.opts.effortLabel ?? path.basename(this.opts.cwd));
@@ -1205,7 +1281,12 @@ export class PrimeSeatAgent implements AgentLike {
 				});
 			});
 			await closed;
-			if (forcedFailure !== undefined && rpcSessionId !== undefined) {
+			const rpcFailed = forcedFailure !== undefined
+				|| exitStatus.code !== 0
+				|| exitStatus.signal !== null
+				|| !promptAccepted
+				|| !agentEnded;
+			if (rpcFailed && rpcSessionId !== undefined) {
 				try {
 					await this.stopSharedSessionTree(
 						binary,

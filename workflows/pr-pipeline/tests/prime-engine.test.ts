@@ -189,6 +189,7 @@ const valueAfter = (flag) => args[args.indexOf(flag) + 1];
 const provider = valueAfter("--provider");
 const model = valueAfter("--model");
 const sessionDir = valueAfter("--session-dir");
+if (captureFile) fs.appendFileSync(captureFile, JSON.stringify({ args, env: process.env, homeTokenExists: fs.existsSync(path.join(process.env.HOME, ".deck", "broker", "gateway.token")), gitConfigExists: fs.existsSync(path.join(process.env.HOME, ".gitconfig")) }) + "\\n");
 const daemonSocket = valueAfter("--daemon-socket");
 if (valueAfter("--mode") === "daemon") {
   try { fs.unlinkSync(daemonSocket); } catch {}
@@ -207,7 +208,6 @@ if (valueAfter("--mode") === "daemon") {
   server.listen(daemonSocket);
   return;
 }
-if (captureFile) fs.appendFileSync(captureFile, JSON.stringify({ args, env: process.env, homeTokenExists: fs.existsSync(path.join(process.env.HOME, ".deck", "broker", "gateway.token")), gitConfigExists: fs.existsSync(path.join(process.env.HOME, ".gitconfig")) }) + "\\n");
 if (args.includes("stop")) process.exit(0);
 let stallDescendant;
 if (mode === "stall") {
@@ -247,7 +247,10 @@ process.stdin.on("data", (chunk) => {
       send({ id: request.id, type: "response", command: "get_state", success: true, data: { model: { provider, id: mode === "wrong-model" ? "gpt-5.4" : model } } });
     } else if (request.type === "prompt") {
       send({ id: request.id, type: "response", command: "prompt", success: true });
-      if (mode === "transport-death") process.exit(7);
+      if (mode === "transport-death") {
+        send({ type: "session", version: 3, id: "root-session", timestamp: new Date().toISOString(), cwd: process.cwd() });
+        process.exit(7);
+      }
       if (mode === "stall") {
         send({ type: "session", version: 3, id: "root-session", timestamp: new Date().toISOString(), cwd: process.cwd() });
         send({ type: "agent_start" });
@@ -293,6 +296,7 @@ function agent(binary: string, overrides: Partial<ConstructorParameters<typeof P
 		idleTimeoutMs: 500,
 		terminationGraceMs: 50,
 		brokerApiKey: "test-broker-token",
+		patchVerifierPath: path.join(primeHome, "missing-prime-patch-verifier"),
 		herdrSocketPath: herdrSocket,
 		herdrWorkspaceLabel: "deck-test",
 		binary,
@@ -377,12 +381,29 @@ async function stopFakePrimeDaemon(): Promise<void> {
 			socket.write(`${JSON.stringify({ id: "deck-test-shutdown", type: "shutdown", force: true })}\n`);
 		});
 		socket.once("error", finish);
+
 		socket.once("close", finish);
-		socket.on("data", (chunk) => {
-			if (chunk.toString("utf8").includes("\"success\":true")) finish();
-		});
 	});
 	await fs.rm(primeDaemonSocket, { force: true });
+}
+async function fakePrimeDaemonReady(): Promise<boolean> {
+	return new Promise<boolean>((resolve) => {
+		const socket = createConnection(primeDaemonSocket);
+		let settled = false;
+		const finish = (ready: boolean) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			socket.destroy();
+			resolve(ready);
+		};
+		const timer = setTimeout(() => finish(false), 1_000);
+		socket.once("error", () => finish(false));
+		socket.on("data", (chunk) => {
+			const hello = chunk.toString("utf8");
+			finish(hello.includes("\"name\":\"prime-agent.daemon\"") && hello.includes("\"version\":7"));
+		});
+	});
 }
 
 async function startIsolatedHerdr(): Promise<IsolatedHerdr | null> {
@@ -506,10 +527,15 @@ describe("Prime seat adapter fault contract", () => {
 		expect(events).toContainEqual(expect.objectContaining({ type: "completed", ok: false }));
 	});
 
-	test("RPC transport death after prompt acceptance is a typed failure", async () => {
-		const binary = await fakePrime("transport-death");
+	test("RPC transport death stops a reported shared-daemon session before returning a typed failure", async () => {
+		const capture = path.join(os.tmpdir(), `prime-transport-death-${crypto.randomUUID()}`);
+		roots.push(capture);
+		const binary = await fakePrime("transport-death", capture);
 		const failure = await expectPrimeError(agent(binary).generate({ prompt: "die" }), "PRIME_RPC_TRANSPORT_DIED");
 		expect(failure.result.exitStatus.code).toBe(7);
+		const invocations = readFileSync(capture, "utf8").trim().split("\n")
+			.map((line) => JSON.parse(line) as { args: string[] });
+		expect(invocations.some(({ args }) => args.includes("stop") && args.includes("root-session"))).toBe(true);
 	});
 
 	test("honors the exact pin and fails closed on invalid or substituted pins", async () => {
@@ -525,6 +551,7 @@ describe("Prime seat adapter fault contract", () => {
 		const success = await fakePrime("success");
 		const mismatch = await fakePrime("version-mismatch");
 		await agent(success, {
+
 			env: { PATH: `${path.dirname(mismatch)}${path.delimiter}${process.env.PATH ?? ""}` },
 		}).preflight();
 
@@ -558,6 +585,19 @@ describe("Prime seat adapter fault contract", () => {
 
 		const wrongVersion = await fakePrime("version-mismatch");
 		await expectPrimeError(agent(wrongVersion).generate({ prompt: "version" }), "PRIME_VERSION_MISMATCH");
+	});
+	test("requires the repository patch fingerprint when its verifier is present", async () => {
+		const binary = await fakePrime("success");
+		const passing = path.join(primeHome, `prime-patches-pass-${crypto.randomUUID()}`);
+		const failing = path.join(primeHome, `prime-patches-fail-${crypto.randomUUID()}`);
+		writeFileSync(passing, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+		writeFileSync(failing, "#!/bin/sh\necho 'patched package fingerprint mismatch' >&2\nexit 1\n", { mode: 0o700 });
+		await agent(binary, { patchVerifierPath: passing }).preflight();
+		const failure = await expectPrimeError(
+			agent(binary, { patchVerifierPath: failing }).preflight(),
+			"PRIME_VERSION_MISMATCH",
+		);
+		expect(failure.result.stderr).toContain("patched package fingerprint mismatch");
 	});
 
 	test("loads broker authentication when an absolute Prime binary override is configured", async () => {
@@ -616,6 +656,7 @@ describe("Prime seat adapter fault contract", () => {
 	});
 
 	test("concurrent seats share one supervisor while keeping distinct sessions and top-level panes", async () => {
+		await stopFakePrimeDaemon();
 		const capture = path.join(os.tmpdir(), `prime-isolation-${crypto.randomUUID()}`);
 		roots.push(capture);
 		const binary = await fakePrime("success", capture);
@@ -629,7 +670,11 @@ describe("Prime seat adapter fault contract", () => {
 				taskContext: { runId: "run-b", nodeId: "stage-b", iteration: 0, attempt: 0 },
 			}),
 		]);
-		const rows = readFileSync(capture, "utf8").trim().split("\n").map((line) => JSON.parse(line) as { args: string[]; env: Record<string, string> });
+		const capturedRows = readFileSync(capture, "utf8").trim().split("\n")
+			.map((line) => JSON.parse(line) as { args: string[]; env: Record<string, string> });
+		const daemonRows = capturedRows.filter((row) => row.args[row.args.indexOf("--mode") + 1] === "daemon");
+		const rows = capturedRows.filter((row) => row.args[row.args.indexOf("--mode") + 1] === "rpc");
+		expect(daemonRows).toHaveLength(1);
 		expect(rows).toHaveLength(2);
 		const values = (flag: string) => rows.map((row) => row.args[row.args.indexOf(flag) + 1]);
 		expect(new Set(values("--daemon-socket"))).toEqual(new Set([primeDaemonSocket]));
@@ -638,6 +683,7 @@ describe("Prime seat adapter fault contract", () => {
 			new Set([resolveDeckPrimeProfilePaths(primeHome).agentDir]),
 		);
 		expect(new Set(rows.map((row) => row.env.HERDR_PANE_ID)).size).toBe(2);
+		expect(await fakePrimeDaemonReady()).toBe(true);
 		const creates = herdrRequests.filter((request) => request.method === "tab.create");
 		expect(creates).toHaveLength(2);
 		expect(creates.map((request) => (request.params as Record<string, unknown>).label).sort()).toEqual([
