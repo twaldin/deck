@@ -99,7 +99,8 @@ jobs:
           echo "88b6578518c72cd51a825bc80f28e0fef9a64c67de4a7d6fd7afd7ca1b34da0b  $artifact" |
             sha256sum --check --strict
           npm install --global "$artifact"
-          version="$(prime-agent --version)"
+          # prime-agent 0.7.0 writes its version to stderr, not stdout
+          version="$(prime-agent --version 2>&1)"
           if [ "$version" != "0.7.0" ]; then
             echo "Expected prime-agent 0.7.0, got $version" >&2
             exit 1
