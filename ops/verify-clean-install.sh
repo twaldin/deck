@@ -6,7 +6,7 @@ fail() {
   exit 1
 }
 
-for prerequisite in bun cmp curl git grep python3 sed tr wc; do
+for prerequisite in bun cmp curl git grep node npm python3 sed shasum tar tr wc; do
   command -v "$prerequisite" >/dev/null 2>&1 || fail "$prerequisite is required"
 done
 
@@ -37,63 +37,11 @@ for tool in bash bun curl git node npm python3 tar; do
 done
 INSTALL_PATH="$TOOLS_DIR:/usr/bin:/bin"
 
-# A foreign pi command must stop even piped bootstrap before clone, downloads,
-# dependency installation, or any Deck-home mutation.
+# Deck no longer owns or installs a `pi` executable. A pre-existing command is
+# deliberately irrelevant and must survive a Prime-only install untouched.
 FOREIGN_PI="$SANDBOX_HOME/.local/bin/pi"
-printf '#!/bin/sh\nprintf "foreign pi must survive\\n"\n' > "$FOREIGN_PI"
+printf '#!/bin/sh\nprintf "foreign command survived\\n"\n' > "$FOREIGN_PI"
 chmod +x "$FOREIGN_PI"
-COLLISION_TOOLS="$SANDBOX_HOME/collision-path"
-mkdir -p "$COLLISION_TOOLS"
-for tool in bash bun curl node npm python3 tar; do
-  tool_path="$(command -v "$tool" 2>/dev/null || true)"
-  if [ -n "$tool_path" ]; then ln -s "$tool_path" "$COLLISION_TOOLS/$tool"; fi
-done
-cat > "$COLLISION_TOOLS/git" <<'EOF'
-#!/bin/sh
-: > "$MOCK_GIT_CALLED"
-exit 91
-EOF
-chmod +x "$COLLISION_TOOLS/git"
-PIPED_REPO="$SANDBOX_HOME/piped-deck"
-MOCK_GIT_CALLED="$SANDBOX_HOME/git-called"
-set +e
-COLLISION_OUTPUT="$(env HOME="$SANDBOX_HOME" \
-  PATH="$COLLISION_TOOLS:/usr/bin:/bin" \
-  BIN_TARGET="$SANDBOX_HOME/.local/bin" \
-  DECK_REPO="$PIPED_REPO" \
-  DECK_REPO_URL="https://invalid.example/deck.git" \
-  MOCK_GIT_CALLED="$MOCK_GIT_CALLED" \
-  bash -s < "$CLONE_DIR/install.sh" 2>&1)"
-COLLISION_STATUS=$?
-set -e
-[ "$COLLISION_STATUS" -ne 0 ] || fail "foreign pi shim did not stop piped bootstrap"
-printf '%s\n' "$COLLISION_OUTPUT"
-case "$COLLISION_OUTPUT" in
-  *"$FOREIGN_PI already exists and is not the Deck pi shim; no changes were made."*) ;;
-  *) fail "foreign pi failure did not explain the collision" ;;
-esac
-EXPECTED_REMEDIATION="git clone https://invalid.example/deck.git $PIPED_REPO && BIN_TARGET=$SANDBOX_HOME/.local/deck-bin bash $PIPED_REPO/install.sh"
-case "$COLLISION_OUTPUT" in
-  *"$EXPECTED_REMEDIATION"*) ;;
-  *) fail "foreign pi failure did not print an exact BIN_TARGET remediation" ;;
-esac
-[ ! -e "$MOCK_GIT_CALLED" ] || fail "foreign pi collision was detected after a git command"
-[ ! -e "$PIPED_REPO" ] || fail "foreign pi collision was detected after repository mutation"
-[ ! -e "$SANDBOX_HOME/.deck" ] ||
-  fail "foreign pi collision was detected after Deck-home mutation"
-[ ! -e "$SANDBOX_HOME/.cache" ] ||
-  fail "foreign pi collision was detected after a download or runtime bootstrap"
-BIN_ENTRIES="$(python3 - "$SANDBOX_HOME/.local/bin" <<'PY'
-from pathlib import Path
-import sys
-
-print(",".join(sorted(path.name for path in Path(sys.argv[1]).iterdir())))
-PY
-)"
-[ "$BIN_ENTRIES" = pi ] ||
-  fail "foreign pi collision mutated BIN_TARGET: $BIN_ENTRIES"
-[ "$(cat "$FOREIGN_PI")" = '#!/bin/sh
-printf "foreign pi must survive\n"' ] || fail "foreign pi command was modified"
 
 DECK_BIN="$SANDBOX_HOME/.local/deck-bin"
 
@@ -102,25 +50,32 @@ env HOME="$SANDBOX_HOME" \
   PATH="$INSTALL_PATH" \
   DECK_HOME_PROFILE= \
   DECK_V2_HOME="$SANDBOX_HOME/.deck" \
-  INSTALL_TARGET="$SANDBOX_HOME/.deck/.pi" \
   BIN_TARGET="$DECK_BIN" \
   WORKFLOWS_SOURCE="$CLONE_DIR/workflows" \
   WORKFLOWS_LINK="$SANDBOX_HOME/.deck/workflows" \
-  PI_CODING_AGENT_DIR="$SANDBOX_HOME/.pi/agent" \
   bash "$CLONE_DIR/install.sh"
 
 DECK_HOME="$SANDBOX_HOME/.deck"
-PI_HOME="$DECK_HOME/.pi"
-for extension in deck-questions deck-ship deck-recall; do
-  [ -f "$PI_HOME/extensions/$extension/index.ts" ] ||
-    fail "fresh install is missing $extension/index.ts"
+PRIME_HOME="$DECK_HOME/.prime"
+for extension in deck-questions deck-ship deck-recall deck-usage; do
+  [ -f "$PRIME_HOME/agent/extensions/$extension/index.ts" ] ||
+    fail "fresh install is missing Prime extension $extension/index.ts"
 done
-[ -x "$DECK_BIN/pi" ] || fail "fresh install is missing the pinned pi command"
+[ -f "$PRIME_HOME/agent/extensions/deck-provider.ts" ] ||
+  fail "fresh install is missing the Deck Prime provider"
+[ -x "$DECK_BIN/prime-agent" ] || fail "fresh install is missing prime-agent"
+[ -x "$DECK_BIN/prime-conversation" ] || fail "fresh install is missing prime-conversation"
 [ -x "$DECK_BIN/deck-v2" ] || fail "fresh install is missing deck-v2"
 [ -x "$DECK_BIN/deck" ] || fail "fresh install is missing deck"
 [ -x "$DECK_BIN/smithers" ] || fail "fresh install is missing smithers"
 [ -x "$DECK_BIN/uv" ] || fail "fresh install is missing pinned uv"
 [ -x "$DECK_BIN/uvx" ] || fail "fresh install is missing pinned uvx"
+[ ! -e "$DECK_BIN/pi" ] || fail "fresh install produced a retired pi shim"
+[ ! -e "$DECK_HOME/.pi" ] || fail "fresh install produced a retired .pi home"
+PRIME_VERSION="$("$DECK_BIN/prime-agent" --version 2>&1)" ||
+  fail "freshly installed prime-agent cannot run"
+[ "$PRIME_VERSION" = "0.7.0" ] ||
+  fail "fresh install has Prime Agent $PRIME_VERSION instead of pinned 0.7.0"
 UV_DESCRIPTION="$("$DECK_BIN/uv" --version 2>&1)" ||
   fail "freshly installed uv cannot run"
 case "$UV_DESCRIPTION" in
@@ -128,12 +83,12 @@ case "$UV_DESCRIPTION" in
   *) fail "fresh install has $UV_DESCRIPTION instead of pinned uv 0.11.8" ;;
 esac
 [ "$(cat "$FOREIGN_PI")" = '#!/bin/sh
-printf "foreign pi must survive\n"' ] ||
-  fail "alternate BIN_TARGET install overwrote the foreign pi command"
-ENTER_PI="$(env HOME="$SANDBOX_HOME" PATH="$INSTALL_PATH" \
-  bash -c '. "$HOME/.deck/enter.sh" >/dev/null; command -v pi')"
-[ "$ENTER_PI" = "$DECK_BIN/pi" ] ||
-  fail "enter.sh did not activate remediated BIN_TARGET (got $ENTER_PI)"
+printf "foreign command survived\n"' ] ||
+  fail "Prime-only install modified an unrelated command"
+ENTER_PRIME="$(env HOME="$SANDBOX_HOME" PATH="$INSTALL_PATH" \
+  bash -c '. "$HOME/.deck/enter.sh" >/dev/null; command -v prime-conversation')"
+[ "$ENTER_PRIME" = "$DECK_BIN/prime-conversation" ] ||
+  fail "enter.sh did not activate Prime conversation (got $ENTER_PRIME)"
 
 KERNEL_PROBE="$SANDBOX_HOME/kernel-tool-runtime.txt"
 if ! HOME="$SANDBOX_HOME" "$DECK_BIN/uv" \
@@ -207,11 +162,11 @@ env REVIEWERS_FILE="$REVIEWERS_FILE" bun -e '
 
 PROBE="$SANDBOX_HOME/verify-deck-tools.mjs"
 cat > "$PROBE" <<'EOF'
-export default function verifyDeckInstall(pi) {
-  pi.registerCommand("verify-deck-install", {
+export default function verifyDeckInstall(agent) {
+  agent.registerCommand("verify-deck-install", {
     description: "Report clean-install resources",
     handler: async (_args, ctx) => {
-      const tools = pi.getAllTools().map((tool) => tool.name).sort();
+      const tools = agent.getAllTools().map((tool) => tool.name).sort();
       const contexts = (ctx.getSystemPromptOptions().contextFiles ?? []).map((file) => file.path);
       ctx.ui.notify(`DECK_TOOLS:${tools.join(",")}`, "info");
       ctx.ui.notify(`DECK_CONTEXT:${contexts.join(",")}`, "info");
@@ -228,34 +183,115 @@ RPC_OUTPUT="$({
   env HOME="$SANDBOX_HOME" \
     PATH="$DECK_BIN:$ORIGINAL_PATH" \
     DECK_V2_HOME="$DECK_HOME" \
-    PI_CODING_AGENT_DIR="$SANDBOX_HOME/.pi/agent" \
-    pi --mode rpc --no-session --offline --approve --extension "$PROBE"
+    DECK_HERDR_AUTO_ATTACH=0 \
+    "$DECK_BIN/prime-conversation" --mode rpc --no-session --offline --extension "$PROBE"
 ) 2>&1)" || {
   printf '%s\n' "$RPC_OUTPUT" >&2
-  fail "fresh Pi RPC session failed"
+  fail "fresh Prime RPC conversation failed"
 }
 printf '%s\n' "$RPC_OUTPUT"
 
 case "$RPC_OUTPUT" in
   *'"command":"get_commands","success":true'*) ;;
-  *) fail "fresh Pi session did not answer get_commands" ;;
+  *) fail "fresh Prime conversation did not answer get_commands" ;;
 esac
-case "$RPC_OUTPUT" in
-  *'"name":"questions"'*) ;;
-  *) fail "deck-questions did not register /questions" ;;
-esac
-case "$RPC_OUTPUT" in
-  *'DECK_CONTEXT:'*'/AGENTS.md'*) ;;
-  *) fail "fresh Pi session did not read the Deck-home AGENTS.md" ;;
-esac
-TOOLS_LINE="$(printf '%s\n' "$RPC_OUTPUT" | sed -n 's/.*\(DECK_TOOLS:[^"]*\).*/\1/p' | sed -n '1p')"
-[ -n "$TOOLS_LINE" ] || fail "fresh Pi session did not report loaded tools"
-for tool in ask_captain list_questions answer_question ship adopt status recall_effort; do
-  case ",${TOOLS_LINE#DECK_TOOLS:}," in
-    *",$tool,"*) ;;
-    *) fail "fresh Pi session did not load tool $tool" ;;
+for command in questions quota; do
+  case "$RPC_OUTPUT" in
+    *"\"name\":\"$command\""*) ;;
+    *) fail "Prime extension pack did not register /$command" ;;
   esac
 done
+case "$RPC_OUTPUT" in
+  *'DECK_CONTEXT:'*'/AGENTS.md'*) ;;
+  *) fail "fresh Prime conversation did not read the Deck-home AGENTS.md" ;;
+esac
+TOOLS_LINE="$(printf '%s\n' "$RPC_OUTPUT" | sed -n 's/.*\(DECK_TOOLS:[^"]*\).*/\1/p' | sed -n '1p')"
+[ -n "$TOOLS_LINE" ] || fail "fresh Prime conversation did not report loaded tools"
+for tool in ask_captain list_questions answer_question ship adopt status recall_effort process; do
+  case ",${TOOLS_LINE#DECK_TOOLS:}," in
+    *",$tool,"*) ;;
+    *) fail "fresh Prime conversation did not load tool $tool" ;;
+  esac
+done
+# Reproduce the upgrade state that previously required three manual repairs:
+# a stale generated wrapper, a missing pinned process package, a drifted seed,
+# and a running daemon holding the pre-convergence profile.
+DAEMON_SOCKET="$DECK_HOME/run/prime-agent.sock"
+env HOME="$SANDBOX_HOME" \
+  PATH="$DECK_BIN:$ORIGINAL_PATH" \
+  PRIME_AGENT_CODING_AGENT_DIR="$PRIME_HOME/agent" \
+  PRIME_AGENT_SESSION_DIR="$PRIME_HOME/sessions" \
+  "$DECK_BIN/prime-agent" shutdown --force --json >/dev/null 2>&1 || true
+mkdir -p "$DECK_HOME/run" "$PRIME_HOME/agent/logs"
+env HOME="$SANDBOX_HOME" \
+  PATH="$DECK_BIN:$ORIGINAL_PATH" \
+  PRIME_AGENT_CODING_AGENT_DIR="$PRIME_HOME/agent" \
+  PRIME_AGENT_SESSION_DIR="$PRIME_HOME/sessions" \
+  "$DECK_BIN/prime-agent" --mode daemon --daemon-socket "$DAEMON_SOCKET" \
+  </dev/null >"$PRIME_HOME/agent/logs/stale-upgrade.log" 2>&1 &
+node - "$DAEMON_SOCKET" <<'NODE'
+const net = require("node:net");
+const socketPath = process.argv[2];
+const deadline = Date.now() + 10_000;
+function probe() {
+  const socket = net.createConnection(socketPath);
+  const timer = setTimeout(() => socket.destroy(), 200);
+  socket.once("connect", () => { clearTimeout(timer); socket.destroy(); process.exit(0); });
+  socket.once("error", () => {
+    clearTimeout(timer);
+    if (Date.now() >= deadline) process.exit(1);
+    setTimeout(probe, 100);
+  });
+}
+probe();
+NODE
+printf '#!/bin/sh\nprintf "stale wrapper\\n"\n' > "$DECK_BIN/prime-conversation"
+chmod +x "$DECK_BIN/prime-conversation"
+printf 'stale seed\n' > "$DECK_HOME/AGENTS.md"
+rm -rf "$PRIME_HOME/runtime/lib/node_modules/@aliou/pi-processes"
+
+env HOME="$SANDBOX_HOME" \
+  PATH="$INSTALL_PATH" \
+  DECK_HOME_PROFILE= \
+  DECK_V2_HOME="$DECK_HOME" \
+  BIN_TARGET="$DECK_BIN" \
+  WORKFLOWS_SOURCE="$CLONE_DIR/workflows" \
+  WORKFLOWS_LINK="$DECK_HOME/workflows" \
+  bash "$CLONE_DIR/install.sh"
+
+cmp "$CLONE_DIR/v2/seed/AGENTS.md" "$DECK_HOME/AGENTS.md" >/dev/null ||
+  fail "upgrade did not converge the public seed"
+case "$(cat "$DECK_BIN/prime-conversation")" in
+  *"stale wrapper"*) fail "upgrade did not regenerate prime-conversation" ;;
+esac
+PROCESS_IDENTITY="$(node -e 'const p=require(process.argv[1]); process.stdout.write(`${p.name}@${p.version}`)' \
+  "$PRIME_HOME/runtime/lib/node_modules/@aliou/pi-processes/package.json")"
+[ "$PROCESS_IDENTITY" = "@aliou/pi-processes@0.10.4" ] ||
+  fail "upgrade did not restore the pinned process package"
+node - "$DAEMON_SOCKET" <<'NODE'
+const net = require("node:net");
+const socket = net.createConnection(process.argv[2]);
+const timer = setTimeout(() => { socket.destroy(); process.exit(1); }, 1_000);
+socket.once("connect", () => { clearTimeout(timer); socket.destroy(); process.exit(0); });
+socket.once("error", () => { clearTimeout(timer); process.exit(1); });
+NODE
+UPGRADE_RPC="$({
+  printf '%s\n' '{"type":"prompt","id":"upgrade-probe","message":"/verify-deck-install"}'
+} | (
+  cd "$DECK_HOME"
+  env HOME="$SANDBOX_HOME" \
+    PATH="$DECK_BIN:$ORIGINAL_PATH" \
+    DECK_V2_HOME="$DECK_HOME" \
+    DECK_HERDR_AUTO_ATTACH=0 \
+    "$DECK_BIN/prime-conversation" --mode rpc --no-session --offline --extension "$PROBE"
+) 2>&1)" || {
+  printf '%s\n' "$UPGRADE_RPC" >&2
+  fail "converged Prime conversation could not execute its verification command"
+}
+case "$UPGRADE_RPC" in
+  *'DECK_TOOLS:'*'process'*) ;;
+  *) fail "converged Prime conversation did not load the process tool" ;;
+esac
 
 [ -z "$(git -C "$CLONE_DIR" status --porcelain)" ] || {
   git -C "$CLONE_DIR" status --short >&2

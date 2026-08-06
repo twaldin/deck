@@ -51,8 +51,8 @@ NODE
 IFS=$'\t' read -r PINNED_VERSION PINNED_TAG PINNED_COMMIT PINNED_ARTIFACT_URL \
   PINNED_ARTIFACT_SHA256 <<<"$pin_values"
 REPO_V2="$REPO_ROOT/v2"
-EXTENSION_SOURCE="$REPO_ROOT/extensions-pi"
-PROVIDER_SOURCE="$REPO_ROOT/broker/pi/deck-provider.ts"
+EXTENSION_SOURCE="$REPO_ROOT/extensions-prime"
+PROVIDER_SOURCE="$REPO_ROOT/broker/prime/deck-provider.ts"
 ZOD_SOURCE="$REPO_ROOT/broker/node_modules/zod"
 SEED_SOURCE="$REPO_V2/seed/AGENTS.md"
 PROFILE_CONFIG="$REPO_ROOT/ops/prime-deck-profile.json"
@@ -122,7 +122,7 @@ if ! NPM_GLOBAL_ROOT="$("$NPM_BIN" root -g 2>/dev/null)"; then
   printf 'error: cannot resolve the global npm package root with %s\n' "$NPM_BIN" >&2
   exit 1
 fi
-PROCESS_PACKAGE_SOURCE="$NPM_GLOBAL_ROOT/$PROCESS_PACKAGE_NAME"
+PROCESS_PACKAGE_SOURCE="${PRIME_CONVERSATION_PROCESS_PACKAGE_SOURCE:-$NPM_GLOBAL_ROOT/$PROCESS_PACKAGE_NAME}"
 if ! process_package_identity="$(node -e '
 const manifest = require(process.argv[1]);
 process.stdout.write(`${manifest.name}\t${manifest.version}`);
@@ -142,6 +142,7 @@ for source in \
   "$EXTENSION_SOURCE/deck-questions.ts" \
   "$EXTENSION_SOURCE/deck-ship.ts" \
   "$EXTENSION_SOURCE/deck-recall.ts" \
+  "$EXTENSION_SOURCE/deck-usage.ts" \
   "$PROVIDER_SOURCE" \
   "$SEED_SOURCE"; do
   if [[ ! -f "$source" ]]; then
@@ -189,7 +190,7 @@ DRY RUN — no files will be changed
 Prime Agent: $PRIME_BIN ($PINNED_VERSION, $PINNED_TAG, $PINNED_COMMIT)
 Deck home:   $DECK_HOME
 Profile:     $AGENT_DIR
-Extensions:  deck-questions, deck-ship, deck-recall, deck-provider
+Extensions:  deck-questions, deck-ship, deck-recall, deck-usage, deck-provider
 Package:     $PROCESS_PACKAGE_SPEC
 Custody:     $CUSTODY_FILE (read-only base-prompt supplement)
 Refinement:  $HARNESS_DIR (writable supplemental state)
@@ -235,7 +236,7 @@ if [[ -d "$EXTENSIONS_DIR" ]]; then
   for existing in "$EXTENSIONS_DIR"/*; do
     [[ -e "$existing" || -L "$existing" ]] || continue
     case "$(basename "$existing")" in
-      deck-questions|deck-ship|deck-recall|deck-provider.ts|prime-conversation-guard.ts|node_modules|v2) ;;
+      deck-questions|deck-ship|deck-recall|deck-usage|deck-provider.ts|prime-conversation-guard.ts|node_modules|v2) ;;
       *)
         printf 'error: unapproved conversation-profile extension is present: %s\n' "$existing" >&2
         exit 1
@@ -300,7 +301,7 @@ for module in "$REPO_V2"/src/*.ts; do
   ensure_symlink "$module" "$LIB_DEST/$name"
 done
 
-for extension in deck-questions deck-ship deck-recall; do
+for extension in deck-questions deck-ship deck-recall deck-usage; do
   destination="$EXTENSIONS_DIR/$extension"
   if [[ -L "$destination" || ( -e "$destination" && ! -d "$destination" ) ]]; then
     printf 'error: %s exists and is not an extension directory\n' "$destination" >&2
@@ -337,37 +338,35 @@ interface PrimeGuardApi {
   on(event: string, handler: (event: ModelSelectEvent, context: PrimeContext) => void): void;
 }
 
-export default function primeConversationGuard(pi: PrimeGuardApi): void {
+export default function primeConversationGuard(agent: PrimeGuardApi): void {
   const enforceDeck = (model: PrimeModel | undefined, context: PrimeContext): void => {
     if (model?.provider === "deck") return;
     console.error(`error: Prime conversation fail-closed: provider ${model?.provider ?? "<none>"} is forbidden; Deck broker provider required`);
     context.abort();
     context.shutdown();
   };
-  pi.on("session_start", (_event, context) => {
+  agent.on("session_start", (_event, context) => {
     enforceDeck(context.model, context);
     const output = process.env.PRIME_CONVERSATION_PROBE;
     if (output === undefined) return;
     fs.writeFileSync(output, JSON.stringify({
       cwd: process.cwd(),
       systemPrompt: context.getSystemPrompt(),
-      tools: pi.getAllTools().map((tool) => tool.name).sort(),
+      tools: agent.getAllTools().map((tool) => tool.name).sort(),
       gatewayToken: process.env.SMITHERS_GATEWAY_TOKEN ?? null,
       tokenStore: process.env.SMITHERS_TOKEN_STORE ?? null,
       stampToken: process.env.DECK_STAMP_TOKEN ?? null,
       publisherToken: process.env.DECK_PUBLISHER_TOKEN ?? null,
       adminToken: process.env.ADMIN_TOKEN ?? null,
       ambientSecret: process.env.DECK_TEST_AMBIENT_SECRET ?? null,
-      skipVersionCheck: process.env.PI_SKIP_VERSION_CHECK,
-      offline: process.env.PI_OFFLINE,
       maxDepth: process.env.RLM_MAX_DEPTH,
       agentDir: process.env.PRIME_AGENT_CODING_AGENT_DIR,
       sessionDir: process.env.PRIME_AGENT_SESSION_DIR,
     }, null, 2));
   });
-  pi.on("model_select", (event, context) => enforceDeck(event.model, context));
-  pi.on("before_agent_start", (_event, context) => enforceDeck(context.model, context));
-  pi.on("before_provider_request", (_event, context) => enforceDeck(context.model, context));
+  agent.on("model_select", (event, context) => enforceDeck(event.model, context));
+  agent.on("before_agent_start", (_event, context) => enforceDeck(context.model, context));
+  agent.on("before_provider_request", (_event, context) => enforceDeck(context.model, context));
 }
 GUARD
 mv -f "$guard_tmp" "$GUARD_FILE"
@@ -552,14 +551,14 @@ done
 for entry in "\$EXTENSIONS_DIR"/*; do
   [[ -e "\$entry" || -L "\$entry" ]] || continue
   case "\$(basename "\$entry")" in
-    deck-questions|deck-ship|deck-recall|deck-provider.ts|prime-conversation-guard.ts|node_modules|v2) ;;
+    deck-questions|deck-ship|deck-recall|deck-usage|deck-provider.ts|prime-conversation-guard.ts|node_modules|v2) ;;
     *)
       printf 'error: Prime conversation fail-closed: unapproved extension %s\n' "\$entry" >&2
       exit 1
       ;;
   esac
 done
-for extension in deck-questions deck-ship deck-recall; do
+for extension in deck-questions deck-ship deck-recall deck-usage; do
   if [[ "\$(realpath "\$EXTENSIONS_DIR/\$extension/index.ts" 2>/dev/null || true)" != "\$(realpath "\$EXTENSION_SOURCE/\$extension.ts")" ]]; then
     printf 'error: Prime conversation extension pin failed for %s\n' "\$extension" >&2
     exit 1
@@ -624,6 +623,15 @@ case "\${PRIME_CONVERSATION_RLM_MAX_DEPTH:-1}" in
 esac
 
 surface_conversation_in_herdr() {
+  local argument
+  if [[ ! -t 0 || ! -t 1 ]]; then
+    return 1
+  fi
+  for argument in "\$@"; do
+    case "\$argument" in
+      -p|--print) return 1 ;;
+    esac
+  done
   if [[ "\${DECK_HERDR_AUTO_ATTACH:-1}" == 0 ||
         "\${DECK_HERDR_RELAUNCHED:-0}" == 1 ||
         "\${1:-}" == --version ]]; then
@@ -775,16 +783,14 @@ chmod 700 "\$RUN_DIR" "\$SESSIONS_DIR"
 export PRIME_AGENT_CODING_AGENT_DIR="\$AGENT_DIR"
 export PRIME_AGENT_SESSION_DIR="\$SESSIONS_DIR"
 export DECK_V2_HOME="\$DECK_HOME"
-export PI_SKIP_VERSION_CHECK=1
-export PI_OFFLINE=1
 export RLM_MAX_DEPTH="\${PRIME_CONVERSATION_RLM_MAX_DEPTH:-1}"
 prime_env=()
 for name in PATH HOME SHELL TMPDIR TMP TEMP LANG LC_ALL LC_CTYPE TERM COLORTERM NO_COLOR FORCE_COLOR USER LOGNAME TZ \
   GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL \
-  DECK_GATEWAY_ORIGIN DECK_PI_MAX_TOKENS \
+  DECK_GATEWAY_ORIGIN DECK_PRIME_MAX_TOKENS \
   HERDR_ENV HERDR_PANE_ID HERDR_SOCKET_PATH HERDR_TAB_ID HERDR_WORKSPACE_ID \
   PRIME_CONVERSATION_PROBE PRIME_AGENT_CODING_AGENT_DIR PRIME_AGENT_SESSION_DIR \
-  DECK_V2_HOME PI_SKIP_VERSION_CHECK PI_OFFLINE RLM_MAX_DEPTH; do
+  DECK_V2_HOME RLM_MAX_DEPTH; do
   if [[ -n "\${!name+x}" ]]; then
     prime_env+=("\$name=\${!name}")
   fi
@@ -838,4 +844,3 @@ chmod 444 "$MANIFEST_FILE"
 printf 'Prime conversation profile wired at %s\n' "$AGENT_DIR"
 printf 'Pinned Prime Agent: %s (%s, %s)\n' "$PINNED_VERSION" "$PINNED_TAG" "$PINNED_COMMIT"
 printf 'Enter: cd "%s" && "%s"\n' "$DECK_HOME" "$WRAPPER"
-printf 'Rollback: cd "%s" && pi\n' "$DECK_HOME"

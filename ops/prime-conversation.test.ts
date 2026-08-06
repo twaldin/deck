@@ -53,6 +53,14 @@ function combinedOutput(command: string, args: string[], env: NodeJS.ProcessEnv)
 	};
 }
 
+function combinedOutputInPty(command: string, args: string[], env: NodeJS.ProcessEnv): { status: number | null; output: string } {
+	return combinedOutput(
+		executableOnPath("python3"),
+		["-c", "import pty, sys; pty.spawn(sys.argv[1:])", command, ...args],
+		env,
+	);
+}
+
 const RpcFrameSchema = z.looseObject({
 	command: z.string().optional(),
 	success: z.boolean().optional(),
@@ -88,8 +96,6 @@ const ProbeOutputSchema = z.object({
 	publisherToken: z.string().nullable(),
 	adminToken: z.string().nullable(),
 	ambientSecret: z.string().nullable(),
-	skipVersionCheck: z.string(),
-	offline: z.string(),
 	maxDepth: z.string(),
 	agentDir: z.string(),
 	sessionDir: z.string(),
@@ -181,6 +187,7 @@ function runRpc(
 	child.stdin.end(`${requests.map((request) => JSON.stringify(request)).join("\n")}\n`);
 	return promise;
 }
+
 
 const HerdrRequestSchema = z.looseObject({
 	method: z.string().optional(),
@@ -360,7 +367,7 @@ afterAll(() => {
 		});
 	}
 	if (root !== undefined) fs.rmSync(root, { recursive: true, force: true });
-});
+}, 30_000);
 
 describe("Prime conversation installer", () => {
 	test("is dry-run by default and writes no profile", () => {
@@ -397,7 +404,7 @@ describe("Prime conversation installer", () => {
 				"--model", "gpt-5.6-sol",
 				"--tools", "ipython",
 				"--no-extensions",
-				"--extension", path.join(import.meta.dir, "..", "broker", "pi", "deck-provider.ts"),
+				"--extension", path.join(import.meta.dir, "..", "broker", "prime", "deck-provider.ts"),
 			],
 			[{ id: "state", type: "get_state" }],
 			{
@@ -474,12 +481,12 @@ describe("Prime conversation installer", () => {
 
 	test("mirrors only the approved Deck extensions and pinned process package", () => {
 		const extensions = path.join(agentDir, "extensions");
-		for (const name of ["deck-questions", "deck-ship", "deck-recall"]) {
+		for (const name of ["deck-questions", "deck-ship", "deck-recall", "deck-usage"]) {
 			const entry = path.join(extensions, name, "index.ts");
-			expect(fs.realpathSync(entry)).toBe(fs.realpathSync(path.join(import.meta.dir, "..", "extensions-pi", `${name}.ts`)));
+			expect(fs.realpathSync(entry)).toBe(fs.realpathSync(path.join(import.meta.dir, "..", "extensions-prime", `${name}.ts`)));
 		}
 		expect(fs.realpathSync(path.join(extensions, "deck-provider.ts"))).toBe(
-			fs.realpathSync(path.join(import.meta.dir, "..", "broker", "pi", "deck-provider.ts")),
+			fs.realpathSync(path.join(import.meta.dir, "..", "broker", "prime", "deck-provider.ts")),
 		);
 		expect(fs.realpathSync(path.join(extensions, "node_modules", "zod"))).toBe(
 			fs.realpathSync(path.join(import.meta.dir, "..", "broker", "node_modules", "zod")),
@@ -495,6 +502,7 @@ describe("Prime conversation installer", () => {
 			"deck-questions",
 			"deck-recall",
 			"deck-ship",
+			"deck-usage",
 			"node_modules",
 			"prime-conversation-guard.ts",
 			"v2",
@@ -504,6 +512,84 @@ describe("Prime conversation installer", () => {
 });
 
 describe("Prime conversation runtime guards", () => {
+	test("headless print mode bypasses Herdr relaunch and completes a continued conversation", async () => {
+		let requests = 0;
+		const toolProbe = path.join(root, "headless-ipython-tool.txt");
+		fs.rmSync(toolProbe, { force: true });
+		const gateway = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch: async (request) => {
+				requests += 1;
+				await request.text();
+				const envelope = {
+					id: `headless-${requests}`,
+					object: "chat.completion.chunk",
+					created: 1,
+					model: "gpt-5.6-sol",
+				};
+				const delta = requests === 2
+					? {
+						tool_calls: [{
+							index: 0,
+							id: "headless-ipython-probe",
+							type: "function",
+							function: {
+								name: "ipython",
+								arguments: JSON.stringify({
+									code: `from pathlib import Path\nPath(${JSON.stringify(toolProbe)}).write_text("tool-ok")\n"tool-ok"`,
+								}),
+							},
+						}],
+					}
+					: { role: "assistant", content: requests === 1 ? "INITIAL_OK" : "HEADLESS_OK" };
+				const finishReason = requests === 2 ? "tool_calls" : "stop";
+				const chunks = [
+					{ ...envelope, choices: [{ index: 0, delta, finish_reason: null }] },
+					{ ...envelope, choices: [{ index: 0, delta: {}, finish_reason: finishReason }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } },
+				];
+				return new Response(
+					`${chunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("")}data: [DONE]\n\n`,
+					{ headers: { "content-type": "text/event-stream" } },
+				);
+			},
+		});
+		const run = async (args: string[]): Promise<{ status: number; stdout: string; stderr: string }> => {
+			const child = Bun.spawn([wrapper, ...args], {
+				env: {
+					...installEnv,
+					DECK_GATEWAY_ORIGIN: `http://127.0.0.1:${gateway.port}`,
+					DECK_HERDR_AUTO_ATTACH: "1",
+					HERDR_ENV: "0",
+					HERDR_PANE_ID: "",
+					HERDR_SOCKET_PATH: "",
+					HERDR_TAB_ID: "",
+					HERDR_WORKSPACE_ID: "",
+				},
+				stdin: "ignore",
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+			const [stdout, stderr, status] = await Promise.all([
+				new Response(child.stdout).text(),
+				new Response(child.stderr).text(),
+				child.exited,
+			]);
+			return { status, stdout, stderr };
+		};
+		try {
+			const initial = await run(["-p", "Begin a headless test conversation."]);
+			expect(initial.status, initial.stderr).toBe(0);
+			const continued = await run(["-c", "-p", "Reply exactly HEADLESS_OK."]);
+			expect(continued.status, continued.stderr).toBe(0);
+			expect(continued.stdout).toContain("HEADLESS_OK");
+			expect(requests).toBeGreaterThanOrEqual(3);
+			expect(fs.readFileSync(toolProbe, "utf8")).toBe("tool-ok");
+		} finally {
+			gateway.stop(true);
+		}
+	}, 30_000);
+
 	test("a plain-terminal conversation creates and enters its own labelled Herdr pane", () => {
 		const herdr = createHerdrCliStub(true);
 		let relaunchScript: string | undefined;
@@ -515,7 +601,7 @@ describe("Prime conversation runtime guards", () => {
 			"hostile ; exit 77; ' argument",
 		];
 		try {
-			const result = combinedOutput(wrapper, conversationArgs, {
+			const result = combinedOutputInPty(wrapper, conversationArgs, {
 				...installEnv,
 				DECK_HERDR_AUTO_ATTACH: "1",
 				DECK_HERDR_BIN: herdr.binary,
@@ -575,7 +661,7 @@ describe("Prime conversation runtime guards", () => {
 		const herdr = createHerdrCliStub(true, false);
 		let relaunchScript: string | undefined;
 		try {
-			const result = combinedOutput(wrapper, ["--mode", "rpc", "--no-session"], {
+			const result = combinedOutputInPty(wrapper, ["--mode", "rpc", "--no-session"], {
 				...installEnv,
 				DECK_HERDR_AUTO_ATTACH: "1",
 				DECK_HERDR_BIN: herdr.binary,
@@ -612,7 +698,7 @@ describe("Prime conversation runtime guards", () => {
 		const herdr = createHerdrCliStub(true);
 		let relaunchScript: string | undefined;
 		try {
-			const result = combinedOutput(wrapper, ["--mode", "rpc", "--no-session"], {
+			const result = combinedOutputInPty(wrapper, ["--mode", "rpc", "--no-session"], {
 				...installEnv,
 				DECK_HERDR_AUTO_ATTACH: "1",
 				DECK_HERDR_BIN: herdr.binary,
@@ -632,7 +718,7 @@ describe("Prime conversation runtime guards", () => {
 			fs.rmSync(herdr.root, { recursive: true, force: true });
 		}
 	}, 30_000);
-	test("an unavailable Herdr server does not block the conversation seat", async () => {
+	test("a non-interactive conversation bypasses an unavailable Herdr server", async () => {
 		const herdr = createHerdrCliStub(false);
 		try {
 			const result = await runRpc(
@@ -653,16 +739,14 @@ describe("Prime conversation runtime guards", () => {
 				command: "get_state",
 				success: true,
 			}));
-			expect(herdr.readCalls()).toEqual([["status", "server", "--json"]]);
+			expect(herdr.readCalls()).toEqual([]);
 		} finally {
 			fs.rmSync(herdr.root, { recursive: true, force: true });
 		}
 	}, 30_000);
 
-	test("a wedged Herdr CLI is bounded and does not block the conversation seat", async () => {
+	test("a non-interactive conversation bypasses a wedged Herdr CLI", async () => {
 		const herdr = createHerdrCliStub(true, true, true);
-		// A real child process that never responds is required to exercise the
-		// wrapper's OS-level timeout and kill path; fake timers cannot drive spawnSync.
 		try {
 			const startedAt = Date.now();
 			const result = await runRpc(
@@ -684,7 +768,7 @@ describe("Prime conversation runtime guards", () => {
 				command: "get_state",
 				success: true,
 			}));
-			expect(herdr.readCalls()).toEqual([["status", "server", "--json"]]);
+			expect(herdr.readCalls()).toEqual([]);
 		} finally {
 			fs.rmSync(herdr.root, { recursive: true, force: true });
 		}
@@ -718,7 +802,7 @@ export default function workflowToolProbe(pi: { getAllTools(): Array<{ name: str
 				"--no-skills",
 				"--no-prompt-templates",
 				"--no-themes",
-				"--extension", path.join(import.meta.dir, "..", "broker", "pi", "deck-provider.ts"),
+				"--extension", path.join(import.meta.dir, "..", "broker", "prime", "deck-provider.ts"),
 				"--extension", probeExtension,
 			],
 			[
@@ -806,8 +890,6 @@ export default function workflowToolProbe(pi: { getAllTools(): Array<{ name: str
 			expect(probe.publisherToken).toBeNull();
 			expect(probe.adminToken).toBeNull();
 			expect(probe.ambientSecret).toBeNull();
-			expect(probe.skipVersionCheck).toBe("1");
-			expect(probe.offline).toBe("1");
 			expect(probe.maxDepth).toBe("1");
 			expect(probe.tools).toEqual(expect.arrayContaining([
 				"list_questions",

@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Pull the configured deck branch and refresh an existing installation.
-# Does NOT overwrite ~/.deck/AGENTS.md, broker store, or state, and does not
-# start resident services or the opt-in review-gate poller.
+# Pull the configured Deck branch and run the same convergent Prime install path
+# used by a fresh machine.
 set -euo pipefail
 
 REPO="${DECK_REPO:-$HOME/dev/deck}"
@@ -11,7 +10,7 @@ if [ ! -d "$REPO/.git" ]; then
   exit 1
 fi
 
-for prerequisite in bun curl git python3; do
+for prerequisite in bun curl git node npm python3 shasum tar; do
   command -v "$prerequisite" >/dev/null 2>&1 || {
     echo "error: $prerequisite is required before updating" >&2
     exit 1
@@ -23,10 +22,7 @@ git fetch origin "$BRANCH"
 git checkout -B "$BRANCH" "origin/$BRANCH"
 git reset --hard "origin/$BRANCH"
 
-bun install --frozen-lockfile --cwd "$REPO/v2"
-bun install --frozen-lockfile --cwd "$REPO/broker"
-bun install --frozen-lockfile --cwd "$REPO/cli"
-bash "$REPO/v2/install.sh"
+DECK_HOME_PROFILE="${DECK_HOME_PROFILE:-}" bash "$REPO/install.sh"
 
 # Sync the machine's filtered home profile into the plain operator directory.
 # Clone to a temporary directory. Never turn ~/.deck into a git checkout.
@@ -62,7 +58,7 @@ if [ -n "$HOME_PROFILE" ] && command -v gh >/dev/null && gh auth status >/dev/nu
     for item in "$TEMP_HOME/repo"/* "$TEMP_HOME/repo"/.[!.]*; do
       [ -e "$item" ] || continue
       name="$(basename "$item")"
-      case "$name" in .git|.pi|.env|.deck-profile|AGENTS.md|data|state|wt|logs|run|questions|broker) continue ;; esac
+      case "$name" in .git|.prime|.env|.deck-profile|AGENTS.md|data|state|wt|logs|run|questions|broker) continue ;; esac
       cp -a "$item" "$HOME_REPO/"
     done
   else
@@ -72,31 +68,8 @@ else
   echo "home sync skipped: gh auth is not configured" >&2
 fi
 
-# Seed the operator contract on first update. Never overwrite operator edits.
-# Use the repository shim directly because ~/.local/bin may not be on PATH yet.
-# Use the bootstrap path so stripping, permissions, and DECK_V2_HOME stay aligned.
-"$REPO/v2/bin/deck-v2" bootstrap >/dev/null
-
-# Refresh the plain-session entrypoint.
-ENTER="$HOME/.deck/enter.sh"
-mkdir -p "$HOME/.deck"
-# Always refresh enter.sh so PATH + silent .env load stay current.
-cat > "$ENTER" <<'EOF'
-#!/usr/bin/env bash
-export PATH="$HOME/.local/bin:$HOME/.bun/bin:$PATH"
-# Home secrets (LINEAR_API_KEY, …). chmod 600. Never commit.
-if [ -f "$HOME/.deck/.env" ]; then
-  set -a
-  # shellcheck disable=SC1091
-  . "$HOME/.deck/.env"
-  set +a
-fi
-cd "$HOME/.deck" || exit 1
-echo "deck home=$(pwd) pi=$(command -v pi) tip=$(git -C "${DECK_REPO:-$HOME/dev/deck}" rev-parse --short HEAD 2>/dev/null)"
-EOF
-chmod +x "$ENTER"
 
 mkdir -p "$HOME/.deck/data/inbox"
 echo "updated: $(git -C "$REPO" rev-parse --short HEAD)  home=$HOME/.deck"
-echo "next: source ~/.deck/enter.sh && pi"
+echo "next: source ~/.deck/enter.sh && prime-conversation"
 command -v deck-v2 >/dev/null && deck-v2 fleet 2>/dev/null | head -5 || true
