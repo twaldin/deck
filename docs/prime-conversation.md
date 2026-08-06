@@ -16,20 +16,26 @@ fallback and no second live authority path.
 
 ## Install and enter
 
-Prime Agent is already installed globally. The profile installer does not
-install a second copy and never writes `~/.prime`. It requires version `0.7.0`,
-the reviewed CLI and complete release-owned package-tree digests, then wires the
-profile around that absolute binary. The reviewed source artifact is
-`prime-agent-0.7.0.tgz` at tag `v0.7.0`, SHA-256
-`88b6578518c72cd51a825bc80f28e0fef9a64c67de4a7d6fd7afd7ca1b34da0b`.
-If Prime is missing, install that immutable artifact through npm:
+Prime Agent is installed globally. The profile installer does not install a
+second copy and never writes `~/.prime`.
+`patches/prime-agent/manifest.json` is the single source for the expected
+install state and its full package-tree and CLI fingerprints. The current
+policy is the pristine pinned `0.7.0`; the tracked fixes remain unapplied while
+their upstream PRs are open. Both install and every profile launch delegate to
+`ops/prime-patches.sh verify`; patched, dirty, or unknown builds fail closed.
+
+If Prime is missing, install the manifest's pinned base artifact and verify it:
 
 ```sh
-artifact="$(mktemp -t prime-agent-0.7.0.XXXXXX.tgz)"
-curl -fsSL https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev/releases/v0.7.0/prime-agent-0.7.0.tgz -o "$artifact"
-printf '%s  %s\n' 88b6578518c72cd51a825bc80f28e0fef9a64c67de4a7d6fd7afd7ca1b34da0b "$artifact" | shasum -a 256 -c -
+cd ~/dev/deck
+artifact="$(mktemp -t prime-agent.XXXXXX.tgz)"
+url="$(node -p 'require("./patches/prime-agent/manifest.json").base.artifactUrl')"
+sha="$(node -p 'require("./patches/prime-agent/manifest.json").base.artifactSha256')"
+curl -fsSL "$url" -o "$artifact"
+printf '%s  %s\n' "$sha" "$artifact" | shasum -a 256 -c -
 npm install -g "$artifact"
 rm -f "$artifact"
+ops/prime-patches.sh verify
 ```
 
 The Deck installer is a dry run unless `--apply` is present:
@@ -282,14 +288,14 @@ A manual upgrade is a reviewed pin change:
    prime-agent shutdown --force --daemon-socket ~/.deck/.prime/run/conversation.sock
    ```
 
-2. Review the upstream release, bind its version/tag to an exact commit, record
-   the official artifact SHA-256, and derive the reviewed CLI and release-owned
-   package-tree digests. Update every pin in the installer, guard, and this
-   document.
-3. Download the exact reviewed tarball, verify its SHA-256, then install that
-   local artifact with `npm install -g <verified-artifact>`. The public
-   `prime-agent@<version>` npm selector is not the release channel; never use the
-   moving `prime-agent update` command.
+2. Review the upstream release and every tracked patch. Update
+   `patches/prime-agent/manifest.json` with the exact base, patch, artifact,
+   full-tree, and CLI fingerprints and set its reviewed `expectedInstallState`.
+   Do not copy those fingerprints into this installer or document.
+3. Install only the manifest-selected artifact, then run
+   `ops/prime-patches.sh verify`. The public `prime-agent@<version>` npm selector
+   is not the release channel; never use the moving `prime-agent update`
+   command.
 
 4. Rewire the profile and rerun the upgrade tripwire in a sandbox:
 

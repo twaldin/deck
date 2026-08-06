@@ -1,14 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Prime Agent release pinned by the captain's v4 adoption ruling.
-PINNED_VERSION="0.7.0"
-PINNED_TAG="v0.7.0"
-PINNED_COMMIT="be9e2fa0714e7cd1c6bd9bdb1b554d2cc6550387"
-PINNED_ARTIFACT_URL="https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev/releases/v0.7.0/prime-agent-0.7.0.tgz"
-PINNED_ARTIFACT_SHA256="88b6578518c72cd51a825bc80f28e0fef9a64c67de4a7d6fd7afd7ca1b34da0b"
-PINNED_CLI_SHA256="ef097dce87e63c32e49493767763c7147376e6b4522818dd275ca9c32218ad35"
-PINNED_PACKAGE_TREE_SHA256="bacc5921cfce2d58da0bb557501b011c699ad0a95ade6ac4499190ffd6392250"
+# Prime version and artifact metadata are loaded from the reviewed Deck patch
+# manifest below. ops/prime-patches.sh is the sole fingerprint verifier.
 PROFILE_ID="deck-prime-conversation-v1"
 
 usage() {
@@ -34,6 +28,25 @@ if [[ $# -gt 1 ]]; then
 fi
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
+PATCH_MANIFEST="$REPO_ROOT/patches/prime-agent/manifest.json"
+PATCH_VERIFIER="$REPO_ROOT/ops/prime-patches.sh"
+pin_values="$(node - "$PATCH_MANIFEST" <<'NODE'
+const fs = require("node:fs");
+const manifest = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+process.stdout.write([
+  manifest.base.version,
+  manifest.base.tag,
+  manifest.base.commit,
+  manifest.base.artifactUrl,
+  manifest.base.artifactSha256,
+].join("\t"));
+NODE
+)" || {
+  printf 'error: cannot load reviewed Prime patch manifest: %s\n' "$PATCH_MANIFEST" >&2
+  exit 1
+}
+IFS=$'\t' read -r PINNED_VERSION PINNED_TAG PINNED_COMMIT PINNED_ARTIFACT_URL \
+  PINNED_ARTIFACT_SHA256 <<<"$pin_values"
 REPO_V2="$REPO_ROOT/v2"
 EXTENSION_SOURCE="$REPO_ROOT/extensions-pi"
 PROVIDER_SOURCE="$REPO_ROOT/broker/pi/deck-provider.ts"
@@ -76,7 +89,7 @@ if [[ -n "${PRIME_CONVERSATION_PRIME_BIN:-}" ]]; then
 else
   PRIME_BIN="$(command -v prime-agent || true)"
   if [[ -z "$PRIME_BIN" ]]; then
-    printf 'error: prime-agent is not installed. Install the reviewed release artifact:\n' >&2
+    printf 'error: prime-agent is not installed. Install the manifest-pinned pristine artifact:\n' >&2
     printf '  curl -fsSL %s -o /tmp/prime-agent-%s.tgz\n' "$PINNED_ARTIFACT_URL" "$PINNED_VERSION" >&2
     printf '  printf "%s  /tmp/prime-agent-%s.tgz\\n" | shasum -a 256 -c -\n' "$PINNED_ARTIFACT_SHA256" "$PINNED_VERSION" >&2
     printf '  npm install -g /tmp/prime-agent-%s.tgz\n' "$PINNED_VERSION" >&2
@@ -92,50 +105,8 @@ if [[ "$installed_version" != "$PINNED_VERSION" ]]; then
     "$PINNED_VERSION" "$PINNED_TAG" "$PINNED_COMMIT" "${installed_version:-<no version>}" "$PRIME_BIN" >&2
   exit 1
 fi
-prime_entry="$(realpath "$PRIME_BIN")"
-installed_cli_sha="$(shasum -a 256 "$prime_entry" | cut -d ' ' -f 1)"
-if [[ "$installed_cli_sha" != "$PINNED_CLI_SHA256" ]]; then
-  printf 'error: Prime Agent provenance tripwire: expected CLI SHA-256 %s, got %s from %s\n' \
-    "$PINNED_CLI_SHA256" "$installed_cli_sha" "$prime_entry" >&2
-  exit 1
-fi
-prime_package_root="$(cd "$(dirname "$prime_entry")/../.." && pwd -P)"
-installed_tree_sha="$(node -e '
-const crypto = require("node:crypto");
-const fs = require("node:fs");
-const path = require("node:path");
-const root = process.argv[1];
-const roots = new Set(["dist", "docs", "examples", "skills"]);
-const files = new Set(["postinstall.cjs", "CHANGELOG.md", "package.json"]);
-const entries = [];
-function walk(directory) {
-  for (const name of fs.readdirSync(directory).sort()) {
-    const absolute = path.join(directory, name);
-    const relative = path.relative(root, absolute).split(path.sep).join("/");
-    if (relative.includes("/__pycache__/") || relative.endsWith(".pyc")) continue;
-    const stat = fs.lstatSync(absolute);
-    if (stat.isDirectory()) walk(absolute);
-    else if (stat.isFile() || stat.isSymbolicLink()) entries.push(relative);
-  }
-}
-for (const name of [...roots].sort()) walk(path.join(root, name));
-for (const name of [...files].sort()) entries.push(name);
-const hash = crypto.createHash("sha256");
-for (const relative of entries.sort()) {
-  const absolute = path.join(root, relative);
-  const symbolic = fs.lstatSync(absolute).isSymbolicLink();
-  const data = symbolic ? Buffer.from(fs.readlinkSync(absolute)) : fs.readFileSync(absolute);
-  hash.update(symbolic ? "L" : "F");
-  hash.update(relative);
-  hash.update("\\0");
-  hash.update(String(data.length));
-  hash.update("\\0");
-  hash.update(data);
-}
-process.stdout.write(hash.digest("hex"));
-' "$prime_package_root" 2>/dev/null || true)"
-if [[ "$installed_tree_sha" != "$PINNED_PACKAGE_TREE_SHA256" ]]; then
-  printf 'error: Prime Agent provenance tripwire: installed package tree does not match the reviewed artifact\n' >&2
+if ! install_verification="$(PRIME_AGENT_BIN="$PRIME_BIN" "$PATCH_VERIFIER" verify 2>&1)"; then
+  printf 'error: Prime Agent install-state tripwire failed for %s:\n%s\n' "$PRIME_BIN" "$install_verification" >&2
   exit 1
 fi
 
@@ -430,7 +401,7 @@ printf -v extension_source_q '%q' "$EXTENSION_SOURCE"
 printf -v provider_source_q '%q' "$PROVIDER_SOURCE"
 printf -v zod_source_q '%q' "$ZOD_SOURCE"
 printf -v lib_root_q '%q' "$LIB_ROOT"
-printf -v prime_package_root_q '%q' "$prime_package_root"
+printf -v patch_verifier_q '%q' "$PATCH_VERIFIER"
 printf -v guard_file_q '%q' "$GUARD_FILE"
 printf -v run_dir_q '%q' "$RUN_DIR"
 printf -v sessions_dir_q '%q' "$SESSIONS_DIR"
@@ -441,7 +412,6 @@ cat > "$wrapper_tmp" <<EOF
 set -euo pipefail
 PINNED_VERSION='$PINNED_VERSION'
 PINNED_TAG='$PINNED_TAG'
-PINNED_CLI_SHA256='$PINNED_CLI_SHA256'
 PINNED_COMMIT='$PINNED_COMMIT'
 PRIME_AGENT_BIN=$prime_bin_q
 DECK_HOME=$deck_home_q
@@ -450,7 +420,7 @@ CUSTODY_FILE=$custody_file_q
 GUARD_FILE=$guard_file_q
 RUN_DIR=$run_dir_q
 SESSIONS_DIR=$sessions_dir_q
-PRIME_PACKAGE_ROOT=$prime_package_root_q
+PATCH_VERIFIER=$patch_verifier_q
 EXTENSIONS_DIR=$extensions_dir_q
 EXTENSION_SOURCE=$extension_source_q
 PROVIDER_SOURCE=$provider_source_q
@@ -461,7 +431,6 @@ AUTH_FILE=$auth_file_q
 SEED_FILE=$seed_file_q
 AGENT_DIR=$agent_dir_q
 CUSTODY_SHA256='$custody_sha'
-PINNED_PACKAGE_TREE_SHA256='$PINNED_PACKAGE_TREE_SHA256'
 SETTINGS_SHA256='$settings_sha'
 AUTH_SHA256='$auth_sha'
 SEED_SHA256='$seed_sha'
@@ -476,9 +445,8 @@ if [[ "\$actual_version" != "\$PINNED_VERSION" ]]; then
     "\$PINNED_VERSION" "\$PINNED_TAG" "\$PINNED_COMMIT" "\${actual_version:-<no version>}" >&2
   exit 1
 fi
-actual_cli_sha="\$(shasum -a 256 "\$PRIME_AGENT_BIN" | cut -d ' ' -f 1)"
-if [[ "\$actual_cli_sha" != "\$PINNED_CLI_SHA256" ]]; then
-  printf 'error: Prime Agent provenance tripwire: CLI SHA-256 mismatch\n' >&2
+if ! install_verification="\$(PRIME_AGENT_BIN="\$PRIME_AGENT_BIN" "\$PATCH_VERIFIER" verify 2>&1)"; then
+  printf 'error: Prime Agent install-state tripwire failed at launch:\n%s\n' "\$install_verification" >&2
   exit 1
 fi
 actual_custody_sha="\$(shasum -a 256 "\$CUSTODY_FILE" | cut -d ' ' -f 1)"

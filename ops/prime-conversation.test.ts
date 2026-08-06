@@ -631,6 +631,6 @@ describe("Prime upgrade tripwire", () => {
 			PRIME_CONVERSATION_PRIME_BIN: impersonator,
 		});
 		expect(provenanceRejected.status).toBe(1);
-		expect(provenanceRejected.output).toContain("provenance tripwire");
+		expect(provenanceRejected.output).toContain("install-state tripwire");
 	});
 });
