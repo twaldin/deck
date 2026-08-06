@@ -46,6 +46,7 @@ const deckOverride = {
 	yolo: true,
 	stamp: false,
 	knowledge: [],
+	reviewPolicy: { requireHuman: false, requiredBots: [{ login: "coderabbitai[bot]", approvalCheckPattern: "^CodeRabbit(?:$| /)" }] },
 };
 
 function writeConfig(profiles: unknown): void {
@@ -84,6 +85,18 @@ describe("config file", () => {
 		// the captain. Refuse the file instead.
 		writeConfig([{ ...deckOverride, stamp: true }]);
 		expect(() => loadProfiles()).toThrow(/implies yolo=true stamp=false/);
+	});
+
+	test("review policy is explicit, profile-scoped, and regex-validated", () => {
+		const { reviewPolicy: _missing, ...withoutPolicy } = deckOverride;
+		expect(() => validateProfiles([withoutPolicy], "x")).toThrow(/reviewPolicy is required/);
+		expect(() => validateProfiles([{
+			...deckOverride,
+			reviewPolicy: {
+				requireHuman: false,
+				requiredBots: [{ login: "coderabbitai[bot]", approvalCheckPattern: "[" }],
+			},
+		}], "x")).toThrow(/approvalCheckPattern must be a valid regex/);
 	});
 
 	test("model seat config refuses malformed opposition defaults", () => {

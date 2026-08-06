@@ -44,6 +44,17 @@ export type ModelSeats = {
 	oppositionDefaults?: Record<string, string>;
 };
 
+export type ReviewBotPolicy = {
+	login: string;
+	approvalCommentPattern?: string;
+	approvalCheckPattern?: string;
+};
+
+export type ProjectReviewPolicy = {
+	requireHuman: boolean;
+	requiredBots: ReviewBotPolicy[];
+};
+
 export type ProjectProfile = {
 	/** Stable id; doubles as the repo alias (spawn --repo <id>). */
 	id: string;
@@ -66,6 +77,8 @@ export type ProjectProfile = {
 	doctrine?: string;
 	/** Captain-editable workflow seat models. */
 	models?: ModelSeats;
+	/** Repo-specific approvers and review bots; bot identity is never inferred. */
+	reviewPolicy: ProjectReviewPolicy;
 	/** Dependency install command for allocated worktrees. */
 	installCommand?: string;
 	/** Project command used to validate an automatic rebase. */
@@ -147,6 +160,41 @@ export function validateProfiles(parsed: unknown, source: string): ProjectProfil
 		if (p.doctrine !== undefined && typeof p.doctrine !== "string") {
 			throw new Error(`${where} (${p.id}): doctrine must be a string`);
 		}
+		if (p.reviewPolicy === null || typeof p.reviewPolicy !== "object" || Array.isArray(p.reviewPolicy)) {
+			throw new Error(`${where} (${p.id}): reviewPolicy is required and must be an object`);
+		}
+		const policy = p.reviewPolicy as Record<string, unknown>;
+		if (typeof policy.requireHuman !== "boolean" || !Array.isArray(policy.requiredBots)) {
+			throw new Error(`${where} (${p.id}): reviewPolicy requires requireHuman:boolean and requiredBots:array`);
+		}
+		const requiredBots = policy.requiredBots.map((value, botIndex) => {
+			if (value === null || typeof value !== "object" || Array.isArray(value)) {
+				throw new Error(`${where} (${p.id}): reviewPolicy.requiredBots[${botIndex}] must be an object`);
+			}
+			const bot = value as Record<string, unknown>;
+			if (typeof bot.login !== "string" || bot.login.trim() === "") {
+				throw new Error(`${where} (${p.id}): reviewPolicy.requiredBots[${botIndex}].login must be non-empty`);
+			}
+			for (const key of ["approvalCommentPattern", "approvalCheckPattern"] as const) {
+				if (bot[key] !== undefined && (typeof bot[key] !== "string" || bot[key] === "")) {
+					throw new Error(`${where} (${p.id}): reviewPolicy.requiredBots[${botIndex}].${key} must be non-empty`);
+				}
+				if (typeof bot[key] === "string") {
+					try { new RegExp(bot[key]); } catch {
+						throw new Error(`${where} (${p.id}): reviewPolicy.requiredBots[${botIndex}].${key} must be a valid regex`);
+					}
+				}
+			}
+			return {
+				login: bot.login.trim(),
+				...(bot.approvalCommentPattern === undefined ? {} : { approvalCommentPattern: bot.approvalCommentPattern as string }),
+				...(bot.approvalCheckPattern === undefined ? {} : { approvalCheckPattern: bot.approvalCheckPattern as string }),
+			};
+		});
+		if (new Set(requiredBots.map((bot) => bot.login.toLowerCase())).size !== requiredBots.length) {
+			throw new Error(`${where} (${p.id}): reviewPolicy.requiredBots logins must be unique`);
+		}
+		const reviewPolicy: ProjectReviewPolicy = { requireHuman: policy.requireHuman, requiredBots };
 		let models: ModelSeats | undefined;
 		if (p.models !== undefined && p.models !== null) {
 			if (typeof p.models !== "object" || Array.isArray(p.models)) {
@@ -215,6 +263,7 @@ export function validateProfiles(parsed: unknown, source: string): ProjectProfil
 			knowledge: knowledge as string[],
 			...(p.doctrine === undefined ? {} : { doctrine: p.doctrine }),
 			...(models === undefined ? {} : { models }),
+			reviewPolicy,
 			...(p.testCommand === undefined ? {} : { testCommand: p.testCommand }),
 			...(p.installCommand === undefined ? {} : { installCommand: p.installCommand }),
 			depsWarm: p.depsWarm ?? true

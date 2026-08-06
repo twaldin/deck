@@ -176,7 +176,7 @@ export function buildPipelineInput(
 	};
 	if (request.baseBranch !== undefined) input.baseBranch = request.baseBranch;
 	if (request.existingPr !== undefined) input.existingPr = request.existingPr;
-	const github: Record<string, unknown> = {};
+	const github: Record<string, unknown> = { reviewPolicy: profile.reviewPolicy };
 	if (reviewersConfig !== undefined) {
 		github.selfLogins = reviewersConfig.selfLogins;
 		github.excludedApprovers = reviewersConfig.excludedApprovers;

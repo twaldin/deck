@@ -18,6 +18,7 @@ beforeAll(() => {
 		pipeline: "lindy-full",
 		yolo: false,
 		stamp: true,
+		reviewPolicy: { requireHuman: true, requiredBots: [{ login: "claude[bot]", approvalCheckPattern: "claude.*review" }] },
 		knowledge: [
 			path.join(promptTestHome, "data", "domain.md"),
 			path.join(promptTestHome, "data", "ops.md"),
