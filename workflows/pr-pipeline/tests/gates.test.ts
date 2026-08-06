@@ -732,10 +732,12 @@ describe("evaluateWatchExit", () => {
 				statuses: [],
 			},
 		}), { selfLogins: ["twaldin"] });
-		expect(verdict.exitOk).toBe(true);
+		expect(verdict.exitOk).toBe(false);
+		expect(verdict.disposition).toBe("escalate");
+		expect(verdict.terminalEscalation).toBe(true);
 		expect(verdict.ci).toBe("not-configured");
 		expect(verdict.ciClassification).toBe("NO_REQUIRED_CHECKS");
-		expect(verdict.reasons.join(" ")).toContain("not as terminal success");
+		expect(verdict.reasons.join(" ")).toContain("human must decide");
 	});
 
 	test("zero checks with required CI inside grace waits for reporting", () => {

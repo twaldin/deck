@@ -3790,7 +3790,7 @@ export default smithers((ctx) => {
 																const migrationFiles = detectMigrations(files);
 																const stampReady =
 																	watchVerdict.exitOk
-																	&& (!yolo || watchVerdict.ci === "green" || watchVerdict.ci === "not-configured");
+																	&& (!yolo || watchVerdict.ci === "green");
 																const readyReasons = [
 																	...(!watchVerdict.exitOk
 																		? ["watch conditions regressed:", ...watchVerdict.reasons]
