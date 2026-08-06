@@ -28,7 +28,7 @@ import { evaluateReadyForStamp, findHumanApproval } from "../lib/ready.ts";
 import {
 	assessCi,
 	classifyCiEvidence,
-	evaluateWatchExit,
+	evaluateWatchExit as evaluateWatchExitRequired,
 	reviewersNeedingReRequest,
 	unansweredComments,
 	isReviewFinding,
@@ -36,6 +36,19 @@ import {
 } from "../lib/watch.ts";
 import type { MigrationEvidenceEntry, WatchSnapshot } from "../lib/types.ts";
 import ciFailureFixtures from "./fixtures/ci-failures.json";
+
+const TEST_REVIEW_POLICY = { requireHuman: true, requiredBots: [] };
+function evaluateWatchExit(
+	snapshot: WatchSnapshot,
+	options: Omit<Parameters<typeof evaluateWatchExitRequired>[1], "reviewPolicy"> & {
+		reviewPolicy?: Parameters<typeof evaluateWatchExitRequired>[1]["reviewPolicy"];
+	},
+) {
+	return evaluateWatchExitRequired(snapshot, {
+		reviewPolicy: TEST_REVIEW_POLICY,
+		...options,
+	});
+}
 
 // Keep gate tests away from the operator home. Some imported helpers can write
 // wake state while evaluating workflow-related fixtures.

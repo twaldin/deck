@@ -19,7 +19,7 @@ import * as path from "node:path";
 // Smithers testing is optional in minimal checkouts; workflow tests run when the pinned package is installed.
 import { renderWorkflow, simulate } from "smithers-orchestrator/testing";
 
-import pipeline, { buildModelPolicy, DEFAULT_GITHUB, schemas } from "../pipeline.tsx";
+import pipeline, { buildModelPolicy, DEFAULT_GITHUB, inputSchema, schemas } from "../pipeline.tsx";
 import { loadProfiles, type ProjectProfile } from "../lib/profiles.ts";
 import { falloutPrompt, localFixPrompt, localReviewPrompt, reviewersDecisionPrompt } from "../lib/prompts.ts";
 import { resolveAdversary } from "../lib/models.ts";
@@ -67,6 +67,7 @@ const baseInput = {
 	brief: validBrief,
 	dryRun: true,
 	wakeDryRun: true,
+	github: { reviewPolicy: { requireHuman: false, requiredBots: [] } },
 };
 const fixtureProfiles: ProjectProfile[] = [
 	{
@@ -221,6 +222,32 @@ describe("workflow rendering contracts", () => {
 		expect((pipeline as typeof pipeline & { inputSchema: { safeParse: (value: unknown) => { success: boolean } } }).inputSchema.safeParse({ ...baseInput, models: null }).success).toBe(true);
 	});
 
+	test("input schema fails closed when the immutable project review policy is missing", () => {
+		const { github: _github, ...withoutGitHub } = baseInput;
+		expect(inputSchema.safeParse(withoutGitHub).success).toBe(false);
+		expect(inputSchema.safeParse({
+			...withoutGitHub,
+			github: { gh: "gh", git: "git" },
+		}).success).toBe(false);
+	});
+
+	test("adopted and persisted/resumed inputs retain the resolved review policy exactly", () => {
+		const reviewPolicy = {
+			requireHuman: true,
+			requiredBots: [{
+				login: "claude[bot]",
+				approvalCheckPattern: "^claude-review$",
+			}],
+		};
+		const adopted = inputSchema.parse({
+			...baseInput,
+			existingPr: 777,
+			github: { ...baseInput.github, reviewPolicy },
+		});
+		const resumed = inputSchema.parse(JSON.parse(JSON.stringify(adopted)));
+		expect(resumed.github.reviewPolicy).toEqual(reviewPolicy);
+	});
+
 	test("profile reasoning flows to each seat, with explicit seat overrides", () => {
 		const policy = buildModelPolicy({
 			...profileBase,
@@ -372,6 +399,7 @@ describe("reviewer selection contracts", () => {
 		expect(DEFAULT_GITHUB.selfLogins).toEqual([]);
 		expect(DEFAULT_GITHUB.excludedApprovers).toEqual([]);
 		expect(DEFAULT_GITHUB.reviewerDenylist).toEqual([]);
+		expect("reviewPolicy" in DEFAULT_GITHUB).toBe(false);
 	});
 });
 
@@ -688,7 +716,7 @@ printf '%s\\n' '${JSON.stringify({ number: 777, html_url: "https://github.com/li
 					existingPr: 777,
 					worktree: dir,
 					watchSetPath,
-					github: { git, gh },
+					github: { ...baseInput.github, git, gh },
 				},
 				outputs: {
 					preflight: [{ nodeId: "preflight", ok: true, openQuestions: [], briefDigest: "", resolvedReviewerModel: "deck/claude-fable-5" }],
@@ -719,7 +747,7 @@ printf '%s\\n' '${JSON.stringify({ number: 777, html_url: "https://github.com/li
 		fs.chmodSync(gh, 0o755);
 		try {
 			const rendered = await renderWorkflow(pipeline, {
-				input: { ...baseInput, baseBranch: "main", dryRun: false, wakeDryRun: true, existingPr: 777, worktree: dir, github: { git, gh } },
+				input: { ...baseInput, baseBranch: "main", dryRun: false, wakeDryRun: true, existingPr: 777, worktree: dir, github: { ...baseInput.github, git, gh } },
 				outputs: {
 					preflight: [{ nodeId: "preflight", ok: true, openQuestions: [], briefDigest: "", resolvedReviewerModel: "deck/claude-fable-5" }],
 					adoptBase: [{ nodeId: "adopt-base", baseBranch: "fm/stack-parent" }],
@@ -848,7 +876,7 @@ else printf 'queued\\n'; fi
 		fs.chmodSync(git, 0o755);
 		fs.chmodSync(gh, 0o755);
 		const rendered = await renderWorkflow(pipeline, {
-			input: { ...baseInput, worktree: dir, dryRun: false, wakeDryRun: true, github: { git, gh } },
+			input: { ...baseInput, worktree: dir, dryRun: false, wakeDryRun: true, github: { ...baseInput.github, git, gh } },
 			outputs: mergeTaskOutputs(baseBranch),
 			workflowPath: path.join(import.meta.dir, "..", "pipeline.tsx"),
 		});
@@ -1002,7 +1030,7 @@ describe("full graph traversal (bypassApprovals, dry-run only)", () => {
 		const { sim, error } = await run({
 			...baseInput,
 			bypassApprovals: true,
-			github: { skipReviewerRequest: true },
+			github: { ...baseInput.github, skipReviewerRequest: true },
 			fixtures: { changedFiles: ["src/feature.ts"] },
 		});
 		expect(error).toBeUndefined();

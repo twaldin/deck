@@ -226,6 +226,7 @@ bun install                      # pins smithers-orchestrator 0.30.0
 #      commands.deployEvidence       — required (done is evidence-gated)
 #      commands.migration*           — required if the diff touches migrations
 #      github.selfLogins             — your GH login(s)
+#      github.reviewPolicy           — required, resolved profile approval contract
 cp examples/dry-run-input.json /tmp/lin-123-input.json && $EDITOR /tmp/lin-123-input.json
 
 # 2. Launch. ALWAYS pin the CLI version to match the workflow's pinned dep.

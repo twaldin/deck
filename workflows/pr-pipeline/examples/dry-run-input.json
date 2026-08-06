@@ -4,6 +4,17 @@
   "worktree": "/tmp/lindy-wt",
   "branch": "fm/lin-123-rate-limit",
   "dryRun": true,
+  "github": {
+    "reviewPolicy": {
+      "requireHuman": true,
+      "requiredBots": [
+        {
+          "login": "claude[bot]",
+          "approvalCommentPattern": "^\\\\*\\\\*Claude finished .+ task in .+\\\\*\\\\*$"
+        }
+      ]
+    }
+  },
   "brief": {
     "ticket": "LIN-123",
     "title": "Add rate limiting to /api/foo",
