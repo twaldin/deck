@@ -213,7 +213,7 @@ describe("model policy (deck catalog + family opposition)", () => {
 	test("same-family reviewer with opposition explicitly OFF is allowed", () => {
 		const policy = {
 			...defaultModelPolicy(),
-			implementer: "deck/claude-sonnet-5",
+			implementer: "deck/claude-fable-5",
 			reviewer: "deck/claude-opus-5",
 			familyOpposition: false,
 		};

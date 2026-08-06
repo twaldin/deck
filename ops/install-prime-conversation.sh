@@ -55,6 +55,7 @@ EXTENSION_SOURCE="$REPO_ROOT/extensions-prime"
 PROVIDER_SOURCE="$REPO_ROOT/broker/prime/deck-provider.ts"
 ZOD_SOURCE="$REPO_ROOT/broker/node_modules/zod"
 SEED_SOURCE="$REPO_V2/seed/AGENTS.md"
+PYTHON_SOURCE="$REPO_V2/python"
 PROFILE_CONFIG="$REPO_ROOT/ops/prime-deck-profile.json"
 DECK_HOME="${PRIME_CONVERSATION_HOME:-$HOME/.deck}"
 PROFILE_ROOT="$DECK_HOME/.prime"
@@ -70,6 +71,9 @@ GUARD_FILE="$EXTENSIONS_DIR/prime-conversation-guard.ts"
 AUTH_FILE="$AGENT_DIR/auth.json"
 MANIFEST_FILE="$AGENT_DIR/deck-prime-conversation.json"
 WRAPPER="$PROFILE_ROOT/bin/prime-conversation"
+# The agent surface is code, not tools: the kernel imports `deck` from here.
+PYTHON_ROOT="$PROFILE_ROOT/python"
+IPYTHON_ROOT="$PROFILE_ROOT/ipython"
 PROCESS_PACKAGE_LINK="$AGENT_DIR/npm/node_modules/$PROCESS_PACKAGE_NAME"
 SOCKET_RELATIVE="$(node -e '
 const fs = require("node:fs");
@@ -363,12 +367,30 @@ ensure_symlink "$PROVIDER_SOURCE" "$EXTENSIONS_DIR/deck-provider.ts"
 mkdir -p "$EXTENSIONS_DIR/node_modules"
 ensure_symlink "$ZOD_SOURCE" "$EXTENSIONS_DIR/node_modules/zod"
 
-guard_tmp="$GUARD_FILE.tmp.$$"
-cat > "$guard_tmp" <<'GUARD'
-import * as fs from "node:fs";
+# The canonical model set, read from the ONE list that defines it. A second
+# hardcoded copy here is exactly how the seat drifted onto a non-canonical
+# model, so this fails the install rather than guessing.
+catalog_bare_json="$(cd "$REPO_ROOT" && bun -e '
+import { DECK_AGENT_CATALOG } from "./workflows/pr-pipeline/lib/model-policy";
+process.stdout.write(JSON.stringify(DECK_AGENT_CATALOG));
+')" || {
+  printf 'error: could not read DECK_AGENT_CATALOG from model-policy.ts\n' >&2
+  exit 1
+}
+catalog_json="$(node -e '
+process.stdout.write(JSON.stringify(JSON.parse(process.argv[1]).map((id) => `deck/${id}`)));
+' "$catalog_bare_json")"
 
+guard_tmp="$GUARD_FILE.tmp.$$"
+# `enabledModels` only filters the interactive model picker - it does NOT stop a
+# session from running on another model. Enforcement has to happen on the
+# select/start/request hooks, so the canonical list is baked in here.
+printf 'import * as fs from "node:fs";\nconst DECK_CANON_MODELS: readonly string[] = %s;\n\n' "$catalog_bare_json" > "$guard_tmp"
+cat >> "$guard_tmp" <<'GUARD'
 interface PrimeModel {
   provider: string;
+  id?: string;
+  model?: string;
 }
 interface PrimeTool {
   name: string;
@@ -389,10 +411,23 @@ interface PrimeGuardApi {
 
 export default function primeConversationGuard(agent: PrimeGuardApi): void {
   const enforceDeck = (model: PrimeModel | undefined, context: PrimeContext): void => {
-    if (model?.provider === "deck") return;
-    console.error(`error: Prime conversation fail-closed: provider ${model?.provider ?? "<none>"} is forbidden; Deck broker provider required`);
-    context.abort();
-    context.shutdown();
+    const fail = (reason: string): void => {
+      console.error(`error: Prime conversation fail-closed: ${reason}`);
+      context.abort();
+      context.shutdown();
+    };
+    if (model?.provider !== "deck") {
+      fail(`provider ${model?.provider ?? "<none>"} is forbidden; Deck broker provider required`);
+      return;
+    }
+    // The captain's canonical set is the whole set. `enabledModels` only filters
+    // the interactive picker, so without this a session can run on any of the
+    // thousands of ids the broker exposes - which is how a seat ended up doing
+    // judgment work on a non-canonical model.
+    const id = model.id ?? model.model;
+    if (id === undefined || !DECK_CANON_MODELS.includes(id)) {
+      fail(`model ${id ?? "<none>"} is not canonical; allowed: ${DECK_CANON_MODELS.join(", ")}`);
+    }
   };
   agent.on("session_start", (_event, context) => {
     enforceDeck(context.model, context);
@@ -424,11 +459,13 @@ chmod 444 "$GUARD_FILE"
 
 
 settings_tmp="$SETTINGS_FILE.tmp.$$"
-cat > "$settings_tmp" <<'SETTINGS'
+cat > "$settings_tmp" <<SETTINGS
 {
   "defaultProvider": "deck",
-  "enabledModels": ["deck/*"],
-  "packages": ["npm:@aliou/pi-processes@0.10.4"],
+  "defaultModel": "claude-fable-5",
+  "defaultThinkingLevel": "high",
+  "enabledModels": $catalog_json,
+  "packages": [],
   "autoRefine": {
     "enabled": false
   }
@@ -491,6 +528,22 @@ mv -f "$auth_tmp" "$AUTH_FILE"
 chmod 400 "$AUTH_FILE"
 
 
+
+# Materialize the code surface. Every capability the retired pi-tools exposed is
+# a call in this module, so it is installer-owned like the rest of the profile
+# and is replaced wholesale on every apply rather than merged.
+rm -rf "$PYTHON_ROOT"
+mkdir -p "$PYTHON_ROOT"
+cp -R "$PYTHON_SOURCE/deck" "$PYTHON_ROOT/deck"
+chmod -R go-w "$PYTHON_ROOT"
+# IPython runs every file in the profile's startup dir, so the surface is
+# present without an import the agent has to remember.
+mkdir -p "$IPYTHON_ROOT/profile_default/startup"
+cat > "$IPYTHON_ROOT/profile_default/startup/00-deck.py" <<'STARTUP'
+"""Deck's agent surface. Code execution is the only tool; `deck.help()` lists it."""
+import deck
+from deck import ask, questions, answer, recall, ship, adopt, runs, why, wake, fleet, procs
+STARTUP
 custody_sha="$(shasum -a 256 "$CUSTODY_FILE" | cut -d ' ' -f 1)"
 guard_sha="$(shasum -a 256 "$GUARD_FILE" | cut -d ' ' -f 1)"
 settings_sha="$(shasum -a 256 "$SETTINGS_FILE" | cut -d ' ' -f 1)"
@@ -833,13 +886,19 @@ export PRIME_AGENT_CODING_AGENT_DIR="\$AGENT_DIR"
 export PRIME_AGENT_SESSION_DIR="\$SESSIONS_DIR"
 export DECK_V2_HOME="\$DECK_HOME"
 export RLM_MAX_DEPTH="\${PRIME_CONVERSATION_RLM_MAX_DEPTH:-1}"
+# `env -i` drops everything not listed below, and the IPython kernel inherits
+# this environment - so the code surface reaches the agent ONLY if both of
+# these are exported here AND named in the allowlist.
+export PYTHONPATH='$PYTHON_ROOT'
+export IPYTHONDIR='$IPYTHON_ROOT'
+export DECK_CLI="\${DECK_CLI:-\$(command -v deck-v2 || true)}"
 prime_env=()
 for name in PATH HOME SHELL TMPDIR TMP TEMP LANG LC_ALL LC_CTYPE TERM COLORTERM NO_COLOR FORCE_COLOR USER LOGNAME TZ \
   GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL \
   DECK_GATEWAY_ORIGIN DECK_PRIME_MAX_TOKENS \
   HERDR_ENV HERDR_PANE_ID HERDR_SOCKET_PATH HERDR_TAB_ID HERDR_WORKSPACE_ID \
   PRIME_CONVERSATION_PROBE PRIME_AGENT_CODING_AGENT_DIR PRIME_AGENT_SESSION_DIR \
-  DECK_V2_HOME RLM_MAX_DEPTH; do
+  DECK_V2_HOME RLM_MAX_DEPTH PYTHONPATH IPYTHONDIR DECK_CLI; do
   if [[ -n "\${!name+x}" ]]; then
     prime_env+=("\$name=\${!name}")
   fi

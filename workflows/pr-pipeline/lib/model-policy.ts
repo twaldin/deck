@@ -26,21 +26,24 @@ export interface ModelRef {
 }
 
 /**
- * Agent-pickable slice of the deck catalog (mirrors broker/src/models.ts
- * DEFAULT_ALLOWLIST). Workflow agents may only be configured with these ids;
- * anything else fails preflight. Extend deliberately, in lockstep with the
- * broker allowlist.
+ * The captain's canonical model set - the ONLY models any Deck seat may run.
+ *
+ * Four, deliberately. The broker exposes thousands and the conversation profile
+ * used to admit them with a `deck/*` glob, which is how a seat silently ended up
+ * orchestrating on claude-sonnet-4-5 at medium. Every seat, workflow node and
+ * rlm child resolves to one of these; the orchestrator picks WHICH one per slot,
+ * but never outside this list. Extend deliberately, in lockstep with the broker
+ * allowlist AND the conversation profile's enabledModels.
  */
 export const DECK_AGENT_CATALOG: readonly string[] = [
-	// anthropic
+	// judgment, adversarial review, orchestration
 	"claude-fable-5",
+	// judgment fallback, worst case only
 	"claude-opus-5",
-	"claude-sonnet-5",
-	"claude-haiku-4-5",
-	// openai (codex family)
-	"gpt-5.6-terra",
-	"gpt-5.6-luna",
+	// implementation
 	"gpt-5.6-sol",
+	// mechanical and watch work
+	"gpt-5.6-luna",
 ];
 
 /**

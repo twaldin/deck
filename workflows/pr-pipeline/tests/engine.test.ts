@@ -108,8 +108,10 @@ describe("Prime-only seat engine invariant", () => {
 	});
 
 	test("assertDeckModel rejects non-deck providers and off-catalog models", () => {
-		expect(() => assertDeckModel("deck/claude-sonnet-5")).not.toThrow();
+		expect(() => assertDeckModel("deck/claude-fable-5")).not.toThrow();
 		expect(() => assertDeckModel("openai/gpt-5.6-sol")).toThrow(/must use the deck provider/);
 		expect(() => assertDeckModel("deck/gpt-4o")).toThrow(/agent-pickable deck catalog/);
+		// Retired from the canonical set: legal at the broker, illegal for a seat.
+		expect(() => assertDeckModel("deck/claude-sonnet-5")).toThrow(/agent-pickable deck catalog/);
 	});
 });
