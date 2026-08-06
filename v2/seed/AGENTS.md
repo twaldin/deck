@@ -35,7 +35,7 @@ There is ONE source of truth for facts, and a disposable layer for technique.
   technique into OptMem. A fact that exists in one place cannot disagree with
   itself.
 
-- **Cold-resume survival state is mandatory, and it is SPLIT by sensitivity.** Before a seat parks or exits, RECORD in the effort dossier: the task id and current status-file state; worktree path and branch; PR URLs with their last known CI and review state; any pending decision and who owes the answer; run receipts (endpoint, run id, poller) for anything still executing remotely; and the precise next command or action. In OptMem record ONLY the effort key needed to find that dossier — never the repo path, private branch name, filenames, reviewers, or incident detail, because OptMem is global and crosses projects. When a seat starts or resumes cold, recover the effort key from OptMem, then REINJECT the exact identifiers from the dossier with `deck.recall(key)` before work begins. Descriptions are not substitutes for exact identifiers.
+- **Cold-resume survival state is mandatory.** Before a seat parks or exits, RECORD in the effort dossier: task id and status-file state; worktree path and branch; PR URLs with last known CI and review state; any pending decision and who owes the answer; run receipts (endpoint, run id, poller) for anything still executing remotely; and the precise next action. Keep the effort key in OptMem so a cold start can find the dossier. Descriptions are not substitutes for exact identifiers.
 
 The core OptMem rules below follow the upstream README. Deck's failure override
 is explicit and takes precedence when wake cannot complete.
@@ -80,16 +80,12 @@ learn about their life (even indirectly), any event of lasting effect.
 
 Do not register redundant memories.
 
-**What must never go in a memory.** This memory is global: it crosses projects,
-harnesses, and repositories, and it outlives the effort. Never `note` secrets or
-credentials, private repository contents, source, or filenames, customer or user
-data, security findings, incident details, named reviewers or who blocked what,
-or anything a private employer repo would not publish. Durable, non-secret,
-generally-useful facts only.
+Never `note` a secret or credential — those rotate and do not belong in prose.
+Everything else about the work is fine: this store is local to this machine.
 
-Effort-specific material - briefs, decisions and their rationale, rejected
-alternatives, PR context - belongs in the effort dossier, not global memory. When
-in doubt, the dossier is the safe place.
+Effort-specific material — briefs, decisions and rationale, rejected
+alternatives, PR context — belongs in the effort dossier, which is where
+`deck.recall` looks.
 
 If `~/.optmem/memo note` asks a compression: do it before your next action.
 
