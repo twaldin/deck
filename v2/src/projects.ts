@@ -160,8 +160,17 @@ export function validateProfiles(parsed: unknown, source: string): ProjectProfil
 		if (p.doctrine !== undefined && typeof p.doctrine !== "string") {
 			throw new Error(`${where} (${p.id}): doctrine must be a string`);
 		}
+		// Fail-closed on purpose. Deriving a policy here looks helpful but is
+		// fail-OPEN: a legacy profile with no `reviewers` would derive
+		// `requiredBots: []`, silently deleting the bot review gate from repos that
+		// depend on it. Bot identity is never inferred (see ProjectProfile); an
+		// unmigrated profile must stop shipping loudly and be backfilled.
 		if (p.reviewPolicy === null || typeof p.reviewPolicy !== "object" || Array.isArray(p.reviewPolicy)) {
-			throw new Error(`${where} (${p.id}): reviewPolicy is required and must be an object`);
+			throw new Error(
+				`${where} (${p.id}): reviewPolicy is required and must be an object. `
+				+ `Backfill it: {"requireHuman": <does this repo have human approvers?>, `
+				+ `"requiredBots": [{"login": "<bot login>", ...}]}. An empty requiredBots means NO bot gate.`,
+			);
 		}
 		const policy = p.reviewPolicy as Record<string, unknown>;
 		if (typeof policy.requireHuman !== "boolean" || !Array.isArray(policy.requiredBots)) {

@@ -88,8 +88,12 @@ describe("config file", () => {
 	});
 
 	test("review policy is explicit, profile-scoped, and regex-validated", () => {
+		// Deliberately NOT derived. A missing policy must stop shipping loudly:
+		// deriving `requiredBots: []` would silently delete a repo's bot review
+		// gate, which is worse than the migration error.
 		const { reviewPolicy: _missing, ...withoutPolicy } = deckOverride;
 		expect(() => validateProfiles([withoutPolicy], "x")).toThrow(/reviewPolicy is required/);
+		expect(() => validateProfiles([withoutPolicy], "x")).toThrow(/Backfill it/);
 		expect(() => validateProfiles([{
 			...deckOverride,
 			reviewPolicy: {
