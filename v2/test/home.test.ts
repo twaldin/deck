@@ -16,7 +16,7 @@ import {
 	bootstrapHome,
 } from "../src/bootstrap";
 import { openQuestions } from "../src/questions-store";
-import { homeSyncMayCopyEntry } from "../src/home-sync";
+import { homeSyncMayCopyEntry, purgeNonPortableProfileEntries } from "../src/home-sync";
 
 const REPO_V2 = path.resolve(import.meta.dir, "..");
 let sandbox: string;
@@ -52,11 +52,24 @@ describe("home sync profile resolution", () => {
 	});
 });
 
-	test("never copies host-local durable links or retired Pi state between hosts", () => {
-		for (const name of [...DURABLE_LINK_NAMES, ...ARCHIVE_ONCE_NAMES]) {
+	test("never copies host-local, retired, or installer-owned entries between hosts", () => {
+		for (const name of [...DURABLE_LINK_NAMES, ...ARCHIVE_ONCE_NAMES, "enter.sh", "START.md", "workflows"]) {
 			expect(homeSyncMayCopyEntry(name)).toBe(false);
 		}
 		expect(homeSyncMayCopyEntry("operator-prompt.txt")).toBe(true);
+	});
+
+	test("purges newly private entries from an existing profile clone", () => {
+		const profile = path.join(sandbox, "profile");
+		fs.mkdirSync(path.join(profile, ".git"), { recursive: true });
+		fs.mkdirSync(path.join(profile, "config"));
+		fs.writeFileSync(path.join(profile, "worktrees.json"), "{}\n");
+		fs.writeFileSync(path.join(profile, "operator-prompt.txt"), "portable\n");
+		purgeNonPortableProfileEntries(profile);
+		expect(fs.existsSync(path.join(profile, "config"))).toBe(false);
+		expect(fs.existsSync(path.join(profile, "worktrees.json"))).toBe(false);
+		expect(fs.existsSync(path.join(profile, ".git"))).toBe(true);
+		expect(fs.readFileSync(path.join(profile, "operator-prompt.txt"), "utf8")).toBe("portable\n");
 	});
 
 describe("home is not a checkout", () => {
@@ -191,6 +204,20 @@ describe("bootstrap", () => {
 		})).toThrow(/must live outside the wipe path/);
 	});
 
+	test("rejects symlinked backing entries inside the owned durable root", () => {
+		const home = path.join(sandbox, "owned-home");
+		const durableRoot = path.join(sandbox, "owned-durable");
+		const foreign = path.join(sandbox, "foreign-backing");
+		bootstrapHome({ repoV2Dir: REPO_V2, home, durableRoot, optMem: false });
+		fs.rmSync(path.join(home, "data"));
+		fs.rmdirSync(path.join(durableRoot, "data"));
+		fs.mkdirSync(foreign);
+		fs.symlinkSync(foreign, path.join(durableRoot, "data"));
+		expect(() => bootstrapHome({ repoV2Dir: REPO_V2, home, durableRoot, optMem: false }))
+			.toThrow(/target is not a directory/);
+		expect(fs.readlinkSync(path.join(durableRoot, "data"))).toBe(foreign);
+	});
+
 	test("rename-wipe and reinstall preserve every host-local durable authority", async () => {
 		const home = path.join(sandbox, ".deck");
 		const durableRoot = path.join(sandbox, ".deck-durable");
@@ -237,6 +264,7 @@ describe("bootstrap", () => {
 		fs.writeFileSync(path.join(home, "logs", "disposable.log"), "reconstructible diagnostics\n");
 		fs.writeFileSync(path.join(home, ".env"), "HOST_ONLY_SECRET=still-here\n", { mode: 0o600 });
 		fs.writeFileSync(path.join(home, ".deck-profile"), "personal\n", { mode: 0o600 });
+		fs.writeFileSync(path.join(home, "config.json"), '{"admission":{"maxWorktreesGlobal":7}}\n', { mode: 0o600 });
 		fs.writeFileSync(
 			memo,
 			'#!/bin/sh\n[ "${1:-}" = wake ] || exit 2\nprintf "memory awake: durable fact\\n"\n',
@@ -389,6 +417,7 @@ describe("bootstrap", () => {
 		expect(fs.existsSync(path.join(allocatedPath!, ".git"))).toBe(true);
 		expect(fs.readFileSync(path.join(home, ".env"), "utf8")).toContain("HOST_ONLY_SECRET=still-here");
 		expect(fs.readFileSync(path.join(home, "config", "projects.json"), "utf8")).toContain("local-only");
+		expect(fs.readFileSync(path.join(home, "config.json"), "utf8")).toContain('"maxWorktreesGlobal":7');
 		expect(fs.existsSync(path.join(home, ".prime", "sessions", "disposable.jsonl"))).toBe(false);
 		expect(fs.existsSync(path.join(home, "logs", "disposable.log"))).toBe(false);
 	}, 30_000);

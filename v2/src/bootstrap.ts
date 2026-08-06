@@ -53,7 +53,7 @@ export const DURABLE_DIRECTORY_NAMES = [
 	"wt",
 ] as const;
 
-export const DURABLE_FILE_NAMES = [".deck-profile", ".env", "worktrees.json"] as const;
+export const DURABLE_FILE_NAMES = [".deck-profile", ".env", "config.json", "worktrees.json"] as const;
 export const ARCHIVE_ONCE_NAMES = [".pi"] as const;
 export const DURABLE_LINK_NAMES: readonly string[] = [
 	...DURABLE_DIRECTORY_NAMES,
@@ -125,13 +125,10 @@ function movePath(source: string, target: string): void {
 		fs.renameSync(source, target);
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "EXDEV") throw error;
-		fs.cpSync(source, target, {
-			recursive: true,
-			force: false,
-			errorOnExist: true,
-			preserveTimestamps: true,
-		});
-		fs.rmSync(source, { recursive: true, force: true });
+		throw new Error(
+			`refusing non-atomic cross-device adoption from ${source} to ${target}; ` +
+				"place DECK_DURABLE_HOME on the same filesystem or migrate while every writer is stopped",
+		);
 	}
 }
 
@@ -246,7 +243,7 @@ function adoptDirectory(
 		if (actual !== durable) {
 			throw new Error(`refusing unowned durable Deck link ${visible} -> ${fs.readlinkSync(visible)}`);
 		}
-		if (!fs.statSync(durable).isDirectory()) {
+		if (statOrUndefined(durable)?.isDirectory() !== true) {
 			throw new Error(`durable Deck directory target is not a directory: ${durable}`);
 		}
 		fs.chmodSync(durable, 0o700);
@@ -262,7 +259,7 @@ function adoptDirectory(
 		fs.mkdirSync(durable, { recursive: true, mode: 0o700 });
 		created.push(durable);
 	}
-	if (!fs.statSync(durable).isDirectory()) {
+	if (statOrUndefined(durable)?.isDirectory() !== true) {
 		throw new Error(`durable Deck directory target is not a directory: ${durable}`);
 	}
 	fs.chmodSync(durable, 0o700);
@@ -287,7 +284,7 @@ function adoptFile(
 		if (actual !== durable) {
 			throw new Error(`refusing unowned durable Deck link ${visible} -> ${fs.readlinkSync(visible)}`);
 		}
-		if (!fs.statSync(durable).isFile()) {
+		if (statOrUndefined(durable)?.isFile() !== true) {
 			throw new Error(`durable Deck file target is not a file: ${durable}`);
 		}
 		fs.chmodSync(durable, 0o600);
@@ -303,7 +300,7 @@ function adoptFile(
 		fs.writeFileSync(durable, initialBody, { mode: 0o600, flag: "wx" });
 		created.push(durable);
 	}
-	if (!fs.statSync(durable).isFile()) {
+	if (statOrUndefined(durable)?.isFile() !== true) {
 		throw new Error(`durable Deck file target is not a file: ${durable}`);
 	}
 	fs.chmodSync(durable, 0o600);
@@ -358,12 +355,13 @@ function configureDurableHome(
 	writeDurableManifest(root, home);
 	for (const name of DURABLE_DIRECTORY_NAMES) {
 		adoptDirectory(home, root, name, created, linked, notes);
+		if (name === "broker") hardenCredentialStore(path.join(root, "broker"));
 	}
 	archiveRetiredPi(home, root, notes);
 	adoptFile(home, root, ".deck-profile", "", created, linked, notes);
 	adoptFile(home, root, ".env", "", created, linked, notes);
+	adoptFile(home, root, "config.json", "{}\n", created, linked, notes);
 	adoptFile(home, root, "worktrees.json", '{\n\t"v": 1,\n\t"entries": []\n}\n', created, linked, notes);
-	hardenCredentialStore(path.join(root, "broker"));
 	return root;
 }
 
