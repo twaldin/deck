@@ -246,6 +246,19 @@ then
 fi
 
 
+# Retire extensions this installer used to own. Refusing here instead would
+# strand every existing home on the previous release: the profile is
+# installer-managed, so removing something we installed is our job, not the
+# captain's. Anything we never owned is still a hard stop below.
+RETIRED_EXTENSIONS=(deck-ship)
+for retired in "${RETIRED_EXTENSIONS[@]}"; do
+  entry="$EXTENSIONS_DIR/$retired"
+  if [[ -e "$entry" || -L "$entry" ]]; then
+    rm -rf "$entry"
+    printf 'retired conversation-profile extension %s (its capability is now a deck Python call)\n' "$retired"
+  fi
+done
+
 # Reject every unowned auto-discovery entry before creating profile state. Prime
 # loads top-level *.ts files and */index.ts automatically.
 if [[ -d "$EXTENSIONS_DIR" ]]; then
