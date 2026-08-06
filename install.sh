@@ -186,10 +186,10 @@ PY
     fail "verified uv archive reported ${staged_version:-no version}, expected uv $UV_VERSION"
   fi
 
-  ln "$UV_STAGE/uvx" "$BIN_TARGET/uvx"
   UV_PUBLISHED_UVX=true
-  ln "$UV_STAGE/uv" "$BIN_TARGET/uv"
+  ln "$UV_STAGE/uvx" "$BIN_TARGET/uvx"
   UV_PUBLISHED_UV=true
+  ln "$UV_STAGE/uv" "$BIN_TARGET/uv"
   UV_PUBLISHED_UV=false
   UV_PUBLISHED_UVX=false
   rm -rf "$UV_STAGE"
@@ -232,7 +232,7 @@ printf 'using %s at %s\n' "$UV_DESCRIPTION" "$UV_BIN"
 export PATH="$BIN_TARGET:$PATH"
 
 printf 'verifying isolated IPython kernel execution...\n'
-if ! "$UV_BIN" run --isolated --no-project --python 3.11 --with ipykernel python - <<'PY'
+if ! "$UV_BIN" run --isolated --no-project --python 3.11 --with ipykernel python -I - <<'PY'
 import sys
 
 from jupyter_client import KernelManager
@@ -330,7 +330,8 @@ import shlex
 import tempfile
 
 path = Path(os.environ["DECK_BASHRC"])
-lines = path.read_text().splitlines() if path.exists() else []
+destination = path.resolve() if path.is_symlink() else path
+lines = destination.read_text().splitlines() if destination.exists() else []
 kept = []
 index = 0
 while index < len(lines):
@@ -350,11 +351,11 @@ target = shlex.quote(os.environ["DECK_BIN_TARGET"] + ":")
 prefix = "\n".join(kept).rstrip()
 block = f'# deck local bin\nexport PATH={target}"$PATH"\n# /deck local bin\n'
 content = f"{prefix}\n\n{block}" if prefix else block
-mode = path.stat().st_mode & 0o777 if path.exists() else 0o644
+mode = destination.stat().st_mode & 0o777 if destination.exists() else 0o644
 with tempfile.NamedTemporaryFile(
     mode="w",
-    dir=path.parent,
-    prefix=f".{path.name}.deck-",
+    dir=destination.parent,
+    prefix=f".{destination.name}.deck-",
     delete=False,
 ) as staged:
     staged.write(content)
@@ -363,7 +364,7 @@ with tempfile.NamedTemporaryFile(
 staged_path = Path(staged.name)
 try:
     staged_path.chmod(mode)
-    os.replace(staged_path, path)
+    os.replace(staged_path, destination)
 finally:
     staged_path.unlink(missing_ok=True)
 PY

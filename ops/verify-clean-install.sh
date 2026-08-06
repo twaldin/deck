@@ -111,7 +111,7 @@ env HOME="$SANDBOX_HOME" \
 
 DECK_HOME="$SANDBOX_HOME/.deck"
 PI_HOME="$DECK_HOME/.pi"
-for extension in deck-questions deck-ship deck-recall deck-subagents; do
+for extension in deck-questions deck-ship deck-recall; do
   [ -f "$PI_HOME/extensions/$extension/index.ts" ] ||
     fail "fresh install is missing $extension/index.ts"
 done
@@ -137,7 +137,7 @@ ENTER_PI="$(env HOME="$SANDBOX_HOME" PATH="$INSTALL_PATH" \
 
 KERNEL_PROBE="$SANDBOX_HOME/kernel-tool-runtime.txt"
 HOME="$SANDBOX_HOME" "$DECK_BIN/uv" \
-  run --isolated --no-project --python 3.11 --with ipykernel python - "$KERNEL_PROBE" <<'PY' ||
+  run --isolated --no-project --python 3.11 --with ipykernel python -I - "$KERNEL_PROBE" <<'PY' ||
   fail "installed uv could not bootstrap and execute the seat's IPython tool runtime"
 from pathlib import Path
 import sys
@@ -247,7 +247,7 @@ case "$RPC_OUTPUT" in
 esac
 TOOLS_LINE="$(printf '%s\n' "$RPC_OUTPUT" | sed -n 's/.*\(DECK_TOOLS:[^"]*\).*/\1/p' | sed -n '1p')"
 [ -n "$TOOLS_LINE" ] || fail "fresh Pi session did not report loaded tools"
-for tool in ask_captain list_questions answer_question ship adopt status recall_effort subagent; do
+for tool in ask_captain list_questions answer_question ship adopt status recall_effort; do
   case ",${TOOLS_LINE#DECK_TOOLS:}," in
     *",$tool,"*) ;;
     *) fail "fresh Pi session did not load tool $tool" ;;
@@ -265,7 +265,6 @@ PERSONAL_SCAN_FILES=(
   install.sh
   update.sh
   scripts/update-home.sh
-  subagents/install.sh
   v2/README.md
   v2/seed/AGENTS.md
   v2/seed/README.md
