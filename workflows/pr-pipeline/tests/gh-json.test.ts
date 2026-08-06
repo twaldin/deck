@@ -33,6 +33,33 @@ describe("a repo without readable rulesets still watches", () => {
 		expect(calls.some((c) => c.includes("/rules/branches/"))).toBe(true);
 	});
 
+	// "No required contexts" is the answer that lets a merge proceed on observed
+	// checks alone, so only a PLAN limitation may produce it. An auth/scope 403 or
+	// a wrong-repo 404 must stay fatal or the gate silently widens.
+	test("a generic 403 stays fatal instead of widening the gate", async () => {
+		const exec: ExecFn = async (argv) => {
+			if (argv.join(" ").includes("/rules/branches/")) {
+				return { code: 1, stdout: "", stderr: "gh: Resource not accessible by integration (HTTP 403)" };
+			}
+			return { code: 0, stdout: "[]", stderr: "" };
+		};
+		await expect(
+			resolveRequiredContexts({ gh: "gh", repo: "acme/widgets", exec }, "main"),
+		).rejects.toThrow(/Resource not accessible/);
+	});
+
+	test("a 404 stays fatal too", async () => {
+		const exec: ExecFn = async (argv) => {
+			if (argv.join(" ").includes("/rules/branches/")) {
+				return { code: 1, stdout: "", stderr: "gh: Not Found (HTTP 404)" };
+			}
+			return { code: 0, stdout: "[]", stderr: "" };
+		};
+		await expect(
+			resolveRequiredContexts({ gh: "gh", repo: "acme/widgets", exec }, "main"),
+		).rejects.toThrow(/Not Found/);
+	});
+
 	test("a genuine ruleset read failure is still an error", async () => {
 		const exec: ExecFn = async (argv) => {
 			if (argv.join(" ").includes("/rules/branches/")) {

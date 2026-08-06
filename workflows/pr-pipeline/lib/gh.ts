@@ -539,19 +539,23 @@ export async function resolveRequiredContexts(
 	let branch = startingBranch;
 	while (branch !== "" && !visited.has(branch)) {
 		visited.add(branch);
-		// The rulesets API is a paid feature on private repos: a private repo on a
-		// free plan answers 403 "Upgrade to GitHub Pro". That is "this repo cannot
-		// have rulesets", not "the read failed" — treating it as an error killed
-		// the watch poll outright. A repo with no readable rulesets simply
-		// declares no required contexts, and the gate falls back to the checks
-		// rollup and the profile's own review policy.
+		// The rulesets API is a paid feature: a private repo on a free plan answers
+		// 403 "Upgrade to GitHub Pro ... to enable this feature". That means the
+		// repo CANNOT have rulesets, not that the read failed, and treating it as
+		// an error killed the watch poll outright.
+		//
+		// Match that response and nothing else. A bare 403 or 404 is an auth,
+		// scope, or wrong-repo problem, and "no required contexts" is exactly the
+		// answer that lets a merge proceed on observed checks alone — so every
+		// other failure stays fatal rather than silently widening the gate.
 		const rules = await ctx.exec([
 			ctx.gh,
 			"api",
 			`repos/${ctx.repo}/rules/branches/${encodeURIComponent(branch)}`,
 		]);
 		if (rules.code !== 0) {
-			if (!/Upgrade to GitHub Pro|HTTP 40[34]/.test(rules.stderr)) {
+			const planLimited = /Upgrade to GitHub Pro[\s\S]*enable this feature/i.test(rules.stderr);
+			if (!planLimited) {
 				throw new Error(`command failed (${rules.code}): ${ctx.gh} api rules/branches\n${rules.stderr.slice(0, 2000)}`);
 			}
 			return { requiredContexts: [], rulesBranch: branch };
