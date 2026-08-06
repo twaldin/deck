@@ -205,7 +205,7 @@ describe("model policy (deck catalog + family opposition)", () => {
 	});
 
 	test("same-family reviewer with opposition ON is a violation", () => {
-		const policy = { ...defaultModelPolicy(), implementer: "deck/claude-sonnet-5", reviewer: "deck/claude-opus-5" };
+		const policy = { ...defaultModelPolicy(), implementer: "deck/claude-fable-5", reviewer: "deck/claude-opus-5" };
 		const violations = validateModelPolicy(policy);
 		expect(violations.some((v) => v.includes("same family"))).toBe(true);
 	});
