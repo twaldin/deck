@@ -246,6 +246,7 @@ test("gate has a hard no-approval rule and verifies state before queueing", () =
   expect(source).toContain("<Approval");
   expect(source).toContain("review-approval-gate-");
   expect(source).not.toMatch(/"pr",\s*"merge"/);
+  expect(source).not.toContain("--approve");
   expect(source).toContain("mergeStateStatus");
   expect(assessCi([])).toEqual({ ciGreen: false, ciPending: true });
   expect(assessCi([{ conclusion: "SUCCESS" }])).toEqual({ ciGreen: true, ciPending: false });
@@ -282,7 +283,7 @@ test("captain decision is required before exactly one review command", () => {
   expect(shouldSubmitReview(undefined)).toBe(false);
   expect(shouldSubmitReview({ approved: false })).toBe(false);
   expect(shouldSubmitReview({ approved: true })).toBe(true);
-  expect(reviewCommand(7, "owner/repo", true)).toEqual(["pr", "review", "7", "--repo", "owner/repo", "--approve"]);
+  expect(reviewCommand(7, "owner/repo", true)).toEqual(["pr", "comment", "7", "--repo", "owner/repo"]);
   expect(reviewCommand(7, "owner/repo", false)).toEqual(["pr", "review", "7", "--repo", "owner/repo", "--request-changes"]);
 });
 
