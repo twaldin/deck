@@ -2,7 +2,7 @@
  * Deck questions has exactly two workflow answer lanes:
  * 1. `smithers-approval` (stamps and other Approval nodes) submits the
  *    authenticated Gateway `submitApproval` RPC, then folds the queue closed.
- * 2. `store` appends the captain's plain answer only; the owning run hydrates
+ * 2. `store` appends the operator's plain answer only; the owning run hydrates
  *    that durable answer into its next decision-capable seat.
  *
  * Both lanes are declared by the workflow question record. Presentation text
@@ -113,7 +113,7 @@ export function registerDeckQuestions(
 	pi.registerTool({
 		name: "list_questions",
 		label: "List Questions",
-		description: "List queued captain questions without changing the append-only queue.",
+		description: "List queued operator questions without changing the append-only queue.",
 		parameters: Type.Object({
 			include_resolved: Type.Optional(
 				Type.Boolean({ description: "Include answered and dismissed queue history; default false" }),
@@ -139,7 +139,7 @@ export function registerDeckQuestions(
 			"Answer an open question. Workflow approvals accept Stamp/Approve, Deny gate, or Hold and route through Smithers; plain answers append to the store.",
 		parameters: Type.Object({
 			id: Type.String({ description: "Queued question id", minLength: 1, maxLength: 512 }),
-			answer: Type.String({ description: "Captain's answer or workflow action", minLength: 1, maxLength: 7000 }),
+			answer: Type.String({ description: "Operator answer or workflow action", minLength: 1, maxLength: 7000 }),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const id = String(params.id).trim();

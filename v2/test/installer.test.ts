@@ -66,6 +66,9 @@ describe("installer layout", () => {
 			expect(fs.existsSync(path.join(target, "agent", "extensions", `${name}.ts`))).toBe(false);
 		}
 		expect(fs.existsSync(extensionDir("deck-v2"))).toBe(false);
+		expect(fs.realpathSync(path.join(target, "agent", "extensions", "node_modules", "typebox"))).toBe(
+			fs.realpathSync(path.join(REPO_V2, "node_modules", "typebox")),
+		);
 	});
 
 	test("entrypoint imports resolve through the shared v2 source tree", () => {
@@ -134,6 +137,22 @@ describe("installer layout", () => {
 		expect(fs.lstatSync(shim).isSymbolicLink()).toBe(true);
 		expect(fs.realpathSync(shim)).toBe(
 			fs.realpathSync(path.join(REPO_V2, "..", "cli", "bin", "deck")),
+		);
+	});
+
+	test("installs pinned pi without relying on a global Node package", () => {
+		install();
+		const shim = path.join(target, "bin", "pi");
+		const expectedVersion = JSON.parse(
+			fs.readFileSync(
+				path.join(REPO_V2, "node_modules", "@earendil-works", "pi-coding-agent", "package.json"),
+				"utf8",
+			),
+		).version;
+		expect(fs.readFileSync(shim, "utf8")).toContain("deck pi shim");
+		expect(execFileSync(shim, ["--version"], { encoding: "utf8" }).trim()).toBe(expectedVersion);
+		expect(fs.realpathSync(path.join(target, "agent", "extensions", "deck-subagents", "node_modules", "typebox"))).toBe(
+			fs.realpathSync(path.join(REPO_V2, "node_modules", "typebox")),
 		);
 	});
 

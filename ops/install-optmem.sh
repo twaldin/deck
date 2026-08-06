@@ -1,17 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-readonly UPSTREAM_INSTALLER="https://raw.githubusercontent.com/VictorTaelin/OptMem/main/install.sh"
+readonly OPTMEM_REVISION="1fb164cf39028047781f72ac3bb1e5a691c1dcb0"
+readonly UPSTREAM_INSTALLER="https://raw.githubusercontent.com/VictorTaelin/OptMem/${OPTMEM_REVISION}/install.sh"
+readonly MUTABLE_MEMO_URL="https://raw.githubusercontent.com/VictorTaelin/OptMem/main/memo"
+readonly PINNED_MEMO_URL="https://raw.githubusercontent.com/VictorTaelin/OptMem/${OPTMEM_REVISION}/memo"
 readonly MEMO="${HOME}/.optmem/memo"
 
 command -v curl >/dev/null 2>&1 || {
 	printf 'ERROR: curl is required to install OptMem.\n' >&2
 	exit 1
 }
-
-# This is the upstream command from the OptMem README. Re-running it updates the
-# executable without replacing the append-only memory log.
-curl -fsSL "${UPSTREAM_INSTALLER}" | sh
+# Run the pinned upstream installer after replacing its one mutable payload URL
+# with the same pinned revision. Re-running updates the executable without
+# replacing the append-only memory log.
+installer="$(curl -fsSL "${UPSTREAM_INSTALLER}")"
+installer="${installer/"${MUTABLE_MEMO_URL}"/"${PINNED_MEMO_URL}"}"
+printf '%s\n' "${installer}" | sh
 
 if [[ ! -x "${MEMO}" ]]; then
 	printf 'ERROR: the upstream installer did not create executable %s.\n' "${MEMO}" >&2

@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { renderWorkflow } from "smithers-orchestrator/testing";
 import { askIfAbsent, openQuestions } from "../../../v2/src/questions-store.ts";
@@ -127,7 +127,12 @@ test("an unhealthy workspace launches one poller from the live Smithers workspac
   expect(launches[0]?.cwd).toBe(workspace);
   expect(launches[0]?.args[1]).toBe(reviewGateLauncher.workflow);
   expect(launches[0]?.args).toContain("--no-post-failure");
-  expect(LIVE_SMITHERS_WORKSPACE).toBe("/Users/twaldin/.deck/state/smithers");
+});
+test("the production launcher uses the configured Deck home instead of opening Smithers through a database shortcut", () => {
+  expect(LIVE_SMITHERS_WORKSPACE).toBe(
+    process.env.DECK_SMITHERS_WORKSPACE ??
+      join(process.env.DECK_V2_HOME ?? join(homedir(), ".deck"), "state", "smithers"),
+  );
 });
 
 test("the production launcher uses public Smithers commands instead of opening its database", () => {

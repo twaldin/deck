@@ -179,6 +179,27 @@ describe("deck subagent primitive", () => {
 				"worker",
 				"worker-gpt",
 			]);
+			const installedChild = new FakeChild();
+			let installedArgs: readonly string[] = [];
+			const runInstalledWorker = installedSpawn.createSubagentSpawner({
+				loadModels: async () => ["deck/gpt-5.6-luna"],
+				spawnChild: (_command: string, args: readonly string[]) => {
+					installedArgs = args;
+					queueMicrotask(() => {
+						installedChild.exitCode = 1;
+						installedChild.emit("close", 1, null);
+					});
+					return installedChild;
+				},
+			});
+			await runInstalledWorker({
+				agent: "worker",
+				task: "Resolve installed provider",
+				cwd: files.directory,
+				model: "deck/gpt-5.6-luna",
+			});
+			const firstExtension = installedArgs.indexOf("--extension");
+			expect(await realpath(installedArgs[firstExtension + 1]!)).toBe(await realpath(providerPath));
 			const loaded = Bun.spawn(["pi", "--no-extensions", "--extension", extensionPath, "--help"], {
 				env: { ...process.env, PI_CODING_AGENT_DIR: installTarget },
 				stdout: "pipe",

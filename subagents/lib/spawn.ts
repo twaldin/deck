@@ -283,8 +283,31 @@ export function createSubagentSpawner(dependencies: SubagentSpawnerDependencies 
 				const installedExtensionPath = fileURLToPath(new URL("../index.ts", import.meta.url));
 				const extensionPath = dependencies.extensionPath ?? (existsSync(sourceExtensionPath) ? sourceExtensionPath : installedExtensionPath);
 				const sourceProviderExtensionPath = fileURLToPath(new URL("../../broker/pi/deck-provider.ts", import.meta.url));
-				const installedProviderExtensionPath = path.join(process.env.PI_CODING_AGENT_DIR ?? path.join(os.homedir(), ".pi", "agent"), "extensions", "deck-provider.ts");
-				const providerExtensionPath = dependencies.providerExtensionPath ?? (existsSync(sourceProviderExtensionPath) ? sourceProviderExtensionPath : installedProviderExtensionPath);
+				const adjacentProviderExtensionPath = fileURLToPath(new URL("../../deck-provider.ts", import.meta.url));
+				const globalProviderExtensionPath = path.join(
+					process.env.PI_CODING_AGENT_DIR ?? path.join(os.homedir(), ".pi", "agent"),
+					"extensions",
+					"deck-provider.ts",
+				);
+				const detectedProviderExtensionPath = [
+					sourceProviderExtensionPath,
+					adjacentProviderExtensionPath,
+					globalProviderExtensionPath,
+				].find((candidate) => existsSync(candidate));
+				const providerExtensionPath =
+					dependencies.providerExtensionPath ?? detectedProviderExtensionPath;
+				if (providerExtensionPath === undefined) {
+					return resultForFailure(
+						request,
+						cwd,
+						model,
+						actualStartedAtMs,
+						now,
+						"spawn",
+						"Cannot find the Deck provider extension; rerun subagents/install.sh",
+					);
+				}
+
 				const args = [
 					"-p",
 					"--mode", "json",

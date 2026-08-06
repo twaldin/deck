@@ -17,7 +17,7 @@ cd ~/dev/deck/workflows/.smithers
   --format json
 ```
 
-Store the returned `token` in the Gateway process's secret environment as `SMITHERS_GATEWAY_TOKEN`, and retain the returned non-secret `tokenId` in the rotation record. Then restart the Gateway. Never put the bearer in this repository, a launchd plist, shell history, a URL, or a tailnet ACL.
+Store the returned `token` in the Gateway process's secret environment as `SMITHERS_GATEWAY_TOKEN`, and retain the returned non-secret `tokenId` in the rotation record. Then restart the Gateway. Never put the bearer in this repository, a launchd plist, shell history, a URL, or a private-network ACL.
 
 Clients must send `Authorization: Bearer <token>` for HTTP. A `SmithersGatewayClient` must receive the same value as its `token` option so it includes the token in the WebSocket `connect` frame.
 
@@ -48,7 +48,7 @@ The repository launchd template does not provision secrets. Do not load its Keep
 
 ## Approve from a phone
 
-Tailnet reachability is transport, not authentication. The repository test is the first gate; run it against the live Smithers workspace from the machine that will serve the Gateway:
+Private-network reachability is transport, not authentication. The repository test is the first gate; run it against the live Smithers workspace from the machine that will serve the Gateway:
 
 ```sh
 cd ~/dev/deck
@@ -67,10 +67,10 @@ printf 'Authorization: Bearer %s\n' "$SMITHERS_GATEWAY_TOKEN" |
   curl -fsS --header @- "$GATEWAY_URL/v1/api/runs"
 ```
 
-Both checks must pass. Immediately before any tailnet exposure, repeat them from the intended client against the exact tailnet-facing URL; do not treat the ephemeral test or loopback check alone as permission to expose the listener.
+Both checks must pass. Immediately before any private-network exposure, repeat them from the intended client against the exact externally reachable URL; do not treat the ephemeral test or loopback check alone as permission to expose the listener.
 
 Smithers 0.30.0 serves `GET /metrics` and `GET /workflows` before its auth router. Deck therefore publishes a thin authenticated HTTP proxy and keeps the native Gateway on an OS-assigned loopback-only internal port. The proxy accepts only the standard bearer scheme on every HTTP route except its sanitized public `/health`.
 
 Smithers upgrades a WebSocket before authenticating its mandatory `connect` frame. Rejecting the HTTP upgrade would break its browser client because the browser WebSocket API cannot set an `Authorization` header, so Deck accepts the upgrade but gates the protocol: before Smithers confirms `connect`, the proxy forwards only one `connect` request, locally validates its token, directly rejects every read/mutation, allowlists only a safe challenge and the matching connect response from upstream, and caps connections, frames, queues, and authentication time. A missing or wrong-token client receives only `connect.challenge`, then the proxy's deterministic `UNAUTHORIZED` and policy close; no run read or mutation is dispatched. Direct browser navigation to the embedded UI still cannot attach the required HTTP bearer, so a phone UI needs a separate authentication bootstrap.
 
-The upgrade-then-reject window means approve-from-phone tailnet exposure stays **captain-attended** even after the live-home test passes. An unattended or broadly shared tailnet exposure is not allowed; tailnet configuration and a browser-token bootstrap are separate follow-up work.
+The upgrade-then-reject window means approve-from-phone exposure stays **operator-attended** even after the live-home test passes. An unattended or broadly shared network exposure is not allowed; network configuration and a browser-token bootstrap are separate follow-up work.

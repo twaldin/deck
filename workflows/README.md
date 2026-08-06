@@ -15,15 +15,14 @@ both one-PR efforts and ordered stacks (creation or adoption); do not create a
 sibling stack workflow. Reach for a new workflow only when the shape genuinely
 differs.
 
-## Engine policy: pi only
+## Engine policy: reviewed allowlist
 
-**Pi is the only Smithers engine Deck uses.** Every agent seat in this
-workspace is a `PiAgent` with `provider: "deck"`, so all model traffic goes
-through the Deck broker: broker-held credentials, `deck/*` model ids from the
-broker allowlist, and quota-aware routing. The direct `codex` and
-`claude-code` CLI engines are removed, not merely unused — they authenticate as
-a single mono-account and inherit whatever ambient local CLI config happens to
-exist on the host, which is neither attributable nor quota-aware.
+Smithers seats use the reviewed `pi` and `prime` engines only, always through
+the `deck` provider and broker catalog. Project profiles select `engine:
+"pi" | "prime"` and omission defaults to `pi`; shipped profiles remain on Pi
+until the Prime canary sequence is explicitly approved. Direct `codex`,
+`claude-code`, and other vendor CLI engines remain banned because they bypass
+broker attribution and quota-aware routing.
 
 - Pack seats: `.smithers/agents.ts` (`providers` + `agents`). Deck-owned, no
   longer regenerated content. `smithers init` may recreate per-engine templates
@@ -34,14 +33,13 @@ exist on the host, which is neither attributable nor quota-aware.
 - Model catalog and the `deck/` provider guard: `pr-pipeline/lib/models.ts`
   (`DECK_PROVIDER`, `DECK_AGENT_CATALOG`, `assertDeckModel`). Seats validate at
   import time, so an off-catalog or non-`deck/` model fails before a run starts.
-- Enforcement: `pr-pipeline/tests/engine.test.ts` asserts every seat is a
-  `PiAgent` on `deck/`, carries no raw `apiKey`, and that no workflow source in
-  this workspace constructs `CodexAgent` / `ClaudeCodeAgent` / `OpenCodeAgent` /
-  `AntigravityAgent`. Run it with `cd pr-pipeline && bun test`.
+- Enforcement: `pr-pipeline/tests/engine.test.ts` validates every profile
+  engine against the allowlist, validates Pi/Prime seats and Deck models, and
+  rejects direct `CodexAgent` / `ClaudeCodeAgent` / `OpenCodeAgent` /
+  `AntigravityAgent` construction. Run it with `cd pr-pipeline && bun test`.
 
-Family diversity is preserved *within* pi: a seat's fallback list crosses model
-families (anthropic <-> openai) rather than crossing engines, which is what
-adversarial review actually needs.
+Family diversity remains a model-policy concern: adversarial seats select the
+opposite model family while keeping the profile-selected reviewed engine.
 
 - `spike/hello-deck.tsx` — the durability spike (kill -9 drill accepted; see below).
 - `pr-pipeline/` — the executable lindy PR-and-stack pipeline (enforced SOP

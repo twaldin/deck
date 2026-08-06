@@ -117,7 +117,7 @@ export function buildPipelineInput(
 					: { kind: "named", name: request.killSwitch },
 			breakSignal:
 				request.breakSignal ??
-				"captain report + CI on the base branch after landing",
+				"operator report + CI on the base branch after landing",
 			...(request.blastRadius === undefined
 				? {}
 				: { blastRadius: request.blastRadius }),
@@ -139,8 +139,8 @@ export function buildPipelineInput(
 	}
 	// Done is evidence-gated. For a yolo repo with no deploy step, landing on
 	// the base branch IS the deploy, so a git-log probe is honest evidence.
-	// A stamp profile (lindy) has REAL deploys: no weak default there — the
-	// pipeline's preflight fails closed until explicit evidence is configured.
+	// An explicit-approval profile may have real deploys: no weak default there.
+	// Preflight fails closed until explicit evidence is configured.
 	if (request.dryRun !== true && profile.yolo) {
 		const commands: Record<string, string> = { test: profile.testCommand ?? "bun test" };
 		if (request.deployEvidence !== undefined) {
@@ -173,9 +173,9 @@ export type ShipResult = {
 };
 
 /**
- * Start the pipeline run, detached. The run is durable smithers state: watch it
- * with `smithers ps|why|inspect <runId>` from the pipeline directory; a stamp
- * park resumes with `smithers approve` + `up --resume true`.
+ * Start the pipeline run, detached. The run is durable Smithers state: inspect
+ * it with `smithers ps|why|inspect <runId>` from the live workspace; an
+ * explicit approval park resumes with `smithers approve` + `up --resume true`.
  *
  * Async: child startup errors are emitted asynchronously, so a sync return
  * would report "started" for a process that never launched.

@@ -116,6 +116,25 @@ export function bootstrapHome(options: BootstrapOptions = { repoV2Dir: "" }): Bo
 	const profilesSeeded = seedProfilesFile(home);
 	if (profilesSeeded !== null) created.push(profilesSeeded);
 
+	const reviewersPath = path.join(home, "config", "reviewers.json");
+	if (!fs.existsSync(reviewersPath)) {
+		fs.writeFileSync(
+			reviewersPath,
+			`${JSON.stringify(
+				{
+					selfLogins: [],
+					excludedApprovers: [],
+					reviewerDenylist: [],
+					reviewers: [],
+				},
+				null,
+				2,
+			)}\n`,
+			{ mode: 0o600, flag: "wx" },
+		);
+		created.push(reviewersPath);
+	}
+
 	return { home, created, linked, notes };
 }
 

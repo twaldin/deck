@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Deck-home bootstrap. Run on the durable operator host.
-#   curl -fsSL https://raw.githubusercontent.com/OWNER/deck/main/install.sh | bash
-# or from a clone: ./install.sh
-# Never copies secrets. Broker login is interactive and separate.
+# Deck-home bootstrap. Run once from a clone; use update.sh for later updates.
+# Never copies secrets, starts resident services, or starts the review gate.
 
 if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
   REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -25,11 +23,16 @@ else
   exec bash "$REPO/install.sh"
 fi
 
-command -v bun >/dev/null || { echo "error: bun is required (https://bun.sh)" >&2; exit 1; }
+for prerequisite in bun curl git python3; do
+  command -v "$prerequisite" >/dev/null || {
+    echo "error: $prerequisite is required" >&2
+    exit 1
+  }
+done
 
-bun install --cwd "$REPO/v2"
-bun install --cwd "$REPO/broker"
-bun install --cwd "$REPO/cli"
+bun install --frozen-lockfile --cwd "$REPO/v2"
+bun install --frozen-lockfile --cwd "$REPO/broker"
+bun install --frozen-lockfile --cwd "$REPO/cli"
 
 bash "$REPO/v2/install.sh"
 bun "$REPO/v2/bin/deck-v2" bootstrap
@@ -42,14 +45,11 @@ else
   echo "Home sync is disabled until DECK_HOME_PROFILE is set to full or personal."
 fi
 
-# glass entry + inbox
+# Plain-session entrypoint and inbox.
 mkdir -p "$HOME/.deck/data/inbox"
 ENTER="$HOME/.deck/enter.sh"
 cat > "$ENTER" <<'EOF'
 #!/usr/bin/env bash
-export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
-[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
-nvm use 24 >/dev/null 2>&1 || true
 export PATH="$HOME/.local/bin:$HOME/.bun/bin:$PATH"
 # Home secrets (LINEAR_API_KEY, …). chmod 600. Never commit.
 if [ -f "$HOME/.deck/.env" ]; then
@@ -63,9 +63,9 @@ echo "deck home=$(pwd) pi=$(command -v pi)"
 EOF
 chmod +x "$ENTER"
 
-# PATH: local bin after nvm in interactive shells
-if ! grep -q 'deck local bin after nvm' "$HOME/.bashrc" 2>/dev/null; then
-  printf '\n# deck local bin after nvm\nexport PATH="$HOME/.local/bin:$PATH"\n' >> "$HOME/.bashrc"
+# Put Deck's generated command shims on PATH in interactive Bash shells.
+if ! grep -q 'deck local bin' "$HOME/.bashrc" 2>/dev/null; then
+  printf '\n# deck local bin\nexport PATH="$HOME/.local/bin:$PATH"\n' >> "$HOME/.bashrc"
 fi
 
 chmod +x "$REPO/update.sh" 2>/dev/null || true
@@ -75,16 +75,20 @@ cat <<EOF
 Done. Code: $REPO
 Home: $HOME/.deck
 
-Next (interactive, personal accounts only):
+Start a standalone session:
 
-  1. Broker (user systemd or):  bun --cwd $REPO/broker src/main.ts
-     login:  bun $REPO/broker/src/cli.ts login anthropic
-  2. herdr server (user unit or): herdr server
-  3. Glass:  herdr --remote <user>@<host>
-     then:   source ~/.deck/enter.sh && pi
+  source $HOME/.deck/enter.sh
+  pi
 
-Keep updated:  $REPO/update.sh
-Laptop agents: cat $REPO/docs/LAPTOP-AGENTS.md
+In pi, run /login and configure your own provider subscription or API key,
+then use /model to select it. The Deck broker is optional for the plain session;
+configure it only when you want Deck's broker-backed models:
+
+  bun $REPO/broker/src/cli.ts login anthropic
+  bun --cwd $REPO/broker src/main.ts
+
+No resident service or review-gate poller was started. See $REPO/ops/README.md
+for optional services. Keep updated with $REPO/update.sh.
 
 Never put work credentials, production tokens, or restricted checkouts on this host.
 EOF

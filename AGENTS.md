@@ -50,8 +50,8 @@ library task.
 ## Documentation split
 
 Repository contributor guidance lives here. `v2/seed/AGENTS.md` is copied into
-the private deck home. Global memory lives in OptMem; per-effort depth lives in
-dossiers, and `STANDING-RULES.md` remains the Lindy seat-injection source.
+the private Deck home. Global memory lives in OptMem; per-effort depth lives in
+dossiers. Project-specific doctrine belongs in private project configuration.
 
 ## Maintaining this file
 

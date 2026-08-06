@@ -1,103 +1,161 @@
-# deck
+# Deck
 
-**Plain pi sessions use a durable software factory.**
+Deck is a local, operator-attended software factory used from ordinary
+[Pi](https://github.com/earendil-works/pi) sessions. The conversation stays a
+plain Pi chat; durable delivery work runs in Smithers when the chat calls
+`ship` or `adopt`.
 
-Start any number of pi sessions in `~/.deck`. OptMem carries global identity,
-decisions, preferences, and lessons across sessions. Effort dossiers carry the
-deeper brief and decision history. Shipping work goes through durable
-[Smithers](https://github.com/smithers-ai/smithers) workflows:
+**What this is not:** Deck is not a hosted product, an autonomous supervisor,
+or an unattended merge service. An operator remains responsible for credentials,
+project policy, queued decisions, and any explicit merge authorization.
 
-```
-plain pi session
+```text
+plain Pi session in ~/.deck
       │  ship · adopt · status
       ▼
-smithers pr-pipeline
+Smithers pr-pipeline
       │  implement → adversarial review → PR → reviewers
-      └→ watch CI → explicit stamp when required → merge → deploy/fallout proof
+      └→ watch CI → optional explicit approval → merge → delivery evidence
 ```
 
-The conversation session shapes work and surfaces queued decisions. The engine
-owns progress, retries, CI/review watch, merge mechanics, and liveness.
+There is no Deck orchestrator extension, fleet overlay, or wake loop. The
+factory is a set of tools loaded into a plain session.
 
-## What it is
+## Components
 
-| Piece | Job |
+| Component | Responsibility |
 |---|---|
-| **Plain pi session** | Understand the issue, inspect evidence, and call factory tools. |
-| **`ship` / `adopt` / `status`** | The only shipment interface: start, take over, or inspect durable work. |
-| **pr-pipeline** | Encoded implementation, adversarial review, reviewers, CI, merge, and fallout gates. |
-| **Questions** | Durable, decision-shaped asks that do not block unrelated work. |
-| **OptMem + dossiers** | Global continuity plus per-effort depth. |
-| **Broker** | Multi-account model access using the operator's own subscriptions. |
+| **Plain Pi session** | Understand the issue, inspect evidence, call factory tools, and surface queued decisions. |
+| **`deck-questions`** | Durable questions plus the interactive `/questions` queue. |
+| **`deck-ship`** | `ship`, `adopt`, and read-only `status`; dispatches the project PR pipeline rather than implementing delivery in the chat. |
+| **`deck-recall`** | Reads per-effort dossiers so a new session can recover the deeper brief and decision history. |
+| **`deck-subagents`** | Temporary bounded-child tool. It remains installed while the Pi-seat migration is in progress, then retires. |
+| **Smithers** | Persists and resumes the PR pipeline, including implementation, adversarial review, GitHub review/CI, merge policy, and evidence gates. |
+| **Broker** | Optional multi-account model provider for the conversation; required by the current default Smithers and `deck-subagents` model seats. It uses accounts configured by this installation's operator. |
+| **OptMem** | Global append-only identity, decisions, preferences, and lessons. Effort-specific detail stays in dossiers. |
 
-Profiles choose the merge posture. Every profile keeps the same implementation,
-adversarial-review, CI, review, and evidence gates.
+Project and reviewer policy is private machine configuration:
 
-## Quick start (personal host)
+- `~/.deck/config/projects.json`
+- `~/.deck/config/reviewers.json`
+
+The repository ships no personal project profile, reviewer handle, or default
+merge authority. Company-specific profiles may be kept as explicitly selected
+examples; they are never selected by bootstrap.
+
+## Prerequisites
+
+- Git
+- [Bun](https://bun.sh/)
+- `curl`, Python 3, and network access for the pinned OptMem installer and
+  package downloads
+- a Pi-supported model account or API key
+- the GitHub CLI (`gh`) authenticated to each repository you want the factory
+  to ship; it is not needed for a standalone conversation
+
+Deck installs its pinned Pi CLI under `~/.local/bin/pi`; a global Pi or Node
+installation is not required.
+
+## Clean install
 
 ```sh
-# one-time
 export DECK_REPO_URL="https://github.com/<owner>/deck.git"
-git clone "$DECK_REPO_URL" ~/dev/deck
-cd ~/dev/deck && git checkout main
+git clone --branch main "$DECK_REPO_URL" ~/dev/deck
+cd ~/dev/deck
 ./install.sh
 
-# keep updated
-~/dev/deck/update.sh
-
-# interactive once — personal accounts only
-bun ~/dev/deck/broker/src/cli.ts login anthropic
-
-# enter a plain session
-cd ~/.deck && pi
+source ~/.deck/enter.sh
+pi
 ```
 
-Inside the session use `ship`, `adopt`, `status`, questions, `recall_effort`, and
-`subagent`. There is no fleet-supervision or wake-loop command surface.
+Review and accept Pi's project-local trust prompt for `~/.deck/.pi`. In Pi, run
+`/login`, choose your own provider subscription or API-key provider, then use
+`/model`. Pi stores that credential in its own user configuration under
+`~/.pi/agent/`; no broker account belonging to another operator is needed for a
+standalone conversation.
 
-**Laptop agents:** see [`docs/LAPTOP-AGENTS.md`](docs/LAPTOP-AGENTS.md) for
-handoffs that a deck session can route into the factory.
+An environment variable such as `ANTHROPIC_API_KEY` is also supported, but do
+not put API keys in this repository.
+
+The standalone path loads questions, shipping/status, recall, and the seed
+`~/.deck/AGENTS.md`. Calls that start model seats — the current PR pipeline and
+`subagent` — additionally need the Deck broker:
+
+```sh
+# interactive, once per provider account
+bun ~/dev/deck/broker/src/cli.ts login anthropic
+
+# keep this process running while broker-backed seats execute
+bun --cwd ~/dev/deck/broker src/main.ts
+```
+
+The broker is not started by `install.sh`, and it is not required merely to
+enter and use a plain session with your own Pi credential.
+
+## Install, update, and optional services
+
+- `./install.sh` is the first-time, clean-clone bootstrap. It installs package
+  dependencies, the Deck-scoped Pi extension pack, command shims, the isolated
+  Smithers workspace, OptMem, and the plain `~/.deck` home.
+- `./update.sh` refreshes an existing checkout and converges the same installed
+  files. Set `DECK_BRANCH` when updating a branch other than `main`.
+- `./v2/install.sh` is the internal component installer used by both paths; it
+  is not a second onboarding entrypoint.
+- `./ops/install.sh` previews optional resident launchd services; apply with
+  `./ops/install.sh --yes` only after reviewing the plan.
+
+Neither install nor update starts the separate review-gate poller. The
+`workflows/review-gate/` workflow is a company-specific example and must be
+started deliberately, after its project configuration and authenticated
+Smithers Gateway are ready:
+
+```sh
+cd ~/dev/deck
+bun workflows/review-gate/launch.ts
+```
+
+## Installed layout
+
+```text
+~/dev/deck/                    code and factory definitions (git checkout)
+~/.deck/                       private plain-Pi runtime home (not a checkout)
+~/.deck/AGENTS.md              public seed copied on first bootstrap
+~/.deck/.pi/extensions/        deck-questions, deck-ship, deck-recall,
+                               deck-subagents, and its Deck provider dependency
+~/.deck/state/smithers/        live Smithers workspace and run state
+~/.deck/efforts/               per-effort dossiers
+~/.optmem/                     global append-only memory
+~/.local/bin/                  pinned pi, deck, deck-v2, and smithers shims
+~/.pi/agent/                   the operator's Pi credentials and global config
+```
+
+Sync code with Git. Never rsync `~/.deck` between hosts: it contains private
+configuration and runtime state.
 
 ## Project profiles
 
-`~/.deck/config/projects.json` — which repo uses which pipeline:
+Each entry in `~/.deck/config/projects.json` chooses a pipeline and its merge
+posture:
 
-- **Stamp profile**: merge waits for your explicit word after human approve + CI green.
-- **Yolo profile**: auto-merge on green; still adversarial + watch.
+- an explicit-approval profile waits for the configured operator decision after
+  repository review and CI requirements pass;
+- an auto-merge profile merges on green but keeps implementation,
+  adversarial-review, CI, and evidence gates.
 
-Keep company work and personal OAuth on separate hosts. Never put company secrets on a personal box.
+Bootstrap creates an empty profile list. Copy and review an example or write a
+profile for your own repository before using `ship`.
 
-## Layout
+## More detail
 
-```
-~/dev/deck/          code and factory definitions (git)
-~/.deck/             private plain-pi home (NOT a checkout)
-~/.optmem/           global append-only memory and summary tree
-~/.deck/efforts/     per-effort dossiers
-~/.deck/.pi/         Deck-scoped extensions, skills, and model configuration
-~/.pi/agent/         Global deck-subagents extension and shared pi skills
-```
-
-Sync code with git. **Never rsync `~/.deck` between hosts** (credentials + state).
-
-## Docs
-
-| Doc | For |
+| Document | Subject |
 |---|---|
-| [`docs/personal-home.md`](docs/personal-home.md) | Bootstrap a durable personal host |
-| [`docs/LAPTOP-AGENTS.md`](docs/LAPTOP-AGENTS.md) | Laptop agents handing work to a deck home |
-| [`workflows/pr-pipeline/README.md`](workflows/pr-pipeline/README.md) | Pipeline stages |
-| [`v2/seed/AGENTS.md`](v2/seed/AGENTS.md) | Public seed for plain sessions in `~/.deck` |
-| [`docs/home-cutover.md`](docs/home-cutover.md) | Locked v4 home cutover checklist |
+| [`v2/README.md`](v2/README.md) | Plain-session and library architecture |
+| [`workflows/pr-pipeline/README.md`](workflows/pr-pipeline/README.md) | Pipeline stages and gates |
+| [`v2/seed/AGENTS.md`](v2/seed/AGENTS.md) | Public plain-session contract copied into `~/.deck` |
+| [`ops/README.md`](ops/README.md) | Optional resident services |
+| [`docs/prime-conversation.md`](docs/prime-conversation.md) | Optional Prime conversation profile |
 
-## Layout details
+## Develop Deck
 
-- `cli/` allocates isolated deck worktrees and is linked by `v2/install.sh`.
-- `ops/` contains launchd installers and the resource monitor.
-- `subagents/` contains crew agent definitions.
-
-The router-era directories were removed. Their design history is in `docs/archive/router-era/`.
-
-## Develop deck itself
-
-Branch from **`main`**. Ship with the deck profile (yolo).
+Read [`AGENTS.md`](AGENTS.md), branch from `main`, and run only the tests for
+the package you change.

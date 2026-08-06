@@ -6,6 +6,7 @@ generic contract for plain pi sessions; private names and routing stay under
 
 ## Move to a new machine
 
-Install deck with `install.sh`, install OptMem, then transfer only reviewed
-private configuration, dossiers, and memory according to `docs/home-cutover.md`.
-Never transfer credentials, runtime state, or a git checkout of `~/.deck`.
+Clone Deck and run the repository-root `install.sh`; bootstrap installs OptMem
+and creates a new plain runtime home. Then transfer only reviewed private
+configuration and dossiers. Never transfer credentials, Smithers runtime state,
+or a git checkout of `~/.deck`.

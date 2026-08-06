@@ -1,5 +1,5 @@
 /** @jsxImportSource smithers-orchestrator */
-/** Captain review gate. Agents review and fix, but never approve or merge. */
+/** Operator review gate. Agents review and fix, but never approve or merge. */
 /** NEVER run any GitHub approve command. */
 import { Approval, Branch, ContinueAsNew, Loop, Parallel, PiAgent, Poller, Sequence, Task, Timer, Workflow, Worktree, createSmithers } from "smithers-orchestrator";
 import { z } from "zod";
@@ -15,7 +15,7 @@ import { shouldSubmitReview, reviewCommand } from "./decision.ts";
 const inputSchema = z.object({
   repo: z.string().min(1).default(process.env.GITHUB_REPOSITORY ?? "local/repository"),
   worktree: z.string().min(1).default(process.cwd()),
-  captainLogin: z.string().min(1).default(process.env.GITHUB_ACTOR ?? process.env.USER ?? "captain"),
+  captainLogin: z.string().min(1).default(process.env.GITHUB_ACTOR ?? process.env.USER ?? "operator"),
   ticket: z.string().optional(),
   brief: z.object({ summary: z.string().optional() }).optional(),
   dryRun: z.boolean().optional(), github: z.object({ gh: z.string().optional() }).optional(),
@@ -64,7 +64,7 @@ function reviewComment(pr: Pr, blockers: string[]): string {
   return [`Review found ${blockers.length} blocker(s) on PR #${pr.number}.`, ...blockers.map((item, i) => `${i + 1}. ${item}`), "Fix each blocker, then push the branch.", "— Tim's agent"].join("\n");
 }
 function cleanComment(pr: Pr, summary: string): string {
-  return [`Review checked the full diff, tests, security, failure modes, CI, and merge state for PR #${pr.number}.`, `Result: ${summary}`, "No blockers remain.", "The captain must approve this PR.", "— Tim's agent"].join("\n");
+  return [`Review checked the full diff, tests, security, failure modes, CI, and merge state for PR #${pr.number}.`, `Result: ${summary}`, "No blockers remain.", "The operator must approve this PR.", "— automated review"].join("\n");
 }
 
 export default smithers((ctx) => {

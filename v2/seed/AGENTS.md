@@ -90,8 +90,8 @@ not a specification store. Effort briefs, decisions with rationale, rejected
 alternatives, and checkpoints live in effort dossiers. Before resuming an
 effort, call `recall_effort` with `{ effort: "<task id, PR, owner/repo#PR, or PR URL>" }`.
 
-`~/.deck/data/ref/distill/STANDING-RULES.md` remains the Lindy seat-injection
-source. Do not fold it into OptMem or replace it with remembered fragments.
+Project-specific doctrine is not global memory. Reference it from the private
+project profile and keep it in its authoritative source.
 
 ## THE FACTORY
 
@@ -108,11 +108,11 @@ For build, review, and deploy obligations, this plain pi chat session discharges
 them only through `ship`, `adopt`, `status`, and queued questions; it never
 executes the delivery middle.
 
-For Lindy, never hand-run `gh pr create`, `gh pr merge`, or a stack merge. Do not
-bypass a broken pipeline with manual GitHub commands or a second workflow. A
-broken shipment path is a stop-the-line factory defect: preserve the work, queue
-one decision-shaped question, and continue only work that does not depend on the
-answer.
+For a profiled project, never hand-run `gh pr create`, `gh pr merge`, or a
+stack merge. Do not bypass a broken pipeline with manual GitHub commands or a
+second workflow. A broken shipment path is a stop-the-line factory defect:
+preserve the work, queue one decision-shaped question, and continue only work
+that does not depend on the answer.
 
 ## QUESTIONS DISCIPLINE
 
@@ -127,33 +127,27 @@ Give concrete options and a recommendation when there is a real choice. After
 queueing, continue unrelated work. Surface an unanswered question once at a
 natural handoff or when asked; never nag, poll the user, or repeat it in chat.
 
-## LINDY DOCTRINE
+## PROJECT POLICY
 
-For Lindy work, `~/.deck/data/ref/distill/STANDING-RULES.md` is binding.
-The short form that must survive every handoff is:
+Project paths, required knowledge, reviewer exclusions, model seats, and merge
+posture come from private configuration under `~/.deck/config/`. Bootstrap
+selects no company or personal profile. Never infer missing policy from examples
+in the Deck repository.
 
-- A stamp is explicit merge-time authorization. The pipeline asks when the work
-  is ready and performs the merge only after the answer.
-- An approval belongs to the PR and survives later pushes. Never re-request the
-  same review merely because the head changed; require new review only when a
-  repository rule or new risk calls for it.
-- Real stacks use GitHub-native `gh stack` inside the pipeline. Never use
-  Graphite or imitate a stack with chained base branches.
-- Merged is not done. Confirm landing, deployment, fallout, and acceptance with
-  evidence. A closed or merged flag alone proves none of them.
-- Production reads use the approved read-only rails. Production writes, secret
-  creation, direct production execution, destructive actions, and security
-  changes require explicit per-operation authorization. Never turn a read path
-  into a write path for convenience.
+An explicit-approval profile requires the configured operator decision at its
+merge gate. An auto-merge profile does not. Both still require the pipeline's
+implementation, review, CI, landing, and evidence checks. Production writes,
+secret creation, destructive actions, and security changes always require the
+authorization declared by the project policy; never turn a read path into a
+write path for convenience.
 
 ## SUBAGENTS
 
-Use the `subagent` tool supplied by deck-subagents for bounded parallel research,
-implementation, or fresh-context review. Follow the model-pick guidance in the
-tool description and choose an explicit Deck model; do not invent aliases. For
-the canonical capability table, read
-`~/dev/deck/broker/pi/README.md#reasoning-capability-table`. Reviews use a fresh
-subagent from the opposite model family. Tell every subagent not to run `memo`.
+Use the `subagent` tool supplied by deck-subagents for bounded parallel
+research, implementation, or fresh-context review. Follow its model-pick
+guidance and choose an explicit Deck model; do not invent aliases. Reviews use
+a fresh subagent from the opposite model family. Tell every subagent not to run
+`memo`.
 
 ## THIS SESSION NEVER
 

@@ -1,13 +1,13 @@
-# Laptop agents → Deck-host handoff
+# Remote-agent → Deck-host handoff
 
-For agents running on a **glass laptop**. Prepare work and drop files that any
-plain pi session on the durable Deck host can pick up. Smithers owns pipelines
+For agents running on another machine. Prepare work and drop files that any
+plain Pi session on the durable Deck host can pick up. Smithers owns pipelines
 and delivery state on that host.
 
 ## Reach the Deck host
 
 ```sh
-# Prefer a hosts-file or MagicDNS name; fall back to the host's tailnet address.
+# Use a host name or private-network address controlled by the operator.
 ssh <user>@<deck-host>
 ```
 
@@ -63,7 +63,7 @@ PY
 EOF
 ```
 
-Edit `repo` / paths to match reality. Pipeline stays **`yolo-ship`** on personal hosts unless the captain says otherwise.
+Edit `repo`, paths, and merge posture to match the operator's reviewed project policy.
 
 ## Drop work for Deck (inbox)
 
@@ -94,11 +94,11 @@ profile id or path under ~/dev/...
 Links, prior PRs, constraints. No secrets.
 
 ## Pipeline
-yolo-ship | (only if captain said stamp)
+configured project profile; never invent merge authority in the handoff
 ```
 
-The captain opens any plain Deck session, reviews these, and turns them into
-`ship` runs. **Do not** start Smithers yourself from the laptop unless asked.
+The operator opens a plain Deck session, reviews these files, and turns them
+into `ship` runs. Do not start Smithers from the remote machine unless asked.
 
 ## Update deck code on the box
 
@@ -106,15 +106,14 @@ The captain opens any plain Deck session, reviews these, and turns them into
 ssh <user>@<deck-host> '~/dev/deck/update.sh'
 ```
 
-## Glass in (human)
+## Enter a plain session remotely
 
 ```sh
-herdr --remote <user>@<deck-host>
-# remote shell:
-cd ~/.deck && pi
+ssh -t <user>@<deck-host> 'source ~/.deck/enter.sh && pi'
 ```
 
-Then use the plain Deck session: describe work, point at inbox files, and stamp when asked.
+Then describe the work, point at inbox files, and answer queued decisions when
+asked. No proprietary remote terminal tool is required.
 
 ## One-liner the laptop agent can cat first
 

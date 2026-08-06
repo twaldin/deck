@@ -13,8 +13,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
+      - name: Install v2 dependencies
+        working-directory: v2
+        run: bun install --frozen-lockfile
+      - name: Run home contract tests
+        working-directory: ops
+        run: bun test home-v4.test.ts
       - name: Run ops tests
         run: ./ops/resource-monitor.test.sh
+
+  clean-install:
+    name: clean clone install
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Bootstrap a sandbox home from a clean clone
+        env:
+          DECK_VERIFY_REF: HEAD
+        run: ./ops/verify-clean-install.sh
 
   v2-tests:
     name: v2 tests
@@ -24,6 +41,9 @@ jobs:
       - uses: oven-sh/setup-bun@v2
       - name: Install v2 dependencies
         working-directory: v2
+        run: bun install --frozen-lockfile
+      - name: Install broker dependencies
+        working-directory: broker
         run: bun install --frozen-lockfile
       - name: Install CLI dependencies
         working-directory: cli

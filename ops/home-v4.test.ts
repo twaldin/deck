@@ -255,7 +255,7 @@ describe("home seed", () => {
 		expect(seed).toContain("## MEMORY CONTRACT");
 		expect(seed).toContain("## THE FACTORY");
 		expect(seed).toContain("## QUESTIONS DISCIPLINE");
-		expect(seed).toContain("## LINDY DOCTRINE");
+		expect(seed).toContain("## PROJECT POLICY");
 		expect(seed).toContain("## SUBAGENTS");
 		expect(seed).toContain("## THIS SESSION NEVER");
 		expect(seed).not.toContain("single point of contact");
@@ -264,6 +264,13 @@ describe("home seed", () => {
 		const optMemEnd = seed.indexOf("\n\n### Per-effort depth", optMemStart);
 		expect(optMemStart).toBeGreaterThanOrEqual(0);
 		expect(optMemEnd).toBeGreaterThan(optMemStart);
-		expect(seed.slice(optMemStart, optMemEnd)).toBe(expectedOptMem);
+		const installedOptMem = seed.slice(optMemStart, optMemEnd);
+		const overrideStart = installedOptMem.indexOf("\n\n### Deck failure override");
+		const overrideEnd = installedOptMem.indexOf("\n\n### While working", overrideStart);
+		expect(overrideStart).toBeGreaterThanOrEqual(0);
+		expect(overrideEnd).toBeGreaterThan(overrideStart);
+		const upstreamOptMem =
+			installedOptMem.slice(0, overrideStart) + installedOptMem.slice(overrideEnd);
+		expect(upstreamOptMem).toBe(expectedOptMem);
 	});
 });

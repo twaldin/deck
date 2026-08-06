@@ -9,6 +9,7 @@ EXTENSION_SOURCE="$REPO_ROOT/subagents/deck-subagents.ts"
 LIB_SOURCE="$REPO_ROOT/subagents/lib"
 PROVIDER_SOURCE="$REPO_ROOT/broker/pi/deck-provider.ts"
 ZOD_SOURCE="$REPO_ROOT/broker/node_modules/zod"
+TYPEBOX_SOURCE="$REPO_ROOT/v2/node_modules/typebox"
 
 if [[ ! -f "$EXTENSION_SOURCE" || ! -d "$LIB_SOURCE" || ! -f "$PROVIDER_SOURCE" ]]; then
   printf 'error: deck-subagents or Deck provider source is incomplete under %s\n' "$REPO_ROOT" >&2
@@ -16,6 +17,10 @@ if [[ ! -f "$EXTENSION_SOURCE" || ! -d "$LIB_SOURCE" || ! -f "$PROVIDER_SOURCE" 
 fi
 if [[ ! -d "$ZOD_SOURCE" ]]; then
   printf 'error: Deck provider dependencies are missing; run bun install --cwd %s/broker\n' "$REPO_ROOT" >&2
+  exit 1
+fi
+if [[ ! -d "$TYPEBOX_SOURCE" ]]; then
+  printf 'error: Deck subagent dependencies are missing; run bun install --cwd %s/v2\n' "$REPO_ROOT" >&2
   exit 1
 fi
 
@@ -41,17 +46,10 @@ cp -R "$LIB_SOURCE" "$INSTALL_TARGET/extensions/deck-subagents/lib"
 ln -sfn "$PROVIDER_SOURCE" "$INSTALL_TARGET/extensions/deck-provider.ts"
 mkdir -p "$INSTALL_TARGET/extensions/node_modules"
 ln -sfn "$ZOD_SOURCE" "$INSTALL_TARGET/extensions/node_modules/zod"
-# The installed copy resolves its only package dependency beside the extension.
-PI_PACKAGE_ROOT="$(node -e 'try { process.stdout.write(require.resolve("@earendil-works/pi-coding-agent/package.json")) } catch { process.exit(1) }' 2>/dev/null || true)"
-if [[ -z "$PI_PACKAGE_ROOT" ]]; then
-  PI_PACKAGE_ROOT="/Users/twaldin/.nvm/versions/node/v24.8.0/lib/node_modules/@earendil-works/pi-coding-agent/package.json"
-fi
-if [[ -f "$PI_PACKAGE_ROOT" ]]; then
-  PACKAGE_ROOT="$(dirname "$PI_PACKAGE_ROOT")"
-  DEPENDENCY_ROOT="$PACKAGE_ROOT/node_modules"
-  mkdir -p "$INSTALL_TARGET/extensions/deck-subagents/node_modules"
-  ln -sfn "$DEPENDENCY_ROOT/typebox" "$INSTALL_TARGET/extensions/deck-subagents/node_modules/typebox"
-fi
+# The installed copy resolves its package dependency from Deck's pinned v2
+# install. Never probe a global pi package or a machine-specific Node path.
+mkdir -p "$INSTALL_TARGET/extensions/deck-subagents/node_modules"
+ln -sfn "$TYPEBOX_SOURCE" "$INSTALL_TARGET/extensions/deck-subagents/node_modules/typebox"
 AGENTS_SOURCE="$(cd "$(dirname "$0")" && pwd)/agents"
 # The tool validates only this namespaced registry. The user-level links expose
 # the same definitions to pi without allowing unrelated ambient agents to spawn.

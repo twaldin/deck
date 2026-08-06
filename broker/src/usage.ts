@@ -19,7 +19,7 @@ export interface UsageRosterEntry {
 
 /**
  * An account pi-ai tore down because its OAuth grant is definitively gone
- * (`invalid_grant`, a non-blip 401/403). Only the captain can fix it, by
+ * (`invalid_grant`, a non-blip 401/403). Only the operator can fix it, by
  * logging that provider in again, so the roster carries it instead of letting
  * the account silently vanish from every surface.
  */
@@ -50,7 +50,7 @@ export interface UsageRoster {
 
 /**
  * A tombstone is auth-dead only when a refresh failed. `remove()` writes
- * "deleted by user", and asking the captain to re-login an account he just
+ * "deleted by user", and asking the operator to re-login an account they just
  * logged out is a false alarm.
  */
 export function isAuthDeadCause(cause: string): boolean {
@@ -61,7 +61,7 @@ export function isAuthDeadCause(cause: string): boolean {
 const MAX_CAUSE_CHARS = 200;
 
 /**
- * One readable line for the captain.
+ * One readable line for the operator.
  *
  * pi-ai records the verbatim error, which for Anthropic is a nested
  * OAuthError carrying a stack trace and absolute node_modules paths — roughly a

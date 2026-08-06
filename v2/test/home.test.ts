@@ -117,6 +117,15 @@ describe("bootstrap", () => {
 		expect(body).toMatch(/do not claim durable\s+memory, remembered identity, or remembered decisions/);
 		expect(body).not.toContain("single point of contact");
 		expect(result.created.length).toBeGreaterThan(0);
+		expect(
+			JSON.parse(fs.readFileSync(path.join(home, "config", "reviewers.json"), "utf8")),
+		).toEqual({
+			selfLogins: [],
+			excludedApprovers: [],
+			reviewerDenylist: [],
+			reviewers: [],
+		});
+		expect(fs.statSync(path.join(home, "config", "reviewers.json")).mode & 0o777).toBe(0o600);
 	});
 
 	test("is idempotent", async () => {
@@ -128,7 +137,7 @@ describe("bootstrap", () => {
 		expect(second.linked).toHaveLength(0);
 	});
 
-	test("does not clobber a real AGENTS.md the captain wrote", async () => {
+	test("does not clobber a real AGENTS.md the operator wrote", async () => {
 		const home = path.join(sandbox, "home");
 		fs.mkdirSync(home, { recursive: true });
 		fs.writeFileSync(path.join(home, "AGENTS.md"), "# mine\n");
@@ -216,6 +225,7 @@ describe("the seeded contract is clean", () => {
 			"this plain pi chat session discharges\n" +
 				"them only through `ship`, `adopt`, `status`, and queued questions",
 		);
+		expect(contract).not.toMatch(/\b(?:Lindy|captain|twaldin)\b/i);
 		expect(Buffer.byteLength(contract, "utf8")).toBeLessThan(12 * 1024);
 	});
 });

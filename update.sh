@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# Update an existing deck installation. Private home sync requires: gh auth login.
+# Refresh an existing Deck installation. Use install.sh for first-time setup.
 REPO="${DECK_REPO:-$HOME/dev/deck}"
+BRANCH="${DECK_BRANCH:-main}"
 if [ ! -d "$REPO/.git" ]; then
-  echo "error: no deck checkout at $REPO; run install.sh first" >&2
+  echo "error: no deck checkout at $REPO; clone it and run install.sh first" >&2
   exit 1
 fi
-git -C "$REPO" fetch origin main
-git -C "$REPO" checkout -B main origin/main
-bash "$REPO/scripts/update-home.sh"
-printf '\nUpdate complete. Copy .env secrets by hand, start the broker, and accept pi trust prompts.\n'
+DECK_REPO="$REPO" DECK_BRANCH="$BRANCH" bash "$REPO/scripts/update-home.sh"
+printf '\nUpdate complete. No services or review-gate pollers were started.\n'
