@@ -27,17 +27,19 @@ The canonical `workflow-seat` and `spawn-agent` capability profiles export only 
 
 ## Herdr auto-attach
 
-Prime Agent `0.7.0` includes `HerdrAgentStateExtension`, but source inspection and an isolated headless probe showed that it is a reporter, not a pane allocator: without inherited `HERDR_ENV` and pane identity its factory is a no-op and no pane appears. Deck therefore discovers the configured Herdr socket/workspace and creates a new top-level tab and root pane for every seat. It never calls `pane.split` and never uses an inherited captain pane. Only after allocation does the adapter inject that seat's pane identity so Prime's built-in reporter can publish lifecycle state.
+Prime Agent `0.7.0` includes `HerdrAgentStateExtension`, but source inspection and an isolated headless probe showed that it is a reporter, not a pane allocator: without inherited `HERDR_ENV` and pane identity its factory is a no-op and no pane appears. Deck therefore allocates one pane before Prime starts, then injects that pane's identity so Prime's built-in reporter can publish lifecycle state. An explicit Deck socket or a responsive ambient `HERDR_SOCKET_PATH` is the fast path. With neither—or when the ambient socket is stale—Deck runs `herdr status server --json` without ambient Herdr identity and accepts only a running, compatible protocol 19 server with an absolute socket.
 
-The tab and root pane use exactly:
+When a valid ambient parent pane belongs to that socket, Deck inspects its layout and splits right for a wide pane or down otherwise. This preserves useful locality without making the parent a precondition. A headless seat instead reuses the unique `deck-fleet` workspace, creates it if absent, and calls `tab.create` to receive a new top-level tab and root pane. In both paths, each workflow or spawn-agent seat owns exactly one labelled pane.
+
+The pane label is:
 
 ```text
 {effort label} · {Smithers node id} · {Smithers run id}
 ```
 
-For example: `lindy#27140 · watch-fix · run-abc`. The adapter closes only that pane when the seat exits, including stalled-process termination; concurrent seats retain distinct session and pane identities while sharing the Prime supervisor.
+For example: `lindy#27140 · watch-fix · run-abc`. The adapter closes only the pane it allocated when the seat exits, including stalled-process termination; concurrent seats retain distinct session and pane identities while sharing the Prime supervisor.
 
-Herdr visibility is fail-soft by default. If Herdr is absent, has no matching workspace, or refuses the socket, the seat runs normally, emits a warning, and receives no ambient `HERDR_*` identity. Set `DECK_HERDR_STRICT=1` (or the explicit adapter option) only when loss of board visibility must fail the seat.
+Herdr visibility is fail-soft by default. If Herdr or its CLI is absent, its server is down, the selected socket refuses the connection, emits an oversized response, or allocation fails, the seat runs normally, emits a sanitized warning, and receives no `HERDR_*` identity. Socket validation happens before workspace allocation serialization so one wedged endpoint does not queue other seats behind repeated timeouts. Set `DECK_HERDR_STRICT=1` (or the explicit adapter option) only when loss of board visibility must fail the seat.
 
 Prime's known limit remains: RLM children share the root seat's Herdr pane. Per-child status and cancellation therefore live in the shared Prime Agents View / `prime-agent agents`, while Herdr is intentionally per root seat.
 

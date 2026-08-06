@@ -201,6 +201,33 @@ EOF
   exit 0
 fi
 
+# A daemon started by an older wrapper retains that wrapper's ambient
+# environment for its lifetime. Never publish the allowlisted wrapper while
+# such a supervisor is still serving the shared socket.
+if [[ -S "$SOCKET" ]] && node - "$SOCKET" <<'NODE'
+const net = require("node:net");
+const socket = net.createConnection(process.argv[2]);
+const timer = setTimeout(() => {
+  socket.destroy();
+  process.exit(1);
+}, 250);
+socket.once("connect", () => {
+  clearTimeout(timer);
+  socket.destroy();
+  process.exit(0);
+});
+socket.once("error", () => {
+  clearTimeout(timer);
+  process.exit(1);
+});
+NODE
+then
+  printf 'error: the existing shared Prime daemon predates this environment boundary\n' >&2
+  printf 'stop active Prime seats, run: %q shutdown --force\n' "$PRIME_BIN" >&2
+  printf 'then re-run this installer with --apply\n' >&2
+  exit 1
+fi
+
 
 # Reject every unowned auto-discovery entry before creating profile state. Prime
 # loads top-level *.ts files and */index.ts automatically.
@@ -599,16 +626,80 @@ esac
 surface_conversation_in_herdr() {
   if [[ "\${DECK_HERDR_AUTO_ATTACH:-1}" == 0 ||
         "\${DECK_HERDR_RELAUNCHED:-0}" == 1 ||
-        -n "\${HERDR_PANE_ID:-}" ||
         "\${1:-}" == --version ]]; then
     return 1
   fi
   local herdr_bin="\${DECK_HERDR_BIN:-herdr}"
   command -v "\$herdr_bin" >/dev/null 2>&1 || return 1
-  "\$herdr_bin" status server >/dev/null 2>&1 || return 1
+
+  bounded_herdr() {
+    node - "\$herdr_bin" "\$@" <<'HERDR_TIMEOUT_NODE'
+const { spawnSync } = require("node:child_process");
+const [binary, ...args] = process.argv.slice(2);
+const result = spawnSync(binary, args, {
+  encoding: "utf8",
+  timeout: 2000,
+  killSignal: "SIGKILL",
+  maxBuffer: 1024 * 1024,
+});
+if (result.stdout) process.stdout.write(result.stdout);
+if (result.stderr) process.stderr.write(result.stderr);
+if (result.error || result.status === null) process.exit(124);
+process.exit(result.status);
+HERDR_TIMEOUT_NODE
+  }
+
+  herdr_server_is_compatible() {
+    local status_json
+    status_json="\$(bounded_herdr status server --json 2>/dev/null)" || return 1
+    printf '%s' "\$status_json" | node -e '
+const fs = require("node:fs");
+const status = JSON.parse(fs.readFileSync(0, "utf8"));
+if (
+  status.running !== true ||
+  status.compatible !== true ||
+  typeof status.version !== "string" ||
+  status.protocol !== 19
+) process.exit(1);
+' 2>/dev/null
+  }
+
+  ambient_pane_matches() {
+    local pane_json
+    pane_json="\$(bounded_herdr pane get "\$HERDR_PANE_ID" 2>/dev/null)" || return 1
+    printf '%s' "\$pane_json" | node -e '
+const fs = require("node:fs");
+const [paneId, tabId, workspaceId] = process.argv.slice(1);
+const parsed = JSON.parse(fs.readFileSync(0, "utf8"));
+const pane = parsed?.result?.pane;
+if (
+  pane?.pane_id !== paneId ||
+  pane?.tab_id !== tabId ||
+  pane?.workspace_id !== workspaceId
+) process.exit(1);
+' "\$HERDR_PANE_ID" "\$HERDR_TAB_ID" "\$HERDR_WORKSPACE_ID" 2>/dev/null
+  }
+
+  if [[ "\${HERDR_ENV:-}" == 1 &&
+        -n "\${HERDR_PANE_ID:-}" &&
+        -n "\${HERDR_SOCKET_PATH:-}" &&
+        -n "\${HERDR_TAB_ID:-}" &&
+        -n "\${HERDR_WORKSPACE_ID:-}" ]] &&
+     herdr_server_is_compatible &&
+     ambient_pane_matches; then
+    return 1
+  fi
+  if [[ -n "\${HERDR_ENV:-}" ||
+        -n "\${HERDR_PANE_ID:-}" ||
+        -n "\${HERDR_SOCKET_PATH:-}" ||
+        -n "\${HERDR_TAB_ID:-}" ||
+        -n "\${HERDR_WORKSPACE_ID:-}" ]]; then
+    unset HERDR_ENV HERDR_PANE_ID HERDR_SOCKET_PATH HERDR_TAB_ID HERDR_WORKSPACE_ID
+  fi
+  herdr_server_is_compatible || return 1
 
   local workspace_json workspace_id created created_fields pane_id tab_id
-  workspace_json="\$("\$herdr_bin" workspace list 2>/dev/null)" || return 1
+  workspace_json="\$(bounded_herdr workspace list 2>/dev/null)" || return 1
   workspace_id="\$(printf '%s' "\$workspace_json" | node -e '
 const fs = require("node:fs");
 const parsed = JSON.parse(fs.readFileSync(0, "utf8"));
@@ -619,14 +710,14 @@ if (typeof matches[0]?.workspace_id === "string") process.stdout.write(matches[0
 ' 2>/dev/null)" || return 1
 
   if [[ -n "\$workspace_id" ]]; then
-    created="\$("\$herdr_bin" tab create \
+    created="\$(bounded_herdr tab create \
       --workspace "\$workspace_id" \
       --label 'deck · orch · conversation' \
       --cwd "\$DECK_HOME" \
       --env DECK_HERDR_RELAUNCHED=1 \
       --no-focus 2>/dev/null)" || return 1
   else
-    created="\$("\$herdr_bin" workspace create \
+    created="\$(bounded_herdr workspace create \
       --label deck-fleet \
       --cwd "\$DECK_HOME" \
       --env DECK_HERDR_RELAUNCHED=1 \
@@ -641,22 +732,40 @@ if (typeof pane !== "string" || typeof tab !== "string") process.exit(2);
 process.stdout.write(pane + "\\t" + tab);
 ' 2>/dev/null)" || return 1
   IFS=\$'\\t' read -r pane_id tab_id <<<"\$created_fields"
-  if ! "\$herdr_bin" pane rename "\$pane_id" 'deck · orch · conversation' >/dev/null 2>&1; then
-    "\$herdr_bin" pane close "\$pane_id" >/dev/null 2>&1 || true
+  if ! bounded_herdr tab rename "\$tab_id" 'deck · orch · conversation' >/dev/null 2>&1 ||
+     ! bounded_herdr pane rename "\$pane_id" 'deck · orch · conversation' >/dev/null 2>&1; then
+    bounded_herdr pane close "\$pane_id" >/dev/null 2>&1 || true
     return 1
   fi
 
-  local relaunch_command quoted
-  printf -v relaunch_command 'exec %q' "\${BASH_SOURCE[0]}"
-  for argument in "\$@"; do
-    printf -v quoted ' %q' "\$argument"
-    relaunch_command+="\$quoted"
-  done
-  if ! "\$herdr_bin" pane run "\$pane_id" "\$relaunch_command" >/dev/null 2>&1; then
-    "\$herdr_bin" pane close "\$pane_id" >/dev/null 2>&1 || true
+  local relaunch_script relaunch_command quoted
+  relaunch_script="\$(mktemp /tmp/deck-herdr-conversation.XXXXXX)" || {
+    bounded_herdr pane close "\$pane_id" >/dev/null 2>&1 || true
+    return 1
+  }
+  if ! {
+    printf '#!/usr/bin/env bash\n'
+    printf 'rm -f %q\n' "\$relaunch_script"
+    printf 'export PRIME_CONVERSATION_RLM_MAX_DEPTH=%q\n' "\${PRIME_CONVERSATION_RLM_MAX_DEPTH:-1}"
+    printf 'export DECK_HERDR_RELAUNCHED=1\n'
+    printf 'exec %q' "\${BASH_SOURCE[0]}"
+    for argument in "\$@"; do
+      printf -v quoted ' %q' "\$argument"
+      printf '%s' "\$quoted"
+    done
+    printf '\n'
+  } >"\$relaunch_script"; then
+    rm -f "\$relaunch_script"
+    bounded_herdr pane close "\$pane_id" >/dev/null 2>&1 || true
     return 1
   fi
-  "\$herdr_bin" tab focus "\$tab_id" >/dev/null 2>&1 || true
+  relaunch_command="/bin/bash \$relaunch_script"
+  if ! bounded_herdr pane run "\$pane_id" "\$relaunch_command" >/dev/null 2>&1; then
+    rm -f "\$relaunch_script"
+    bounded_herdr pane close "\$pane_id" >/dev/null 2>&1 || true
+    return 1
+  fi
+  bounded_herdr tab focus "\$tab_id" >/dev/null 2>&1 || true
   exec "\$herdr_bin"
 }
 surface_conversation_in_herdr "\$@" || true

@@ -47,6 +47,7 @@ const VERSION_TIMEOUT_MS = 10_000;
 const SHARED_DAEMON_STARTUP_TIMEOUT_MS = 10_000;
 const DEFAULT_HERDR_WORKSPACE_LABEL = "deck-fleet";
 const HERDR_DISCOVERY_TIMEOUT_MS = 2_000;
+const HERDR_RESPONSE_MAX_BYTES = 1024 * 1024;
 const SAFE_ENV_KEYS: Record<string, true> = {
 	PATH: true,
 	HOME: true,
@@ -75,6 +76,23 @@ const SAFE_ENV_KEYS: Record<string, true> = {
 	HERDR_PI_IDLE_DEBOUNCE_MS: true,
 	HERDR_PI_RETRY_GRACE_MS: true,
 };
+const SHARED_DAEMON_INHERITED_ENV_KEYS = [
+	"PATH",
+	"SHELL",
+	"TMPDIR",
+	"TMP",
+	"TEMP",
+	"LANG",
+	"LC_ALL",
+	"LC_CTYPE",
+	"TERM",
+	"COLORTERM",
+	"NO_COLOR",
+	"FORCE_COLOR",
+	"USER",
+	"LOGNAME",
+	"TZ",
+] as const;
 const TASK_CONTEXT_KEYS = [
 	"SMITHERS_RUN_ID",
 	"SMITHERS_NODE_ID",
@@ -306,6 +324,18 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 		: null;
 }
 
+function stripUnsafeHerdrText(value: string): string {
+	return value.replace(
+		/[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g,
+		" ",
+	);
+}
+
+function herdrCauseMessage(cause: unknown): string {
+	const message = cause instanceof Error ? cause.message : String(cause);
+	return stripUnsafeHerdrText(message).slice(0, 2_048);
+}
+
 async function herdrRequest(
 	socketPath: string,
 	method: string,
@@ -317,6 +347,7 @@ async function herdrRequest(
 	const socket = createConnection(socketPath);
 	let buffer = "";
 	let settled = false;
+	let receivedBytes = 0;
 	const finish = (error?: unknown, result?: Record<string, unknown>) => {
 		if (settled) return;
 		settled = true;
@@ -334,6 +365,11 @@ async function herdrRequest(
 	});
 	socket.once("error", finish);
 	socket.on("data", (chunk: Buffer) => {
+		receivedBytes += chunk.byteLength;
+		if (receivedBytes > HERDR_RESPONSE_MAX_BYTES) {
+			finish(new Error(`Herdr ${method} response exceeded ${HERDR_RESPONSE_MAX_BYTES} bytes`));
+			return;
+		}
 		buffer += chunk.toString("utf8");
 		let newline = buffer.indexOf("\n");
 		while (newline >= 0) {
@@ -347,7 +383,9 @@ async function herdrRequest(
 				}
 				const error = asRecord(response.error);
 				if (error !== null) {
-					finish(new Error(`Herdr ${method} failed: ${String(error.code)}: ${String(error.message)}`));
+					finish(new Error(
+						`Herdr ${method} failed: ${stripUnsafeHerdrText(String(error.code))}: ${stripUnsafeHerdrText(String(error.message))}`,
+					));
 					return;
 				}
 				const result = asRecord(response.result);
@@ -358,7 +396,7 @@ async function herdrRequest(
 				finish(undefined, result);
 				return;
 			} catch (error) {
-				finish(new Error(`Herdr ${method} returned malformed JSON: ${String(error)}`));
+				finish(new Error(`Herdr ${method} returned malformed JSON: ${herdrCauseMessage(error)}`));
 				return;
 			}
 		}
@@ -444,11 +482,15 @@ function nonEmpty(value: string | undefined): string | undefined {
 async function discoverHerdrSocketPath(): Promise<string> {
 	const binary = nonEmpty(process.env.DECK_HERDR_BIN) ?? "herdr";
 	const env = { ...process.env };
-	if (nonEmpty(env.HERDR_SOCKET_PATH) === undefined) delete env.HERDR_SOCKET_PATH;
+	delete env.HERDR_ENV;
+	delete env.HERDR_SOCKET_PATH;
+	delete env.HERDR_PANE_ID;
+	delete env.HERDR_TAB_ID;
+	delete env.HERDR_WORKSPACE_ID;
 	return new Promise<string>((resolve, reject) => {
 		let child: ChildProcess;
 		try {
-			child = spawn(binary, ["status", "server"], {
+			child = spawn(binary, ["status", "server", "--json"], {
 				env,
 				stdio: ["ignore", "pipe", "pipe"],
 			});
@@ -488,10 +530,21 @@ async function discoverHerdrSocketPath(): Promise<string> {
 				));
 				return;
 			}
-			const match = /^socket:\s*(.+?)\s*$/m.exec(stdout);
-			const socketPath = nonEmpty(match?.[1]);
-			if (socketPath === undefined || !path.isAbsolute(socketPath)) {
-				finish(new Error(`Herdr status server returned no absolute socket path: ${stdout.trim() || "<empty>"}`));
+			let status: Record<string, unknown> | null;
+			try {
+				status = asRecord(JSON.parse(stdout));
+			} catch (error) {
+				finish(new Error(`Herdr status server returned malformed JSON: ${herdrCauseMessage(error)}`));
+				return;
+			}
+			const socketPath = typeof status?.socket === "string" ? nonEmpty(status.socket) : undefined;
+			if (status?.running !== true
+				|| status.compatible !== true
+				|| typeof status.version !== "string"
+				|| status.protocol !== 19
+				|| socketPath === undefined
+				|| !path.isAbsolute(socketPath)) {
+				finish(new Error("Herdr status server did not report a compatible protocol 19 server with an absolute socket"));
 				return;
 			}
 			finish(undefined, socketPath);
@@ -517,8 +570,13 @@ async function herdrSplitDirection(socketPath: string, paneId: string): Promise<
 }
 
 
+function sanitizeHerdrLabel(value: string): string {
+	const normalized = stripUnsafeHerdrText(value).replace(/\s+/g, " ").trim();
+	return [...normalized].slice(0, 80).join("") || "unknown";
+}
+
 function herdrLabelSegment(value: string): string {
-	return value.replace(/\s+/g, " ").replaceAll(" · ", " / ").trim().slice(0, 80) || "unknown";
+	return sanitizeHerdrLabel(value.replaceAll(" · ", " / "));
 }
 
 function extractText(value: unknown): string {
@@ -1132,7 +1190,7 @@ export class PrimeSeatAgent implements AgentLike {
 				const failure = new PrimeSeatError({
 					status: "failed",
 					code: "PRIME_HERDR_ATTACH_FAILED",
-					message: String(cause),
+					message: herdrCauseMessage(cause),
 					exitStatus: { code: null, signal: null },
 					wallClockMs: Date.now() - startedAt,
 					stderr: "",
@@ -1145,7 +1203,7 @@ export class PrimeSeatAgent implements AgentLike {
 				} as never)).catch(() => undefined);
 				throw failure;
 			}
-			herdrWarning = `Prime seat continuing without Herdr board visibility: ${cause instanceof Error ? cause.message : String(cause)}`;
+			herdrWarning = `Prime seat continuing without Herdr board visibility: ${herdrCauseMessage(cause)}`;
 			console.warn(herdrWarning);
 			options.onStderr?.(`${herdrWarning}\n`);
 		}
@@ -1191,16 +1249,19 @@ export class PrimeSeatAgent implements AgentLike {
 		const daemonArgs = [...args];
 		daemonArgs[1] = "daemon";
 		daemonArgs[daemonArgs.indexOf("--session-dir") + 1] = sharedProfile.sessionDir;
-		const daemonEnv: Record<string, string> = {
-			...env,
-			HOME: sourceEnv.HOME ?? os.homedir(),
-			PRIME_AGENT_SESSION_DIR: sharedProfile.sessionDir,
-		};
-		delete daemonEnv.HERDR_ENV;
-		delete daemonEnv.HERDR_PANE_ID;
-		delete daemonEnv.HERDR_SOCKET_PATH;
-		delete daemonEnv.HERDR_TAB_ID;
-		delete daemonEnv.HERDR_WORKSPACE_ID;
+		// Prime's supervisor merges its own process environment beneath each
+		// client's launchEnv. Keep daemon-wide state limited to stable runtime
+		// values so the first seat cannot pin credentials, task attribution, RLM
+		// policy, or Herdr identity for every later seat sharing this socket.
+		const daemonEnv: Record<string, string> = {};
+		for (const key of SHARED_DAEMON_INHERITED_ENV_KEYS) {
+			const value = sourceEnv[key];
+			if (value !== undefined) daemonEnv[key] = value;
+		}
+		daemonEnv.HOME = sourceEnv.HOME ?? os.homedir();
+		daemonEnv.PRIME_AGENT_CODING_AGENT_DIR = sharedProfile.agentDir;
+		daemonEnv.PRIME_AGENT_SESSION_DIR = sharedProfile.sessionDir;
+		daemonEnv.PI_SKIP_VERSION_CHECK = "1";
 		const prompt = typeof options.prompt === "string" ? options.prompt : extractText(options.prompt ?? options.messages);
 		const timeoutMs = typeof options.timeout === "number" && Number.isFinite(options.timeout)
 			? Math.min(options.timeout, this.opts.timeoutMs)
@@ -1611,7 +1672,7 @@ export class PrimeSeatAgent implements AgentLike {
 					if (herdrStrict) {
 						herdrTeardownCause = cause;
 					} else {
-						const warning = `Prime seat continuing without Herdr board visibility: ${cause instanceof Error ? cause.message : String(cause)}`;
+						const warning = `Prime seat continuing without Herdr board visibility: ${herdrCauseMessage(cause)}`;
 						console.warn(warning);
 						options.onStderr?.(`${warning}\n`);
 					}
@@ -1622,7 +1683,7 @@ export class PrimeSeatAgent implements AgentLike {
 				const failure = new PrimeSeatError({
 					status: "failed",
 					code: "PRIME_HERDR_ATTACH_FAILED",
-					message: String(herdrTeardownCause),
+					message: herdrCauseMessage(herdrTeardownCause),
 					exitStatus,
 					wallClockMs: Date.now() - startedAt,
 					stderr: stderrTail.trim(),
@@ -1661,24 +1722,48 @@ export class PrimeSeatAgent implements AgentLike {
 	}
 
 	private async attachHerdrSeat(label: string): Promise<HerdrSeatLease> {
+		const optionSocketPath = nonEmpty(this.opts.herdrSocketPath);
+		const deckSocketPath = nonEmpty(process.env.DECK_HERDR_SOCKET_PATH);
+		const ambientSocketPath = nonEmpty(process.env.HERDR_SOCKET_PATH);
+		let socketPath: string;
+		let socketValidated = false;
+		if (optionSocketPath !== undefined) {
+			socketPath = optionSocketPath;
+		} else if (deckSocketPath !== undefined) {
+			socketPath = deckSocketPath;
+		} else if (ambientSocketPath !== undefined) {
+			try {
+				await herdrRequest(ambientSocketPath, "workspace.list", {});
+				socketPath = ambientSocketPath;
+				socketValidated = true;
+			} catch {
+				socketPath = await discoverHerdrSocketPath();
+			}
+		} else {
+			socketPath = await discoverHerdrSocketPath();
+		}
+		if (!socketValidated) await herdrRequest(socketPath, "workspace.list", {});
 		return withHerdrAttachLock(async () => {
-			const configuredSocketPath = nonEmpty(this.opts.herdrSocketPath)
-				?? nonEmpty(process.env.DECK_HERDR_SOCKET_PATH);
-			const ambientSocketPath = nonEmpty(process.env.HERDR_SOCKET_PATH);
-			const socketPath = configuredSocketPath
-				?? ambientSocketPath
-				?? await discoverHerdrSocketPath();
-			const workspaceIdHint = nonEmpty(this.opts.herdrWorkspaceId)
-				?? nonEmpty(process.env.DECK_HERDR_WORKSPACE_ID)
-				?? (configuredSocketPath === undefined ? nonEmpty(process.env.HERDR_WORKSPACE_ID) : undefined);
-			const workspaceLabel = nonEmpty(this.opts.herdrWorkspaceLabel)
-				?? nonEmpty(process.env.DECK_HERDR_WORKSPACE_LABEL)
-				?? DEFAULT_HERDR_WORKSPACE_LABEL;
+			const deckIdentityMatchesSocket = deckSocketPath !== undefined
+				&& deckSocketPath === socketPath;
 			const ambientParentPaneId = nonEmpty(process.env.HERDR_PANE_ID);
-			const parentPaneId = ambientParentPaneId !== undefined
-				&& (configuredSocketPath === undefined || configuredSocketPath === ambientSocketPath)
-				? ambientParentPaneId
-				: undefined;
+			const ambientTabId = nonEmpty(process.env.HERDR_TAB_ID);
+			const ambientWorkspaceId = nonEmpty(process.env.HERDR_WORKSPACE_ID);
+			const ambientIdentityMatchesSocket = process.env.HERDR_ENV === "1"
+				&& ambientSocketPath !== undefined
+				&& ambientSocketPath === socketPath
+				&& ambientParentPaneId !== undefined
+				&& ambientTabId !== undefined
+				&& ambientWorkspaceId !== undefined;
+			const workspaceIdHint = nonEmpty(this.opts.herdrWorkspaceId)
+				?? (deckIdentityMatchesSocket ? nonEmpty(process.env.DECK_HERDR_WORKSPACE_ID) : undefined)
+				?? (ambientIdentityMatchesSocket ? ambientWorkspaceId : undefined);
+			const workspaceLabel = sanitizeHerdrLabel(
+				nonEmpty(this.opts.herdrWorkspaceLabel)
+					?? nonEmpty(process.env.DECK_HERDR_WORKSPACE_LABEL)
+					?? DEFAULT_HERDR_WORKSPACE_LABEL,
+			);
+			const parentPaneId = ambientIdentityMatchesSocket ? ambientParentPaneId : undefined;
 			let workspaceId: string;
 			let pane: Record<string, unknown> | null = null;
 			let tab: Record<string, unknown> | null = null;
@@ -1689,7 +1774,10 @@ export class PrimeSeatAgent implements AgentLike {
 					const parent = asRecord(found.pane);
 					const parentTabId = typeof parent?.tab_id === "string" ? parent.tab_id : undefined;
 					const parentWorkspaceId = typeof parent?.workspace_id === "string" ? parent.workspace_id : undefined;
-					if (parentTabId !== undefined && parentWorkspaceId !== undefined) {
+					if (parentTabId !== undefined
+						&& parentWorkspaceId !== undefined
+						&& parentTabId === ambientTabId
+						&& parentWorkspaceId === ambientWorkspaceId) {
 						const created = await herdrRequest(socketPath, "pane.split", {
 							target_pane_id: parentPaneId,
 							direction: await herdrSplitDirection(socketPath, parentPaneId),

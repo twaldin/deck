@@ -202,17 +202,27 @@ Prime Agent `0.7.0` includes its own Herdr reporter. No
 `herdr-agent-state.ts` file is installed in this profile. The focused guard
 starts headless RPC sessions against a stub Herdr socket and observes
 `pane.report_agent` with source `herdr:pi`, state `idle`, and a matching
-`pane.release_agent` on exit. A concurrent two-session drill on the same
-shared Deck daemon verifies that each session keeps its own `HERDR_PANE_ID`.
-The built-in lifecycle also reports `working` during an agent turn and `blocked`
-for an explicit block or a terminal retry failure.
+`pane.release_agent` on exit. The built-in lifecycle also reports `working`
+during an agent turn and `blocked` for an explicit block or terminal retry
+failure.
+
+The wrapper now supplies the pane that reporter needs. When the conversation is
+already running in a validated Herdr pane/socket tuple, it keeps that ambient
+pane. Partial or stale ambient identity is cleared. When the captain starts
+`prime-conversation` from a plain terminal, the wrapper validates `herdr status
+server --json`, reuses or creates the `deck-fleet` workspace, creates a labelled
+root tab, and uses an argv-safe Bash bootstrap to run the same wrapper command
+in its root pane. It then focuses that tab and attaches the terminal to Herdr.
+The new pane receives Herdr's injected socket, workspace, tab, and pane identity;
+a recursion guard prevents another allocation. Every CLI call is bounded; if
+the CLI or server is unavailable or wedged, the wrapper continues locally
+instead of blocking the conversation.
 
 This does not fight Deck's fleet projection. Prime reports the captain process
-with source `herdr:pi` in the Herdr pane that launched it. Deck's best-effort
-fleet projection uses source `deck` on Deck-managed effort panes; Smithers and
-Deck state remain authoritative. Prime also defers its built-in reporter if a
-loaded file-based Herdr integration is present, preventing two `herdr:pi`
-reporters from racing.
+with source `herdr:pi`; Deck's best-effort fleet projection uses source `deck`
+on Deck-managed effort panes. Smithers and Deck state remain authoritative.
+Prime also defers its built-in reporter if a file-based Herdr integration is
+present, but Deck does not install one.
 
 Known limitation: Prime `rlm()` children share the parent's Herdr pane. Herdr
 visibility is therefore per conversation seat, not one pane per RLM child.
@@ -301,7 +311,7 @@ A manual upgrade is a reviewed pin change:
 
    ```sh
    cd ~/.deck && pi
-   prime-agent shutdown --force --daemon-socket ~/.deck/.prime/run/conversation.sock
+   prime-agent shutdown --force
    ```
 
 2. Review the upstream release and every tracked patch. Update

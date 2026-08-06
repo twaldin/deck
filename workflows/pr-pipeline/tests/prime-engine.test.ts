@@ -716,7 +716,7 @@ describe("Prime seat adapter fault contract", () => {
 		expect(tools.some((tool) => /dispatch|spawn|task/i.test(tool))).toBe(false);
 	});
 
-	test("discovers the active socket through herdr status server with no ambient Herdr variables", async () => {
+	test("discovers the socket and ignores partial ambient or Deck identity without its server binding", async () => {
 		const binary = await fakePrime("success");
 		const cliRoot = await fs.mkdtemp(path.join(os.tmpdir(), "deck-herdr-discovery-"));
 		roots.push(cliRoot);
@@ -725,7 +725,14 @@ describe("Prime seat adapter fault contract", () => {
 		writeFileSync(herdrBinary, `#!/bin/sh
 printf '%s\\n' "$*" >> ${JSON.stringify(calls)}
 if [ "$1 $2" = "status server" ]; then
-  printf 'status: running\\nversion: 0.8.0\\nprotocol: 19\\ncompatible: yes\\nsocket: %s\\n' ${JSON.stringify(herdrSocket)}
+  printf '%s\\n' '${JSON.stringify({
+		status: "running",
+		running: true,
+		version: "0.8.0",
+		protocol: 19,
+		compatible: true,
+		socket: herdrSocket,
+	})}'
   exit 0
 fi
 exit 2
@@ -743,20 +750,33 @@ exit 2
 		const saved = new Map(herdrKeys.map((key) => [key, process.env[key]]));
 		for (const key of herdrKeys) delete process.env[key];
 		process.env.DECK_HERDR_BIN = herdrBinary;
+		process.env.HERDR_ENV = "1";
+		process.env.HERDR_SOCKET_PATH = path.join(cliRoot, "stale.sock");
+		process.env.HERDR_PANE_ID = captainPane.paneId;
+		process.env.HERDR_TAB_ID = captainPane.tabId;
+		process.env.HERDR_WORKSPACE_ID = captainPane.workspaceId;
+		process.env.DECK_HERDR_WORKSPACE_ID = captainPane.workspaceId;
 		try {
 			const result = runRecordSchema.parse(await agent(binary, {
 				herdrSocketPath: undefined,
-				effortLabel: "headless",
+				effortLabel: "headless\u001b[2J\u202e",
+				herdrWorkspaceLabel: "deck-test\u001b\u202e",
 			}).generate({
 				prompt: "discover",
-				taskContext: { runId: "run-discover", nodeId: "seat", iteration: 0, attempt: 0 },
+				taskContext: { runId: "run-discover", nodeId: "se\u0007at", iteration: 0, attempt: 0 },
 			}));
 			expect(result.providerMetadata.prime.herdr).toMatchObject({
 				attached: true,
-				label: "headless · seat · run-discover",
+				label: "headless [2J · se at · run-discover",
 			});
-			expect(readFileSync(calls, "utf8").trim()).toBe("status server");
+			expect(readFileSync(calls, "utf8").trim()).toBe("status server --json");
 			expect(herdrRequests.filter((request) => request.method === "tab.create")).toHaveLength(1);
+			const createLabel = (herdrRequests.find((request) => request.method === "tab.create")?.params as Record<string, unknown>).label;
+			expect(createLabel).toBe("headless [2J · se at · run-discover");
+			expect(String(createLabel)).not.toMatch(/[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/);
+			expect(herdrRequests.filter((request) => request.method === "pane.get")).toHaveLength(0);
+			expect(herdrRequests.filter((request) => request.method === "pane.split")).toHaveLength(0);
+			expect(herdrRequests.filter((request) => request.method === "workspace.get")).toHaveLength(0);
 		} finally {
 			for (const [key, value] of saved) {
 				if (value === undefined) delete process.env[key];
@@ -811,11 +831,11 @@ exit 2
 		roots.push(capture);
 		const binary = await fakePrime("success", capture);
 		await Promise.all([
-			agent(binary, { effortLabel: "effort-a" }).generate({
+			agent(binary, { effortLabel: "effort-a", brokerApiKey: "broker-a" }).generate({
 				prompt: "a",
 				taskContext: { runId: "run-a", nodeId: "stage-a", iteration: 0, attempt: 0 },
 			}),
-			agent(binary, { effortLabel: "effort-b" }).generate({
+			agent(binary, { effortLabel: "effort-b", brokerApiKey: "broker-b" }).generate({
 				prompt: "b",
 				taskContext: { runId: "run-b", nodeId: "stage-b", iteration: 0, attempt: 0 },
 			}),
@@ -833,6 +853,35 @@ exit 2
 			new Set([resolveDeckPrimeProfilePaths(primeHome).agentDir]),
 		);
 		expect(new Set(rows.map((row) => row.env.HERDR_PANE_ID)).size).toBe(2);
+		const rowsByRun = new Map(rows.map((row) => [row.env.SMITHERS_RUN_ID, row]));
+		expect(rowsByRun.get("run-a")?.env.DECK_GATEWAY_API_KEY).toBe("broker-a");
+		expect(rowsByRun.get("run-b")?.env.DECK_GATEWAY_API_KEY).toBe("broker-b");
+		for (const row of rows) {
+			expect(row.env.DECK_RLM_CHILD_MODEL).toBe("deck/gpt-5.6-luna");
+			expect(row.env.RLM_MAX_DEPTH).toBe("1");
+		}
+		const daemonEnv = daemonRows[0]?.env;
+		expect(daemonEnv).toBeDefined();
+		for (const key of [
+			"DECK_GATEWAY_API_KEY",
+			"DECK_RLM_CHILD_MODEL",
+			"DECK_RLM_REASONING_BY_MODEL",
+			"RLM_DEPTH",
+			"RLM_MAX_DEPTH",
+			"SMITHERS_RUN_ID",
+			"SMITHERS_NODE_ID",
+			"SMITHERS_ITERATION",
+			"SMITHERS_ATTEMPT",
+			"HERDR_ENV",
+			"HERDR_PANE_ID",
+			"HERDR_SOCKET_PATH",
+			"HERDR_TAB_ID",
+			"HERDR_WORKSPACE_ID",
+		]) {
+			expect(daemonEnv?.[key], key).toBeUndefined();
+		}
+		expect(daemonEnv?.PRIME_AGENT_CODING_AGENT_DIR).toBe(resolveDeckPrimeProfilePaths(primeHome).agentDir);
+		expect(daemonEnv?.PRIME_AGENT_SESSION_DIR).toBe(resolveDeckPrimeProfilePaths(primeHome).sessionDir);
 		expect(await fakePrimeDaemonReady()).toBe(true);
 		const creates = herdrRequests.filter((request) => request.method === "tab.create");
 		expect(creates).toHaveLength(2);
@@ -995,7 +1044,7 @@ exit 2
 		const warning = spyOn(console, "warn").mockImplementation(() => undefined);
 		try {
 			const result = runRecordSchema.parse(await agent(binary, {
-				herdrSocketPath: path.join(herdrRoot, "unavailable.sock"),
+				herdrSocketPath: path.join(herdrRoot, "unavailable\u001b\u202e.sock"),
 				herdrStrict: false,
 			}).generate({
 				prompt: "ship without board",
@@ -1008,12 +1057,44 @@ exit 2
 			});
 			expect(warning).toHaveBeenCalledWith(expect.stringContaining("continuing without Herdr board visibility"));
 			expect(stderr.join("")).toContain("continuing without Herdr board visibility");
+			expect(stderr.join("").trimEnd()).not.toMatch(/[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/);
 			const captured = JSON.parse(readFileSync(capture, "utf8").trim()) as { env: Record<string, string> };
 			for (const key of ["HERDR_ENV", "HERDR_SOCKET_PATH", "HERDR_PANE_ID", "HERDR_TAB_ID", "HERDR_WORKSPACE_ID"]) {
 				expect(captured.env[key], key).toBeUndefined();
 			}
 		} finally {
 			warning.mockRestore();
+		}
+	});
+
+	test("bounds an untrusted Herdr socket response and continues the seat", async () => {
+		const floodSocket = path.join(herdrRoot, `flood-${crypto.randomUUID()}.sock`);
+		const floodServer = createServer((connection) => {
+			connection.on("error", () => undefined);
+			connection.end(Buffer.alloc(1024 * 1024 + 1, "x"));
+		});
+		await new Promise<void>((resolve, reject) => {
+			floodServer.once("error", reject);
+			floodServer.listen(floodSocket, resolve);
+		});
+		const binary = await fakePrime("success");
+		const stderr: string[] = [];
+		try {
+			const result = runRecordSchema.parse(await agent(binary, {
+				herdrSocketPath: floodSocket,
+				herdrStrict: false,
+			}).generate({
+				prompt: "ship despite hostile board",
+				onStderr: (text) => { stderr.push(text); },
+			}));
+			expect(result.providerMetadata.prime.herdr).toMatchObject({
+				attached: false,
+				paneId: null,
+			});
+			expect(stderr.join("")).toContain("response exceeded 1048576 bytes");
+		} finally {
+			await new Promise<void>((resolve) => floodServer.close(() => resolve()));
+			await fs.rm(floodSocket, { force: true });
 		}
 	});
 

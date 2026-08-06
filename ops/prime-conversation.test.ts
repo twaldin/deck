@@ -232,7 +232,7 @@ function startHerdrStub(socketPath: string): Promise<HerdrStub> {
 	return promise;
 }
 
-function createHerdrCliStub(running: boolean): {
+function createHerdrCliStub(running: boolean, existingWorkspace = true, hangStatus = false): {
 	root: string;
 	binary: string;
 	readCalls(): string[][];
@@ -247,13 +247,28 @@ fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(args) + "\\n");
 const send = (result) => process.stdout.write(JSON.stringify({ id: "stub", result }) + "\\n");
 if (args.length === 0) process.exit(0);
 if (args[0] === "status" && args[1] === "server") {
-  if (!${JSON.stringify(running)}) process.exit(1);
-  process.stdout.write("status: running\\nversion: 0.8.0\\nprotocol: 19\\ncompatible: yes\\nsocket: /tmp/herdr-stub.sock\\n");
+  if (${JSON.stringify(hangStatus)}) {
+    require("node:net").createServer().listen(0);
+  } else {
+    process.stdout.write(JSON.stringify({
+      status: ${JSON.stringify(running ? "running" : "not_running")},
+      running: ${JSON.stringify(running)},
+      version: ${JSON.stringify(running ? "0.8.0" : null)},
+      protocol: ${JSON.stringify(running ? 19 : null)},
+      compatible: ${JSON.stringify(running)},
+      socket: "/tmp/herdr-stub.sock",
+    }) + "\\n");
+  }
 } else if (args[0] === "workspace" && args[1] === "list") {
-  send({ type: "workspace_list", workspaces: [{ workspace_id: "wTEST", label: "deck-fleet" }] });
-} else if (args[0] === "tab" && args[1] === "create") {
   send({
-    type: "tab_created",
+    type: "workspace_list",
+    workspaces: ${JSON.stringify([{ workspace_id: "wTEST", label: "deck-fleet" }])}.slice(0, ${existingWorkspace ? 1 : 0}),
+  });
+} else if ((args[0] === "tab" && args[1] === "create") ||
+           (args[0] === "workspace" && args[1] === "create")) {
+  send({
+    type: args[0] === "tab" ? "tab_created" : "workspace_created",
+    workspace: { workspace_id: "wTEST", label: "deck-fleet" },
     root_pane: { pane_id: "wTEST:p2", tab_id: "wTEST:t2", workspace_id: "wTEST" },
     tab: { tab_id: "wTEST:t2", workspace_id: "wTEST", label: "deck · orch · conversation" },
   });
@@ -271,6 +286,13 @@ if (args[0] === "status" && args[1] === "server") {
 				.map((line) => JSON.parse(line) as string[]);
 		},
 	};
+}
+
+function herdrRelaunchScriptPath(calls: string[][]): string {
+	const command = calls.find((args) => args[0] === "pane" && args[1] === "run")?.[3];
+	const matched = /^\/bin\/bash (\/tmp\/deck-herdr-conversation\.[A-Za-z0-9]+)$/.exec(command ?? "");
+	if (matched === null) throw new Error(`Missing safe Herdr relaunch command: ${String(command)}`);
+	return matched[1];
 }
 
 beforeAll(() => {
@@ -326,7 +348,7 @@ exit 2
 
 afterAll(() => {
 	if (primeBinary !== undefined && daemonSocket !== undefined) {
-		spawnSync(primeBinary, ["shutdown", "--force", "--daemon-socket", daemonSocket], {
+		spawnSync(primeBinary, ["shutdown", "--force"], {
 			env: {
 				...installEnv,
 				HERDR_ENV: "0",
@@ -363,6 +385,48 @@ describe("Prime conversation installer", () => {
 			fs.rmSync(dryRoot, { recursive: true, force: true });
 		}
 	});
+
+	test("refuses to publish the profile over a live pre-boundary daemon", async () => {
+		const started = await runRpc(
+			[
+				"--mode", "rpc",
+				"--offline",
+				"--no-session",
+				"--daemon-socket", daemonSocket,
+				"--provider", "deck",
+				"--model", "gpt-5.6-sol",
+				"--tools", "ipython",
+				"--no-extensions",
+				"--extension", path.join(import.meta.dir, "..", "broker", "pi", "deck-provider.ts"),
+			],
+			[{ id: "state", type: "get_state" }],
+			{
+				...installEnv,
+				DECK_TEST_AMBIENT_SECRET: "pre-boundary-secret",
+				PRIME_AGENT_CODING_AGENT_DIR: agentDir,
+				PRIME_AGENT_SESSION_DIR: path.join(deckHome, ".prime", "sessions"),
+			},
+			primeBinary,
+		);
+		expect(rpcFrames(started.stdout)).toContainEqual(expect.objectContaining({
+			command: "get_state",
+			success: true,
+		}));
+
+		const refused = combinedOutput("bash", [INSTALLER, "--apply"], installEnv);
+		expect(refused.status).toBe(1);
+		expect(refused.output).toContain("existing shared Prime daemon predates this environment boundary");
+		expect(refused.output).toContain("shutdown --force");
+
+		const stopped = combinedOutput(
+			primeBinary,
+			["shutdown", "--force"],
+			installEnv,
+		);
+		expect(stopped.status).toBe(0);
+		const reapplied = combinedOutput("bash", [INSTALLER, "--apply"], installEnv);
+		expect(reapplied.status).toBe(0);
+	}, 30_000);
 
 	test("refuses apply when the Deck home seed is missing or stale", () => {
 		const invalidRoot = fs.mkdtempSync(path.join(os.tmpdir(), "deck-prime-seed-"));
@@ -442,6 +506,74 @@ describe("Prime conversation installer", () => {
 describe("Prime conversation runtime guards", () => {
 	test("a plain-terminal conversation creates and enters its own labelled Herdr pane", () => {
 		const herdr = createHerdrCliStub(true);
+		let relaunchScript: string | undefined;
+		const conversationArgs = [
+			"--mode",
+			"rpc",
+			"--no-session",
+			"--model",
+			"hostile ; exit 77; ' argument",
+		];
+		try {
+			const result = combinedOutput(wrapper, conversationArgs, {
+				...installEnv,
+				DECK_HERDR_AUTO_ATTACH: "1",
+				DECK_HERDR_BIN: herdr.binary,
+				HERDR_ENV: "0",
+				HERDR_PANE_ID: "",
+				HERDR_SOCKET_PATH: "",
+				HERDR_TAB_ID: "",
+				HERDR_WORKSPACE_ID: "",
+				PRIME_CONVERSATION_RLM_MAX_DEPTH: "0",
+			});
+			expect(result).toMatchObject({ status: 0 });
+			const calls = herdr.readCalls();
+			expect(calls.slice(0, 2)).toEqual([
+				["status", "server", "--json"],
+				["workspace", "list"],
+			]);
+			const create = calls.find((args) => args[0] === "tab" && args[1] === "create");
+			expect(create).toEqual([
+				"tab", "create",
+				"--workspace", "wTEST",
+				"--label", "deck · orch · conversation",
+				"--cwd", deckHome,
+				"--env", "DECK_HERDR_RELAUNCHED=1",
+				"--no-focus",
+			]);
+			expect(calls).toContainEqual([
+				"tab", "rename", "wTEST:t2", "deck · orch · conversation",
+			]);
+			expect(calls).toContainEqual([
+				"pane", "rename", "wTEST:p2", "deck · orch · conversation",
+			]);
+			const run = calls.find((args) => args[0] === "pane" && args[1] === "run");
+			expect(run?.[2]).toBe("wTEST:p2");
+			relaunchScript = herdrRelaunchScriptPath(calls);
+			const bootstrap = fs.readFileSync(relaunchScript, "utf8");
+			expect(bootstrap).toContain(`exec ${wrapper}`);
+			expect(bootstrap).toContain("--mode rpc --no-session");
+			expect(bootstrap).toContain("export PRIME_CONVERSATION_RLM_MAX_DEPTH=0");
+			const execLine = bootstrap.trimEnd().split("\n").at(-1);
+			expect(execLine?.startsWith("exec ")).toBe(true);
+			const argvProbe = spawnSync("/bin/bash", [
+				"-c",
+				`set -- ${execLine?.slice(5)}; node -e 'process.stdout.write(JSON.stringify(process.argv.slice(1)))' "$@"`,
+			], { encoding: "utf8" });
+			expect(argvProbe.status).toBe(0);
+			expect(JSON.parse(argvProbe.stdout)).toEqual([wrapper, ...conversationArgs]);
+			expect(run?.[3]).not.toContain("--mode");
+			expect(calls).toContainEqual(["tab", "focus", "wTEST:t2"]);
+			expect(calls.at(-1)).toEqual([]);
+		} finally {
+			if (relaunchScript !== undefined) fs.rmSync(relaunchScript, { force: true });
+			fs.rmSync(herdr.root, { recursive: true, force: true });
+		}
+	}, 30_000);
+
+	test("a fresh Herdr server labels both the new workspace root tab and pane", () => {
+		const herdr = createHerdrCliStub(true, false);
+		let relaunchScript: string | undefined;
 		try {
 			const result = combinedOutput(wrapper, ["--mode", "rpc", "--no-session"], {
 				...installEnv,
@@ -455,33 +587,51 @@ describe("Prime conversation runtime guards", () => {
 			});
 			expect(result.status).toBe(0);
 			const calls = herdr.readCalls();
-			expect(calls.slice(0, 2)).toEqual([
-				["status", "server"],
-				["workspace", "list"],
-			]);
-			const create = calls.find((args) => args[0] === "tab" && args[1] === "create");
-			expect(create).toEqual([
-				"tab", "create",
-				"--workspace", "wTEST",
-				"--label", "deck · orch · conversation",
+			expect(calls).toContainEqual([
+				"workspace", "create",
+				"--label", "deck-fleet",
 				"--cwd", deckHome,
 				"--env", "DECK_HERDR_RELAUNCHED=1",
 				"--no-focus",
 			]);
 			expect(calls).toContainEqual([
+				"tab", "rename", "wTEST:t2", "deck · orch · conversation",
+			]);
+			expect(calls).toContainEqual([
 				"pane", "rename", "wTEST:p2", "deck · orch · conversation",
 			]);
-			const run = calls.find((args) => args[0] === "pane" && args[1] === "run");
-			expect(run?.[2]).toBe("wTEST:p2");
-			expect(run?.[3]).toContain(wrapper);
-			expect(run?.[3]).toContain("--mode rpc --no-session");
-			expect(calls).toContainEqual(["tab", "focus", "wTEST:t2"]);
-			expect(calls.at(-1)).toEqual([]);
+			relaunchScript = herdrRelaunchScriptPath(calls);
 		} finally {
+			if (relaunchScript !== undefined) fs.rmSync(relaunchScript, { force: true });
 			fs.rmSync(herdr.root, { recursive: true, force: true });
 		}
 	}, 30_000);
 
+
+	test("a stale ambient socket without pane identity is cleared before server discovery", () => {
+		const herdr = createHerdrCliStub(true);
+		let relaunchScript: string | undefined;
+		try {
+			const result = combinedOutput(wrapper, ["--mode", "rpc", "--no-session"], {
+				...installEnv,
+				DECK_HERDR_AUTO_ATTACH: "1",
+				DECK_HERDR_BIN: herdr.binary,
+				HERDR_ENV: "1",
+				HERDR_PANE_ID: "",
+				HERDR_SOCKET_PATH: "/tmp/stale-herdr.sock",
+				HERDR_TAB_ID: "",
+				HERDR_WORKSPACE_ID: "",
+			});
+			expect(result.status).toBe(0);
+			const calls = herdr.readCalls();
+			expect(calls.some((args) => args[0] === "pane" && args[1] === "get")).toBe(false);
+			expect(calls.some((args) => args[0] === "tab" && args[1] === "create")).toBe(true);
+			relaunchScript = herdrRelaunchScriptPath(calls);
+		} finally {
+			if (relaunchScript !== undefined) fs.rmSync(relaunchScript, { force: true });
+			fs.rmSync(herdr.root, { recursive: true, force: true });
+		}
+	}, 30_000);
 	test("an unavailable Herdr server does not block the conversation seat", async () => {
 		const herdr = createHerdrCliStub(false);
 		try {
@@ -503,7 +653,38 @@ describe("Prime conversation runtime guards", () => {
 				command: "get_state",
 				success: true,
 			}));
-			expect(herdr.readCalls()).toEqual([["status", "server"]]);
+			expect(herdr.readCalls()).toEqual([["status", "server", "--json"]]);
+		} finally {
+			fs.rmSync(herdr.root, { recursive: true, force: true });
+		}
+	}, 30_000);
+
+	test("a wedged Herdr CLI is bounded and does not block the conversation seat", async () => {
+		const herdr = createHerdrCliStub(true, true, true);
+		// A real child process that never responds is required to exercise the
+		// wrapper's OS-level timeout and kill path; fake timers cannot drive spawnSync.
+		try {
+			const startedAt = Date.now();
+			const result = await runRpc(
+				["--mode", "rpc", "--no-session"],
+				[{ id: "state", type: "get_state" }],
+				{
+					...installEnv,
+					DECK_HERDR_AUTO_ATTACH: "1",
+					DECK_HERDR_BIN: herdr.binary,
+					HERDR_ENV: "0",
+					HERDR_PANE_ID: "",
+					HERDR_SOCKET_PATH: "",
+					HERDR_TAB_ID: "",
+					HERDR_WORKSPACE_ID: "",
+				},
+			);
+			expect(Date.now() - startedAt).toBeLessThan(12_000);
+			expect(rpcFrames(result.stdout)).toContainEqual(expect.objectContaining({
+				command: "get_state",
+				success: true,
+			}));
+			expect(herdr.readCalls()).toEqual([["status", "server", "--json"]]);
 		} finally {
 			fs.rmSync(herdr.root, { recursive: true, force: true });
 		}
