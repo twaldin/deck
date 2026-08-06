@@ -253,7 +253,7 @@ test("blocker reports draft findings and submit only follows captain approval", 
   expect(source).toContain('request-changes');
   expect(source).toContain("draftFingerprint");
   expect(source).toContain("draftBody");
-  expect(source).toContain("— Tim's agent");
+  expect(source).toContain("— automated review");
 });
 
 test("clean and exhausted rounds use different captain decisions without self-approval", () => {

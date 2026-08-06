@@ -323,10 +323,11 @@ export async function startShip(
 				stdio: ["ignore", log, log],
 				env: {
 					...process.env,
-					PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR ?? path.join(home, ".pi"),
+					PI_CODING_AGENT_DIR:
+						process.env.PI_CODING_AGENT_DIR ?? path.join(home, ".pi"),
 					DECK_SUBAGENT_EXTENSION:
 						process.env.DECK_SUBAGENT_EXTENSION ??
-						path.join(home, ".pi", "agent", "extensions", "deck-subagents", "index.ts"),
+						path.join(home, ".pi", "extensions", "deck-subagents", "index.ts"),
 				},
 			},
 		);

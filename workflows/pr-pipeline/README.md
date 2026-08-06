@@ -233,18 +233,18 @@ bunx smithers-orchestrator@0.30.0 logs lin-123-pipeline    # event stream
 ```
 
 When a gate parks (`migration-gate`, `r{N}-stamp`, escalations): relay the card
-to Tim through firstmate (`needs-decision:`), then resolve it yourself:
+to the operator through the configured decision surface, then resolve it:
 
 ```sh
-bunx smithers-orchestrator@0.30.0 approve lin-123-pipeline --node r0-stamp --by tim
+bunx smithers-orchestrator@0.30.0 approve example-123-pipeline --node r0-stamp --by operator
 #   or: deny ... --node r0-stamp   (onDeny=fail → the run fails closed)
-bunx smithers-orchestrator@0.30.0 up pipeline.tsx --run-id lin-123-pipeline --resume true
+bunx smithers-orchestrator@0.30.0 up pipeline.tsx --run-id example-123-pipeline --resume true
 ```
 
 Long real runs: prefer `up ... --serve --port <p>` to keep the owning process
 alive at gates (plain `up` exits at a park; resume works either way).
 
-The stamp card reaches Tim through firstmate; his answer resumes the run. The
+The stamp card reaches the operator through the configured decision surface; their answer resumes the run. The
 crewmate NEVER approves the stamp itself.
 
 ### Operational invariants
@@ -302,7 +302,7 @@ bun run graph            # render-without-execute sanity check
 
 - `tests/reviewers.test.ts` — request-reviewers stage: CODEOWNERS
   parsing/matching (GitHub semantics: `docs/*` owns direct children only,
-  `**/` matches zero dirs), frequency fallback, ali/self/bot exclusion, the
+  `**/` matches zero dirs), frequency fallback, configured/self/bot exclusion, the
   full `executeReviewerRequest` escalation paths against mocked adapters, and
   the gh adapters (request POST + silent-no-op verification) against a mocked
   exec.

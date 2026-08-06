@@ -8,7 +8,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { AGENT_COMMENT_SIGNATURE, commentCommand, isSignatureProject, reviewReplyCommand } from "./comments.ts";
+import { agentCommentSignature, commentCommand, isSignatureProject, reviewReplyCommand } from "./comments.ts";
 import type { Brief } from "./types.ts";
 import type { StackCarSpec } from "./adopt.ts";
 
@@ -368,7 +368,7 @@ export function watchFixPrompt(args: {
 		"   repeat that blocker in summary.",
 		`3. Every unanswered actionable issue comment: pipe the answer to this signing helper, not a raw gh comment command: ${commentCommand(args.project, args.repo, args.prNumber, "YOUR ANSWER")}.`,
 		"   For a review-thread reply, query the thread comments and use the numeric `databaseId` of the",
-		`   review comment being answered in place of <REVIEW_COMMENT_ID>: ${reviewReplyTemplate}.${isSignatureProject(args.project) ? ` The helper adds ${AGENT_COMMENT_SIGNATURE}.` : ""}`,
+		`   review comment being answered in place of <REVIEW_COMMENT_ID>: ${reviewReplyTemplate}.${isSignatureProject(args.project) && agentCommentSignature() !== undefined ? ` The helper adds ${agentCommentSignature()}.` : ""}`,
 		"   Never run the review-reply template with the placeholder or with comment id 0. Use a heredoc or",
 		"   stdin so shell metacharacters stay literal. Use the helper for every issue comment and review",
 		"   reply. Do not add the signature to the PR description.",

@@ -1,6 +1,6 @@
-import { AGENT_COMMENT_SIGNATURE, signatureProjects } from "../../../v2/src/signature.ts";
+import { agentCommentSignature, signatureProjects } from "../../../v2/src/signature.ts";
 
-export { AGENT_COMMENT_SIGNATURE };
+export { agentCommentSignature };
 
 /** Match the same project forms used by every comment writer. */
 export function isSignatureProject(project: string | undefined): boolean {
@@ -14,10 +14,11 @@ export function isSignatureProject(project: string | undefined): boolean {
 
 /** Add the configured agent signature to a comment, once. */
 export function signComment(project: string | undefined, body: string): string {
-	if (!isSignatureProject(project) || body.trimEnd().endsWith(AGENT_COMMENT_SIGNATURE)) {
+	const signature = agentCommentSignature();
+	if (signature === undefined || !isSignatureProject(project) || body.trimEnd().endsWith(signature)) {
 		return body;
 	}
-	return `${body.trimEnd()}\n\n${AGENT_COMMENT_SIGNATURE}`;
+	return `${body.trimEnd()}\n\n${signature}`;
 }
 
 /** The only body transformation used by pipeline comment writers. */

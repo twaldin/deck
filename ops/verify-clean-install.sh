@@ -135,6 +135,7 @@ PERSONAL_SCAN_FILES=(
   v2/seed/README.md
   v2/src/projects.ts
   docs/LAPTOP-AGENTS.md
+  v2/src/signature.ts
   docs/gateway-auth.md
   docs/personal-home.md
   workflows/pr-pipeline/README.md
