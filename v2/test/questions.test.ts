@@ -14,9 +14,21 @@ import {
 	openQuestions,
 	pendingAnswersFor,
 	queueFile,
+	readQuestionHistory,
 	readQuestions,
 	STALE_AFTER_MS,
+	type Question,
 } from "../src/questions-store";
+import {
+	askWorkflowQuestion,
+	resolveWorkflowQuestion,
+	workflowQuestionId,
+	workflowQuestions,
+} from "../src";
+import {
+	routeWorkflowQuestionAnswer,
+	workflowRunIsTerminal,
+} from "../src/workflow-questions";
 import { answerMessage, describe as describeQuestion, registerQuestions } from "../src/questions";
 
 const dirs: string[] = [];
@@ -242,6 +254,306 @@ describe("questions store", () => {
 		expect(formatAge(90 * 60_000)).toBe("1h30m");
 		expect(formatAge(50 * 3_600_000)).toBe("2d2h");
 	});
+	test("workflow writer is keyed, decision-shaped, and terminal across retries", () => {
+		const file = freshFile();
+		const input = {
+			runId: "run-42",
+			nodeId: "r0-stamp",
+			answerLane: "smithers-approval" as const,
+			resumeHint: "Gateway approval releases the parked node.",
+			originalIssue: "PR #42 is green and waiting for its commit-bound stamp.",
+			proposedAction: "Stamp head abc123 and submit this PR to the merge queue.",
+			blastRadius: "Only PR #42 at abc123; any new head invalidates the stamp.",
+			prNumber: 42,
+			approvalValue: { headSha: "abc123", prNumber: 42 },
+			cwd: "/workflow",
+		};
+		const first = askWorkflowQuestion(file, input);
+		const retry = askWorkflowQuestion(file, input);
+		expect(first.id).toBe(workflowQuestionId("run-42", "r0-stamp"));
+		expect(retry.id).toBe(first.id);
+		expect(readFileSync(file, "utf8").trim().split("\n")).toHaveLength(1);
+		expect(openQuestions(file)[0]).toMatchObject({
+			origin: "workflow",
+			workflow: {
+				runId: "run-42",
+				nodeId: "r0-stamp",
+				answerLane: "smithers-approval",
+				prNumber: 42,
+				originalIssue: input.originalIssue,
+				proposedAction: input.proposedAction,
+				blastRadius: input.blastRadius,
+			},
+		});
+
+		expect(resolveWorkflowQuestion(file, {
+			runId: "run-42",
+			nodeId: "r0-stamp",
+			answer: "Approved by Gateway",
+		})).toBe(true);
+		askWorkflowQuestion(file, input);
+		expect(readFileSync(file, "utf8").trim().split("\n")).toHaveLength(2);
+		expect(openQuestions(file)).toEqual([]);
+		expect(workflowQuestions(file, "run-42", "r0-stamp")[0]?.status).toBe("answered");
+		expect(compact(file, STALE_AFTER_MS * 100)).toEqual({ kept: 1, archived: 0 });
+		askWorkflowQuestion(file, input);
+		expect(openQuestions(file)).toEqual([]);
+		expect(workflowQuestions(file, "run-42", "r0-stamp")[0]?.status).toBe("answered");
+	});
+	test("workflow identity cannot alias delimiter-bearing run, node, or decision keys", () => {
+		expect(workflowQuestionId("run:a", "b", "c")).not.toBe(
+			workflowQuestionId("run", "a:b", "c"),
+		);
+		expect(workflowQuestionId("run:a", "b", "c")).not.toBe(
+			workflowQuestionId("run:a", "b:c"),
+		);
+		expect(() => workflowQuestionId("run\nother", "node")).toThrow(
+			"workflow runId must be one line",
+		);
+		expect(() => workflowQuestionId("run", "x".repeat(201))).toThrow(
+			"workflow nodeId exceeds 200 UTF-8 bytes",
+		);
+	});
+
+
+	test("workflow waits do not age into unresolvable archive ghosts", () => {
+		const file = freshFile();
+		askWorkflowQuestion(file, {
+			runId: "run-old",
+			nodeId: "fallout-escalation",
+			answerLane: "smithers-approval",
+			resumeHint: "Answer the approval.",
+			originalIssue: "The fallout probe is parked.",
+			proposedAction: "Choose whether the run may close.",
+			blastRadius: "Only the recorded fallout verdict.",
+			cwd: "/workflow",
+			now: 1,
+		});
+		expect(compact(file, STALE_AFTER_MS * 2)).toEqual({ kept: 1, archived: 0 });
+		expect(openQuestions(file)).toHaveLength(1);
+	});
+
+	test("workflow answer router submits approval metadata before closing the queue", async () => {
+		const file = freshFile();
+		askWorkflowQuestion(file, {
+			runId: "run-gateway",
+			nodeId: "r1-stamp",
+			answerLane: "smithers-approval",
+			resumeHint: "Gateway releases the stamp node.",
+			originalIssue: "The replacement head needs a fresh stamp.",
+			proposedAction: "Approve the replacement head.",
+			blastRadius: "Only PR #9 at the replacement head.",
+			prNumber: 9,
+			approvalValue: { headSha: "def456", prNumber: 9 },
+			cwd: "/workflow",
+		});
+		const question = openQuestions(file)[0]!;
+		let requestBody: unknown;
+		const result = await routeWorkflowQuestionAnswer(file, question, "Stamp", {
+			env: {
+				SMITHERS_GATEWAY_TOKEN: "smithers-test",
+				SMITHERS_GATEWAY_URL: "http://gateway.test/",
+			},
+			fetch: async (url, init) => {
+				expect(String(url)).toBe("http://gateway.test/v1/rpc/submitApproval");
+				expect(new Headers(init?.headers).get("authorization")).toBe("Bearer smithers-test");
+				requestBody = JSON.parse(String(init?.body));
+				return new Response(JSON.stringify({
+					ok: true,
+					payload: {
+						runId: "run-gateway",
+						nodeId: "r1-stamp",
+						iteration: 0,
+						approved: true,
+					},
+				}), { status: 200 });
+			},
+		});
+		expect(result).toEqual({ lane: "smithers-approval", choice: "approve", applied: true });
+		expect(requestBody).toMatchObject({
+			runId: "run-gateway",
+			nodeId: "r1-stamp",
+			iteration: 0,
+			approved: true,
+			decision: {
+				approved: true,
+				value: { headSha: "def456", prNumber: 9 },
+			},
+		});
+		expect(readQuestions(file)[0]).toMatchObject({ status: "answered", answer: "Stamp" });
+	});
+
+	test("workflow approval preserves an explicit null decision value", async () => {
+		const file = freshFile();
+		askWorkflowQuestion(file, {
+			runId: "run-null-value",
+			nodeId: "r0-stamp",
+			answerLane: "smithers-approval",
+			resumeHint: "Gateway releases the stamp.",
+			originalIssue: "The workflow contract uses JSON null.",
+			proposedAction: "Approve the exact null value.",
+			blastRadius: "Only this approval.",
+			approvalValue: null,
+			cwd: "/workflow",
+		});
+		let submitted: unknown;
+		await routeWorkflowQuestionAnswer(file, openQuestions(file)[0]!, "Stamp", {
+			env: { SMITHERS_GATEWAY_TOKEN: "smithers-test" },
+			fetch: async (_input, init) => {
+				submitted = JSON.parse(String(init?.body));
+				return new Response(JSON.stringify({
+					ok: true,
+					payload: {
+						runId: "run-null-value",
+						nodeId: "r0-stamp",
+						iteration: 0,
+						approved: true,
+					},
+				}), { status: 200 });
+			},
+		});
+		expect(submitted).toMatchObject({ decision: { value: null } });
+	});
+	test("continued Smithers runs are terminal for workflow cleanup", async () => {
+		const file = freshFile();
+		askWorkflowQuestion(file, {
+			runId: "run-continued",
+			nodeId: "r0-watch-fix",
+			answerLane: "store",
+			resumeHint: "No resume remains.",
+			originalIssue: "The run continued as a replacement execution.",
+			proposedAction: "Clear the superseded wait.",
+			blastRadius: "Only the superseded run.",
+			cwd: "/workflow",
+		});
+		expect(await workflowRunIsTerminal(openQuestions(file)[0]!, {
+			env: { SMITHERS_GATEWAY_TOKEN: "status-test" },
+			fetch: async () => new Response(JSON.stringify({
+				ok: true,
+				payload: { runId: "run-continued", status: "continued" },
+			}), { status: 200 }),
+		})).toBe(true);
+	});
+
+
+	test("Gateway failure leaves the workflow approval visibly open", async () => {
+		const file = freshFile();
+		askWorkflowQuestion(file, {
+			runId: "run-gateway-down",
+			nodeId: "r0-stamp",
+			answerLane: "smithers-approval",
+			resumeHint: "Retry after Gateway recovery.",
+			originalIssue: "The PR needs a stamp.",
+			proposedAction: "Submit the stamp.",
+			blastRadius: "Only the recorded PR head.",
+			cwd: "/workflow",
+		});
+		await expect(routeWorkflowQuestionAnswer(
+			file,
+			openQuestions(file)[0]!,
+			"Stamp",
+			{
+				env: { SMITHERS_GATEWAY_TOKEN: "smithers-test" },
+				fetch: async () => new Response("unavailable", { status: 503 }),
+			},
+		)).rejects.toThrow("Smithers approval failed (503)");
+		expect(openQuestions(file)).toHaveLength(1);
+		expect(readFileSync(file, "utf8").trim().split("\n")).toHaveLength(1);
+	});
+
+	test("malformed Gateway success leaves the workflow approval visibly open", async () => {
+		const file = freshFile();
+		askWorkflowQuestion(file, {
+			runId: "run-bad-receipt",
+			nodeId: "r0-stamp",
+			answerLane: "smithers-approval",
+			resumeHint: "Retry after Gateway recovery.",
+			originalIssue: "The PR needs a stamp.",
+			proposedAction: "Submit the stamp.",
+			blastRadius: "Only the recorded PR head.",
+			cwd: "/workflow",
+		});
+		await expect(routeWorkflowQuestionAnswer(file, openQuestions(file)[0]!, "Stamp", {
+			env: { SMITHERS_GATEWAY_TOKEN: "smithers-test" },
+			fetch: async () => new Response("{}", { status: 200 }),
+		})).rejects.toThrow("mismatched success receipt");
+		expect(openQuestions(file)).toHaveLength(1);
+	});
+
+	test("matching AlreadyDecided reconciles a lost receipt without accepting a conflict", async () => {
+		const askStamp = (file: string, runId: string): Question => {
+			askWorkflowQuestion(file, {
+				runId,
+				nodeId: "r0-stamp",
+				answerLane: "smithers-approval",
+				resumeHint: "Reconcile the prior Gateway decision.",
+				originalIssue: "The approval response was lost.",
+				proposedAction: "Confirm the durable approval.",
+				blastRadius: "Only the same approval node and iteration.",
+				cwd: "/workflow",
+			});
+			return openQuestions(file)[0]!;
+		};
+		const response = (runId: string, status: "approved" | "denied"): Response =>
+			new Response(JSON.stringify({
+				ok: false,
+				error: {
+					code: "AlreadyDecided",
+					runId,
+					nodeId: "r0-stamp",
+					iteration: 0,
+					status,
+				},
+			}), { status: 409 });
+
+		const recovered = freshFile();
+		const result = await routeWorkflowQuestionAnswer(
+			recovered,
+			askStamp(recovered, "run-recover"),
+			"Stamp",
+			{
+				env: { SMITHERS_GATEWAY_TOKEN: "smithers-test" },
+				fetch: async () => response("run-recover", "approved"),
+			},
+		);
+		expect(result).toEqual({ lane: "smithers-approval", choice: "approve", applied: true });
+		expect(openQuestions(recovered)).toEqual([]);
+
+		const conflict = freshFile();
+		await expect(routeWorkflowQuestionAnswer(
+			conflict,
+			askStamp(conflict, "run-conflict"),
+			"Stamp",
+			{
+				env: { SMITHERS_GATEWAY_TOKEN: "smithers-test" },
+				fetch: async () => response("run-conflict", "denied"),
+			},
+		)).rejects.toThrow("conflicts with the decision already recorded");
+		expect(openQuestions(conflict)).toHaveLength(1);
+	});
+
+	test("plain workflow answers stay in the store for next-run hydration", async () => {
+		const file = freshFile();
+		askWorkflowQuestion(file, {
+			runId: "run-watch",
+			nodeId: "r0-watch-fix",
+			decisionKey: "thread=https://example.test/thread/1",
+			answerLane: "store",
+			resumeHint: "The next watch-fix seat hydrates this answer.",
+			originalIssue: "Review intent is ambiguous.",
+			proposedAction: "Captain chooses the intended behavior.",
+			blastRadius: "Only this review thread; no push occurs before hydration.",
+			cwd: "/workflow",
+		});
+		const question = openQuestions(file)[0]!;
+		const result = await routeWorkflowQuestionAnswer(file, question, "Keep backward compatibility.");
+		expect(result).toEqual({ lane: "store", applied: true });
+		expect(workflowQuestions(file, "run-watch", "r0-watch-fix")[0]).toMatchObject({
+			status: "answered",
+			answer: "Keep backward compatibility.",
+		});
+	});
+
 });
 
 describe("compact", () => {
@@ -645,6 +957,124 @@ describe("questions extension", () => {
 		expect(captain.notices.some((n) => n.includes("truncated"))).toBe(true);
 		expect(readQuestions(file)[0]?.status).toBe("answered");
 	});
+
+	test("/questions routes workflow stamps through the authenticated Gateway", async () => {
+		const file = freshFile();
+		const pi = new Harness();
+		let submitted: unknown;
+		registerQuestions(
+			pi as never,
+			{
+				...envFor(file),
+				SMITHERS_GATEWAY_TOKEN: "smithers-ui-test",
+				SMITHERS_GATEWAY_URL: "http://gateway.test",
+			},
+			{
+				...pi.runtime,
+				fetch: async (_input, init) => {
+					submitted = JSON.parse(String(init?.body));
+					return new Response(JSON.stringify({
+						ok: true,
+						payload: {
+							runId: "run-ui",
+							nodeId: "r0-stamp",
+							iteration: 0,
+							approved: true,
+						},
+					}), { status: 200 });
+				},
+			},
+		);
+		askWorkflowQuestion(file, {
+			runId: "run-ui",
+			nodeId: "r0-stamp",
+			answerLane: "smithers-approval",
+			resumeHint: "Gateway releases the node.",
+			originalIssue: "PR #12 is ready for a stamp.",
+			proposedAction: "Stamp the reviewed head.",
+			blastRadius: "Only PR #12 at head-12.",
+			prNumber: 12,
+			approvalValue: { headSha: "head-12", prNumber: 12 },
+			questionKind: "stamp",
+			options: ["Stamp", "Hold", "Deny gate"],
+			actions: ["stamp", "hold", "deny-gate"],
+			cwd: "/workflow",
+		});
+		await pi.commands.get("questions")!.handler("", fakeContext("captain", ["1. Stamp"]));
+		expect(submitted).toMatchObject({
+			runId: "run-ui",
+			nodeId: "r0-stamp",
+			approved: true,
+			decision: { value: { headSha: "head-12", prNumber: 12 } },
+		});
+		expect(openQuestions(file)).toEqual([]);
+	});
+
+	test("/questions cannot dismiss an active workflow wait into a ghost", async () => {
+		const file = freshFile();
+		const pi = new Harness();
+		registerQuestions(
+			pi as never,
+			{ ...envFor(file), SMITHERS_GATEWAY_TOKEN: "status-test" },
+			{
+				...pi.runtime,
+				fetch: async (input) => {
+					expect(String(input)).toBe("http://127.0.0.1:7331/v1/rpc/getRun");
+					return new Response(JSON.stringify({
+						ok: true,
+						payload: { runId: "run-ui", status: "running" },
+					}), { status: 200 });
+				},
+			},
+		);
+		askWorkflowQuestion(file, {
+			runId: "run-ui",
+			nodeId: "r0-watch-fix",
+			decisionKey: "thread-12",
+			answerLane: "store",
+			resumeHint: "Next watch-fix hydrates the answer.",
+			originalIssue: "Thread 12 needs a product decision.",
+			proposedAction: "State the intended behavior.",
+			blastRadius: "Only thread 12.",
+			cwd: "/workflow",
+		});
+		const captain = fakeContext("captain", ["Dismiss"]);
+		await pi.commands.get("questions")!.handler("", captain);
+		expect(openQuestions(file)).toHaveLength(1);
+		expect(captain.notices).toContain(
+			"Workflow decisions cannot be dismissed while their wait is active; choose Hold, approve/deny the gate, or answer the plain decision.",
+		);
+	});
+	test("/questions dismisses a workflow wait after Gateway reports its run terminal", async () => {
+		const file = freshFile();
+		const pi = new Harness();
+		registerQuestions(
+			pi as never,
+			{ ...envFor(file), SMITHERS_GATEWAY_TOKEN: "status-test" },
+			{
+				...pi.runtime,
+				fetch: async () => new Response(JSON.stringify({
+					ok: true,
+					payload: { runId: "run-cancelled", status: "cancelled" },
+				}), { status: 200 }),
+			},
+		);
+		askWorkflowQuestion(file, {
+			runId: "run-cancelled",
+			nodeId: "r0-watch-fix",
+			decisionKey: "thread-12",
+			answerLane: "store",
+			resumeHint: "Next watch-fix hydrates the answer.",
+			originalIssue: "Thread 12 needs a product decision.",
+			proposedAction: "State the intended behavior.",
+			blastRadius: "Only thread 12.",
+			cwd: "/workflow",
+		});
+		await pi.commands.get("questions")!.handler("", fakeContext("captain", ["Dismiss"]));
+		expect(openQuestions(file)).toEqual([]);
+		expect(readQuestionHistory(file)[0]?.status).toBe("dismissed");
+	});
+
 
 	test("stamp approves the exact gate and resumes the exact run", async () => {
 		const file = freshFile();

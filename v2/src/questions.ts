@@ -25,6 +25,11 @@ import {
 	readQuestionHistory,
 	type Question,
 } from "./questions-store";
+import {
+	routeWorkflowQuestionAnswer,
+	workflowRunIsTerminal,
+	type WorkflowAnswerChoice,
+} from "./workflow-questions";
 
 // Polling audit: before this change the fleet overlay polled every 5s (12/min)
 // and the wake reconciler every 30s (2/min), in addition to this queue poll
@@ -78,6 +83,7 @@ export interface QuestionsRuntime {
 	now(): number;
 	setInterval(callback: () => void, ms: number): ReturnType<typeof setInterval>;
 	clearInterval(handle: ReturnType<typeof setInterval>): void;
+	fetch?(input: string | URL | Request, init?: RequestInit): Promise<Response>;
 }
 
 const defaultRuntime: QuestionsRuntime = {
@@ -133,6 +139,18 @@ export function describe(entry: Question, nowMs: number): string {
 			`WHY IT IS CORRECT (AGENT CLAIM): ${pr.whyCorrect ?? "No evidence recorded."}`,
 			`CI: ${pr.ciState ?? "unknown"}`,
 			`mergeStateStatus: ${pr.mergeStateStatus ?? "unknown"}`,
+		);
+	}
+	const workflow = entry.workflow;
+	if (workflow !== undefined) {
+		lines.push(
+			"",
+			`Workflow wait: run ${workflow.runId}; node ${workflow.nodeId}; PR #${workflow.prNumber ?? "pending"}`,
+			`Answer lane: ${workflow.answerLane}`,
+			`ORIGINAL ISSUE: ${workflow.originalIssue}`,
+			`PROPOSED ACTION: ${workflow.proposedAction}`,
+			`BLAST RADIUS: ${workflow.blastRadius}`,
+			`Resume: ${workflow.resumeHint}`,
 		);
 	}
 	lines.push("", entry.question);
@@ -341,7 +359,29 @@ export function registerQuestions(
 				if (control === "Stop reviewing") break;
 				if (control === "Skip") continue;
 				if (control === "Dismiss") {
-					if (resolve(ctx, entry, DISMISSED, "dismissed")) answered += 1;
+					if (entry.workflow === undefined) {
+						if (resolve(ctx, entry, DISMISSED, "dismissed")) answered += 1;
+						continue;
+					}
+					try {
+						const terminal = await workflowRunIsTerminal(entry, {
+							env,
+							...(runtime.fetch === undefined ? {} : { fetch: runtime.fetch }),
+						});
+						if (terminal) {
+							if (resolve(ctx, entry, DISMISSED, "dismissed")) answered += 1;
+						} else {
+							ctx.ui.notify(
+								"Workflow decisions cannot be dismissed while their wait is active; choose Hold, approve/deny the gate, or answer the plain decision.",
+								"warning",
+							);
+						}
+					} catch (error) {
+						ctx.ui.notify(
+							`Workflow status could not be verified; the question remains open: ${error instanceof Error ? error.message : String(error)}`,
+							"error",
+						);
+					}
 					continue;
 				}
 				let text = options[choice] ?? "";
@@ -357,7 +397,33 @@ export function registerQuestions(
 				if (action === "hold") continue;
 				const trustedStamp = entry.questionKind === "stamp" && entry.origin === "fleet";
 				const trustedReviewGate = entry.origin === "review-gate" && entry.prContext !== undefined;
-				if ((action === "stamp" && trustedStamp || action === undefined && trustedStamp && selectedLabel === "Stamp")) {
+				if (entry.workflow !== undefined) {
+					const choiceOverride: WorkflowAnswerChoice | undefined =
+						action === "stamp" || action === "approve"
+							? "approve"
+							: action === "deny-gate"
+								? "deny"
+								: undefined;
+					try {
+						const routed = await routeWorkflowQuestionAnswer(
+							file,
+							entry,
+							text,
+							{
+								env,
+								now: runtime.now,
+								...(runtime.fetch === undefined ? {} : { fetch: runtime.fetch }),
+							},
+							choiceOverride,
+						);
+						applied = routed.applied;
+					} catch (error) {
+						ctx.ui.notify(
+							`Workflow decision was not recorded; the question remains open: ${error instanceof Error ? error.message : String(error)}`,
+							"error",
+						);
+					}
+				} else if ((action === "stamp" && trustedStamp || action === undefined && trustedStamp && selectedLabel === "Stamp")) {
 					applied = await approveStamp(ctx, entry);
 				} else if ((action === "approve" && trustedReviewGate || action === undefined && trustedReviewGate && entry.questionKind === "approve" && selectedLabel === "Approve")) {
 					applied = await approvePullRequest(ctx, entry);

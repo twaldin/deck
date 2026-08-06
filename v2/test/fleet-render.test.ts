@@ -35,6 +35,7 @@ import {
   type TaskRow,
   type WorkflowRow,
 } from "../src/monitor";
+import { askWorkflowQuestion, readQuestions, workflowQuestionId } from "../src/questions-store";
 
 function task(overrides: Partial<TaskRow> = {}): TaskRow {
   return {
@@ -191,6 +192,53 @@ describe("fleet frame state", () => {
       expect(question.prContext.originalIssue).toBe("Restore widget startup");
       expect(question.question).toContain("Stamp PR #42");
       expect(result.counters.efforts).toBe(1);
+    } finally {
+      if (previousHome === undefined) delete process.env.DECK_V2_HOME;
+      else process.env.DECK_V2_HOME = previousHome;
+      if (previousQueue === undefined) delete process.env.DECK_QUESTIONS_FILE;
+      else process.env.DECK_QUESTIONS_FILE = previousQueue;
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("does not duplicate a stamp question already owned by pr-pipeline", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fleet-bridged-stamp-"));
+    const previousHome = process.env.DECK_V2_HOME;
+    const previousQueue = process.env.DECK_QUESTIONS_FILE;
+    const file = path.join(directory, "questions.jsonl");
+    process.env.DECK_V2_HOME = directory;
+    process.env.DECK_QUESTIONS_FILE = file;
+    try {
+      fs.mkdirSync(path.join(directory, "state", "ship"), { recursive: true });
+      fs.writeFileSync(
+        path.join(directory, "state", "ship", "stamp.input.json"),
+        JSON.stringify({ repo: "acme/widgets", existingPr: 42 }),
+      );
+      askWorkflowQuestion(file, {
+        runId: "stamp",
+        nodeId: "r0-stamp",
+        answerLane: "smithers-approval",
+        resumeHint: "Gateway releases the stamp node.",
+        originalIssue: "PR #42 is ready for its stamp.",
+        proposedAction: "Stamp the reviewed head.",
+        blastRadius: "Only PR #42 at head-42.",
+        prNumber: 42,
+        cwd: directory,
+      });
+      await buildFrame({
+        workflowCwd: directory,
+        psRuns: [{
+          id: "stamp",
+          rootDir: directory,
+          prNumber: 42,
+          step: "r0-stamp",
+          status: "waiting-approval",
+          state: "paused",
+          headRefOid: "head-42",
+        }],
+      });
+      expect(readQuestions(file)).toHaveLength(1);
+      expect(readQuestions(file)[0]?.id).toBe(workflowQuestionId("stamp", "r0-stamp"));
     } finally {
       if (previousHome === undefined) delete process.env.DECK_V2_HOME;
       else process.env.DECK_V2_HOME = previousHome;

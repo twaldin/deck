@@ -71,7 +71,7 @@ describe("installer layout", () => {
 	test("entrypoint imports resolve through the shared v2 source tree", () => {
 		install();
 		const lib = path.join(target, "agent", "extensions", "v2", "src");
-		for (const module of ["questions-store", "questions", "ship", "smithers", "workspace", "hydrate", "home", "meta"]) {
+		for (const module of ["questions-store", "workflow-questions", "questions", "ship", "smithers", "workspace", "hydrate", "home", "meta"]) {
 			const installed = path.join(lib, `${module}.ts`);
 			expect(fs.lstatSync(installed).isSymbolicLink()).toBe(true);
 			expect(fs.realpathSync(installed)).toBe(path.join(REPO_V2, "src", `${module}.ts`));

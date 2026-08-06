@@ -1,3 +1,13 @@
+/**
+ * Deck questions has exactly two workflow answer lanes:
+ * 1. `smithers-approval` (stamps and other Approval nodes) submits the
+ *    authenticated Gateway `submitApproval` RPC, then folds the queue closed.
+ * 2. `store` appends the captain's plain answer only; the owning run hydrates
+ *    that durable answer into its next decision-capable seat.
+ *
+ * Both lanes are declared by the workflow question record. Presentation text
+ * never grants approval authority or changes the route.
+ */
 import { Type } from "typebox";
 import {
 	answer as recordAnswer,
@@ -6,6 +16,7 @@ import {
 	readQuestionHistory,
 	type Question,
 } from "../v2/src/questions-store";
+import { routeWorkflowQuestionAnswer } from "../v2/src/workflow-questions";
 import {
 	QUESTIONS_POLL_INTERVAL_MS,
 	registerQuestions,
@@ -33,8 +44,13 @@ function questionSummary(question: Question): Record<string, unknown> {
 		status: question.status,
 		urgency: question.urgency,
 		question: question.question,
+		...(question.questionKind === undefined ? {} : { questionKind: question.questionKind }),
+		...(question.origin === undefined ? {} : { origin: question.origin }),
+		...(question.prContext === undefined ? {} : { prContext: question.prContext }),
+		...(question.workflow === undefined ? {} : { workflow: question.workflow }),
 		...(question.context === undefined ? {} : { context: question.context }),
 		...(question.options === undefined ? {} : { options: question.options }),
+		...(question.actions === undefined ? {} : { actions: question.actions }),
 		...(question.recommendation === undefined ? {} : { recommendation: question.recommendation }),
 		...(question.answer === undefined ? {} : { answer: question.answer }),
 		askedAt: question.askedAt,
@@ -119,29 +135,54 @@ export function registerDeckQuestions(
 	pi.registerTool({
 		name: "answer_question",
 		label: "Answer Question",
-		description: "Append one answer to an open queued question. Existing resolutions are never overwritten.",
+		description:
+			"Answer an open question. Workflow approvals accept Stamp/Approve, Deny gate, or Hold and route through Smithers; plain answers append to the store.",
 		parameters: Type.Object({
-			id: Type.String({ description: "Queued question id", minLength: 1, maxLength: 128 }),
-			answer: Type.String({ description: "Captain's answer", minLength: 1, maxLength: 7000 }),
+			id: Type.String({ description: "Queued question id", minLength: 1, maxLength: 512 }),
+			answer: Type.String({ description: "Captain's answer or workflow action", minLength: 1, maxLength: 7000 }),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const id = String(params.id).trim();
 			const answer = String(params.answer).trim();
 			if (id === "") throw new Error("answer_question needs a question id");
 			if (answer === "") throw new Error("answer_question needs a non-empty answer");
-			if (!openQuestions(file).some((question) => question.id === id)) {
+			const entry = openQuestions(file).find((question) => question.id === id);
+			if (entry === undefined) {
 				const existing = readQuestionHistory(file).find((question) => question.id === id);
 				throw new Error(existing === undefined
 					? `question ${id} does not exist`
 					: `question ${id} is already ${existing.status}`);
 			}
-			const applied = recordAnswer(file, id, answer);
+			const routed = entry.workflow === undefined
+				? undefined
+				: await routeWorkflowQuestionAnswer(file, entry, answer, {
+						env,
+						...(runtime === undefined
+							? {}
+							: { now: runtime.now, ...(runtime.fetch === undefined ? {} : { fetch: runtime.fetch }) }),
+					});
+			if (routed?.choice === "hold") {
+				const open = setQuestionsStatus(ctx, file);
+				return text(`Held question ${id}; it remains open (${open} open in the queue).`, {
+					id,
+					open,
+					file,
+					lane: routed.lane,
+					choice: routed.choice,
+				});
+			}
+			const applied = routed?.applied ?? recordAnswer(file, id, answer);
 			if (!applied) {
 				const existing = readQuestionHistory(file).find((question) => question.id === id);
 				throw new Error(`question ${id} is already ${existing?.status ?? "resolved"}`);
 			}
 			const open = setQuestionsStatus(ctx, file);
-			return text(`Answered question ${id} (${open} open in the queue).`, { id, open, file });
+			return text(`Answered question ${id} (${open} open in the queue).`, {
+				id,
+				open,
+				file,
+				...(routed === undefined ? {} : { lane: routed.lane, choice: routed.choice }),
+			});
 		},
 	});
 

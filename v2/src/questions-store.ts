@@ -12,12 +12,38 @@
 import { appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import * as path from "node:path";
+import { createHash } from "node:crypto";
 import { deckV2Home } from "./home";
 
 export type Urgency = "low" | "normal" | "high";
 export type QuestionStatus = "open" | "answered" | "dismissed";
 export type QuestionKind = "agent" | "stamp" | "approve";
-export type QuestionOrigin = "fleet" | "review-gate";
+export type QuestionOrigin = "fleet" | "review-gate" | "workflow";
+export type WorkflowQuestionAnswerLane = "smithers-approval" | "store";
+
+/**
+ * Durable routing and ask-discipline fields for a workflow-owned decision.
+ *
+ * `runId + nodeId` is the stable wait identity. `decisionKey` further scopes
+ * multiple independent decisions emitted by one node (for example review
+ * threads). The free-form `question` remains presentation copy; consumers
+ * route and hydrate from this structured record.
+ */
+export interface WorkflowQuestionContext {
+	runId: string;
+	nodeId: string;
+	iteration: number;
+	answerLane: WorkflowQuestionAnswerLane;
+	resumeHint: string;
+	originalIssue: string;
+	proposedAction: string;
+	blastRadius: string;
+	prNumber?: number;
+	decisionKey?: string;
+	generation?: number;
+	/** Arbitrary JSON persisted with a Smithers approval (for commit-bound stamps). */
+	approvalValue?: unknown;
+}
 
 /** PR evidence shown with a captain stamp or approval decision. */
 export interface PrQuestionContext {
@@ -61,6 +87,32 @@ function boundedPrContext(value: PrQuestionContext | undefined): PrQuestionConte
 		evidence: text(value.evidence, 2000),
 	};
 }
+function boundedWorkflowContext(
+	value: WorkflowQuestionContext | undefined,
+): WorkflowQuestionContext | undefined {
+	if (value === undefined) return undefined;
+	const text = (item: string, bytes: number): string =>
+		truncateBytes(item.replace(/[\r\n]+/g, " "), bytes);
+	return {
+		runId: text(value.runId, 300),
+		nodeId: text(value.nodeId, 200),
+		iteration: value.iteration,
+		answerLane: value.answerLane,
+		resumeHint: text(value.resumeHint, 500),
+		originalIssue: text(value.originalIssue, 800),
+		proposedAction: text(value.proposedAction, 800),
+		blastRadius: text(value.blastRadius, 800),
+		...(value.prNumber === undefined ? {} : { prNumber: value.prNumber }),
+		...(value.decisionKey === undefined
+			? {}
+			: { decisionKey: text(value.decisionKey, 500) }),
+		...(value.generation === undefined ? {} : { generation: value.generation }),
+		...(value.approvalValue === undefined
+			? {}
+			: { approvalValue: value.approvalValue }),
+	};
+}
+
 
 export interface AskEvent {
 	kind: "ask";
@@ -71,6 +123,8 @@ export interface AskEvent {
 	origin?: QuestionOrigin;
 	/** Structured PR context is rendered before the free-form question. */
 	prContext?: PrQuestionContext;
+	/** Workflow wait identity, ask discipline, and answer routing. */
+	workflow?: WorkflowQuestionContext;
 	/** Gate questions can be terminal without waking a vanished worker session. */
 	deliverAnswer?: boolean;
 	actions?: Array<"stamp" | "approve" | "hold" | "close-pr" | "deny-gate" | null>;
@@ -250,6 +304,7 @@ export function ask(
 		questionKind?: QuestionKind;
 		origin?: QuestionOrigin;
 		prContext?: PrQuestionContext;
+		workflow?: WorkflowQuestionContext;
 		deliverAnswer?: boolean;
 		actions?: Array<"stamp" | "approve" | "hold" | "close-pr" | "deny-gate" | null>;
 		question: string;
@@ -284,6 +339,9 @@ export function ask(
 		...(input.questionKind === undefined ? {} : { questionKind: input.questionKind }),
 		...(input.origin === undefined ? {} : { origin: input.origin }),
 		...(input.prContext === undefined ? {} : { prContext: boundedPrContext(input.prContext) }),
+		...(input.workflow === undefined
+			? {}
+			: { workflow: boundedWorkflowContext(input.workflow) }),
 		...(input.deliverAnswer === undefined ? {} : { deliverAnswer: input.deliverAnswer }),
 		...(input.actions === undefined ? {} : { actions: input.actions }),
 		question,
@@ -314,24 +372,48 @@ const MAX_ANSWER_BYTES = MAX_EVENT_BYTES - 1024;
  * a pre-append read: two captains can both observe `open` before either writes,
  * and a pre-append read would then tell both of them they won.
  */
-/** Atomically create one global ask. The lock is a directory because mkdir is exclusive on
- * every filesystem used by Deck. The check and append happen while holding it. */
-export function askIfAbsent(file: string, input: Parameters<typeof ask>[1]): AskEvent {
-	const id = input.id?.trim();
-	if (!id || input.idScope !== "global") return ask(file, input);
-	const lock = `${file}.${id.replace(/[^a-zA-Z0-9_.-]/g, "_")}.lock`;
+function acquireQuestionLock(file: string, id: string): string {
+	const digest = createHash("sha256").update(id).digest("hex").slice(0, 32);
+	const lock = `${file}.${digest}.lock`;
 	mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
 	for (let attempt = 0; ; attempt++) {
 		try {
 			mkdirSync(lock, { mode: 0o700 });
-			break;
-		} catch (error: any) {
-			if (error?.code !== "EEXIST" || attempt >= 500) throw error;
+			return lock;
+		} catch (error: unknown) {
+			const code =
+				typeof error === "object" && error !== null && "code" in error
+					? error.code
+					: undefined;
+			if (code !== "EEXIST") throw error;
+			try {
+				if (Date.now() - statSync(lock).mtimeMs > 30_000) {
+					rmSync(lock, { recursive: true, force: true });
+					continue;
+				}
+			} catch (statError: unknown) {
+				const statCode =
+					typeof statError === "object" && statError !== null && "code" in statError
+						? statError.code
+						: undefined;
+				if (statCode === "ENOENT") continue;
+				throw statError;
+			}
+			if (attempt >= 500) throw error;
 			Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
 		}
 	}
+}
+
+/** Atomically creates one global ask. Both live and archived entries
+ * participate: retrying a wait after its terminal answer must never append a
+ * second ask or resurrect a closed question. */
+export function askIfAbsent(file: string, input: Parameters<typeof ask>[1]): AskEvent {
+	const id = input.id?.trim();
+	if (!id || input.idScope !== "global") return ask(file, input);
+	const lock = acquireQuestionLock(file, id);
 	try {
-		const existing = openQuestions(file).find((question) => question.id === id);
+		const existing = readQuestionHistory(file).find((question) => question.id === id);
 		if (existing) return existing;
 		return ask(file, input);
 	} finally {
@@ -356,6 +438,174 @@ export function answer(
 		answeredAt: now,
 	});
 	return readQuestions(file).find((entry) => entry.id === id)?.resolvedBy === eventId;
+}
+export interface WorkflowQuestionInput {
+	runId: string;
+	nodeId: string;
+	iteration?: number;
+	answerLane: WorkflowQuestionAnswerLane;
+	resumeHint: string;
+	originalIssue: string;
+	proposedAction: string;
+	blastRadius: string;
+	cwd: string;
+	prNumber?: number;
+	prContext?: PrQuestionContext;
+	decisionKey?: string;
+	generation?: number;
+	approvalValue?: unknown;
+	questionKind?: QuestionKind;
+	options?: string[];
+	actions?: Array<"stamp" | "approve" | "hold" | "close-pr" | "deny-gate" | null>;
+	recommendation?: string;
+	urgency?: Urgency;
+	now?: number;
+}
+
+function canonicalWorkflowIdentity(
+	value: string,
+	label: "runId" | "nodeId" | "decisionKey",
+	maxBytes: number,
+): string {
+	const normalized = value.trim();
+	if (normalized === "") throw new Error(`workflow ${label} must not be empty`);
+	if (/[\r\n]/.test(normalized)) throw new Error(`workflow ${label} must be one line`);
+	if (Buffer.byteLength(normalized, "utf8") > maxBytes) {
+		throw new Error(`workflow ${label} exceeds ${maxBytes} UTF-8 bytes`);
+	}
+	return normalized;
+}
+
+/**
+ * Stable, delimiter-safe queue identity for one workflow wait. The structured
+ * record retains the readable tuple; the id hashes its length-preserving JSON
+ * encoding so colons/URLs cannot alias another run/node/key combination.
+ */
+export function workflowQuestionId(
+	runId: string,
+	nodeId: string,
+	decisionKey?: string,
+): string {
+	const identity = JSON.stringify([
+		canonicalWorkflowIdentity(runId, "runId", 300),
+		canonicalWorkflowIdentity(nodeId, "nodeId", 200),
+		decisionKey === undefined
+			? null
+			: canonicalWorkflowIdentity(decisionKey, "decisionKey", 500),
+	]);
+	const digest = createHash("sha256").update(identity).digest("hex");
+	return `workflow:${digest}`;
+}
+
+/** Appends one decision-shaped workflow ask, once, across retries and resumes. */
+export function askWorkflowQuestion(
+	file: string,
+	input: WorkflowQuestionInput,
+): AskEvent {
+	const runId = canonicalWorkflowIdentity(input.runId, "runId", 300);
+	const nodeId = canonicalWorkflowIdentity(input.nodeId, "nodeId", 200);
+	const decisionKey =
+		input.decisionKey === undefined
+			? undefined
+			: canonicalWorkflowIdentity(input.decisionKey, "decisionKey", 500);
+	const originalIssue = input.originalIssue.trim();
+	const proposedAction = input.proposedAction.trim();
+	const blastRadius = input.blastRadius.trim();
+	const resumeHint = input.resumeHint.trim();
+	if (
+		originalIssue === "" ||
+		proposedAction === "" ||
+		blastRadius === "" ||
+		resumeHint === ""
+	) {
+		throw new Error(
+			"workflow question needs runId, nodeId, originalIssue, proposedAction, blastRadius, and resumeHint",
+		);
+	}
+	const clip = (value: string, bytes: number): string => truncateBytes(value, bytes);
+	const workflow: WorkflowQuestionContext = {
+		runId,
+		nodeId,
+		iteration: input.iteration ?? 0,
+		answerLane: input.answerLane,
+		resumeHint,
+		originalIssue,
+		proposedAction,
+		blastRadius,
+		...(input.prNumber === undefined ? {} : { prNumber: input.prNumber }),
+		...(decisionKey === undefined ? {} : { decisionKey }),
+		...(input.generation === undefined ? {} : { generation: input.generation }),
+		...(input.approvalValue === undefined
+			? {}
+			: { approvalValue: input.approvalValue }),
+	};
+	return askIfAbsent(file, {
+		id: workflowQuestionId(runId, nodeId, decisionKey),
+		idScope: "global",
+		origin: "workflow",
+		questionKind:
+			input.questionKind ??
+			(input.answerLane === "smithers-approval" ? "approve" : "agent"),
+		workflow,
+		prContext: input.prContext,
+		deliverAnswer: false,
+		question: `Workflow decision needed for run ${clip(runId, 300)}, node ${clip(nodeId, 200)}.`,
+		context:
+			`Run ${clip(runId, 300)}; node ${clip(nodeId, 200)}; ` +
+			`PR #${input.prNumber ?? "pending"}; resume: ${clip(resumeHint, 500)}`,
+		options: input.options,
+		actions: input.actions,
+		recommendation: input.recommendation,
+		urgency: input.urgency ?? "high",
+		sessionId: `workflow:${runId}`,
+		cwd: input.cwd,
+		now: input.now,
+	});
+}
+
+/** Workflow questions for reconciliation and answer hydration. */
+export function workflowQuestions(
+	file: string,
+	runId: string,
+	nodeId?: string,
+): Question[] {
+	const canonicalRunId = canonicalWorkflowIdentity(runId, "runId", 300);
+	const canonicalNodeId =
+		nodeId === undefined ? undefined : canonicalWorkflowIdentity(nodeId, "nodeId", 200);
+	return readQuestionHistory(file).filter(
+		(entry) =>
+			entry.workflow?.runId === canonicalRunId &&
+			(canonicalNodeId === undefined || entry.workflow.nodeId === canonicalNodeId),
+	);
+}
+
+/** Appends the terminal event matching one workflow wait, if it is still open. */
+export function resolveWorkflowQuestion(
+	file: string,
+	input: {
+		runId: string;
+		nodeId: string;
+		decisionKey?: string;
+		answer: string;
+		status?: "answered" | "dismissed";
+		now?: number;
+	},
+): boolean {
+	const id = workflowQuestionId(input.runId, input.nodeId, input.decisionKey);
+	const lock = acquireQuestionLock(file, id);
+	try {
+		const current = readQuestions(file).find((entry) => entry.id === id);
+		if (current?.status !== "open") return false;
+		return answer(
+			file,
+			id,
+			input.answer,
+			input.status ?? "answered",
+			input.now ?? Date.now(),
+		);
+	} finally {
+		rmSync(lock, { recursive: true, force: true });
+	}
 }
 
 /** Marks an answer as handed back to the asking agent so it is not re-delivered. */
@@ -399,12 +649,19 @@ export const STALE_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
  * Resolved-but-undelivered is ALWAYS kept, at any age: compaction runs on
  * session start before delivery, so aging these out would silently destroy a
  * captain answer the asker never saw — the exact failure the queue exists
- * to prevent. Resolved-and-delivered is history. Open questions must
- * be fresh and carry a sane timestamp; junk without a real `askedAt`
- * (firstmate-era records) can never age out, so it goes immediately.
+ * to prevent. Resolved-and-delivered is history. Workflow waits remain live
+ * until their owner appends a matching terminal event; expiring one would hide
+ * a still-blocked run and make later reconciliation impossible. Other open
+ * questions must be fresh and carry a sane timestamp; junk without a real
+ * `askedAt` (firstmate-era records) can never age out, so it goes immediately.
  */
 function isLive(entry: Question, now: number): boolean {
-	if (entry.status !== "open") return entry.deliverAnswer === false ? false : !entry.delivered;
+	// Workflow records are the durable tombstones and hydration history for a
+	// run/node identity. They never enter the bounded archive rotation.
+	if (entry.workflow !== undefined) return true;
+	if (entry.status !== "open") {
+		return entry.deliverAnswer === false ? false : !entry.delivered;
+	}
 	if (typeof entry.askedAt !== "number" || !Number.isFinite(entry.askedAt)) return false;
 	return now - entry.askedAt <= STALE_AFTER_MS;
 }

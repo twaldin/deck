@@ -824,6 +824,18 @@ export async function buildFrame(
     };
   });
   for (const wf of liveRuns.filter((row) => row.waitingFor === "stamp")) {
+    // New pr-pipeline runs write their Approval question before the engine can
+    // project `waitingFor=stamp`. Keep this monitor path only as a fallback for
+    // older parked runs; otherwise one wait would produce two captain asks.
+    const gateNode = wf.step ?? "r0-stamp";
+    if (
+      readQuestionHistory(queueFile()).some(
+        (question) =>
+          question.workflow?.runId === wf.runId &&
+          question.workflow.nodeId === gateNode,
+      )
+    )
+      continue;
     // Include the run so a later generation of the same PR gets a fresh
     // decision, while every render of this parked run uses one stable id.
     const input = readShipInput(wf.runId);
