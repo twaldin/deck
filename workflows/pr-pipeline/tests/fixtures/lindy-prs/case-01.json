@@ -11,13 +11,13 @@
     "mergeStateStatus": "BLOCKED",
     "transientMergeableObservation": null,
     "reviewDecision": "REVIEW_REQUIRED",
-    "behindBy": 18,
+    "behindBy": 19,
     "requiredChecks": {
       "configured": 2,
       "observed": 1
     }
   },
-  "headAgeSeconds": 2469,
+  "headAgeSeconds": 3164,
   "actors": [
     {
       "id": "self",
@@ -80,9 +80,9 @@
       "id": "check-1",
       "contextId": "other-3",
       "workflowId": "workflow-1",
-      "status": "in_progress",
+      "status": "queued",
       "conclusion": null,
-      "startedAfterHeadSeconds": 2026,
+      "startedAfterHeadSeconds": 2773,
       "completedAfterHeadSeconds": null,
       "appId": "app-1",
       "checkSuiteId": "suite-1"

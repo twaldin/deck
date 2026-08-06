@@ -11,13 +11,13 @@
     "mergeStateStatus": "BLOCKED",
     "transientMergeableObservation": null,
     "reviewDecision": "REVIEW_REQUIRED",
-    "behindBy": 138,
+    "behindBy": 139,
     "requiredChecks": {
       "configured": 2,
       "observed": 2
     }
   },
-  "headAgeSeconds": 147509,
+  "headAgeSeconds": 148216,
   "actors": [
     {
       "id": "self",

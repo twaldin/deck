@@ -48,6 +48,7 @@ export const CAPTAIN_REVIEW_POLICY: WatchReviewPolicy = {
 		approvalCheckPattern: "claude.*review",
 	}],
 };
+const LINDY_REPOSITORY = "lindy-ai/lindy";
 
 export type ActorKind = "self" | "human" | "bot" | "claude" | "linear";
 export type CommentSignal = "finding" | "claude-approved" | "claude-error" | "linear-banner" | "empty";
@@ -183,6 +184,19 @@ const SAFE_STRUCTURAL_ENUMS = new Set([
 	"approved", "changes-requested", "review-required", "empty-review-decision",
 	"merge-conflict", "transient-unknown-observed", "unresolved-thread", "changes-requested-with-approval",
 ]);
+const SAFE_STRUCTURAL_KEYS = new Set([
+	"schemaVersion", "caseId", "situationTags", "real", "state", "isDraft",
+	"mergeable", "mergeStateStatus", "transientMergeableObservation", "reviewDecision",
+	"behindBy", "requiredChecks", "configured", "observed", "headAgeSeconds",
+	"actors", "id", "kind", "codeowner", "threads", "resolved", "lastAuthorId",
+	"comments", "authorId", "source", "threadId", "afterHeadSeconds", "signal",
+	"actionable", "reviews", "actorId", "onCurrentHead", "requestedReviewerIds",
+	"checks", "contextId", "workflowId", "status", "conclusion",
+	"startedAfterHeadSeconds", "completedAfterHeadSeconds", "appId", "checkSuiteId",
+	"ci", "rulesBranchRelation", "graceSeconds", "requiredContexts", "currentRuns",
+	"staleActiveRuns", "statuses", "head", "createdAfterHeadSeconds",
+	"updatedAfterHeadSeconds", "jobs",
+]);
 const SAFE_SYNTHETIC_ID = /^(?:app|bot|case|check|claude|comment|human|job|other|required|run|status|stale|suite|thread|workflow)(?:-[a-z0-9]+)+$/;
 
 /**
@@ -214,7 +228,10 @@ export function assertPublicStructuralFixture(value: unknown): asserts value is 
 		if (typeof candidate !== "object" || candidate === undefined) {
 			throw new Error(`unsafe structural value at ${path}`);
 		}
-		for (const [key, child] of Object.entries(candidate)) visit(child, `${path}.${key}`);
+		for (const [key, child] of Object.entries(candidate)) {
+			if (!SAFE_STRUCTURAL_KEYS.has(key)) throw new Error(`unsafe structural key at ${path}.${key}`);
+			visit(child, `${path}.${key}`);
+		}
 	};
 	visit(value, "$");
 }
@@ -358,6 +375,9 @@ async function capturePr(
 	selfLogins: string[],
 	transientUnknown: Set<number>,
 ): Promise<RawPrCapture> {
+	if (repo !== LINDY_REPOSITORY) {
+		throw new Error(`this evidence corpus harness is scoped to ${LINDY_REPOSITORY}`);
+	}
 	const ctx = { gh: "gh", repo, exec: readOnlyExec };
 	for (let attempt = 1; attempt <= 3; attempt++) {
 		const before = await fetchMetadata(repo, prNumber);
@@ -369,6 +389,11 @@ async function capturePr(
 			: { ...capturedSnapshot, checkRuns: await fetchAllCheckRuns(repo, capturedSnapshot.headSha) };
 		const after = await fetchMetadata(repo, prNumber);
 		const moved = before.headRefOid !== after.headRefOid
+			|| before.state !== after.state
+			|| before.baseRefName !== after.baseRefName
+			|| before.mergeable !== after.mergeable
+			|| before.mergeStateStatus !== after.mergeStateStatus
+			|| before.reviewDecision !== after.reviewDecision
 			|| watchSnapshot.headSha !== after.headRefOid
 			|| approvalState.headSha !== after.headRefOid
 			|| reviewActivityFingerprint(approvalState.approvals) !== snapshotReviewFingerprint(watchSnapshot);
@@ -376,13 +401,17 @@ async function capturePr(
 			if (attempt === 3) throw new Error(`PR #${prNumber} changed during all three capture attempts`);
 			continue;
 		}
-		assertCaptureCollectionsComplete(watchSnapshot, approvalState.approvals, checkRunsPaginated);
+		const coherentWatchSnapshot: WatchSnapshot = {
+			...watchSnapshot,
+			reviewDecision: after.reviewDecision,
+		};
+		assertCaptureCollectionsComplete(coherentWatchSnapshot, approvalState.approvals, checkRunsPaginated);
 		if (after.state.toUpperCase() !== "OPEN") throw new Error(`PR #${prNumber} is not open`);
 		return {
 			capturedAt: new Date().toISOString(),
 			metadata: after,
 			selfLogins,
-			watchSnapshot,
+			watchSnapshot: coherentWatchSnapshot,
 			approvals: approvalState.approvals,
 			transientUnknownObserved: transientUnknown.has(prNumber),
 		};
@@ -395,7 +424,8 @@ async function captureCorpus(args: string[]): Promise<RawCorpus> {
 	const self = valueAfter(args, "--self");
 	const out = valueAfter(args, "--out");
 	if (repo === undefined || self === undefined || out === undefined) usage();
-	if (insideRepo(out)) throw new Error("raw PR captures are private and MUST be written outside the repository");
+	const safeOut = canonicalPath(out);
+	if (insideRepo(safeOut)) throw new Error("raw PR captures are private and MUST be written outside the repository");
 	const transientUnknown = new Set((valueAfter(args, "--transient-unknown") ?? "")
 		.split(",").filter(Boolean).map(Number));
 	const flagsWithValues = new Set(["--repo", "--self", "--out", "--transient-unknown"]);
@@ -416,9 +446,12 @@ async function captureCorpus(args: string[]): Promise<RawCorpus> {
 		capturedAt: new Date().toISOString(),
 		pullRequests,
 	};
-	await mkdir(dirname(resolve(out)), { recursive: true });
-	await Bun.write(resolve(out), `${JSON.stringify(corpus, null, 2)}\n`);
-	await chmod(resolve(out), 0o600);
+	await mkdir(dirname(safeOut), { recursive: true });
+	if (canonicalPath(out) !== safeOut || insideRepo(safeOut)) {
+		throw new Error("raw capture output path changed or entered the repository during capture");
+	}
+	await Bun.write(safeOut, `${JSON.stringify(corpus, null, 2)}\n`);
+	await chmod(safeOut, 0o600);
 	return corpus;
 }
 
@@ -764,18 +797,31 @@ export function rehydrateFixture(fixture: StructuralFixture): {
 	};
 }
 
+function newestCheck(candidates: CheckRun[]): CheckRun | undefined {
+	return candidates.sort((a, b) =>
+		(b.completedAt ?? b.startedAt ?? "").localeCompare(a.completedAt ?? a.startedAt ?? "")
+		|| (b.id ?? 0) - (a.id ?? 0)
+	)[0];
+}
+
 function requiredFailure(snapshot: WatchSnapshot): boolean {
 	const evidence = snapshot.ciEvidence;
 	if (evidence === undefined) return false;
 	const suites = new Set(evidence.currentRuns.map((run) => run.checkSuiteId));
 	return evidence.requiredContexts.some((required) => {
-		const check = snapshot.checkRuns.find((candidate) => candidate.name === required.context &&
-			(required.integrationId === null || candidate.appId === required.integrationId) &&
-			candidate.checkSuiteId !== null && candidate.checkSuiteId !== undefined &&
-			suites.has(candidate.checkSuiteId));
+		const check = newestCheck(snapshot.checkRuns.filter((candidate) =>
+			candidate.name === required.context
+			&& (required.integrationId === null || candidate.appId === required.integrationId)
+			&& candidate.checkSuiteId !== null
+			&& candidate.checkSuiteId !== undefined
+			&& suites.has(candidate.checkSuiteId)
+		));
 		if (check !== undefined) return check.status === "completed" && FAILURE_CONCLUSIONS.has((check.conclusion ?? "").toLowerCase());
-		return required.integrationId === null && evidence.statuses.some((status) =>
-			status.context === required.context && ["error", "failure"].includes(status.state));
+		return required.integrationId === null && evidence.statuses
+			.filter((status) => status.context === required.context)
+			.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || b.id - a.id)
+			.slice(0, 1)
+			.some((status) => ["error", "failure"].includes(status.state));
 	});
 }
 
@@ -800,16 +846,18 @@ export function expectedCiClassification(snapshot: WatchSnapshot): CiClassificat
 
 	const currentSuites = new Set(evidence.currentRuns.map((run) => run.checkSuiteId));
 	const observed = evidence.requiredContexts.map((required) => {
-		const check = snapshot.checkRuns.find((candidate) =>
+		const check = newestCheck(snapshot.checkRuns.filter((candidate) =>
 			candidate.name === required.context
 			&& candidate.checkSuiteId !== null
 			&& candidate.checkSuiteId !== undefined
 			&& currentSuites.has(candidate.checkSuiteId)
 			&& (required.integrationId === null || candidate.appId === required.integrationId)
-		);
+		));
 		if (check !== undefined) return { check };
 		if (required.integrationId !== null) return {};
-		const status = evidence.statuses.find((candidate) => candidate.context === required.context);
+		const status = evidence.statuses
+			.filter((candidate) => candidate.context === required.context)
+			.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || b.id - a.id)[0];
 		return status === undefined ? {} : { status };
 	});
 	if (observed.some((item) =>
@@ -1024,7 +1072,7 @@ export function analyzeSnapshot(args: {
 				...args.watchSnapshot,
 				mergeable: "UNKNOWN",
 				mergeStateStatus: "UNKNOWN",
-				behindBy: 0,
+				behindBy: args.watchSnapshot.behindBy,
 			};
 			const unknownVerdict = evaluateWatchExit(unknownSnapshot, {
 				selfLogins: args.selfLogins,
