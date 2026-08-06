@@ -88,15 +88,29 @@ const fixtureProfiles: ProjectProfile[] = [
 		knowledge: [],
 		depsWarm: true,
 	},
+	{
+		id: "acme-api",
+		repo: "acme/api",
+		primary: "/tmp/acme-api",
+		pipeline: "yolo-ship",
+		yolo: true,
+		stamp: false,
+		production: true,
+		knowledge: [],
+		depsWarm: true,
+	},
 ];
 
 let savedDeckHome: string | undefined;
 let savedProcessHome: string | undefined;
+let savedDevWorkspaceOverride: string | undefined;
 beforeAll(() => {
 	savedDeckHome = process.env.DECK_V2_HOME;
 	savedProcessHome = process.env.HOME;
+	savedDevWorkspaceOverride = process.env.DECK_DEV_WORKSPACE_OK;
 	process.env.DECK_V2_HOME = testHome;
 	process.env.HOME = testHome;
+	process.env.DECK_DEV_WORKSPACE_OK = "1";
 	fs.mkdirSync(path.join(testHome, "config"), { recursive: true });
 	fs.writeFileSync(path.join(testHome, "config", "projects.json"), JSON.stringify(fixtureProfiles));
 });
@@ -105,6 +119,8 @@ afterAll(() => {
 	else process.env.DECK_V2_HOME = savedDeckHome;
 	if (savedProcessHome === undefined) delete process.env.HOME;
 	else process.env.HOME = savedProcessHome;
+	if (savedDevWorkspaceOverride === undefined) delete process.env.DECK_DEV_WORKSPACE_OK;
+	else process.env.DECK_DEV_WORKSPACE_OK = savedDevWorkspaceOverride;
 	fs.rmSync(testHome, { recursive: true, force: true });
 });
 
@@ -411,10 +427,63 @@ describe("preflight gate", () => {
 		expect(sim.executed).not.toContain("implement");
 	});
 
+	test.each([
+		["the Lindy repo", "lindy-ai/lindy"],
+		["a production profile resolved from the repo", "acme/api"],
+	] as const)("fails at preflight for %s outside the canonical workspace", async (_case, repo) => {
+		const savedOverride = process.env.DECK_DEV_WORKSPACE_OK;
+		delete process.env.DECK_DEV_WORKSPACE_OK;
+		try {
+			const { sim, error } = await run({ ...baseInput, repo, dryRun: false, wakeDryRun: false });
+			expect(sim.status).toBe("failed");
+			expect(String(error)).toContain("PRODUCT WORKSPACE REFUSED");
+			expect(String(error)).toContain("deck ship/adopt/status");
+			expect(sim.executed).toEqual(["workspace-assert"]);
+			expect(sim.executed).not.toContain("preflight");
+			expect(sim.executed).not.toContain("implement");
+			expect(fs.existsSync(path.join(testHome, "state"))).toBe(false);
+		} finally {
+			if (savedOverride === undefined) delete process.env.DECK_DEV_WORKSPACE_OK;
+			else process.env.DECK_DEV_WORKSPACE_OK = savedOverride;
+		}
+	});
+
+	test("does not trust a cached preflight from a product run in the development workspace", async () => {
+		const savedOverride = process.env.DECK_DEV_WORKSPACE_OK;
+		delete process.env.DECK_DEV_WORKSPACE_OK;
+		try {
+			const rendered = await renderWorkflow(pipeline, {
+				input: { ...baseInput, dryRun: false, wakeDryRun: false },
+				outputs: {
+					preflight: [{
+						nodeId: "preflight",
+						ok: true,
+						openQuestions: [],
+						briefDigest: "",
+						resolvedReviewerModel: "deck/claude-fable-5",
+					}],
+				} satisfies PipelineOutputFixtures,
+				workflowPath: path.join(import.meta.dir, "..", "pipeline.tsx"),
+			});
+			expect(rendered.tasks.map((task) => task.nodeId)).toEqual(["workspace-assert"]);
+			expect(fs.existsSync(path.join(testHome, "state"))).toBe(false);
+		} finally {
+			if (savedOverride === undefined) delete process.env.DECK_DEV_WORKSPACE_OK;
+			else process.env.DECK_DEV_WORKSPACE_OK = savedOverride;
+		}
+	});
+
 	test("refuses bypassApprovals without dryRun (no real run can self-approve)", async () => {
-		const { sim, error } = await run({ ...baseInput, dryRun: false, wakeDryRun: true, bypassApprovals: true });
-		expect(sim.status).toBe("failed");
-		expect(String(error)).toContain("bypassApprovals");
+		const savedOverride = process.env.DECK_DEV_WORKSPACE_OK;
+		process.env.DECK_DEV_WORKSPACE_OK = "1";
+		try {
+			const { sim, error } = await run({ ...baseInput, dryRun: false, wakeDryRun: true, bypassApprovals: true });
+			expect(sim.status).toBe("failed");
+			expect(String(error)).toContain("bypassApprovals");
+		} finally {
+			if (savedOverride === undefined) delete process.env.DECK_DEV_WORKSPACE_OK;
+			else process.env.DECK_DEV_WORKSPACE_OK = savedOverride;
+		}
 	});
 
 	test("refuses same-family reviewer when familyOpposition is on", async () => {
@@ -429,7 +498,7 @@ describe("preflight gate", () => {
 
 describe("project profiles (yolo vs stamp is data, not a fork)", () => {
 	test("uses the isolated fixture instead of the operator home", () => {
-		expect(loadProfiles().map((profile) => profile.id)).toEqual(["deck", "lindy"]);
+		expect(loadProfiles().map((profile) => profile.id)).toEqual(["deck", "lindy", "acme-api"]);
 	});
 
 	test("a yolo profile (deck) traverses to done with NO approval bypass: the stamp park is skipped", async () => {

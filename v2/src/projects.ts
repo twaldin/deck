@@ -50,6 +50,8 @@ export type ProjectProfile = {
 	yolo: boolean;
 	/** Every merge needs the captain's per-PR stamp. */
 	stamp: boolean;
+	/** Product repos may run only in the canonical home Smithers workspace. */
+	production?: boolean;
 	/** Absolute paths a brief must carry (mandatory reading). */
 	knowledge: string[];
 	/** Project-specific doctrine prose, inlined verbatim into briefs. */
@@ -124,6 +126,9 @@ export function validateProfiles(parsed: unknown, source: string): ProjectProfil
 				`${where} (${p.id}): pipeline "${pipeline}" implies yolo=${implied.yolo} stamp=${implied.stamp}; the file says yolo=${p.yolo} stamp=${p.stamp}. Fix the contradiction.`,
 			);
 		}
+		if (p.production !== undefined && typeof p.production !== "boolean") {
+			throw new Error(`${where} (${p.id}): production must be a boolean`);
+		}
 		const knowledge = p.knowledge ?? [];
 		if (!Array.isArray(knowledge) || knowledge.some((k) => typeof k !== "string")) {
 			throw new Error(`${where} (${p.id}): knowledge must be an array of paths`);
@@ -191,6 +196,7 @@ export function validateProfiles(parsed: unknown, source: string): ProjectProfil
 			pipeline,
 			yolo: p.yolo,
 			stamp: p.stamp,
+			...(p.production === undefined ? {} : { production: p.production }),
 			knowledge: knowledge as string[],
 			...(p.doctrine === undefined ? {} : { doctrine: p.doctrine }),
 			...(models === undefined ? {} : { models }),

@@ -70,6 +70,14 @@ describe("config file", () => {
 		expect(loadProfiles()).toHaveLength(1);
 	});
 
+	test("preserves an explicit production marker and refuses malformed values", () => {
+		writeConfig([{ ...deckOverride, production: true }]);
+		expect(loadProfiles()[0]?.production).toBe(true);
+		expect(() => validateProfiles([{ ...deckOverride, production: "yes" }], "x")).toThrow(
+			/production must be a boolean/,
+		);
+	});
+
 	test("REGRESSION: a pipeline/flags contradiction is refused, not silently obeyed", () => {
 		// yolo-ship with stamp=true is the dangerous kind of typo: whichever
 		// field a consumer happens to read decides whether a merge waits for

@@ -1,5 +1,5 @@
 /** @jsxImportSource smithers-orchestrator */
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -39,12 +39,19 @@ const originalDeckHome = process.env.DECK_V2_HOME;
 
 const tempRoots: string[] = [];
 const originalHome = process.env.HOME;
+const originalDevWorkspaceOverride = process.env.DECK_DEV_WORKSPACE_OK;
+
+beforeEach(() => {
+	process.env.DECK_DEV_WORKSPACE_OK = "1";
+});
 
 afterEach(() => {
 	if (originalHome === undefined) delete process.env.HOME;
 	else process.env.HOME = originalHome;
 	if (originalDeckHome === undefined) delete process.env.DECK_V2_HOME;
 	else process.env.DECK_V2_HOME = originalDeckHome;
+	if (originalDevWorkspaceOverride === undefined) delete process.env.DECK_DEV_WORKSPACE_OK;
+	else process.env.DECK_DEV_WORKSPACE_OK = originalDevWorkspaceOverride;
 	for (const root of tempRoots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
 

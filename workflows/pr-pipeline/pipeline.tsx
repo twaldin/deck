@@ -38,6 +38,7 @@ import {
 } from "smithers-orchestrator";
 import { z } from "zod";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -93,6 +94,12 @@ import {
 	type ModelPolicy,
 } from "./lib/models.ts";
 import { findProfile, type ModelSeat, type ProjectProfile } from "./lib/profiles.ts";
+import {
+	assertProductWorkspace,
+	DEV_WORKSPACE_OVERRIDE,
+	isProductRepo,
+	productWorkspaceViolation,
+} from "./lib/workspace-guard.ts";
 
 export async function changedFilesForBranch(exec: typeof bunExec, worktree: string, baseBranch: string): Promise<string[]> {
 	const output = await execOrThrow(exec, ["git", "diff", "--name-only", `origin/${baseBranch}...HEAD`], { cwd: worktree });
@@ -857,6 +864,9 @@ export function buildModelPolicy(
 
 export default smithers((ctx) => {
 	const input = ctx.input;
+	const workspaceRootAtRunStart = process.cwd();
+	const productWorkspaceHomeAtRunStart = process.env.HOME ?? os.homedir();
+	const devWorkspaceAllowedAtRunStart = process.env[DEV_WORKSPACE_OVERRIDE] === "1";
 	const dryRun = input.dryRun !== false;
 	const wakeDryRun = dryRun || (process.env.NODE_ENV === "test" && input.wakeDryRun === true);
 	const bypass = input.bypassApprovals === true;
@@ -883,6 +893,29 @@ export default smithers((ctx) => {
 	// could attach the deck yolo profile to a lindy run and skip the stamp.
 	const profileRepoMismatch =
 		profile !== null && profile.repo.toLowerCase() !== input.repo.toLowerCase();
+	const workspaceGuardProfile =
+		isProductRepo(input.repo, profile) || (profile !== null && !profileRepoMismatch)
+			? profile
+			: findProfile(input.repo);
+	const productWorkspaceAssertion = {
+		repo: input.repo,
+		profile: workspaceGuardProfile,
+		dryRun,
+		workspaceRoot: workspaceRootAtRunStart,
+		home: productWorkspaceHomeAtRunStart,
+		devWorkspaceAllowed: devWorkspaceAllowedAtRunStart,
+	};
+	const productWorkspaceViolationAtRunStart =
+		productWorkspaceViolation(productWorkspaceAssertion);
+	if (productWorkspaceViolationAtRunStart !== null) {
+		return (
+			<Workflow name="lindy-pr-pipeline">
+				<Task id="workspace-assert" output={outputs.preflight} retries={0}>
+					{() => assertProductWorkspace(productWorkspaceAssertion)}
+				</Task>
+			</Workflow>
+		);
+	}
 	const yolo = profile !== null && !profileRepoMismatch && profile.yolo;
 	const watchSetPath =
 		input.watchSetPath ?? `${process.env.HOME ?? "~"}/dev/fm2/data/watch-set.jsonl`;
