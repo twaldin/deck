@@ -206,7 +206,7 @@ export function startControlSocket(sockPath: string, deps: ControlDeps): { close
 							uptimeMs: Date.now() - deps.startedAt,
 							gateway: deps.gatewayUrl,
 							accounts,
-							// Accounts whose OAuth grant is definitively gone. Only a captain
+							// Accounts whose OAuth grant is definitively gone. Only an operator
 							// re-login fixes these, so they are first-class status, not a
 							// footnote inside the usage payload.
 							dead: usage?.dead ?? null,

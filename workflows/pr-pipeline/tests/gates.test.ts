@@ -19,6 +19,7 @@ import {
 	DECK_AGENT_CATALOG,
 	defaultModelPolicy,
 	modelFamily,
+	modelReasoningPolicy,
 	parseModelRef,
 	resolveAdversary,
 	validateModelPolicy,
@@ -150,6 +151,23 @@ describe("validateBrief (preflight gate)", () => {
 describe("model policy (deck catalog + family opposition)", () => {
 	test("defaults are valid and cross-family", () => {
 		expect(validateModelPolicy(defaultModelPolicy())).toEqual([]);
+	});
+
+	test("defaults encode the captain's role, model, and reasoning choices", () => {
+		expect(defaultModelPolicy()).toMatchObject({
+			implementer: "deck/gpt-5.6-sol",
+			reviewer: "deck/claude-fable-5",
+			mechanical: "deck/gpt-5.6-luna",
+			judgmentFallback: "deck/claude-opus-5",
+			reasoningImplementer: "xhigh",
+			reasoningReviewer: "high",
+			reasoningMechanical: "xhigh",
+		});
+	});
+
+	test("reasoning map normalizes bare Deck selectors for Prime child pinning", () => {
+		const policy = { ...defaultModelPolicy(), mechanical: "gpt-5.6-luna" };
+		expect(modelReasoningPolicy(policy)["deck/gpt-5.6-luna"]).toBe("xhigh");
 	});
 
 	test("parseModelRef splits provider/model", () => {
@@ -463,7 +481,7 @@ describe("watch helpers", () => {
 });
 
 describe("watch fix worker boundary", () => {
-	test("a fix worker returns after push and never owns the wait", () => {
+	test("a fix worker commits locally while the deterministic publisher owns push and wait", () => {
 		const prompt = watchFixPrompt({
 			worktree: "/tmp/wt",
 			branch: "fix/ci",
@@ -475,14 +493,14 @@ describe("watch fix worker boundary", () => {
 			round: 0,
 			afterPoll: 1,
 		});
-		expect(prompt).toContain("return the receipt and exit immediately");
-		expect(prompt).toContain("rebase THIS PR branch");
-		expect(prompt).toContain("DIRTY or BEHIND");
-		expect(prompt).toContain("fetch origin/main");
-		expect(prompt).toContain("force-with-lease");
+		expect(prompt).toContain("Return pushed=false and reRequested=[]");
+		expect(prompt).toContain("pipeline owns publication through rebaseAndPush()");
+		expect(prompt).toContain("bounded-ancestry check");
+		expect(prompt).toContain("force-with-lease push");
+		expect(prompt).toContain("Never run git push");
 		expect(prompt).toContain("Never sleep-poll CI or review state");
 		expect(prompt).toContain("reviewersToReRequest list");
-		expect(prompt).toContain("Never re-request a reviewer whose latest state is APPROVED");
+		expect(prompt).not.toContain("If the helper is unavailable");
 		expect(prompt).not.toContain("re-request every prior human reviewer");
 		expect(prompt).toContain("persisted Smithers poll owns the wait");
 	});

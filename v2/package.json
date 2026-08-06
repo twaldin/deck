@@ -12,12 +12,11 @@
 		"typecheck": "tsc --noEmit"
 	},
 	"devDependencies": {
-		"@earendil-works/pi-coding-agent": "0.82.0",
-		"@earendil-works/pi-tui": "^0.83.0",
 		"@types/bun": "latest",
 		"typescript": "^5"
 	},
 	"dependencies": {
+		"@earendil-works/pi-tui": "^0.83.0",
 		"typebox": "^1.1.24"
 	}
 }

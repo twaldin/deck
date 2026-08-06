@@ -14,7 +14,9 @@ export {
 	profilesFile,
 	seedProfiles,
 	validateProfiles,
+	SEAT_ENGINES,
 	type PipelineId,
 	type ProjectProfile,
+	type SeatEngine,
 	type ModelSeat,
 } from "../../../v2/src/projects.ts";

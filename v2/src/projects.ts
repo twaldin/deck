@@ -22,16 +22,22 @@ import * as path from "node:path";
 export const PIPELINES = ["lindy-full", "yolo-ship", "ask-then-yolo"] as const;
 export type PipelineId = (typeof PIPELINES)[number];
 
+export const SEAT_ENGINES = ["prime"] as const;
+export type SeatEngine = (typeof SEAT_ENGINES)[number];
+
 export type ModelSeat = string | { model: string; reasoning?: string };
 
 export type ModelSeats = {
 	implementer?: ModelSeat;
 	reviewer?: ModelSeat;
+	mechanical?: ModelSeat;
+	judgmentFallback?: ModelSeat;
 	watcher?: ModelSeat;
 	fallout?: ModelSeat;
 	reasoning?: "low" | "medium" | "high" | "xhigh" | "max";
 	reasoningImplementer?: "low" | "medium" | "high" | "xhigh" | "max";
 	reasoningReviewer?: "low" | "medium" | "high" | "xhigh" | "max";
+	reasoningMechanical?: "low" | "medium" | "high" | "xhigh" | "max";
 	reasoningWatcher?: "low" | "medium" | "high" | "xhigh" | "max";
 	reasoningFallout?: "low" | "medium" | "high" | "xhigh" | "max";
 	familyOpposition?: boolean;
@@ -46,10 +52,14 @@ export type ProjectProfile = {
 	/** Absolute path to the primary checkout. Never edited; worktrees only. */
 	primary: string;
 	pipeline: PipelineId;
+	/** LLM seat runtime. Omission selects the sole supported Prime engine. */
+	engine?: SeatEngine;
 	/** Merge green work without per-PR captain word. */
 	yolo: boolean;
 	/** Every merge needs the captain's per-PR stamp. */
 	stamp: boolean;
+	/** Product repos may run only in the canonical home Smithers workspace. */
+	production?: boolean;
 	/** Absolute paths a brief must carry (mandatory reading). */
 	knowledge: string[];
 	/** Project-specific doctrine prose, inlined verbatim into briefs. */
@@ -124,6 +134,12 @@ export function validateProfiles(parsed: unknown, source: string): ProjectProfil
 				`${where} (${p.id}): pipeline "${pipeline}" implies yolo=${implied.yolo} stamp=${implied.stamp}; the file says yolo=${p.yolo} stamp=${p.stamp}. Fix the contradiction.`,
 			);
 		}
+		if (p.engine !== undefined && !SEAT_ENGINES.includes(p.engine as SeatEngine)) {
+			throw new Error(`${where} (${p.id}): engine must be one of ${SEAT_ENGINES.join(" | ")}`);
+		}
+		if (p.production !== undefined && typeof p.production !== "boolean") {
+			throw new Error(`${where} (${p.id}): production must be a boolean`);
+		}
 		const knowledge = p.knowledge ?? [];
 		if (!Array.isArray(knowledge) || knowledge.some((k) => typeof k !== "string")) {
 			throw new Error(`${where} (${p.id}): knowledge must be an array of paths`);
@@ -137,16 +153,16 @@ export function validateProfiles(parsed: unknown, source: string): ProjectProfil
 				throw new Error(`${where} (${p.id}): models must be an object`);
 			}
 			const m = p.models as Record<string, unknown>;
-			for (const role of ["implementer", "reviewer", "watcher", "fallout"] as const) {
+			for (const role of ["implementer", "reviewer", "mechanical", "judgmentFallback", "watcher", "fallout"] as const) {
 				const seat = m[role];
 				if (seat !== undefined && typeof seat !== "string" && (seat === null || typeof seat !== "object" || Array.isArray(seat))) throw new Error(`${where} (${p.id}): models.${role} must be a model string or { model, reasoning }`);
 				if (seat !== undefined && typeof seat === "object") {
 					const value = seat as Record<string, unknown>;
 					if (typeof value.model !== "string" || value.model.length === 0) throw new Error(`${where} (${p.id}): models.${role}.model must be a non-empty string`);
-					if (value.reasoning !== undefined && (typeof value.reasoning !== "string" || !["minimal", "low", "medium", "high", "xhigh", "max"].includes(value.reasoning))) throw new Error(`${where} (${p.id}): models.${role}.reasoning must be one of minimal, low, medium, high, xhigh, max`);
+					if (value.reasoning !== undefined && (typeof value.reasoning !== "string" || !["low", "medium", "high", "xhigh", "max"].includes(value.reasoning))) throw new Error(`${where} (${p.id}): models.${role}.reasoning must be one of low, medium, high, xhigh, max`);
 				}
 			}
-			for (const seat of ["reasoning", "reasoningImplementer", "reasoningReviewer", "reasoningWatcher", "reasoningFallout"]) {
+			for (const seat of ["reasoning", "reasoningImplementer", "reasoningReviewer", "reasoningMechanical", "reasoningWatcher", "reasoningFallout"]) {
 				if (m[seat] !== undefined && !["low", "medium", "high", "xhigh", "max"].includes(m[seat] as string)) throw new Error(`${where} (${p.id}): models.${seat} must be low, medium, high, xhigh, or max`);
 			}
 			if (m.familyOpposition !== undefined && typeof m.familyOpposition !== "boolean") {
@@ -158,11 +174,14 @@ export function validateProfiles(parsed: unknown, source: string): ProjectProfil
 			models = {
 				...(m.implementer === undefined ? {} : { implementer: m.implementer as ModelSeat }),
 				...(m.reviewer === undefined ? {} : { reviewer: m.reviewer as ModelSeat }),
+				...(m.mechanical === undefined ? {} : { mechanical: m.mechanical as ModelSeat }),
+				...(m.judgmentFallback === undefined ? {} : { judgmentFallback: m.judgmentFallback as ModelSeat }),
 				...(m.watcher === undefined ? {} : { watcher: m.watcher as ModelSeat }),
 				...(m.fallout === undefined ? {} : { fallout: m.fallout as ModelSeat }),
 				...(m.reasoning === undefined ? {} : { reasoning: m.reasoning as ModelSeats["reasoning"] }),
 				...(m.reasoningImplementer === undefined ? {} : { reasoningImplementer: m.reasoningImplementer as ModelSeats["reasoningImplementer"] }),
 				...(m.reasoningReviewer === undefined ? {} : { reasoningReviewer: m.reasoningReviewer as ModelSeats["reasoningReviewer"] }),
+				...(m.reasoningMechanical === undefined ? {} : { reasoningMechanical: m.reasoningMechanical as ModelSeats["reasoningMechanical"] }),
 				...(m.reasoningWatcher === undefined ? {} : { reasoningWatcher: m.reasoningWatcher as ModelSeats["reasoningWatcher"] }),
 				...(m.reasoningFallout === undefined ? {} : { reasoningFallout: m.reasoningFallout as ModelSeats["reasoningFallout"] }),
 				...(m.familyOpposition === undefined ? {} : { familyOpposition: m.familyOpposition as boolean }),
@@ -191,6 +210,8 @@ export function validateProfiles(parsed: unknown, source: string): ProjectProfil
 			pipeline,
 			yolo: p.yolo,
 			stamp: p.stamp,
+			engine: (p.engine ?? "prime") as SeatEngine,
+			...(p.production === undefined ? {} : { production: p.production }),
 			knowledge: knowledge as string[],
 			...(p.doctrine === undefined ? {} : { doctrine: p.doctrine }),
 			...(models === undefined ? {} : { models }),

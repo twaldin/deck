@@ -31,17 +31,37 @@ import {
 	Approval,
 	Loop,
 	Parallel,
-	PiAgent,
 	Sequence,
 	approvalDecisionSchema,
 	createSmithers,
+	type AgentLike,
 } from "smithers-orchestrator";
 import { z } from "zod";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { assertAdoptable, cleanKnownScratchFiles, decideAdoptPush, reconcileAdoptBaseBranch } from "./lib/adopt.ts";
+import {
+	assertAdoptable,
+	assertLocalStackTracking,
+	cleanKnownScratchFiles,
+	compareStackHeads,
+	decideAdoptPush,
+	enqueueStackParentFirst,
+	fetchAdoptedPrs,
+	normalizeStackSpecs,
+	nextStackMergeCar,
+	rebaseStackUpstack,
+	reconcileAdoptBaseBranch,
+	submitStack,
+	syncStackPrune,
+	validateAdoptedStack,
+	verifyStackImplementation,
+	type StackCarRecord,
+	type StackCarSpec,
+	type StackHeadStamp,
+} from "./lib/adopt.ts";
 import { validateBrief } from "./lib/brief.ts";
 import { evaluateDone } from "./lib/done.ts";
 import {
@@ -65,15 +85,29 @@ import {
 import { findLandingCommit } from "./lib/landing.ts";
 import { runMerge } from "./lib/merge.ts";
 import { detectMigrations, MIGRATION_STAGES, migrationEvidenceComplete } from "./lib/migrations.ts";
-import { generatePullRequestDescription, sanitizeDescriptionInput } from "./lib/description.ts";
 import {
+	formatPullRequestTitle,
+	generatePullRequestDescription,
+	sanitizeDescriptionInput,
+} from "./lib/description.ts";
+import { PrimeSeatAgent } from "./lib/engines/prime.ts";
+import {
+	DECK_PROVIDER,
 	defaultModelPolicy,
+	modelReasoningPolicy,
 	parseModelRef,
 	resolveAdversary,
+	resolveSeat,
 	validateModelPolicy,
 	type ModelPolicy,
 } from "./lib/models.ts";
 import { findProfile, type ModelSeat, type ProjectProfile } from "./lib/profiles.ts";
+import {
+	assertProductWorkspace,
+	DEV_WORKSPACE_OVERRIDE,
+	isProductRepo,
+	productWorkspaceViolation,
+} from "./lib/workspace-guard.ts";
 
 export async function changedFilesForBranch(exec: typeof bunExec, worktree: string, baseBranch: string): Promise<string[]> {
 	const output = await execOrThrow(exec, ["git", "diff", "--name-only", `origin/${baseBranch}...HEAD`], { cwd: worktree });
@@ -82,6 +116,7 @@ export async function changedFilesForBranch(exec: typeof bunExec, worktree: stri
 import {
 	falloutPrompt,
 	implementPrompt,
+	stackImplementPrompt,
 	reviewersDecisionPrompt,
 	localFixPrompt,
 	localReviewPrompt,
@@ -89,13 +124,19 @@ import {
 } from "./lib/prompts.ts";
 import { evaluateReadyForStamp } from "./lib/ready.ts";
 import { executeReviewerRequest } from "./lib/reviewers.ts";
-import { assessCi, evaluateWatchExit } from "./lib/watch.ts";
+import { assessCi, evaluateWatchExit, parseDecisionClassBlocker } from "./lib/watch.ts";
 import { rebaseAndPush } from "./lib/rebase.ts";
 import type { Brief, MigrationEvidenceEntry } from "./lib/types.ts";
 import { claimMainFailure, publishWakeProducer, releaseMainFailure } from "../../v2/src/wake-producers.ts";
 import { smithersWorkspaceCwd } from "../../v2/src/workspace.ts";
 import { runTestCommand } from "./lib/test-lane.ts";
-import { createHostPiAgent } from "./lib/host-pi.ts";
+import {
+	askWorkflowQuestion,
+	queueFile,
+	resolveWorkflowQuestion,
+	workflowQuestions,
+	type PrQuestionContext,
+} from "../../v2/src/questions-store.ts";
 
 // ---------------------------------------------------------------------------
 // Defaults (normalized in code, not via zod .default(), to keep semantics
@@ -120,6 +161,8 @@ const DEFAULT_FIXTURES = {
 	watchPollsToExit: 2,
 	watchWaitPolls: 0,
 	prNumber: 4242,
+	stackPrNumbers: [] as number[],
+	stackMovedPrNumbers: [] as number[],
 	queueLifecycle: [] as Array<{ state: "open" | "closed"; autoMergeRequest: boolean }>,
 	landingPollLanded: true,
 	noFalloutProbe: false,
@@ -129,9 +172,9 @@ const DEFAULT_FIXTURES = {
 export const DEFAULT_GITHUB = {
 	gh: "gh",
 	git: "git",
-	selfLogins: ["twaldin"],
-	excludedApprovers: ["ali"],
-	reviewerDenylist: ["mackcooper1408", "spencer-negri", "daniel-covelli", "akshat-lindy"],
+	selfLogins: [] as string[],
+	excludedApprovers: [] as string[],
+	reviewerDenylist: [] as string[],
 	reviewers: [] as string[],
 	/** Explicit opt-out only: reviewers are always requested by default. */
 	skipReviewerRequest: false,
@@ -153,6 +196,98 @@ const DEFAULT_COMMANDS = {
 // Schemas
 // ---------------------------------------------------------------------------
 
+const stackCarSpecSchema = z.object({
+	branch: z.string().min(1),
+	baseBranch: z.string().min(1).optional(),
+	title: z.string().min(1).optional(),
+	body: z.string().min(1).optional(),
+});
+
+/**
+ * Exactly one stack source is allowed. `specs` creates/updates a native
+ * gh-stack from already-planned parent-first branches. `existingPrNumbers`
+ * adopts those live PR identities and never invokes a create/submit command.
+ */
+export const stackInputSchema = z.union([
+	z.object({
+		specs: z.array(stackCarSpecSchema).min(1),
+		existingPrNumbers: z.never().optional(),
+	}),
+	z.object({
+		existingPrNumbers: z.array(z.number().int().positive()).min(1),
+		specs: z.never().optional(),
+	}),
+]);
+
+const stackCarRecordSchema = z.object({
+	prNumber: z.number().int().positive(),
+	url: z.string(),
+	branch: z.string().min(1),
+	baseBranch: z.string().min(1),
+	headSha: z.string(),
+	landed: z.boolean(),
+});
+
+const stackWatchCarSchema = z.object({
+	prNumber: z.number().int().positive(),
+	branch: z.string().min(1),
+	baseBranch: z.string().min(1),
+	headSha: z.string(),
+	exitOk: z.boolean(),
+	actionable: z.boolean(),
+	ci: z.string(),
+	unresolvedThreads: z.number().int(),
+	unansweredComments: z.number().int(),
+	reviewersToReRequest: z.array(z.string()),
+	reasons: z.array(z.string()),
+	rebaseRequired: z.boolean(),
+});
+
+const stackReadyCarSchema = z.object({
+	prNumber: z.number().int().positive(),
+	branch: z.string().min(1),
+	baseBranch: z.string().min(1),
+	headSha: z.string(),
+	ready: z.boolean(),
+	approvedBy: z.string().nullable(),
+	ci: z.string(),
+	reasons: z.array(z.string()),
+	migrationFiles: z.array(z.string()),
+});
+
+const stackStampCarSchema = z.object({
+	prNumber: z.number().int().positive(),
+	branch: z.string().min(1),
+	baseBranch: z.string().min(1),
+	headSha: z.string(),
+	currentHead: z.string(),
+	ok: z.boolean(),
+});
+
+const stackMergeCarSchema = stackStampCarSchema.extend({
+	submittedAt: z.string().nullable(),
+	receipt: z.string().nullable(),
+	alreadyLanded: z.boolean(),
+	mergePath: z.enum(["github-merge-queue", "dry-run", "already-landed"]).nullable(),
+});
+
+const stackQueueCarSchema = z.object({
+	prNumber: z.number().int().positive(),
+	merged: z.boolean(),
+	state: z.enum(["open", "closed"]),
+	baseBranch: z.string().min(1),
+	autoMergeRequest: z.boolean(),
+	ejected: z.boolean(),
+});
+
+const stackLandingCarSchema = z.object({
+	prNumber: z.number().int().positive(),
+	baseBranch: z.string().min(1),
+	landed: z.boolean(),
+	sha: z.string().nullable(),
+	subject: z.string().nullable(),
+});
+
 export const inputSchema = z.object({
 	ticket: z.string().min(1),
 	repo: z.string().min(1),
@@ -172,7 +307,12 @@ export const inputSchema = z.object({
 	 * from gh — it NEVER creates a second PR. Watch/ready/stamp are unchanged:
 	 * the run owns continuous CI/review polling until merge, same as a ship.
 	 */
-	existingPr: z.number().int().positive().optional(),
+	existingPr: z.number().int().positive().nullable().optional(),
+	/**
+	 * Optional ordered stack mode. It is mutually exclusive with `existingPr`;
+	 * `specs` creates a native stack and `existingPrNumbers` adopts one.
+	 */
+	stack: stackInputSchema.nullable().optional(),
 	brief: z.unknown().optional(),
 	/** Default TRUE: real GH writes require explicit dryRun:false. */
 	dryRun: z.boolean().optional(),
@@ -186,15 +326,18 @@ export const inputSchema = z.object({
 	bypassApprovals: z.boolean().optional(),
 	models: z
 		.object({
-			implementer: z.union([z.string(), z.object({ model: z.string(), reasoning: z.string().min(1).optional() })]).optional(),
-			reviewer: z.union([z.string(), z.object({ model: z.string(), reasoning: z.string().min(1).optional() })]).optional(),
-			watcher: z.union([z.string(), z.object({ model: z.string(), reasoning: z.string().min(1).optional() })]).optional(),
-			fallout: z.union([z.string(), z.object({ model: z.string(), reasoning: z.string().min(1).optional() })]).optional(),
+			implementer: z.union([z.string(), z.object({ model: z.string(), reasoning: z.enum(["low", "medium", "high", "xhigh", "max"]).optional() })]).optional(),
+			reviewer: z.union([z.string(), z.object({ model: z.string(), reasoning: z.enum(["low", "medium", "high", "xhigh", "max"]).optional() })]).optional(),
+			mechanical: z.union([z.string(), z.object({ model: z.string(), reasoning: z.enum(["low", "medium", "high", "xhigh", "max"]).optional() })]).optional(),
+			judgmentFallback: z.union([z.string(), z.object({ model: z.string(), reasoning: z.enum(["low", "medium", "high", "xhigh", "max"]).optional() })]).optional(),
+			watcher: z.union([z.string(), z.object({ model: z.string(), reasoning: z.enum(["low", "medium", "high", "xhigh", "max"]).optional() })]).optional(),
+			fallout: z.union([z.string(), z.object({ model: z.string(), reasoning: z.enum(["low", "medium", "high", "xhigh", "max"]).optional() })]).optional(),
 			familyOpposition: z.boolean().optional(),
 			oppositionDefaults: z.record(z.string(), z.string()).optional(),
 			reasoning: z.enum(["low", "medium", "high", "xhigh", "max"]).optional(),
 			reasoningImplementer: z.enum(["low", "medium", "high", "xhigh", "max"]).optional(),
 			reasoningReviewer: z.enum(["low", "medium", "high", "xhigh", "max"]).optional(),
+			reasoningMechanical: z.enum(["low", "medium", "high", "xhigh", "max"]).optional(),
 			reasoningWatcher: z.enum(["low", "medium", "high", "xhigh", "max"]).optional(),
 			reasoningFallout: z.enum(["low", "medium", "high", "xhigh", "max"]).optional(),
 		})
@@ -246,12 +389,22 @@ export const inputSchema = z.object({
 			watchPollsToExit: z.number().int().positive().optional(),
 			watchWaitPolls: z.number().int().nonnegative().optional(),
 			prNumber: z.number().int().positive().optional(),
+			stackPrNumbers: z.array(z.number().int().positive()).optional(),
+			stackMovedPrNumbers: z.array(z.number().int().positive()).optional(),
 			queueLifecycle: z.array(z.object({ state: z.enum(["open", "closed"]), autoMergeRequest: z.boolean() })).optional(),
 			landingPollLanded: z.boolean().optional(),
 			noFalloutProbe: z.boolean().optional(),
 			headChangeRounds: z.array(z.number().int().nonnegative()).optional(),
 		})
 		.optional(),
+}).superRefine((input, ctx) => {
+	if (input.existingPr != null && input.stack != null) {
+		ctx.addIssue({
+			code: z.ZodIssueCode.custom,
+			path: ["stack"],
+			message: "existingPr and stack are mutually exclusive; declare one effort shape",
+		});
+	}
 });
 
 export const localReviewSchema = z.object({
@@ -261,6 +414,8 @@ export const localReviewSchema = z.object({
 	nits: z.array(z.string()),
 	summary: z.string(),
 });
+export const mergePathSchema = z.enum(["github-merge-queue", "dry-run", "already-landed"]);
+
 
 export const schemas = {
 	input: inputSchema,
@@ -272,11 +427,17 @@ export const schemas = {
 	}),
 	adoptBase: z.object({
 		baseBranch: z.string().min(1),
+		cars: z.array(stackCarRecordSchema).optional(),
 	}),
 	implementation: z.object({
 		commits: z.array(z.string()),
 		summary: z.string(),
 		testEvidence: z.string(),
+		stackCars: z.array(z.object({
+			branch: z.string().min(1),
+			commits: z.array(z.string()),
+			testEvidence: z.string(),
+		})).optional(),
 	}),
 	localReview: localReviewSchema,
 	localFix: z.object({
@@ -293,6 +454,11 @@ export const schemas = {
 		source: z.string(),
 		at: z.string(),
 		reviewerPrompt: z.string(),
+		cars: z.array(z.object({
+			prNumber: z.number().int().positive(),
+			requested: z.array(z.string()),
+			verified: z.array(z.string()),
+		})).optional(),
 	}),
 	prRecord: z.object({
 		prNumber: z.number().int(),
@@ -303,6 +469,7 @@ export const schemas = {
 		watchSetPath: z.string(),
 		receipt: z.string(),
 		createdAt: z.string(),
+		cars: z.array(stackCarRecordSchema).optional(),
 	}),
 	watchPoll: z.object({
 		round: z.number().int(),
@@ -317,8 +484,25 @@ export const schemas = {
 		reviewersToReRequest: z.array(z.string()),
 		reasons: z.array(z.string()),
 		rebaseRequired: z.boolean(),
+		cars: z.array(stackWatchCarSchema).optional(),
 	}),
 	watchFix: z.object({
+		round: z.number().int(),
+		afterPoll: z.number().int(),
+		actions: z.array(z.string()),
+		commits: z.array(z.string().regex(/^[0-9a-f]{40,64}$/i)),
+		pushed: z.boolean(),
+		reRequested: z.array(z.string()),
+		summary: z.string(),
+	}),
+	watchBaseline: z.object({
+		round: z.number().int(),
+		afterPoll: z.number().int(),
+		headSha: z.string(),
+		valid: z.boolean(),
+		reason: z.string(),
+	}),
+	watchPublish: z.object({
 		round: z.number().int(),
 		afterPoll: z.number().int(),
 		actions: z.array(z.string()),
@@ -352,6 +536,7 @@ export const schemas = {
 		migrationDetected: z.boolean(),
 		migrationFiles: z.array(z.string()),
 		at: z.string(),
+		cars: z.array(stackReadyCarSchema).optional(),
 	}),
 	stampValidity: z.object({
 		round: z.number().int(),
@@ -359,20 +544,28 @@ export const schemas = {
 		currentHead: z.string(),
 		valid: z.boolean(),
 		checkedAt: z.string(),
+		cars: z.array(stackStampCarSchema).optional(),
 	}),
 	mergeHeadCheck: z.object({
 		round: z.number().int(),
 		expectedHead: z.string(),
 		currentHead: z.string(),
 		ok: z.boolean(),
+		diffSummary: z.string(),
 		checkedAt: z.string(),
+		submittedAt: z.string().nullable(),
+		receipt: z.string().nullable(),
+		alreadyLanded: z.boolean(),
+		mergePath: mergePathSchema.nullable(),
+		cars: z.array(stackMergeCarSchema).optional(),
 	}),
 	mergeReceipt: z.object({
 		round: z.number().int(),
 		submittedAt: z.string(),
 		receipt: z.string(),
 		alreadyLanded: z.boolean(),
-		mergePath: z.enum(["github-merge-queue", "dry-run", "already-landed"]),
+		mergePath: mergePathSchema,
+		cars: z.array(stackMergeCarSchema).optional(),
 	}),
 	queuePoll: z.object({
 		poll: z.number().int(),
@@ -381,12 +574,18 @@ export const schemas = {
 		autoMergeRequest: z.boolean(),
 		ejected: z.boolean(),
 		reason: z.string(),
+		cars: z.array(stackQueueCarSchema).optional(),
 	}),
 	landingPoll: z.object({
 		poll: z.number().int(),
 		landed: z.boolean(),
 		sha: z.string().nullable(),
 		subject: z.string().nullable(),
+		cars: z.array(stackLandingCarSchema).optional(),
+	}),
+	stackSync: z.object({
+		synced: z.boolean(),
+		receipt: z.string(),
 	}),
 	deployEvidence: z.object({
 		evidence: z.string(),
@@ -409,6 +608,7 @@ export const schemas = {
 	doneRecord: z.object({
 		ticket: z.string(),
 		prNumber: z.number().int(),
+		prNumbers: z.array(z.number().int().positive()).optional(),
 		landedSha: z.string(),
 		falloutVerdict: z.string(),
 		migrationRequired: z.boolean(),
@@ -442,31 +642,180 @@ function nowIso(): string {
 	return new Date().toISOString();
 }
 
+function registerWatchCars(args: {
+	watchSetPath: string;
+	ticket: string;
+	repo: string;
+	runId: string;
+	cars: StackCarRecord[];
+}): void {
+	fs.mkdirSync(path.dirname(args.watchSetPath), { recursive: true });
+	const registeredAt = nowIso();
+	fs.appendFileSync(
+		args.watchSetPath,
+		args.cars
+			.map((car) =>
+				JSON.stringify({
+					ticket: args.ticket,
+					repo: args.repo,
+					pr: car.prNumber,
+					url: car.url,
+					registeredAt,
+					runId: args.runId,
+					stack: args.cars.map((topologyCar) => ({
+						pr: topologyCar.prNumber,
+						branch: topologyCar.branch,
+						baseBranch: topologyCar.baseBranch,
+						headSha: topologyCar.headSha,
+					})),
+				}),
+			)
+			.join("\n") + "\n",
+	);
+}
+export type ApprovalStampMetadata = {
+	headSha: string;
+	prNumber: number;
+	stackTopology?:
+		| {
+				headBranch: string;
+				baseBranch: string;
+			}
+		| {
+				cars: StackHeadStamp[];
+			};
+};
+
+export function buildApprovalStampMetadata(args: {
+	headSha: string;
+	prNumber: number;
+	headBranch: string;
+	baseBranch: string;
+	cars?: StackHeadStamp[];
+}): ApprovalStampMetadata {
+	if (args.cars !== undefined) {
+		return {
+			headSha: args.headSha,
+			prNumber: args.prNumber,
+			stackTopology: {
+				cars: args.cars.map((car) => ({ ...car })),
+			},
+		};
+	}
+	return {
+		headSha: args.headSha,
+		prNumber: args.prNumber,
+		...(args.baseBranch === "main"
+			? {}
+			: {
+					stackTopology: {
+						headBranch: args.headBranch,
+						baseBranch: args.baseBranch,
+					},
+				}),
+	};
+}
+
+export interface StampComparison {
+	expectedHead: string;
+	currentHead: string;
+	ok: boolean;
+	diffSummary: string;
+}
+
+/**
+ * Fetch the PR head at the merge boundary. A mismatch is a normal invalidation
+ * result, not a thrown merge failure, so the round state machine can re-enter
+ * watch/review with useful evidence.
+ */
+export async function compareApprovalStamp(args: {
+	exec: typeof bunExec;
+	gh: string;
+	repo: string;
+	prNumber: number;
+	expectedHead: string;
+}): Promise<StampComparison> {
+	const currentHead = (
+		await execOrThrow(
+			args.exec,
+			[args.gh, "api", `repos/${args.repo}/pulls/${args.prNumber}`, "--jq", ".head.sha"],
+		)
+	).trim();
+	if (currentHead === args.expectedHead) {
+		return {
+			expectedHead: args.expectedHead,
+			currentHead,
+			ok: true,
+			diffSummary: "head unchanged since approval",
+		};
+	}
+
+	let diffSummary = `head changed ${args.expectedHead} -> ${currentHead}`;
+	try {
+		const raw = await execOrThrow(args.exec, [
+			args.gh,
+			"api",
+			`repos/${args.repo}/compare/${args.expectedHead}...${currentHead}`,
+		]);
+		const comparison = JSON.parse(raw) as {
+			status?: unknown;
+			ahead_by?: unknown;
+			behind_by?: unknown;
+			total_commits?: unknown;
+			files?: Array<{ filename?: unknown }>;
+		};
+		const files = Array.isArray(comparison.files)
+			? comparison.files
+					.map((file) => (typeof file.filename === "string" ? file.filename : ""))
+					.filter(Boolean)
+					.slice(0, 10)
+			: [];
+		diffSummary = [
+			diffSummary,
+			`status=${String(comparison.status ?? "unknown")}`,
+			`ahead=${String(comparison.ahead_by ?? "unknown")}`,
+			`behind=${String(comparison.behind_by ?? "unknown")}`,
+			`commits=${String(comparison.total_commits ?? "unknown")}`,
+			`files=${files.length > 0 ? files.join(", ") : "unknown"}`,
+		].join("; ");
+	} catch (error) {
+		diffSummary = `${diffSummary}; compare summary unavailable: ${String(error).slice(0, 300)}`;
+	}
+	return {
+		expectedHead: args.expectedHead,
+		currentHead,
+		ok: false,
+		diffSummary,
+	};
+}
+
+
 function seat(ref: ModelSeat): { ref: string; reasoning?: string } {
 	return typeof ref === "string" ? { ref } : { ref: ref.model, reasoning: ref.reasoning };
 }
 
-function makeAgent(ref: ModelSeat, cwd: string, timeoutMs: number, reasoning = "medium"): PiAgent {
+function makeAgent(
+	ref: ModelSeat,
+	cwd: string,
+	timeoutMs: number,
+	effortLabel: string,
+	reasoning: ModelPolicy["reasoning"],
+	policy: ModelPolicy,
+): AgentLike {
 	const selected = seat(ref);
-	const configuredExtension = process.env.DECK_SUBAGENT_EXTENSION;
-	const bundledExtension = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../subagents/extension/index.ts");
-	const subagentExtension = configuredExtension ?? (fs.existsSync(bundledExtension) ? bundledExtension : undefined);
-	const extension = subagentExtension === undefined ? undefined : [subagentExtension];
-	const { provider, model } = parseModelRef(selected.ref);
+	const { model } = parseModelRef(selected.ref);
 	const thinking = selected.reasoning ?? reasoning;
-	// Preserve the provider-native selector. If an older Smithers type does not
-	// yet include `max`, the compatibility cast is local and does not rewrite the
-	// value sent to Pi. HostPiAgent also preserves all extension options while
-	// replacing Smithers' default `pi` command with the host-selected binary.
-
-	return createHostPiAgent(PiAgent, {
-		provider,
+	const rlmChild = resolveSeat(policy.mechanical, policy.reasoningMechanical);
+	return new PrimeSeatAgent({
+		provider: DECK_PROVIDER,
 		model,
 		cwd,
+		effortLabel,
 		timeoutMs,
-		thinking: thinking as never,
-		noSession: true,
-		...(extension === undefined ? {} : { extension }),
+		thinking: thinking as ModelPolicy["reasoning"],
+		modelPolicy: policy,
+		rlmChildModel: rlmChild.model,
+		rlmReasoningByModel: modelReasoningPolicy(policy),
 	});
 }
 
@@ -481,12 +830,15 @@ export function buildModelPolicy(
 		implementer?: ModelSeat;
 		reviewer?: ModelSeat;
 		watcher?: ModelSeat;
+		mechanical?: ModelSeat;
+		judgmentFallback?: ModelSeat;
 		fallout?: ModelSeat;
 		familyOpposition?: boolean;
 		oppositionDefaults?: Record<string, string>;
 		reasoning?: "low" | "medium" | "high" | "xhigh" | "max";
 		reasoningImplementer?: "low" | "medium" | "high" | "xhigh" | "max";
 		reasoningReviewer?: "low" | "medium" | "high" | "xhigh" | "max";
+		reasoningMechanical?: "low" | "medium" | "high" | "xhigh" | "max";
 		reasoningWatcher?: "low" | "medium" | "high" | "xhigh" | "max";
 		reasoningFallout?: "low" | "medium" | "high" | "xhigh" | "max";
 	} | null | undefined,
@@ -505,14 +857,16 @@ export function buildModelPolicy(
 		...(profileModels ?? {}),
 		...(profileModels !== undefined ? { reviewer: profileModels.reviewer } : {}),
 		...(models ?? {}),
-		...(profileModels?.reasoning !== undefined && profileModels.reasoningImplementer === undefined ? { reasoningImplementer: profileModels.reasoning } : {}),
-		...(profileModels?.reasoning !== undefined && profileModels.reasoningReviewer === undefined ? { reasoningReviewer: profileModels.reasoning } : {}),
-		...(profileModels?.reasoning !== undefined && profileModels.reasoningWatcher === undefined ? { reasoningWatcher: profileModels.reasoning } : {}),
-		...(profileModels?.reasoning !== undefined && profileModels.reasoningFallout === undefined ? { reasoningFallout: profileModels.reasoning } : {}),
+		...(profileModels?.reasoning !== undefined && profileModels.reasoningImplementer === undefined && models?.reasoningImplementer === undefined ? { reasoningImplementer: profileModels.reasoning } : {}),
+		...(profileModels?.reasoning !== undefined && profileModels.reasoningReviewer === undefined && models?.reasoningReviewer === undefined ? { reasoningReviewer: profileModels.reasoning } : {}),
+		...(profileModels?.reasoning !== undefined && profileModels.reasoningWatcher === undefined && models?.reasoningWatcher === undefined ? { reasoningWatcher: profileModels.reasoning } : {}),
+		...(profileModels?.reasoning !== undefined && profileModels.reasoningFallout === undefined && models?.reasoningFallout === undefined ? { reasoningFallout: profileModels.reasoning } : {}),
+		...(profileModels?.reasoning !== undefined && profileModels.reasoningMechanical === undefined && models?.reasoningMechanical === undefined ? { reasoningMechanical: profileModels.reasoning } : {}),
 		...(models?.reasoning !== undefined && models.reasoningImplementer === undefined ? { reasoningImplementer: models.reasoning } : {}),
 		...(models?.reasoning !== undefined && models.reasoningReviewer === undefined ? { reasoningReviewer: models.reasoning } : {}),
 		...(models?.reasoning !== undefined && models.reasoningWatcher === undefined ? { reasoningWatcher: models.reasoning } : {}),
 		...(models?.reasoning !== undefined && models.reasoningFallout === undefined ? { reasoningFallout: models.reasoning } : {}),
+		...(models?.reasoning !== undefined && models.reasoningMechanical === undefined ? { reasoningMechanical: models.reasoning } : {}),
 		oppositionDefaults: {
 			...defaultModelPolicy().oppositionDefaults,
 			...(profileModels?.oppositionDefaults ?? {}),
@@ -523,6 +877,9 @@ export function buildModelPolicy(
 
 export default smithers((ctx) => {
 	const input = ctx.input;
+	const workspaceRootAtRunStart = process.cwd();
+	const productWorkspaceHomeAtRunStart = process.env.HOME ?? os.homedir();
+	const devWorkspaceAllowedAtRunStart = process.env[DEV_WORKSPACE_OVERRIDE] === "1";
 	const dryRun = input.dryRun !== false;
 	const wakeDryRun = dryRun || (process.env.NODE_ENV === "test" && input.wakeDryRun === true);
 	const bypass = input.bypassApprovals === true;
@@ -531,7 +888,21 @@ export default smithers((ctx) => {
 	const github = { ...DEFAULT_GITHUB, ...(input.github ?? {}) };
 	const commands = { ...DEFAULT_COMMANDS, ...(input.commands ?? {}) };
 	const declaredBaseBranch = input.baseBranch ?? "main";
-	const adopt = input.existingPr != null;
+	const existingPr = input.existingPr ?? undefined;
+	// Smithers stores schema fields in SQLite columns. An omitted optional object
+	// is rehydrated as SQL NULL on the execution render, so null means the normal
+	// single-PR mode here; only a declared stack object enables stack behavior.
+	const stackInput = input.stack ?? undefined;
+	const stackCreateSpecs =
+		stackInput !== undefined && "specs" in stackInput
+			? stackInput.specs
+			: undefined;
+	const stackExistingNumbers =
+		stackInput !== undefined && "existingPrNumbers" in stackInput
+			? stackInput.existingPrNumbers
+			: undefined;
+	const stackMode = stackInput !== undefined;
+	const adopt = existingPr !== undefined || stackExistingNumbers !== undefined;
 	// Resolved once per render; yolo=false (stamp behavior) when omitted.
 	const profile: ProjectProfile | null =
 		input.profile === undefined ? null : findProfile(input.profile);
@@ -540,6 +911,29 @@ export default smithers((ctx) => {
 	// could attach the deck yolo profile to a lindy run and skip the stamp.
 	const profileRepoMismatch =
 		profile !== null && profile.repo.toLowerCase() !== input.repo.toLowerCase();
+	const workspaceGuardProfile =
+		isProductRepo(input.repo, profile) || (profile !== null && !profileRepoMismatch)
+			? profile
+			: findProfile(input.repo);
+	const productWorkspaceAssertion = {
+		repo: input.repo,
+		profile: workspaceGuardProfile,
+		dryRun,
+		workspaceRoot: workspaceRootAtRunStart,
+		home: productWorkspaceHomeAtRunStart,
+		devWorkspaceAllowed: devWorkspaceAllowedAtRunStart,
+	};
+	const productWorkspaceViolationAtRunStart =
+		productWorkspaceViolation(productWorkspaceAssertion);
+	if (productWorkspaceViolationAtRunStart !== null) {
+		return (
+			<Workflow name="lindy-pr-pipeline">
+				<Task id="workspace-assert" output={outputs.preflight} retries={0}>
+					{() => assertProductWorkspace(productWorkspaceAssertion)}
+				</Task>
+			</Workflow>
+		);
+	}
 	const yolo = profile !== null && !profileRepoMismatch && profile.yolo;
 	const watchSetPath =
 		input.watchSetPath ?? `${process.env.HOME ?? "~"}/dev/fm2/data/watch-set.jsonl`;
@@ -554,13 +948,39 @@ export default smithers((ctx) => {
 	const implementation = ctx.latest(outputs.implementation, "implement");
 	const latestLocalReview = ctx.latest(outputs.localReview, "local-review");
 	const latestLocalFix = ctx.latest(outputs.localFix, "local-fix");
-	const localReviewRows = (ctx.outputs.localReview ?? []) as Array<{ round: number }>;
+	const localReviewRows = (ctx.outputs.localReview ?? []) as Array<{
+		round: number;
+		blockingFindings: string[];
+	}>;
+	const findingFingerprint = (findings: string[]): string =>
+		findings
+			.map((finding) => finding.trim().toLowerCase().replace(/\s+/g, " "))
+			.sort()
+			.join("|");
+	const repeatedLocalFinding =
+		localReviewRows.length >= 2 &&
+		findingFingerprint(localReviewRows.at(-1)?.blockingFindings ?? []) !== "" &&
+		findingFingerprint(localReviewRows.at(-1)?.blockingFindings ?? []) ===
+			findingFingerprint(localReviewRows.at(-2)?.blockingFindings ?? []);
 	const reviewEscalation = ctx.latest(outputs.approvals, "review-escalation");
 	const adoptedBase = ctx.latest(outputs.adoptBase, "adopt-base");
 	const pr = ctx.latest(outputs.prRecord, "push-pr");
-	// An adopted stack child resolves its live GitHub base before review. Every
-	// later review, rebase, CI, and landing check uses that same branch.
+	// Stack mode always uses the root branch here. Per-car bases live in the
+	// durable car records and are consulted by every iterative stage.
 	const baseBranch = adoptedBase?.baseBranch ?? pr?.baseBranch ?? declaredBaseBranch;
+	const effortCars: StackCarRecord[] =
+		pr?.cars ??
+		(pr === undefined
+			? []
+			: [{
+					prNumber: pr.prNumber,
+					url: pr.url,
+					branch: input.branch,
+					baseBranch: pr.baseBranch,
+					headSha: pr.headSha,
+					landed: false,
+				}]);
+	const topCar = effortCars.at(-1);
 	const reviewerRequest = ctx.latest(outputs.reviewerRequest, "request-reviewers");
 	const migCheck = ctx.latest(outputs.migrationCheck, "migration-check");
 	const migGate = ctx.latest(outputs.approvals, "migration-gate");
@@ -568,6 +988,28 @@ export default smithers((ctx) => {
 	const migrationRows = (ctx.outputs.migrationRun ?? []) as MigrationEvidenceEntry[];
 	const falloutRow = ctx.latest(outputs.fallout, "fallout-watch");
 	const falloutEscalation = ctx.latest(outputs.approvals, "fallout-escalation");
+	const workflowDir = path.dirname(fileURLToPath(import.meta.url));
+	const questionsFile = queueFile();
+	const approvalRows = (ctx.outputs.approvals ?? []) as Array<{
+		nodeId?: string;
+		approved: boolean;
+		note?: string;
+		decidedBy?: string;
+	}>;
+	if (!bypass) {
+		for (const decision of approvalRows) {
+			if (decision.nodeId === undefined) continue;
+			resolveWorkflowQuestion(questionsFile, {
+				runId: ctx.runId,
+				nodeId: decision.nodeId,
+				answer: [
+					decision.approved ? "Approved" : "Denied",
+					decision.decidedBy ? `by ${decision.decidedBy}` : "",
+					decision.note ? `— ${decision.note}` : "",
+				].filter(Boolean).join(" "),
+			});
+		}
+	}
 
 	const brief: Brief | null = (() => {
 		const validated = validateBrief(input.brief);
@@ -642,23 +1084,38 @@ export default smithers((ctx) => {
 	})();
 
 	// -- merge authorization -----------------------------------------------------
-	// A round authorizes the merge only with: approved stamp + valid post-stamp
-	// validity + passing PRE-MERGE head re-check (closes the stamp->merge TOCTOU
-	// window). A failed head check ends the round instead.
+	// A round authorizes the receipt node only after its approved stamp has
+	// survived the merge attempt's last-instant head comparison. A mismatch is
+	// persisted as ok=false and ends the round before any MQ command runs.
 	const stampedRound = (() => {
 		for (let k = 0; k <= currentRound && k < limits.stampRounds; k++) {
 			const stamp = ctx.latest(outputs.approvals, `r${k}-stamp`);
 			const validity = ctx.latest(outputs.stampValidity, `r${k}-stamp-validity`);
 			const headCheck = ctx.latest(outputs.mergeHeadCheck, `r${k}-merge-head-check`);
 			if (stamp?.approved === true && validity?.valid === true && headCheck?.ok !== false) {
-				return { round: k, headSha: validity.stampedHead, headCheck };
+				return {
+					round: k,
+					headSha: validity.stampedHead,
+					cars: validity.cars?.map((car) => ({
+						prNumber: car.prNumber,
+						branch: car.branch,
+						baseBranch: car.baseBranch,
+						headSha: car.headSha,
+					})),
+					headCheck,
+				};
 			}
 		}
 		return null;
 	})();
 	const authorizedRound =
 		stampedRound !== null && stampedRound.headCheck?.ok === true
-			? { round: stampedRound.round, headSha: stampedRound.headSha }
+			? {
+					round: stampedRound.round,
+					headSha: stampedRound.headSha,
+					headCheck: stampedRound.headCheck,
+					cars: stampedRound.cars,
+				}
 			: null;
 
 	const mergeReceipt = ctx.latest(outputs.mergeReceipt, "enqueue-merge");
@@ -669,9 +1126,16 @@ export default smithers((ctx) => {
 		baseBranch: string;
 		autoMergeRequest: boolean;
 		ejected: boolean;
+		cars?: Array<{
+			prNumber: number;
+			state: "open" | "closed";
+			autoMergeRequest: boolean;
+			ejected: boolean;
+		}>;
 	}>;
 	const latestLanding = ctx.latest(outputs.landingPoll, "landing-poll");
 	const landingRows = (ctx.outputs.landingPoll ?? []) as Array<{ poll: number; landed: boolean }>;
+	const stackSync = ctx.latest(outputs.stackSync, "stack-sync-prune");
 	const deploy = ctx.latest(outputs.deployEvidence, "deploy-evidence");
 	const falloutWindow = ctx.latest(outputs.falloutWindow, "fallout-window");
 	const falloutWait = ctx.latest(outputs.falloutWait, "fallout-wait");
@@ -684,17 +1148,29 @@ export default smithers((ctx) => {
 			return "unresolvable";
 		}
 	})();
-	const agents = dryRun
+	const repoLabel = input.repo.split("/").pop() ?? input.repo;
+	const ticketLabel = input.ticket.replace(/^[^0-9]*/, "") || input.ticket;
+	const effortLabel = `${repoLabel}#${ticketLabel}`;
+	const modelViolationsAtRender = validateModelPolicy(policy);
+	const agents = dryRun || modelViolationsAtRender.length > 0
 		? null
 		: {
-				implementer: makeAgent(policy.implementer, input.worktree, 45 * 60_000, policy.reasoningImplementer),
-				reviewer: makeAgent({ model: reviewerModel, reasoning: seat(policy.reviewer ?? reviewerModel).reasoning }, input.worktree, 20 * 60_000, policy.reasoningReviewer),
-				watcher: makeAgent(policy.watcher, input.worktree, 30 * 60_000, policy.reasoningWatcher),
-				fallout: makeAgent(policy.fallout, input.worktree, 15 * 60_000, policy.reasoningFallout),
+				implementer: makeAgent(policy.implementer, input.worktree, 45 * 60_000, effortLabel, policy.reasoningImplementer, policy),
+				reviewer: makeAgent({ model: reviewerModel, reasoning: seat(policy.reviewer ?? reviewerModel).reasoning }, input.worktree, 20 * 60_000, effortLabel, policy.reasoningReviewer, policy),
+				watcher: makeAgent(policy.watcher, input.worktree, 30 * 60_000, effortLabel, policy.reasoningWatcher, policy),
+				fallout: makeAgent(policy.fallout, input.worktree, 15 * 60_000, effortLabel, policy.reasoningFallout, policy),
 			};
 
 	// -- approval gate helper (bypass only allowed with dryRun; preflight enforces) --
-	const Gate = (props: { id: string; title: string; summary: string }) => {
+	const Gate = (props: {
+		id: string;
+		title: string;
+		summary: string;
+		metadata?: Record<string, unknown>;
+		originalIssue?: string;
+		proposedAction?: string;
+		blastRadius?: string;
+	}) => {
 		if (bypass) {
 			return (
 				<Task id={props.id} output={outputs.approvals}>
@@ -707,11 +1183,58 @@ export default smithers((ctx) => {
 				</Task>
 			);
 		}
+		const stamp = /^r\d+-stamp$/.test(props.id);
+		const prNumber = pr?.prNumber ?? existingPr;
+		const headSha =
+			typeof props.metadata?.headSha === "string"
+				? props.metadata.headSha
+				: pr?.headSha;
+		const prContext: PrQuestionContext = {
+			...(pr?.url === undefined ? {} : { prUrl: pr.url }),
+			prRepo: input.repo,
+			...(prNumber === undefined ? {} : { prNumber }),
+			...(headSha === undefined ? {} : { headSha }),
+			originalIssue: brief?.summary ?? props.title,
+			ourFix: implementation?.summary ?? "The pipeline reached this human decision gate.",
+			whyCorrect: props.summary,
+			workflowDir,
+			workflowFile: "pipeline.tsx",
+		};
+		const resumeHint =
+			`Answer through deck-questions or the Smithers Gateway for run ${ctx.runId}, node ${props.id}. ` +
+			`If the engine is detached: smithers up pipeline.tsx --run-id ${ctx.runId} --resume true`;
+		askWorkflowQuestion(questionsFile, {
+			runId: ctx.runId,
+			nodeId: props.id,
+			answerLane: "smithers-approval",
+			resumeHint,
+			originalIssue: props.originalIssue ?? props.summary,
+			proposedAction: props.proposedAction ?? (
+				stamp
+					? `Stamp the reviewed head ${headSha ?? "unknown"} and release PR #${prNumber ?? "pending"} to the merge boundary.`
+					: `Approve this gate to release the next pipeline stage, or deny it to stop the run.`
+			),
+			blastRadius: props.blastRadius ?? (
+				stamp
+					? `Only PR #${prNumber ?? "pending"} at ${headSha ?? "the recorded head"}; any head change invalidates this stamp before merge.`
+					: `Only run ${ctx.runId} at node ${props.id} and PR #${prNumber ?? "pending"}; approval advances it and denial fails it.`
+			),
+			cwd: workflowDir,
+			prNumber,
+			prContext,
+			approvalValue: props.metadata,
+			questionKind: stamp ? "stamp" : "approve",
+			options: stamp ? ["Stamp", "Hold", "Deny gate"] : ["Approve", "Hold", "Deny gate"],
+			actions: stamp
+				? ["stamp", "hold", "deny-gate"]
+				: ["approve", "hold", "deny-gate"],
+			recommendation: stamp ? "Hold until the recorded head and evidence are reviewed." : "Approve only if the stated issue, action, and blast radius are acceptable.",
+		});
 		return (
 			<Approval
 				id={props.id}
 				output={outputs.approvals}
-				request={{ title: props.title, summary: props.summary }}
+				request={{ title: props.title, summary: props.summary, metadata: props.metadata }}
 				onDeny="fail"
 			/>
 		);
@@ -720,7 +1243,8 @@ export default smithers((ctx) => {
 	// -- reviewApproved gate for push -----------------------------------------------
 	const reviewApproved = latestLocalReview?.approved === true;
 	const reviewExhausted =
-		localReviewRows.length >= limits.localReviewRounds && !reviewApproved;
+		(localReviewRows.length >= limits.localReviewRounds || repeatedLocalFinding) &&
+		!reviewApproved;
 	const pushAllowed = reviewApproved || reviewEscalation?.approved === true;
 	const producerWatch = ctx.latest(outputs.watchPoll, `r${currentRound}-watch-poll`);
 	const coordinationRoot = path.join(smithersWorkspaceCwd(), ".deck-coordination");
@@ -776,6 +1300,28 @@ export default smithers((ctx) => {
 								"bypassApprovals=true requires dryRun=true: no real run may self-approve its gates.",
 							);
 						}
+						if (existingPr !== undefined && stackMode) {
+							questions.push("existingPr and stack are mutually exclusive; declare one effort shape.");
+						}
+						if (stackCreateSpecs !== undefined) {
+							try {
+								const normalized = normalizeStackSpecs(declaredBaseBranch, stackCreateSpecs);
+								const top = normalized.at(-1)?.branch;
+								if (top !== input.branch) {
+									questions.push(
+										`stack top branch "${top ?? "(missing)"}" must equal checked-out input.branch "${input.branch}".`,
+									);
+								}
+							} catch (error) {
+								questions.push(error instanceof Error ? error.message : String(error));
+							}
+						}
+						if (
+							stackExistingNumbers !== undefined &&
+							new Set(stackExistingNumbers).size !== stackExistingNumbers.length
+						) {
+							questions.push("stack.existingPrNumbers contains a duplicate PR number.");
+						}
 						if (!dryRun) {
 							const worktreeExists = require("node:fs").existsSync(input.worktree);
 							if (!worktreeExists) {
@@ -812,10 +1358,48 @@ export default smithers((ctx) => {
 					</Task>
 				) : null}
 
-				{preflight?.ok === true && adopt && !dryRun ? (
+				{preflight?.ok === true && adopt ? (
 					<Task id="adopt-base" output={outputs.adoptBase} retries={1}>
 						{() => (async () => {
-							const overview = await fetchPrOverview(ghCtx, input.existingPr as number);
+							if (stackExistingNumbers !== undefined) {
+								if (dryRun) {
+									const branches = stackExistingNumbers.map((number, index) =>
+										index === stackExistingNumbers.length - 1
+											? input.branch
+											: `${input.branch}-car-${index + 1}`,
+									);
+									const cars = stackExistingNumbers.map((number, index) => ({
+										prNumber: number,
+										url: `https://github.com/${input.repo}/pull/${number}`,
+										branch: branches[index],
+										baseBranch: index === 0 ? declaredBaseBranch : branches[index - 1],
+										headSha: `dryrun-head-sha-${number}`,
+										landed: false,
+									}));
+									return { baseBranch: declaredBaseBranch, cars };
+								}
+								const live = await fetchAdoptedPrs(
+									bunExec,
+									input.repo,
+									stackExistingNumbers,
+									github.gh,
+								);
+								const rootBaseBranch = input.baseBranch ?? live[0]?.baseRefName ?? "main";
+								const cars = validateAdoptedStack(
+									input.repo,
+									rootBaseBranch,
+									stackExistingNumbers,
+									live,
+								);
+								await execOrThrow(
+									bunExec,
+									[github.git, "ls-remote", "--exit-code", "--heads", "origin", rootBaseBranch],
+									{ cwd: input.worktree },
+								);
+								return { baseBranch: rootBaseBranch, cars };
+							}
+							if (dryRun) return { baseBranch: declaredBaseBranch };
+							const overview = await fetchPrOverview(ghCtx, existingPr as number);
 							const baseBranch = reconcileAdoptBaseBranch(input.baseBranch, overview.baseRefName);
 							await execOrThrow(bunExec, [github.git, "ls-remote", "--exit-code", "--heads", "origin", baseBranch], { cwd: input.worktree });
 							return { baseBranch };
@@ -827,13 +1411,17 @@ export default smithers((ctx) => {
 				{/* Adopt path: the code already lives on the PR. The implement node
 				    still runs (downstream gates key off its row) but as a stub compute
 				    task — no agent, no greenfield work. */}
-				{preflight?.ok === true && brief !== null && adopt && (dryRun || adoptedBase !== undefined) ? (
+				{preflight?.ok === true && brief !== null && adopt && adoptedBase !== undefined ? (
 					<Task id="implement" output={outputs.implementation} retries={0}>
-						{() => ({
-							commits: [],
-							summary: `adopted existing PR #${input.existingPr}: implementation lives on the PR`,
-							testEvidence: `adopted existing PR #${input.existingPr}: CI on the PR is the evidence`,
-						})}
+						{() => {
+							const numbers = adoptedBase.cars?.map((car) => car.prNumber) ??
+								[existingPr as number];
+							return {
+								commits: [],
+								summary: `adopted existing ${numbers.length === 1 ? `PR #${numbers[0]}` : `ordered stack ${numbers.map((number) => `#${number}`).join(" → ")}`}: implementation lives on GitHub`,
+								testEvidence: "adopted effort: CI on every existing PR is the evidence",
+							};
+						}}
 					</Task>
 				) : null}
 				{preflight?.ok === true && brief !== null && !adopt ? (
@@ -844,12 +1432,28 @@ export default smithers((ctx) => {
 						retries={1}
 					>
 						{dryRun
-							? () => ({
-									commits: ["dryrun-commit-1"],
-									summary: `dry-run: implemented "${brief.title}"`,
-									testEvidence: "dry-run: tests simulated green",
-								})
-							: implementPrompt(brief, input.worktree, input.branch)}
+							? () => {
+									if (stackCreateSpecs !== undefined) {
+										return {
+											commits: [],
+											summary: `dry-run: implemented stack for "${brief.title}"`,
+											testEvidence: "dry-run: stack tests simulated green",
+											stackCars: stackCreateSpecs.map((spec, index) => ({
+												branch: spec.branch,
+												commits: [`dryrun-stack-commit-${index + 1}`],
+												testEvidence: "dry-run: tests simulated green",
+											})),
+										};
+									}
+									return {
+										commits: ["dryrun-commit-1"],
+										summary: `dry-run: implemented "${brief.title}"`,
+										testEvidence: "dry-run: tests simulated green",
+									};
+								}
+							: stackCreateSpecs !== undefined
+								? stackImplementPrompt(brief, input.worktree, declaredBaseBranch, stackCreateSpecs)
+								: implementPrompt(brief, input.worktree, input.branch)}
 					</Task>
 				) : null}
 
@@ -858,7 +1462,7 @@ export default smithers((ctx) => {
 				{implementation !== undefined && brief !== null ? (
 					<Loop
 						id="local-review-loop"
-						until={latestLocalReview?.approved === true}
+						until={latestLocalReview?.approved === true || repeatedLocalFinding}
 						maxIterations={limits.localReviewRounds}
 						onMaxReached="return-last"
 					>
@@ -897,6 +1501,7 @@ export default smithers((ctx) => {
 							{latestLocalReview !== undefined &&
 							!latestLocalReview.approved &&
 							latestLocalReview.blockingFindings.length > 0 &&
+							!repeatedLocalFinding &&
 							(latestLocalFix === undefined || latestLocalFix.afterRound < latestLocalReview.round) ? (
 								<Task
 									id="local-fix"
@@ -937,7 +1542,130 @@ export default smithers((ctx) => {
 							(async () => {
 								if (adopt) {
 									// Adopt: verify and seed the live PR. Never create a second PR.
-									const prNumber = input.existingPr as number;
+									if (stackExistingNumbers !== undefined) {
+										const seededCars = adoptedBase?.cars ?? [];
+										const seededTop = seededCars.at(-1);
+										if (seededTop === undefined) {
+											throw new Error("[escalate] adopted stack validation produced no cars.");
+										}
+										if (dryRun) {
+											return {
+												prNumber: seededTop.prNumber,
+												url: seededTop.url,
+												headSha: seededTop.headSha,
+												baseBranch: adoptedBase?.baseBranch ?? declaredBaseBranch,
+												watchSetRegistered: true,
+												watchSetPath: "(dry-run: not written)",
+												receipt: `dry-run: adopted stack ${seededCars.map((car) => `#${car.prNumber}`).join(" → ")}`,
+												createdAt: nowIso(),
+												cars: seededCars,
+											};
+										}
+										await assertLocalStackTracking(bunExec, {
+											gh: github.gh,
+											worktree: input.worktree,
+											rootBaseBranch: adoptedBase?.baseBranch ?? declaredBaseBranch,
+											cars: seededCars,
+											allowTopAhead: true,
+										});
+										const [worktreeBranch, worktreeHead, worktreeOriginUrl] =
+											await Promise.all([
+												execOrThrow(
+													bunExec,
+													[github.git, "rev-parse", "--abbrev-ref", "HEAD"],
+													{ cwd: input.worktree },
+												).then((value) => value.trim()),
+												execOrThrow(bunExec, [github.git, "rev-parse", "HEAD"], {
+													cwd: input.worktree,
+												}).then((value) => value.trim()),
+												execOrThrow(
+													bunExec,
+													[github.git, "remote", "get-url", "origin"],
+													{ cwd: input.worktree },
+												).then((value) => value.trim()),
+											]);
+										cleanKnownScratchFiles(input.worktree);
+										const worktreeStatus = await execOrThrow(
+											bunExec,
+											[github.git, "status", "--porcelain"],
+											{ cwd: input.worktree },
+										);
+										const topOverview = await fetchPrOverview(ghCtx, seededTop.prNumber);
+										const ancestor = worktreeHead === topOverview.headSha
+											? null
+											: await bunExec(
+													[github.git, "merge-base", "--is-ancestor", topOverview.headSha, worktreeHead],
+													{ cwd: input.worktree },
+												);
+										const worktreeIsDescendant = ancestor === null || ancestor.code === 0;
+										assertAdoptable(topOverview, {
+											repo: input.repo,
+											branch: seededTop.branch,
+											baseBranch: seededTop.baseBranch,
+											worktreeBranch,
+											worktreeHead,
+											worktreeStatus,
+											worktreeOriginUrl,
+											allowWorktreeAhead: true,
+											worktreeIsDescendant,
+										});
+										if (
+											worktreeHead !== topOverview.headSha &&
+											decideAdoptPush({
+												worktreeHead,
+												prHead: topOverview.headSha,
+												isAncestor: worktreeIsDescendant,
+											}) !== "push"
+										) {
+											throw new Error(
+												`[escalate] adopted stack worktree ${worktreeHead} is not a descendant of top PR head ${topOverview.headSha}.`,
+											);
+										}
+										if (worktreeHead !== topOverview.headSha) {
+											await execOrThrow(
+												bunExec,
+												[github.gh, "stack", "push"],
+												{ cwd: input.worktree },
+											);
+										}
+										const refreshedLive = await fetchAdoptedPrs(
+											bunExec,
+											input.repo,
+											stackExistingNumbers,
+											github.gh,
+										);
+										const cars = validateAdoptedStack(
+											input.repo,
+											adoptedBase?.baseBranch ?? declaredBaseBranch,
+											stackExistingNumbers,
+											refreshedLive,
+										);
+										const top = cars.at(-1);
+										if (top === undefined || top.headSha !== worktreeHead) {
+											throw new Error(
+												`[escalate] adopted stack top did not advance to verified worktree HEAD ${worktreeHead}.`,
+											);
+										}
+										registerWatchCars({
+											watchSetPath,
+											ticket: input.ticket,
+											repo: input.repo,
+											runId: ctx.runId,
+											cars,
+										});
+										return {
+											prNumber: top.prNumber,
+											url: top.url,
+											headSha: top.headSha,
+											baseBranch: adoptedBase?.baseBranch ?? declaredBaseBranch,
+											watchSetRegistered: true,
+											watchSetPath,
+											receipt: `adopted existing stack ${cars.map((car) => `#${car.prNumber}@${car.headSha}`).join(" → ")}`,
+											createdAt: nowIso(),
+											cars,
+										};
+									}
+									const prNumber = existingPr as number;
 									if (dryRun) {
 										return {
 											prNumber,
@@ -1069,6 +1797,141 @@ export default smithers((ctx) => {
 										runId: ctx.runId,
 									};
 								}
+								if (stackCreateSpecs !== undefined) {
+									const specs = normalizeStackSpecs(declaredBaseBranch, stackCreateSpecs);
+									if (dryRun) {
+										const numbers =
+											fixtures.stackPrNumbers.length === specs.length
+												? fixtures.stackPrNumbers
+												: specs.map((_, index) => fixtures.prNumber + index);
+										const cars = specs.map((spec, index) => ({
+											prNumber: numbers[index],
+											url: `https://github.com/${input.repo}/pull/${numbers[index]}`,
+											branch: spec.branch,
+											baseBranch: spec.baseBranch,
+											headSha: `dryrun-head-sha-${numbers[index]}`,
+											landed: false,
+										}));
+										const top = cars[cars.length - 1];
+										return {
+											prNumber: top.prNumber,
+											url: top.url,
+											headSha: top.headSha,
+											baseBranch: declaredBaseBranch,
+											watchSetRegistered: true,
+											watchSetPath: "(dry-run: not written)",
+											receipt: `dry-run: submitted native stack ${cars.map((car) => `#${car.prNumber}`).join(" → ")}`,
+											createdAt: nowIso(),
+											cars,
+										};
+									}
+									if (implementation.stackCars === undefined) {
+										throw new Error(
+											"[escalate] stack implementer did not report per-car commit attribution.",
+										);
+									}
+									cleanKnownScratchFiles(input.worktree);
+									const worktreeStatus = await execOrThrow(
+										bunExec,
+										[github.git, "status", "--porcelain"],
+										{ cwd: input.worktree },
+									);
+									if (worktreeStatus.trim() !== "") {
+										throw new Error(
+											`[escalate] stack worktree is dirty before publication:\n${worktreeStatus.trim()}`,
+										);
+									}
+									const verified = await verifyStackImplementation(bunExec, {
+										git: github.git,
+										worktree: input.worktree,
+										rootBaseBranch: declaredBaseBranch,
+										specs: stackCreateSpecs,
+										reported: implementation.stackCars,
+									});
+									const stackDescriptions: Array<{ title: string; body: string }> = [];
+									for (let index = 0; index < specs.length; index += 1) {
+										const spec = specs[index];
+										const changedFiles = (
+											await execOrThrow(
+												bunExec,
+												[github.git, "diff", "--name-only", `${spec.baseBranch}...${spec.branch}`],
+												{ cwd: input.worktree },
+											)
+										)
+											.split("\n")
+											.map((file) => file.trim())
+											.filter(Boolean);
+										const descriptionInput = sanitizeDescriptionInput({
+											title: formatPullRequestTitle(
+												input.ticket,
+												spec.title ?? `${brief?.title ?? input.ticket} (${index + 1}/${specs.length})`,
+											),
+											summary: spec.body ?? brief?.summary ?? "",
+											acceptanceCriteria: brief?.acceptanceCriteria ?? [],
+											testing: implementation.stackCars[index].testEvidence,
+											reviewOutcome: latestLocalReview?.summary,
+											changedFiles,
+										});
+										stackDescriptions.push({
+											title: descriptionInput.title,
+											body: generatePullRequestDescription(descriptionInput),
+										});
+									}
+									const cars = await submitStack(bunExec, {
+										gh: github.gh,
+										repo: input.repo,
+										worktree: input.worktree,
+										rootBaseBranch: declaredBaseBranch,
+										specs: stackCreateSpecs,
+									});
+									for (let index = 0; index < cars.length; index += 1) {
+										const car = cars[index];
+										if (car.headSha !== verified[index].headSha) {
+											throw new Error(
+												`[escalate] submitted stack PR #${car.prNumber} head ${car.headSha} does not match verified branch head ${verified[index].headSha}.`,
+											);
+										}
+										const description = stackDescriptions[index];
+										if (description === undefined) {
+											throw new Error(`[escalate] missing validated description for stack car ${index + 1}.`);
+										}
+										await execOrThrow(
+											bunExec,
+											[
+												github.gh,
+												"pr",
+												"edit",
+												String(car.prNumber),
+												"--repo",
+												input.repo,
+												"--title",
+												description.title,
+												"--body",
+												description.body,
+											],
+											{ cwd: input.worktree },
+										);
+									}
+									registerWatchCars({
+										watchSetPath,
+										ticket: input.ticket,
+										repo: input.repo,
+										runId: ctx.runId,
+										cars,
+									});
+									const top = cars[cars.length - 1];
+									return {
+										prNumber: top.prNumber,
+										url: top.url,
+										headSha: top.headSha,
+										baseBranch: declaredBaseBranch,
+										watchSetRegistered: true,
+										watchSetPath,
+										receipt: `submitted native stack ${cars.map((car) => `#${car.prNumber}@${car.headSha}`).join(" → ")}`,
+										createdAt: nowIso(),
+										cars,
+									};
+								}
 								if (dryRun) {
 									return {
 										prNumber: fixtures.prNumber,
@@ -1082,6 +1945,48 @@ export default smithers((ctx) => {
 									};
 								}
 								// 1. push the branch (idempotent).
+								await execOrThrow(
+									bunExec,
+									[github.git, "fetch", "origin", baseBranch],
+									{ cwd: input.worktree },
+								);
+								const [publishedLocalHead, actualCommitText] = await Promise.all([
+									execOrThrow(bunExec, [github.git, "rev-parse", "HEAD"], {
+										cwd: input.worktree,
+									}).then((value) => value.trim()),
+									execOrThrow(
+										bunExec,
+										[
+											github.git,
+											"rev-list",
+											"--reverse",
+											`origin/${baseBranch}..HEAD`,
+										],
+										{ cwd: input.worktree },
+									),
+								]);
+								const actualCommits = actualCommitText
+									.split("\n")
+									.map((sha) => sha.trim())
+									.filter(Boolean);
+								const reportedCommits = await Promise.all(
+									implementation.commits.map((sha) =>
+										execOrThrow(
+											bunExec,
+											[github.git, "rev-parse", "--verify", `${sha}^{commit}`],
+											{ cwd: input.worktree },
+										).then((value) => value.trim()),
+									),
+								);
+								if (
+									actualCommits.length !== reportedCommits.length ||
+									actualCommits.some((sha, index) => sha !== reportedCommits[index])
+								) {
+									throw new Error(
+										`[escalate] implementation reported commits ${JSON.stringify(reportedCommits)}, ` +
+											`but origin/${baseBranch}..HEAD is ${JSON.stringify(actualCommits)}; refusing initial publication.`,
+									);
+								}
 								await execOrThrow(
 									bunExec,
 									[github.git, "push", "-u", "origin", input.branch],
@@ -1106,7 +2011,7 @@ export default smithers((ctx) => {
 									// that (create --reviewer is the silent-no-op path with no
 									// verification read).
 									const descriptionInput = sanitizeDescriptionInput({
-										title: brief?.title ?? input.ticket,
+										title: formatPullRequestTitle(input.ticket, brief?.title ?? input.ticket),
 										summary: brief?.summary ?? "",
 										acceptanceCriteria: brief?.acceptanceCriteria ?? [],
 										testing: implementation.testEvidence,
@@ -1128,6 +2033,12 @@ export default smithers((ctx) => {
 									prNumber = Number(match[1]);
 								}
 								const headSha = await fetchHeadSha(ghCtx, prNumber);
+								if (headSha !== publishedLocalHead) {
+									throw new Error(
+										`[escalate] PR #${prNumber} head moved to ${headSha} after publishing ` +
+											`local HEAD ${publishedLocalHead}; refusing to register an unattributed PR state.`,
+									);
+								}
 								// 3. register in the watch-set (side effect of THIS node; nothing untracked).
 								const fs = await import("node:fs");
 								const path = await import("node:path");
@@ -1164,8 +2075,6 @@ export default smithers((ctx) => {
 						{() =>
 							(async () => {
 								if (github.skipReviewerRequest) {
-									// The ONLY way this stage ends with no reviewers: an
-									// explicit input opt-out, recorded as such.
 									return {
 										skipped: true,
 										requested: [],
@@ -1173,6 +2082,9 @@ export default smithers((ctx) => {
 										source: "explicit-skip",
 										at: nowIso(),
 										reviewerPrompt: reviewersDecisionPrompt(github.reviewerDenylist),
+										...(stackMode
+											? { cars: effortCars.map((car) => ({ prNumber: car.prNumber, requested: [], verified: [] })) }
+											: {}),
 									};
 								}
 								if (dryRun) {
@@ -1183,32 +2095,67 @@ export default smithers((ctx) => {
 										source: "dry-run",
 										at: nowIso(),
 										reviewerPrompt: reviewersDecisionPrompt(github.reviewerDenylist),
+										...(stackMode
+											? {
+													cars: effortCars.map((car) => ({
+														prNumber: car.prNumber,
+														requested: ["dry-reviewer"],
+														verified: ["dry-reviewer"],
+													})),
+												}
+											: {}),
 									};
 								}
-								// Selection + request + silent-no-op verification live in
-								// lib/reviewers.ts (unit-tested against mocked adapters).
-								// Explicit sources MERGE (brief + input config, deduped in
-								// selection); entries may be display names (name->login
-								// lookup; unresolvable entries escalate, never dropped).
-								const result = await executeReviewerRequest(
-									{
-										explicit: [...(brief?.suggestedReviewers ?? []), ...github.reviewers],
-										exclude: [...github.selfLogins, ...github.excludedApprovers],
-										denylist: github.reviewerDenylist,
-										max: github.maxReviewers,
-									},
-									{
-										fetchChangedFiles: () => fetchChangedFiles(ghCtx, pr.prNumber),
-										fetchCodeowners: () => fetchCodeowners(ghCtx),
-										fetchRecentAuthors: (files) => fetchRecentAuthors(ghCtx, files),
-										resolveLogin: (entry) => resolveReviewerLogin(ghCtx, entry),
-										isCollaborator: (login) => isCollaborator(ghCtx, login),
-										logSkip: (login, reason) => console.warn(`[reviewer-skip] ${login}: ${reason}`),
-										requestReviewers: (logins) => requestReviewers(ghCtx, pr.prNumber, logins),
-										fetchRequestedReviewers: () => fetchRequestedReviewers(ghCtx, pr.prNumber),
-									},
-								);
-								return { ...result, reviewerPrompt: reviewersDecisionPrompt(github.reviewerDenylist) };
+								const carResults: Array<{
+									prNumber: number;
+									requested: string[];
+									verified: string[];
+									source: string;
+									skippedNonCollaborators?: string[];
+								}> = [];
+								for (const car of effortCars) {
+									const result = await executeReviewerRequest(
+										{
+											explicit: [...(brief?.suggestedReviewers ?? []), ...github.reviewers],
+											exclude: [...github.selfLogins, ...github.excludedApprovers],
+											denylist: github.reviewerDenylist,
+											max: github.maxReviewers,
+										},
+										{
+											fetchChangedFiles: () => fetchChangedFiles(ghCtx, car.prNumber),
+											fetchCodeowners: () => fetchCodeowners(ghCtx),
+											fetchRecentAuthors: (files) => fetchRecentAuthors(ghCtx, files),
+											resolveLogin: (entry) => resolveReviewerLogin(ghCtx, entry),
+											isCollaborator: (login) => isCollaborator(ghCtx, login),
+											logSkip: (login, reason) => console.warn(`[reviewer-skip] ${login}: ${reason}`),
+											requestReviewers: (logins) => requestReviewers(ghCtx, car.prNumber, logins),
+											fetchRequestedReviewers: () => fetchRequestedReviewers(ghCtx, car.prNumber),
+										},
+									);
+									carResults.push({ prNumber: car.prNumber, ...result });
+								}
+								const requested = [...new Set(carResults.flatMap((result) => result.requested))];
+								const verified = [...new Set(carResults.flatMap((result) => result.verified))];
+								return {
+									skipped: false,
+									requested,
+									verified,
+									skippedNonCollaborators: [
+										...new Set(carResults.flatMap((result) => result.skippedNonCollaborators ?? [])),
+									],
+									source: stackMode ? "per-car stack routing" : carResults[0]?.source ?? "selection",
+									at: nowIso(),
+									reviewerPrompt: reviewersDecisionPrompt(github.reviewerDenylist),
+									...(stackMode
+										? {
+												cars: carResults.map((result) => ({
+													prNumber: result.prNumber,
+													requested: result.requested,
+													verified: result.verified,
+												})),
+											}
+										: {}),
+								};
 							})()
 						}
 					</Task>
@@ -1221,7 +2168,13 @@ export default smithers((ctx) => {
 							(async () => {
 								const files = dryRun
 									? fixtures.changedFiles
-									: await fetchChangedFiles(ghCtx, pr.prNumber);
+									: [
+											...new Set(
+												(await Promise.all(
+													effortCars.map((car) => fetchChangedFiles(ghCtx, car.prNumber)),
+												)).flat(),
+											),
+										];
 								const migrationFiles = detectMigrations(files);
 								return { required: migrationFiles.length > 0, files: migrationFiles };
 							})()
@@ -1265,7 +2218,13 @@ export default smithers((ctx) => {
 							(async () => {
 								const files = dryRun
 									? fixtures.changedFiles
-									: await fetchChangedFiles(ghCtx, pr.prNumber);
+									: [
+											...new Set(
+												(await Promise.all(
+													effortCars.map((car) => fetchChangedFiles(ghCtx, car.prNumber)),
+												)).flat(),
+											),
+										];
 								return { files: detectMigrations(files), capturedAt: nowIso() };
 							})()
 						}
@@ -1327,6 +2286,15 @@ export default smithers((ctx) => {
 							.map((k) => {
 								const watchNode = `r${k}-watch-poll`;
 								const latestWatch = ctx.latest(outputs.watchPoll, watchNode);
+								const activeWatchCar =
+									latestWatch?.cars?.find((car) => car.actionable) ??
+									(latestWatch === undefined || topCar === undefined
+										? undefined
+										: {
+												...topCar,
+												actionable: latestWatch.actionable,
+												reviewersToReRequest: latestWatch.reviewersToReRequest,
+											});
 								const watchRows = watchPollRows.filter((row) => row.round === k);
 								const watchExhausted =
 									watchRows.length >= limits.watchPolls && latestWatch?.exitOk !== true;
@@ -1334,6 +2302,75 @@ export default smithers((ctx) => {
 								const watchSettled =
 									latestWatch?.exitOk === true || watchEscalation?.approved === true;
 								const latestFix = ctx.latest(outputs.watchFix, `r${k}-watch-fix`);
+								const latestBaseline = ctx.latest(outputs.watchBaseline, `r${k}-watch-baseline`);
+								const latestPublish = ctx.latest(outputs.watchPublish, `r${k}-watch-publish`);
+								const watchFixNode = `r${k}-watch-fix`;
+								const decisionBlockers = (latestFix?.actions ?? [])
+									.map(parseDecisionClassBlocker)
+									.filter((entry): entry is NonNullable<typeof entry> => entry !== null);
+								const activeDecisionIds = new Set<string>();
+								if (!bypass && latestFix !== undefined) {
+									for (const blocker of decisionBlockers) {
+										const asked = askWorkflowQuestion(questionsFile, {
+											runId: ctx.runId,
+											nodeId: watchFixNode,
+											decisionKey: blocker.threadRef,
+											generation: latestFix.afterPoll,
+											answerLane: "store",
+											resumeHint:
+												`Answer in deck-questions; the next ${watchFixNode} seat for run ${ctx.runId} hydrates the stored decision.`,
+											originalIssue:
+												`Review thread ${blocker.threadRef} cannot be resolved mechanically: ${blocker.decision}`,
+											proposedAction:
+												"State the intended product or implementation behavior for this thread; the next watch-fix seat will apply it.",
+											blastRadius:
+												`Only ${blocker.threadRef} on PR #${pr.prNumber}; this answer grants no merge or push authority.`,
+											cwd: workflowDir,
+											prNumber: pr.prNumber,
+											prContext: {
+												prUrl: pr.url,
+												prRepo: input.repo,
+												prNumber: pr.prNumber,
+												headSha: latestWatch?.headSha ?? pr.headSha,
+												originalIssue: brief?.summary,
+												ourFix: implementation?.summary,
+												whyCorrect: blocker.decision,
+												workflowDir,
+												workflowFile: "pipeline.tsx",
+											},
+											questionKind: "agent",
+											recommendation:
+												"Answer with the intended behavior and any boundary the fixer must preserve.",
+										});
+										activeDecisionIds.add(asked.id);
+									}
+								}
+								const watchDecisionQuestions = bypass
+									? []
+									: workflowQuestions(questionsFile, ctx.runId, watchFixNode);
+								if (!bypass && (latestFix !== undefined || latestWatch?.exitOk === true)) {
+									for (const question of watchDecisionQuestions) {
+										if (question.status !== "open") continue;
+										if (latestWatch?.exitOk !== true && activeDecisionIds.has(question.id)) continue;
+										resolveWorkflowQuestion(questionsFile, {
+											runId: ctx.runId,
+											nodeId: watchFixNode,
+											decisionKey: question.workflow?.decisionKey,
+											answer:
+												latestWatch?.exitOk === true
+													? "Watch completed; this decision is no longer blocking."
+													: "The watch fixer no longer reports this decision-class blocker.",
+											status: "dismissed",
+										});
+									}
+								}
+								const captainDecisionAnswers = watchDecisionQuestions
+									.filter((question) => question.status === "answered" && question.answer !== undefined)
+									.map((question) => ({
+										threadRef: question.workflow?.decisionKey ?? "unknown",
+										answer: question.answer ?? "",
+									}));
+
 
 								const readyNode = `r${k}-ready-poll`;
 								const latestReady = ctx.latest(outputs.readyPoll, readyNode);
@@ -1367,10 +2404,28 @@ export default smithers((ctx) => {
 																	!waiting &&
 																	(k > 0 || pollNo + 1 >= fixtures.watchPollsToExit);
 																const actionable = !waiting && !exitOk;
+																const cars = effortCars.map((car) => ({
+																	prNumber: car.prNumber,
+																	branch: car.branch,
+																	baseBranch: car.baseBranch,
+																	headSha: car.headSha,
+																	exitOk,
+																	actionable,
+																	ci: exitOk ? "green" : "will-be-green",
+																	unresolvedThreads: actionable ? 1 : 0,
+																	unansweredComments: actionable ? 1 : 0,
+																	reviewersToReRequest: actionable ? ["dry-reviewer"] : [],
+																	reasons: exitOk
+																		? []
+																		: waiting
+																			? ["dry-run: CI is pending; Smithers owns the next poll"]
+																			: ["dry-run: 1 unresolved thread"],
+																	rebaseRequired: false,
+																}));
 																return {
 																	round: k,
 																	poll: pollNo,
-																	headSha: "dryrun-head-sha",
+																	headSha: cars.at(-1)?.headSha ?? "dryrun-head-sha",
 																	exitOk,
 																	disposition: exitOk
 																		? "complete"
@@ -1379,49 +2434,103 @@ export default smithers((ctx) => {
 																			: "wait",
 																	actionable,
 																	ci: exitOk ? "green" : "will-be-green",
-																	unresolvedThreads: actionable ? 1 : 0,
-																	unansweredComments: actionable ? 1 : 0,
-																	reviewersToReRequest: actionable ? ["dry-reviewer"] : [],
-														rebaseRequired: false,
-																	reasons: exitOk
-																		? []
-																		: waiting
-																			? ["dry-run: CI is pending; Smithers owns the next poll"]
-																			: ["dry-run: 1 unresolved thread"],
+																	unresolvedThreads: cars.reduce((sum, car) => sum + car.unresolvedThreads, 0),
+																	unansweredComments: cars.reduce((sum, car) => sum + car.unansweredComments, 0),
+																	reviewersToReRequest: [
+																		...new Set(cars.flatMap((car) => car.reviewersToReRequest)),
+																	],
+																	rebaseRequired: false,
+																	reasons: cars.flatMap((car) =>
+																		car.reasons.map((reason) => `PR #${car.prNumber}: ${reason}`),
+																	),
+																	...(stackMode ? { cars } : {}),
 																};
 															}
 															if (pollNo > 0) await sleepSeconds(limits.watchPollSeconds);
-															const snapshot = await fetchWatchSnapshot(
-																ghCtx,
-																pr.prNumber,
-																github.selfLogins,
-															);
 															const mainCi = assessCi(await fetchBranchCheckRuns(ghCtx, baseBranch));
-										if (mainCi === "red") {
-											return {
-												round: k, poll: pollNo, headSha: snapshot.headSha,
-												exitOk: false, disposition: "wait", actionable: false, ci: "red",
-												unresolvedThreads: 0, unansweredComments: 0, reviewersToReRequest: [],
-												reasons: [`base branch ${baseBranch} has failing checks; CI watch is paused until it is green.`],
-												rebaseRequired: false,
-											};
-										}
-										const verdict = evaluateWatchExit(snapshot, {
-																selfLogins: github.selfLogins,
-															});
+															if (mainCi === "red") {
+																const cars = effortCars.map((car) => ({
+																	prNumber: car.prNumber,
+																	branch: car.branch,
+																	baseBranch: car.baseBranch,
+																	headSha: car.headSha,
+																	exitOk: false,
+																	actionable: false,
+																	ci: "red",
+																	unresolvedThreads: 0,
+																	unansweredComments: 0,
+																	reviewersToReRequest: [],
+																	reasons: [`root branch ${baseBranch} has failing checks`],
+																	rebaseRequired: false,
+																}));
+																return {
+																	round: k,
+																	poll: pollNo,
+																	headSha: cars.at(-1)?.headSha ?? pr.headSha,
+																	exitOk: false,
+																	disposition: "wait" as const,
+																	actionable: false,
+																	ci: "red",
+																	unresolvedThreads: 0,
+																	unansweredComments: 0,
+																	reviewersToReRequest: [],
+																	reasons: [`root branch ${baseBranch} has failing checks; CI watch is paused until it is green.`],
+																	rebaseRequired: false,
+																	...(stackMode ? { cars } : {}),
+																};
+															}
+															const cars = [];
+															for (const car of effortCars) {
+																const snapshot = await fetchWatchSnapshot(
+																	ghCtx,
+																	car.prNumber,
+																	github.selfLogins,
+																);
+																const verdict = evaluateWatchExit(snapshot, {
+																	selfLogins: github.selfLogins,
+																});
+																cars.push({
+																	prNumber: car.prNumber,
+																	branch: car.branch,
+																	baseBranch: car.baseBranch,
+																	headSha: snapshot.headSha,
+																	exitOk: verdict.exitOk,
+																	actionable: verdict.actionable,
+																	ci: verdict.ci,
+																	unresolvedThreads: verdict.unresolvedThreads,
+																	unansweredComments: verdict.unansweredComments,
+																	reviewersToReRequest: verdict.reviewersNeedingReRequest,
+																	reasons: verdict.reasons,
+																	rebaseRequired: verdict.rebaseRequired,
+																});
+															}
+															const exitOk = cars.every((car) => car.exitOk);
+															const actionable = cars.some((car) => car.actionable);
+															const ci = cars.some((car) => car.ci === "red")
+																? "red"
+																: cars.some((car) => car.ci === "none")
+																	? "none"
+																	: cars.some((car) => car.ci === "will-be-green")
+																		? "will-be-green"
+																		: "green";
 															return {
 																round: k,
 																poll: pollNo,
-																headSha: snapshot.headSha,
-																exitOk: verdict.exitOk,
-																disposition: verdict.disposition,
-																actionable: verdict.actionable,
-																ci: verdict.ci,
-																unresolvedThreads: verdict.unresolvedThreads,
-																unansweredComments: verdict.unansweredComments,
-																reviewersToReRequest: verdict.reviewersNeedingReRequest,
-																reasons: verdict.reasons,
-																		rebaseRequired: verdict.rebaseRequired,
+																headSha: cars.at(-1)?.headSha ?? pr.headSha,
+																exitOk,
+																disposition: exitOk ? "complete" : actionable ? "fix" : "wait",
+																actionable,
+																ci,
+																unresolvedThreads: cars.reduce((sum, car) => sum + car.unresolvedThreads, 0),
+																unansweredComments: cars.reduce((sum, car) => sum + car.unansweredComments, 0),
+																reviewersToReRequest: [
+																	...new Set(cars.flatMap((car) => car.reviewersToReRequest)),
+																],
+																reasons: cars.flatMap((car) =>
+																	car.reasons.map((reason) => `PR #${car.prNumber}: ${reason}`),
+																),
+																rebaseRequired: cars.some((car) => car.rebaseRequired),
+																...(stackMode ? { cars } : {}),
 															};
 														})()
 													}
@@ -1429,44 +2538,441 @@ export default smithers((ctx) => {
 												{latestWatch !== undefined &&
 												!latestWatch.exitOk &&
 												latestWatch.actionable &&
-												(latestFix === undefined || latestFix.afterPoll < latestWatch.poll) ? (
+												(latestFix === undefined || latestFix.afterPoll < latestWatch.poll)
+													? latestWatch.rebaseRequired
+														? (
+																<Task
+																	id={`r${k}-watch-fix`}
+																	output={outputs.watchFix}
+																	retries={1}
+																>
+																	{async () => {
+																		if (stackMode) {
+																			const watchedCars = latestWatch.cars ?? [];
+																			const rebaseCar = watchedCars.find((car) => car.rebaseRequired);
+																			if (rebaseCar === undefined || topCar === undefined) {
+																				throw new Error("[escalate] stack rebase poll omitted car topology.");
+																			}
+																			const comparisons = await compareStackHeads(
+																				watchedCars.map((car) => ({
+																					prNumber: car.prNumber,
+																					branch: car.branch,
+																					baseBranch: car.baseBranch,
+																					headSha: car.headSha,
+																				})),
+																				(prNumber) => fetchHeadSha(ghCtx, prNumber),
+																			);
+																			const drifted = comparisons.filter((comparison) => !comparison.ok);
+																			if (drifted.length > 0) {
+																				return {
+																					round: k,
+																					afterPoll: latestWatch.poll,
+																					actions: [],
+																					pushed: false,
+																					reRequested: [],
+																					commits: [],
+																					summary:
+																						`Stack changed after poll; pushed nothing and will re-poll: ` +
+																						drifted.map((car) => `#${car.prNumber} ${car.headSha} -> ${car.currentHead}`).join("; "),
+																				};
+																			}
+																			const [branch, localHead] = await Promise.all([
+																				execOrThrow(
+																					bunExec,
+																					[github.git, "branch", "--show-current"],
+																					{ cwd: input.worktree },
+																				).then((value) => value.trim()),
+																				execOrThrow(
+																					bunExec,
+																					[github.git, "rev-parse", "HEAD"],
+																					{ cwd: input.worktree },
+																				).then((value) => value.trim()),
+																			]);
+																			const topComparison = comparisons.at(-1);
+																			if (
+																				branch !== topCar.branch ||
+																				topComparison === undefined ||
+																				localHead !== topComparison.currentHead
+																			) {
+																				throw new Error(
+																					`[escalate] stack rebase worktree is ${branch || "detached"}@${localHead}, not top car ${topCar.branch}@${topComparison?.currentHead ?? "unknown"}.`,
+																				);
+																			}
+																			const actions = await rebaseStackUpstack(bunExec, {
+																				gh: github.gh,
+																				worktree: input.worktree,
+																				rootBaseBranch: baseBranch,
+																				branches: effortCars.map((car) => car.branch),
+																				fromBranch: rebaseCar.branch,
+																				testCommand: commands.test,
+																			});
+																			const reRequested: string[] = [];
+																			for (const car of watchedCars) {
+																				if (car.reviewersToReRequest.length === 0) continue;
+																				await requestReviewers(
+																					ghCtx,
+																					car.prNumber,
+																					car.reviewersToReRequest,
+																				);
+																				reRequested.push(...car.reviewersToReRequest);
+																			}
+																			return {
+																				round: k,
+																				afterPoll: latestWatch.poll,
+																				actions: [
+																					...actions,
+																					...reRequested.map((reviewer) => `re-requested ${reviewer}`),
+																				],
+																				pushed: true,
+																				reRequested: [...new Set(reRequested)],
+																				commits: [],
+																				summary: "Rebased the stale car and every descendant through gh stack, tested, pushed, and re-requested review.",
+																			};
+																		}
+																		const [remoteHead, branch, localHead] =
+																			await Promise.all([
+																				fetchHeadSha(ghCtx, pr.prNumber),
+																				execOrThrow(
+																					bunExec,
+																					[github.git, "branch", "--show-current"],
+																					{ cwd: input.worktree },
+																				).then((value) => value.trim()),
+																				execOrThrow(
+																					bunExec,
+																					[github.git, "rev-parse", "HEAD"],
+																					{ cwd: input.worktree },
+																				).then((value) => value.trim()),
+																			]);
+																		if (
+																			remoteHead !== latestWatch.headSha ||
+																			branch !== input.branch ||
+																			localHead !== remoteHead
+																		) {
+																			throw new Error(
+																				`[escalate] rebase baseline rejected: poll=${latestWatch.headSha}, remote=${remoteHead}, local=${localHead}, branch=${branch || "detached"}; refusing to rebase or push stale/out-of-band state.`,
+																			);
+																		}
+																		const actions = await rebaseAndPush(bunExec, {
+																			git: github.git,
+																			worktree: input.worktree,
+																			branch: input.branch,
+																			baseBranch,
+																			expectedRemoteHead: latestWatch.headSha,
+																			testCommand: commands.test,
+																			runCommitShas: [],
+																		});
+																		const reviewers = latestWatch.reviewersToReRequest;
+																		if (reviewers.length > 0) {
+																			await requestReviewers(ghCtx, pr.prNumber, reviewers);
+																		}
+																		return {
+																			round: k,
+																			afterPoll: latestWatch.poll,
+																			actions: [
+																				...actions,
+																				...reviewers.map((reviewer) => `re-requested ${reviewer}`),
+																			],
+																			pushed: true,
+																			reRequested: reviewers,
+																			commits: [],
+																			summary: "Rebased through the bounded helper, tested, pushed, and re-requested review.",
+																		};
+																	}}
+																</Task>
+															)
+														: latestBaseline === undefined ||
+																latestBaseline.afterPoll < latestWatch.poll
+															? (
+																	<Task
+																		id={`r${k}-watch-baseline`}
+																		output={outputs.watchBaseline}
+																		retries={1}
+																	>
+																		{() =>
+																			dryRun
+																				? {
+																						round: k,
+																						afterPoll: latestWatch.poll,
+																						headSha: activeWatchCar?.headSha ?? latestWatch.headSha,
+																						valid: true,
+																						reason: "dry-run worktree matches polled head",
+																					}
+																				: (async () => {
+																						if (activeWatchCar === undefined) {
+																							throw new Error("[escalate] actionable watch poll omitted its car.");
+																						}
+																						if (stackMode) {
+																							const comparisons = await compareStackHeads(
+																								(latestWatch.cars ?? []).map((car) => ({
+																									prNumber: car.prNumber,
+																									branch: car.branch,
+																									baseBranch: car.baseBranch,
+																									headSha: car.headSha,
+																								})),
+																								(prNumber) => fetchHeadSha(ghCtx, prNumber),
+																							);
+																							const drifted = comparisons.filter((comparison) => !comparison.ok);
+																							if (drifted.length > 0) {
+																								return {
+																									round: k,
+																									afterPoll: latestWatch.poll,
+																									headSha: activeWatchCar.headSha,
+																									valid: false,
+																									reason:
+																										`stack changed after poll; re-poll before running a fixer: ` +
+																										drifted.map((car) => `#${car.prNumber} ${car.headSha} -> ${car.currentHead}`).join("; "),
+																								};
+																							}
+																						}
+																						if (stackMode) {
+																							const current = (
+																								await execOrThrow(
+																									bunExec,
+																									[github.git, "branch", "--show-current"],
+																									{ cwd: input.worktree },
+																								)
+																							).trim();
+																							if (current !== activeWatchCar.branch) {
+																								await execOrThrow(
+																									bunExec,
+																									[github.gh, "stack", "checkout", activeWatchCar.branch],
+																									{ cwd: input.worktree },
+																								);
+																							}
+																						}
+																						const [remoteHead, branch, localHead] =
+																							await Promise.all([
+																								fetchHeadSha(ghCtx, activeWatchCar.prNumber),
+																								execOrThrow(
+																									bunExec,
+																									[github.git, "branch", "--show-current"],
+																									{ cwd: input.worktree },
+																								).then((value) => value.trim()),
+																								execOrThrow(
+																									bunExec,
+																									[github.git, "rev-parse", "HEAD"],
+																									{ cwd: input.worktree },
+																								).then((value) => value.trim()),
+																							]);
+																						const valid =
+																							remoteHead === activeWatchCar.headSha &&
+																							branch === activeWatchCar.branch &&
+																							localHead === remoteHead;
+																						return {
+																							round: k,
+																							afterPoll: latestWatch.poll,
+																							headSha: remoteHead,
+																							valid,
+																							reason: valid
+																								? "worktree and remote PR branch match the polled head"
+																								: `publish baseline rejected: poll=${activeWatchCar.headSha}, remote=${remoteHead}, local=${localHead}, branch=${branch || "detached"}`,
+																						};
+																					})()
+																		}
+																	</Task>
+																)
+															: latestBaseline.valid
+																? (
+																		<Task
+																			id={`r${k}-watch-fix`}
+																			output={outputs.watchFix}
+																			agent={dryRun ? undefined : agents?.watcher}
+																			retries={1}
+																		>
+																			{dryRun
+																				? () => ({
+																						round: k,
+																						afterPoll: latestWatch.poll,
+																						actions: ["dry-run: answered thread"],
+																						commits: [],
+																						pushed: false,
+																						reRequested: [],
+																						summary: "dry-run: feedback addressed locally",
+																					})
+																				: watchFixPrompt({
+																						worktree: input.worktree,
+																						branch: activeWatchCar?.branch ?? input.branch,
+																						baseBranch: activeWatchCar?.baseBranch ?? baseBranch,
+																						repo: input.repo,
+																						project,
+																						prNumber: activeWatchCar?.prNumber ?? pr.prNumber,
+																						gh: github.gh,
+																						pollJson: JSON.stringify({
+																							...latestWatch,
+																							activeCar: activeWatchCar,
+																							captainDecisionAnswers,
+																						}, null, 2),
+																						round: k,
+																						afterPoll: latestWatch.poll,
+																					})}
+																		</Task>
+																	)
+																: null
+													: null}
+												{latestWatch !== undefined &&
+												latestFix !== undefined &&
+												latestFix.afterPoll === latestWatch.poll &&
+												!latestWatch.rebaseRequired &&
+												(latestPublish === undefined ||
+													latestPublish.afterPoll < latestWatch.poll) ? (
 													<Task
-														id={`r${k}-watch-fix`}
-														output={outputs.watchFix}
-														agent={dryRun ? undefined : agents?.watcher}
+														id={`r${k}-watch-publish`}
+														output={outputs.watchPublish}
 														retries={1}
 													>
-														{dryRun
-															? () => ({
-																	round: k,
-																	afterPoll: latestWatch.poll,
-																	actions: [
-																		"dry-run: answered thread",
-																		"dry-run: re-requested dry-reviewer",
-																	],
-																	pushed: false,
-																	reRequested: ["dry-reviewer"],
-																	summary: "dry-run: feedback addressed",
-																})
-															: latestWatch.rebaseRequired
-															? async () => {
-																	const actions = await rebaseAndPush(bunExec, { git: github.git, worktree: input.worktree, branch: input.branch, baseBranch, testCommand: commands.test });
-																	const reviewers = latestWatch.reviewersToReRequest;
-																			if (reviewers.length > 0) await requestReviewers(ghCtx, pr.prNumber, reviewers);
-																			return { round: k, afterPoll: latestWatch.poll, actions: [...actions, "answered review feedback", ...reviewers.map((reviewer) => `re-requested ${reviewer}`)], pushed: true, reRequested: reviewers, summary: "Rebased, addressed review feedback, tested, pushed, and re-requested review." };
-																}
-															: watchFixPrompt({
-																	worktree: input.worktree,
-																	branch: input.branch,
-																	baseBranch,
-																	repo: input.repo,
-																	project,
-prNumber: pr.prNumber,
-																	gh: github.gh,
-																	pollJson: JSON.stringify(latestWatch, null, 2),
-																	round: k,
-																	afterPoll: latestWatch.poll,
-																})}
+														{() =>
+															dryRun
+																? {
+																		round: k,
+																		afterPoll: latestWatch.poll,
+																		actions: ["dry-run: bounded publish completed"],
+																		pushed: false,
+																		reRequested: [],
+																		summary: "dry-run: no local commits to publish",
+																	}
+																: (async () => {
+																		if (
+																			latestFix.pushed ||
+																			latestFix.reRequested.length > 0
+																		) {
+																			throw new Error(
+																				"[escalate] watch fixer reported a direct push or reviewer re-request; both are forbidden outside the deterministic publish node.",
+																			);
+																		}
+																		if (
+																			latestBaseline === undefined ||
+																			!latestBaseline.valid ||
+																			latestBaseline.afterPoll !== latestWatch.poll
+																		) {
+																			throw new Error(
+																				"[escalate] watch publish has no valid worktree/remote baseline for this poll.",
+																			);
+																		}
+																		if (activeWatchCar === undefined) {
+																			throw new Error("[escalate] watch publish has no active car.");
+																		}
+																		const remoteHead = await fetchHeadSha(
+																			ghCtx,
+																			activeWatchCar.prNumber,
+																		);
+																		if (remoteHead !== latestBaseline.headSha) {
+																			throw new Error(
+																				`[escalate] remote PR head moved from ${latestBaseline.headSha} to ${remoteHead} during watch-fix; refusing to publish or trust an out-of-band push.`,
+																			);
+																		}
+																		const ancestry = await bunExec(
+																			[
+																				github.git,
+																				"merge-base",
+																				"--is-ancestor",
+																				latestBaseline.headSha,
+																				"HEAD",
+																			],
+																			{ cwd: input.worktree },
+																		);
+																		if (ancestry.code !== 0) {
+																			throw new Error(
+																				`[escalate] local HEAD is not descended from the trusted watch baseline ${latestBaseline.headSha}; refusing to publish.`,
+																			);
+																		}
+																		const runCommitShas = latestFix.commits;
+																		const actualRunCommits = (
+																			await execOrThrow(
+																				bunExec,
+																				[
+																					github.git,
+																					"rev-list",
+																					"--reverse",
+																					`${latestBaseline.headSha}..HEAD`,
+																				],
+																				{ cwd: input.worktree },
+																			)
+																		)
+																			.split("\n")
+																			.map((sha) => sha.trim())
+																			.filter(Boolean);
+																		if (
+																			actualRunCommits.length !== runCommitShas.length ||
+																			actualRunCommits.some(
+																				(sha, index) => sha !== runCommitShas[index],
+																			)
+																		) {
+																			throw new Error(
+																				`[escalate] watch fixer reported commits ${JSON.stringify(runCommitShas)}, but the trusted baseline-to-HEAD range is ${JSON.stringify(actualRunCommits)}; refusing to allowlist or push unreported local commits.`,
+																			);
+																		}
+																		const reviewers = activeWatchCar.reviewersToReRequest;
+																		if (runCommitShas.length === 0) {
+																			if (reviewers.length > 0) {
+																				await requestReviewers(ghCtx, activeWatchCar.prNumber, reviewers);
+																			}
+																			return {
+																				round: k,
+																				afterPoll: latestWatch.poll,
+																				actions: reviewers.map(
+																					(reviewer) => `re-requested ${reviewer}`,
+																				),
+																				pushed: false,
+																				reRequested: reviewers,
+																				summary:
+																					"Feedback handled without local commits; eligible reviewers re-requested.",
+																			};
+																		}
+																		if (stackMode) {
+																			const comparisons = await compareStackHeads(
+																				(latestWatch.cars ?? []).map((car) => ({
+																					prNumber: car.prNumber,
+																					branch: car.branch,
+																					baseBranch: car.baseBranch,
+																					headSha: car.headSha,
+																				})),
+																				(prNumber) => fetchHeadSha(ghCtx, prNumber),
+																			);
+																			const drifted = comparisons.filter((comparison) => !comparison.ok);
+																			if (drifted.length > 0) {
+																				throw new Error(
+																					`[escalate] stack changed while the fixer was working; pushed nothing. ` +
+																						drifted.map((car) => `#${car.prNumber} ${car.headSha} -> ${car.currentHead}`).join("; "),
+																				);
+																			}
+																		}
+																		const actions = stackMode
+																			? await rebaseStackUpstack(bunExec, {
+																					gh: github.gh,
+																					worktree: input.worktree,
+																					rootBaseBranch: baseBranch,
+																					branches: effortCars.map((car) => car.branch),
+																					fromBranch: activeWatchCar.branch,
+																					testCommand: commands.test,
+																				})
+																			: await rebaseAndPush(bunExec, {
+																					git: github.git,
+																					worktree: input.worktree,
+																					branch: input.branch,
+																					baseBranch,
+																					expectedRemoteHead: latestBaseline.headSha,
+																					testCommand: commands.test,
+																					runCommitShas,
+																				});
+																		if (reviewers.length > 0) {
+																			await requestReviewers(ghCtx, activeWatchCar.prNumber, reviewers);
+																		}
+																		return {
+																			round: k,
+																			afterPoll: latestWatch.poll,
+																			actions: [
+																				...actions,
+																				...reviewers.map(
+																					(reviewer) => `re-requested ${reviewer}`,
+																				),
+																			],
+																			pushed: true,
+																			reRequested: reviewers,
+																			summary:
+																				"Published local fixes through the bounded helper and re-requested eligible reviewers.",
+																		};
+																	})()
+														}
 													</Task>
 												) : null}
 											</Sequence>
@@ -1500,95 +3006,126 @@ prNumber: pr.prNumber,
 														(async () => {
 															const pollNo = readyRows.length;
 															if (dryRun) {
+																const cars = effortCars.map((car) => ({
+																	prNumber: car.prNumber,
+																	branch: car.branch,
+																	baseBranch: car.baseBranch,
+																	headSha: car.headSha,
+																	ready: true,
+																	approvedBy: "operator-dryrun",
+																	ci: "green",
+																	reasons: [],
+																	migrationFiles: migCheck?.files ?? [],
+																}));
 																return {
 																	round: k,
 																	poll: pollNo,
 																	ready: true,
 																	regressed: false,
-																	approvedBy: "tim-dryrun",
+																	approvedBy: "operator-dryrun",
 																	ci: "green",
-																	headSha: "dryrun-head-sha",
+																	headSha: cars.at(-1)?.headSha ?? "dryrun-head-sha",
 																	reasons: [],
 																	migrationDetected: migRequired,
 																	migrationFiles: migCheck?.files ?? [],
 																	at: nowIso(),
+																	...(stackMode ? { cars } : {}),
 																};
 															}
 															if (pollNo > 0) await sleepSeconds(limits.readyPollSeconds);
-															// Re-check watch conditions: regressions send us
-															// back to a fresh watch round, not a silent stamp.
-															const snapshot = await fetchWatchSnapshot(
-																ghCtx,
-																pr.prNumber,
-																github.selfLogins,
-															);
-															const watchVerdict = evaluateWatchExit(snapshot, {
-																selfLogins: github.selfLogins,
-															});
-															const files = await fetchChangedFiles(ghCtx, pr.prNumber);
-															const migrationFiles = detectMigrations(files);
+															const cars = [];
+															for (const car of effortCars) {
+																if (car.landed) {
+																	cars.push({
+																		prNumber: car.prNumber,
+																		branch: car.branch,
+																		baseBranch: car.baseBranch,
+																		headSha: car.headSha,
+																		ready: true,
+																		approvedBy: "already-landed",
+																		ci: "green",
+																		reasons: [],
+																		migrationFiles: [],
+																	});
+																	continue;
+																}
+																const snapshot = await fetchWatchSnapshot(
+																	ghCtx,
+																	car.prNumber,
+																	github.selfLogins,
+																);
+																const watchVerdict = evaluateWatchExit(snapshot, {
+																	selfLogins: github.selfLogins,
+																});
+																const files = await fetchChangedFiles(ghCtx, car.prNumber);
+																const migrationFiles = detectMigrations(files);
+																const { approvals: prApprovals, checkRuns } =
+																	await fetchPrApprovalsAndCi(ghCtx, car.prNumber);
+																const freshCi = assessCi(checkRuns);
+																const readyVerdict = evaluateReadyForStamp(
+																	prApprovals,
+																	freshCi,
+																	{
+																		author: github.selfLogins[0] ?? "",
+																		excludedApprovers: github.excludedApprovers,
+																		yolo,
+																	},
+																);
+																cars.push({
+																	prNumber: car.prNumber,
+																	branch: car.branch,
+																	baseBranch: car.baseBranch,
+																	headSha: snapshot.headSha,
+																	ready: watchVerdict.exitOk && readyVerdict.ready,
+																	approvedBy: readyVerdict.approvedBy,
+																	ci: readyVerdict.ci,
+																	reasons: [
+																		...(!watchVerdict.exitOk
+																			? ["watch conditions regressed:", ...watchVerdict.reasons]
+																			: []),
+																		...readyVerdict.reasons,
+																	],
+																	migrationFiles,
+																});
+															}
+															const migrationFiles = [...new Set(cars.flatMap((car) => car.migrationFiles))];
 															const migrationDetected = migrationFiles.length > 0;
-															if (!watchVerdict.exitOk) {
-																return {
-																	round: k,
-																	poll: pollNo,
-																	ready: false,
-																	regressed: true,
-																	approvedBy: null,
-																	ci: watchVerdict.ci,
-																	headSha: snapshot.headSha,
-																	reasons: [
-																		"watch conditions regressed:",
-																		...watchVerdict.reasons,
-																	],
-																	migrationDetected,
-																	migrationFiles,
-																	at: nowIso(),
-																};
-															}
-															if (migrationDetected && !migrationEvidenceComplete(migrationRows)) {
-																return {
-																	round: k,
-																	poll: pollNo,
-																	ready: false,
-																	regressed: true,
-																	approvedBy: null,
-																	ci: watchVerdict.ci,
-																	headSha: snapshot.headSha,
-																	reasons: [
-																		"migration paths detected in diff but evidence incomplete - migration gate must run before stamp.",
-																	],
-																	migrationDetected,
-																	migrationFiles,
-																	at: nowIso(),
-																};
-															}
-															const { approvals: prApprovals, checkRuns } =
-																await fetchPrApprovalsAndCi(ghCtx, pr.prNumber);
-															// Use the FRESH check runs, not the earlier watch
-															// snapshot's: CI may have gone hard-red in between.
-															const freshCi = assessCi(checkRuns);
-															const readyVerdict = evaluateReadyForStamp(
-																prApprovals,
-																freshCi,
-																{
-																	author: github.selfLogins[0] ?? "",
-																	excludedApprovers: github.excludedApprovers,
-																	yolo,
-																},
-															);
+															const migrationRegressed =
+																migrationDetected && !migrationEvidenceComplete(migrationRows);
+															const regressed =
+																cars.some((car) =>
+																	car.reasons.some((reason) => reason === "watch conditions regressed:"),
+																) || migrationRegressed;
+															const ready = !regressed && cars.every((car) => car.ready);
+															const ci = cars.some((car) => car.ci === "red")
+																? "red"
+																: cars.some((car) => car.ci === "none")
+																	? "none"
+																	: cars.some((car) => car.ci === "will-be-green")
+																		? "will-be-green"
+																		: "green";
 															return {
 																round: k,
 																poll: pollNo,
-																ready: readyVerdict.ready,
-																regressed: false,
-																approvedBy: readyVerdict.approvedBy,
-																ci: readyVerdict.ci,
-																headSha: snapshot.headSha,
-																reasons: readyVerdict.reasons,
+																ready,
+																regressed,
+																approvedBy: ready
+																	? cars.map((car) => car.approvedBy).filter(Boolean).join(", ") || null
+																	: null,
+																ci,
+																headSha: cars.at(-1)?.headSha ?? "",
+																reasons: [
+																	...cars.flatMap((car) =>
+																		car.reasons.map((reason) => `PR #${car.prNumber}: ${reason}`),
+																	),
+																	...(migrationRegressed
+																		? ["migration paths detected but stack-wide evidence is incomplete."]
+																		: []),
+																],
 																migrationDetected,
 																migrationFiles,
 																at: nowIso(),
+																...(stackMode ? { cars } : {}),
 															};
 														})()
 													}
@@ -1640,20 +3177,61 @@ prNumber: pr.prNumber,
 										{latestReady?.ready === true && stamp === undefined && !yolo ? (
 											<Gate
 												id={`r${k}-stamp`}
-												title={`STAMP + merge word: ${input.ticket} PR #${pr.prNumber} (round ${k})`}
+												title={
+													stackMode
+														? `STAMP + merge word: ${input.ticket} stack (${effortCars.length} cars, round ${k})`
+														: `STAMP + merge word: ${input.ticket} PR #${pr.prNumber} (round ${k})`
+												}
+												metadata={buildApprovalStampMetadata({
+													headSha: latestReady.headSha,
+													prNumber: topCar?.prNumber ?? pr.prNumber,
+													headBranch: topCar?.branch ?? input.branch,
+													baseBranch,
+													...(stackMode
+														? {
+																cars: (latestReady.cars ?? []).map((car) => ({
+																	prNumber: car.prNumber,
+																	branch: car.branch,
+																	baseBranch: car.baseBranch,
+																	headSha: car.headSha,
+																})),
+															}
+														: {}),
+												})}
 												summary={[
 													`Original issue: ${brief?.summary ?? input.ticket}`,
 													`Fix: ${implementation?.summary ?? "(see PR)"}`,
 													`Danger/blast radius: ${brief?.blastRadius ?? "(not declared in brief)"}`,
-													`PR: ${pr.url}`,
-																									`Head at ready: ${latestReady.headSha}`,
-												`Human review approval: ${latestReady.approvedBy ?? "n/a"}`,
+													...(stackMode
+														? [
+																"Ordered stack:",
+																...(latestReady.cars ?? []).map(
+																	(car) =>
+																		`  PR #${car.prNumber} ${car.baseBranch} ← ${car.branch}@${car.headSha} (CI ${car.ci}; approval ${car.approvedBy ?? "n/a"})`,
+																),
+															]
+														: [
+																`PR: ${pr.url}`,
+																`Head at ready: ${latestReady.headSha}`,
+																`Human review approval: ${latestReady.approvedBy ?? "n/a"}`,
+															]),
+													...(k > 0
+														? [
+																`Prior stamp invalidation: ${
+																	ctx.latest(
+																		outputs.mergeHeadCheck,
+																		`r${k - 1}-merge-head-check`,
+																	)?.diffSummary ?? "head changed after approval"
+																}`,
+															]
+														: []),
 												`CI: ${latestReady.ci} (green-or-will-be-green per approval ruling)`,
 												`Migration gate: ${migRequired ? `TRIGGERED (evidence ${migEvidenceOk ? "complete" : "INCOMPLETE"})` : "not triggered"}`, 
 													``,
-													`Approving = stamp + the per-PR merge word. The workflow (not an agent)`,
-													`submits to the GitHub merge queue. Head change after this stamp`,
-													`invalidates it and re-enters watch-ci (no silent re-stamp).`,
+													`Approving = one commit-bound stamp + merge word for the entire effort.`,
+													`The workflow (not an agent) re-checks every stamped head, then submits`,
+													`stack cars to the GitHub merge queue parent first. Any head change`,
+													`invalidates the whole stamp and re-enters watch-ci.`,
 												].join("\n")}
 											/>
 										) : null}
@@ -1663,14 +3241,52 @@ prNumber: pr.prNumber,
 												{() =>
 													(async () => {
 														const stampedHead = latestReady?.headSha ?? "";
+														const stampedCars = (latestReady?.cars ?? []).map((car) => ({
+															prNumber: car.prNumber,
+															branch: car.branch,
+															baseBranch: car.baseBranch,
+															headSha: car.headSha,
+														}));
 														if (dryRun) {
-															const moved = fixtures.headChangeRounds.includes(k);
+															const movedRound = fixtures.headChangeRounds.includes(k);
+															const cars = stampedCars.map((car, index) => {
+																const moved =
+																	movedRound && index === stampedCars.length - 1;
+																return {
+																	...car,
+																	currentHead: moved ? `${car.headSha}-moved` : car.headSha,
+																	ok: !moved,
+																};
+															});
+															const valid = stackMode
+																? cars.every((car) => car.ok)
+																: !movedRound;
+															const currentHead = stackMode
+																? cars.at(-1)?.currentHead ?? stampedHead
+																: movedRound
+																	? `${stampedHead}-moved`
+																	: stampedHead;
 															return {
 																round: k,
 																stampedHead,
-																currentHead: moved ? `${stampedHead}-moved` : stampedHead,
-																valid: !moved,
+																currentHead,
+																valid,
 																checkedAt: nowIso(),
+																...(stackMode ? { cars } : {}),
+															};
+														}
+														if (stackMode) {
+															const cars = await compareStackHeads(
+																stampedCars,
+																(prNumber) => fetchHeadSha(ghCtx, prNumber),
+															);
+															return {
+																round: k,
+																stampedHead,
+																currentHead: cars.at(-1)?.currentHead ?? "",
+																valid: cars.every((car) => car.ok),
+																checkedAt: nowIso(),
+																cars,
 															};
 														}
 														const currentHead = await fetchHeadSha(ghCtx, pr.prNumber);
@@ -1704,7 +3320,9 @@ prNumber: pr.prNumber,
 					</Task>
 				) : null}
 
-				{/* -------------- pre-merge head re-check (stamp->merge TOCTOU guard) */}
+				{/* The round-scoped merge attempt owns both the last-instant stamp
+				    comparison and MQ enqueue. A mismatch persists ok=false so the
+				    next render starts a fresh watch/approval round. */}
 				{stampedRound !== null && stampedRound.headCheck === undefined && pr !== undefined && !migStale ? (
 					<Task
 						id={`r${stampedRound.round}-merge-head-check`}
@@ -1713,86 +3331,305 @@ prNumber: pr.prNumber,
 					>
 						{() =>
 							(async () => {
-								const expectedHead = stampedRound.headSha;
-								const currentHead = dryRun
-									? expectedHead // fixtures move the head via stamp-validity, not here
-									: await fetchHeadSha(ghCtx, pr.prNumber);
-								return {
-									round: stampedRound.round,
-									expectedHead,
-									currentHead,
-									ok: currentHead === expectedHead,
-									checkedAt: nowIso(),
-								};
-							})()
-						}
-					</Task>
-				) : null}
-
-				{/* ------------------------------------------------ stage 8: MQ merge */}
-				{authorizedRound !== null && pr !== undefined && !migStale ? (
-					<Task id="enqueue-merge" output={outputs.mergeReceipt} retries={1}>
-						{() =>
-							(async () => {
-								if (dryRun) {
+								if (stackMode) {
+									const stampedCars = stampedRound.cars ?? [];
+									const expectedTop = stampedCars.at(-1);
+									if (stampedCars.length === 0 || expectedTop === undefined) {
+										throw new Error("[escalate] stack merge has no stamped car topology.");
+									}
+									if (dryRun) {
+										const movedCars =
+											stampedRound.round === 0
+												? new Set(fixtures.stackMovedPrNumbers)
+												: new Set<number>();
+										const cars = stampedCars.map((car, index) => {
+											const moved = movedCars.has(car.prNumber);
+											const submitted = movedCars.size === 0 && index === 0;
+											return {
+												...car,
+												currentHead: moved ? `${car.headSha}-moved` : car.headSha,
+												ok: !moved,
+												submittedAt: submitted ? nowIso() : null,
+												receipt: submitted
+													? `dry-run: submitted lowest PR #${car.prNumber}`
+													: null,
+												alreadyLanded: false,
+												mergePath: submitted ? "dry-run" as const : null,
+											};
+										});
+										const drift = cars.find((car) => !car.ok);
+										return {
+											round: stampedRound.round,
+											expectedHead: drift?.headSha ?? expectedTop.headSha,
+											currentHead: drift?.currentHead ?? expectedTop.headSha,
+											ok: drift === undefined,
+											diffSummary: drift === undefined
+												? "dry-run: every stack head unchanged since approval"
+												: `dry-run: PR #${drift.prNumber} moved after stack approval`,
+											checkedAt: nowIso(),
+											submittedAt: drift === undefined ? nowIso() : null,
+											receipt:
+												drift === undefined
+													? cars.find((car) => car.receipt !== null)?.receipt ?? "dry-run: stack already landed"
+													: null,
+											alreadyLanded: false,
+											mergePath: drift === undefined ? "dry-run" as const : null,
+											cars,
+										};
+									}
+									const compareEveryCar = async () =>
+										Promise.all(
+											stampedCars.map(async (car) => {
+												const comparison = await compareApprovalStamp({
+													exec: bunExec,
+													gh: github.gh,
+													repo: input.repo,
+													prNumber: car.prNumber,
+													expectedHead: car.headSha,
+												});
+												return { car, comparison };
+											}),
+										);
+									const initial = await compareEveryCar();
+									const initialDrift = initial.find(({ comparison }) => !comparison.ok);
+									if (initialDrift !== undefined) {
+										const cars = initial.map(({ car, comparison }) => ({
+											...car,
+											currentHead: comparison.currentHead,
+											ok: comparison.ok,
+											submittedAt: null,
+											receipt: null,
+											alreadyLanded: false,
+											mergePath: null,
+										}));
+										return {
+											round: stampedRound.round,
+											expectedHead: initialDrift.car.headSha,
+											currentHead: initialDrift.comparison.currentHead,
+											ok: false,
+											diffSummary: `PR #${initialDrift.car.prNumber}: ${initialDrift.comparison.diffSummary}`,
+											checkedAt: nowIso(),
+											submittedAt: null,
+											receipt: null,
+											alreadyLanded: false,
+											mergePath: null,
+											cars,
+										};
+									}
+									const landedNumbers = new Set<number>();
+									for (const car of stampedCars) {
+										const overview = await fetchPrOverview(ghCtx, car.prNumber);
+										const commits = await fetchBaseCommitSubjects(
+											github.git,
+											input.worktree,
+											overview.baseRefName,
+										);
+										if (findLandingCommit(commits, car.prNumber) !== null) {
+											landedNumbers.add(car.prNumber);
+										}
+									}
+									// This is the merge boundary: every live head is fetched again
+									// before the first parent enqueue. One mismatch invalidates all.
+									const final = await compareEveryCar();
+									const finalDrift = final.find(({ comparison }) => !comparison.ok);
+									if (finalDrift !== undefined) {
+										const cars = final.map(({ car, comparison }) => ({
+											...car,
+											currentHead: comparison.currentHead,
+											ok: comparison.ok,
+											submittedAt: null,
+											receipt: null,
+											alreadyLanded: landedNumbers.has(car.prNumber),
+											mergePath: null,
+										}));
+										return {
+											round: stampedRound.round,
+											expectedHead: finalDrift.car.headSha,
+											currentHead: finalDrift.comparison.currentHead,
+											ok: false,
+											diffSummary: `PR #${finalDrift.car.prNumber}: ${finalDrift.comparison.diffSummary}`,
+											checkedAt: nowIso(),
+											submittedAt: null,
+											receipt: null,
+											alreadyLanded: false,
+											mergePath: null,
+											cars,
+										};
+									}
+									const nextCar = nextStackMergeCar(
+										stampedCars,
+										stampedCars.map((car) => ({
+											prNumber: car.prNumber,
+											landed: landedNumbers.has(car.prNumber),
+											submitted: false,
+										})),
+									);
+									let nextReceipt: string | null = null;
+									let nextMergePath: "github-merge-queue" | "dry-run" | "already-landed" | null = null;
+									if (nextCar !== undefined) {
+										const merge = await runMerge({
+											args: ["--auto", "--squash"],
+											exec: bunExec,
+											gh: github.gh,
+											prNumber: nextCar.prNumber,
+											cwd: input.worktree,
+										});
+										nextReceipt = merge.output.slice(-2000);
+										nextMergePath = merge.path;
+									}
+									const submittedAt = nowIso();
+									const cars = final.map(({ car, comparison }) => {
+										const alreadyLanded = landedNumbers.has(car.prNumber);
+										const submittedNow = car.prNumber === nextCar?.prNumber;
+										return {
+											...car,
+											currentHead: comparison.currentHead,
+											ok: true,
+											submittedAt: alreadyLanded || submittedNow ? submittedAt : null,
+											receipt: alreadyLanded
+												? `PR #${car.prNumber}: already landed; no enqueue`
+												: submittedNow
+													? nextReceipt
+													: null,
+											alreadyLanded,
+											mergePath: alreadyLanded
+												? "already-landed" as const
+												: submittedNow
+													? nextMergePath
+													: null,
+										};
+									});
 									return {
-										round: authorizedRound.round,
-										submittedAt: nowIso(),
-										receipt: `dry-run: submitted PR #${pr.prNumber} to merge queue at head ${authorizedRound.headSha}`,
-										alreadyLanded: false,
-										mergePath: "dry-run",
+										round: stampedRound.round,
+										expectedHead: expectedTop.headSha,
+										currentHead: final.at(-1)?.comparison.currentHead ?? "",
+										ok: true,
+										diffSummary: nextCar === undefined
+											? "every approved stack head unchanged; stack already landed"
+											: `every approved stack head unchanged; enqueued lowest unlanded PR #${nextCar.prNumber}`,
+										checkedAt: nowIso(),
+										submittedAt,
+										receipt:
+											cars
+												.filter((car) => car.receipt !== null)
+												.map((car) => `PR #${car.prNumber}: ${car.receipt}`)
+												.join("\n") || "stack already landed",
+										alreadyLanded: cars.every((car) => car.alreadyLanded),
+										mergePath: cars.every((car) => car.alreadyLanded)
+											? "already-landed" as const
+											: "github-merge-queue" as const,
+										cars,
 									};
 								}
-								// Idempotency: if the squash commit is already on this PR's base
-								// (crash after submit), do not submit again.
+								const expectedHead = stampedRound.headSha;
+								if (dryRun) {
+									return {
+										round: stampedRound.round,
+										expectedHead,
+										currentHead: expectedHead,
+										ok: true,
+										diffSummary: "dry-run head unchanged since approval",
+										checkedAt: nowIso(),
+										submittedAt: nowIso(),
+										receipt: `dry-run: submitted PR #${pr.prNumber} to merge queue at head ${expectedHead}`,
+										alreadyLanded: false,
+										mergePath: "dry-run" as const,
+									};
+								}
+								const initialComparison = await compareApprovalStamp({
+									exec: bunExec,
+									gh: github.gh,
+									repo: input.repo,
+									prNumber: pr.prNumber,
+									expectedHead,
+								});
+								if (!initialComparison.ok) {
+									return {
+										round: stampedRound.round,
+										...initialComparison,
+										checkedAt: nowIso(),
+										submittedAt: null,
+										receipt: null,
+										alreadyLanded: false,
+										mergePath: null,
+									};
+								}
+
+
+								// Idempotency after a crash: if this PR's squash is already
+								// on its live base, record it without issuing another command.
 								const mergeBaseBranch = (await fetchPrOverview(ghCtx, pr.prNumber)).baseRefName;
-								const commits = await fetchBaseCommitSubjects(github.git, input.worktree, mergeBaseBranch);
+								const commits = await fetchBaseCommitSubjects(
+									github.git,
+									input.worktree,
+									mergeBaseBranch,
+								);
 								const landed = findLandingCommit(commits, pr.prNumber);
 								if (landed !== null) {
 									return {
-										round: authorizedRound.round,
+										round: stampedRound.round,
+										...initialComparison,
+										diffSummary:
+											"approved head unchanged; merge already landed, so no enqueue command was issued",
+										checkedAt: nowIso(),
 										submittedAt: nowIso(),
 										receipt: `already landed as ${landed.sha} ("${landed.subject}") - no resubmit`,
 										alreadyLanded: true,
-										mergePath: "already-landed",
+										mergePath: "already-landed" as const,
 									};
 								}
-								// Last-instant head re-check INSIDE the submit node: the
-								// r{N}-merge-head-check node closed most of the stamp->merge
-								// window; this closes the scheduler gap between that node and
-								// this one. Throwing BEFORE submit is safe (nothing was
-								// enqueued; retry/resume re-checks).
-								const headNow = await fetchHeadSha(ghCtx, pr.prNumber);
-								if (headNow !== authorizedRound.headSha) {
-									throw new Error(
-										`[escalate] PR head moved to ${headNow} after the stamp (stamped ${authorizedRound.headSha}) - refusing to submit to the merge queue. The next render re-enters watch-ci via the head-check round guard.`,
-									);
+
+
+								// Nothing runs between this live comparison and runMerge:
+								// a moved head becomes a durable invalidation, never a failed
+								// node that strands the workflow after approval.
+								const finalComparison = await compareApprovalStamp({
+									exec: bunExec,
+									gh: github.gh,
+									repo: input.repo,
+									prNumber: pr.prNumber,
+									expectedHead,
+								});
+								if (!finalComparison.ok) {
+									return {
+										round: stampedRound.round,
+										...finalComparison,
+										checkedAt: nowIso(),
+										submittedAt: null,
+										receipt: null,
+										alreadyLanded: false,
+										mergePath: null,
+									};
 								}
-								// The merge command runs against the worktree's CURRENT
-								// branch (the merge command is scoped to the PR) - refuse if the worktree
-								// drifted off the PR branch, or the wrong PR gets merged.
-								const mergeBranch = (
-									await execOrThrow(
+								const [mergeBranch, mergeHead] = await Promise.all([
+									execOrThrow(
 										bunExec,
 										[github.git, "rev-parse", "--abbrev-ref", "HEAD"],
 										{ cwd: input.worktree },
-									)
-								).trim();
-								if (mergeBranch !== input.branch) {
+									).then((value) => value.trim()),
+									execOrThrow(bunExec, [github.git, "rev-parse", "HEAD"], {
+										cwd: input.worktree,
+									}).then((value) => value.trim()),
+								]);
+								if (mergeBranch !== input.branch || mergeHead !== finalComparison.currentHead) {
 									throw new Error(
-										`[escalate] worktree is on branch "${mergeBranch}", not "${input.branch}" - refusing to run the merge command there (it acts on the current branch and would merge the wrong PR).`,
+										`[escalate] merge worktree is ${mergeBranch || "detached"}@${mergeHead}, ` +
+											`not approved PR state ${input.branch}@${finalComparison.currentHead}; refusing to enqueue.`,
 									);
 								}
+
+
 								const merge = await runMerge({
 									args: ["--auto", "--squash"],
 									exec: bunExec,
 									gh: github.gh,
 									prNumber: pr.prNumber,
 									cwd: input.worktree,
-									// GitHub's merge queue is the only landing path.
 								});
 								return {
-									round: authorizedRound.round,
+									round: stampedRound.round,
+									...finalComparison,
+									checkedAt: nowIso(),
 									submittedAt: nowIso(),
 									receipt: merge.output.slice(-2000),
 									alreadyLanded: false,
@@ -1800,6 +3637,33 @@ prNumber: pr.prNumber,
 								};
 							})()
 						}
+					</Task>
+				) : null}
+
+				{/* Normalize the successful round-scoped attempt into the stable
+				    receipt row consumed by queue and landing verification. */}
+				{authorizedRound !== null && pr !== undefined && !migStale ? (
+					<Task id="enqueue-merge" output={outputs.mergeReceipt} retries={1}>
+						{() => {
+							const attempt = authorizedRound.headCheck;
+							if (
+								attempt.submittedAt === null ||
+								attempt.receipt === null ||
+								attempt.mergePath === null
+							) {
+								throw new Error(
+									"[escalate] merge attempt was marked valid without a complete enqueue receipt.",
+								);
+							}
+							return {
+								round: authorizedRound.round,
+								submittedAt: attempt.submittedAt,
+								receipt: attempt.receipt,
+								alreadyLanded: attempt.alreadyLanded,
+								mergePath: attempt.mergePath,
+								...(stackMode ? { cars: attempt.cars } : {}),
+							};
+						}}
 					</Task>
 				) : null}
 
@@ -1816,31 +3680,193 @@ prNumber: pr.prNumber,
 								const pollNo = queueRows.length;
 								if (!dryRun && pollNo > 0) await sleepSeconds(limits.landingPollSeconds * 2);
 								const fixtureLifecycle = fixtures.queueLifecycle[pollNo];
-								const lifecycle = dryRun
-									? { state: fixtureLifecycle?.state ?? "closed" as const, merged: false, autoMergeRequest: fixtureLifecycle?.autoMergeRequest ?? false, baseBranch }
-									: await fetchPrLifecycle(ghCtx, pr.prNumber);
 								const prior = queueRows[queueRows.length - 1];
-								const ejected = lifecycle.state === "open" && prior?.autoMergeRequest === true && !lifecycle.autoMergeRequest;
-								if (ejected) {
-									// GitHub removes auto-merge when a queued PR is ejected. Re-submit it
-									// through GitHub's native merge queue.
-									if (!dryRun) {
-										const mergeBranch = (
-											await execOrThrow(
+								const lifecycles = [];
+								for (const car of effortCars) {
+									const lifecycle = dryRun
+										? {
+												state: fixtureLifecycle?.state ?? "closed" as const,
+												merged: false,
+												autoMergeRequest: fixtureLifecycle?.autoMergeRequest ?? false,
+												baseBranch: car.baseBranch,
+											}
+										: await fetchPrLifecycle(ghCtx, car.prNumber);
+									const priorCar = prior?.cars?.find((candidate) => candidate.prNumber === car.prNumber);
+									const ejected =
+										lifecycle.state === "open" &&
+										(stackMode ? priorCar?.autoMergeRequest === true : prior?.autoMergeRequest === true) &&
+										!lifecycle.autoMergeRequest;
+									lifecycles.push({
+										prNumber: car.prNumber,
+										state: lifecycle.state,
+										merged: lifecycle.merged,
+										baseBranch: lifecycle.baseBranch || car.baseBranch,
+										autoMergeRequest: ejected ? true : lifecycle.autoMergeRequest,
+										ejected,
+									});
+								}
+								const ejectedCars = lifecycles.filter((lifecycle) => lifecycle.ejected);
+								let newlyEligiblePr: number | undefined;
+								if (stackMode) {
+									const firstOpenIndex = lifecycles.findIndex(
+										(lifecycle) => lifecycle.state === "open",
+									);
+									if (
+										firstOpenIndex >= 0 &&
+										lifecycles.slice(0, firstOpenIndex).every(
+											(lifecycle) =>
+												lifecycle.state === "closed" && lifecycle.merged,
+										)
+									) {
+										const candidate = lifecycles[firstOpenIndex];
+										const submittedAtBoundary =
+											mergeReceipt.cars?.find(
+												(car) => car.prNumber === candidate?.prNumber,
+											)?.submittedAt !== null;
+										const submittedInPriorPoll = queueRows.some(
+											(row) =>
+												row.cars?.find(
+													(car) => car.prNumber === candidate?.prNumber,
+												)?.autoMergeRequest === true,
+										);
+										if (
+											candidate !== undefined &&
+											!candidate.autoMergeRequest &&
+											!submittedAtBoundary &&
+											!submittedInPriorPoll
+										) {
+											newlyEligiblePr = candidate.prNumber;
+										}
+									}
+								}
+								const enqueueNumbers = new Set([
+									...ejectedCars.map((car) => car.prNumber),
+									...(newlyEligiblePr === undefined ? [] : [newlyEligiblePr]),
+								]);
+								if (enqueueNumbers.size > 0 && !dryRun) {
+									const validity = ctx.latest(
+										outputs.stampValidity,
+										`r${mergeReceipt.round}-stamp-validity`,
+									);
+									if (stackMode) {
+										const stampedCars = validity?.cars ?? [];
+										if (stampedCars.length !== effortCars.length) {
+											throw new Error(
+												"[escalate] stack queue re-submit has no complete commit-bound topology.",
+											);
+										}
+										const comparisons = await compareStackHeads(
+											stampedCars,
+											(prNumber) => fetchHeadSha(ghCtx, prNumber),
+										);
+										const drifted = comparisons.filter((comparison) => !comparison.ok);
+										if (drifted.length > 0) {
+											throw new Error(
+												`[escalate] stack queue re-submit invalidated before enqueue; pushed nothing. ` +
+													drifted.map((car) => `#${car.prNumber} ${car.headSha} -> ${car.currentHead}`).join("; "),
+											);
+										}
+										await enqueueStackParentFirst(
+											stampedCars.filter((car) => enqueueNumbers.has(car.prNumber)),
+											async (prNumber) => {
+												if (prNumber === newlyEligiblePr) {
+													await execOrThrow(
+														bunExec,
+														[
+															github.gh,
+															"pr",
+															"edit",
+															String(prNumber),
+															"--repo",
+															input.repo,
+															"--base",
+															baseBranch,
+														],
+														{ cwd: input.worktree },
+													);
+												}
+												const merge = await runMerge({
+													exec: bunExec,
+													gh: github.gh,
+													prNumber,
+													cwd: input.worktree,
+													args: ["--auto", "--squash"],
+												});
+												return merge.output;
+											},
+										);
+										for (const lifecycle of lifecycles) {
+											if (!enqueueNumbers.has(lifecycle.prNumber)) continue;
+											lifecycle.autoMergeRequest = true;
+											if (lifecycle.prNumber === newlyEligiblePr) {
+												lifecycle.baseBranch = baseBranch;
+											}
+										}
+									} else {
+										const approvedHead = validity?.stampedHead;
+										const ejectedCar = ejectedCars[0];
+										if (!approvedHead || ejectedCar === undefined) {
+											throw new Error(
+												"[escalate] merge queue re-submit has no commit-bound stamp.",
+											);
+										}
+										const comparison = await compareApprovalStamp({
+											exec: bunExec,
+											gh: github.gh,
+											repo: input.repo,
+											prNumber: ejectedCar.prNumber,
+											expectedHead: approvedHead,
+										});
+										if (!comparison.ok) {
+											throw new Error(
+												`[escalate] merge queue re-submit invalidated by a moved head; refusing to enqueue. ${comparison.diffSummary}`,
+											);
+										}
+										const [mergeBranch, mergeHead] = await Promise.all([
+											execOrThrow(
 												bunExec,
 												[github.git, "rev-parse", "--abbrev-ref", "HEAD"],
 												{ cwd: input.worktree },
-											)
-										).trim();
-										if (mergeBranch !== input.branch) {
+											).then((value) => value.trim()),
+											execOrThrow(bunExec, [github.git, "rev-parse", "HEAD"], {
+												cwd: input.worktree,
+											}).then((value) => value.trim()),
+										]);
+										if (
+											mergeBranch !== input.branch ||
+											mergeHead !== comparison.currentHead
+										) {
 											throw new Error(
-													`[escalate] worktree is on branch "${mergeBranch}", not "${input.branch}" - refusing to re-submit the merge command there (it acts on the current branch and would merge the wrong PR).`,
+												`[escalate] merge queue re-submit worktree is ${mergeBranch || "detached"}@${mergeHead}, ` +
+													`not approved PR state ${input.branch}@${comparison.currentHead}; refusing to enqueue.`,
 											);
 										}
-										await runMerge({ exec: bunExec, gh: github.gh, prNumber: pr.prNumber, cwd: input.worktree, args: ["--auto", "--squash"] });
+										await runMerge({
+											exec: bunExec,
+											gh: github.gh,
+											prNumber: ejectedCar.prNumber,
+											cwd: input.worktree,
+											args: ["--auto", "--squash"],
+										});
 									}
 								}
-								return { poll: pollNo, state: lifecycle.state, baseBranch: lifecycle.baseBranch || baseBranch, autoMergeRequest: ejected ? true : lifecycle.autoMergeRequest, ejected, reason: ejected ? "PR ejected; auto-merge re-submitted" : lifecycle.state === "closed" ? "PR closed; verify squash on base" : "waiting in merge queue" };
+								const state = lifecycles.every((lifecycle) => lifecycle.state === "closed")
+									? "closed" as const
+									: "open" as const;
+								const ejected = lifecycles.some((lifecycle) => lifecycle.ejected);
+								return {
+									poll: pollNo,
+									state,
+									baseBranch: lifecycles.at(-1)?.baseBranch ?? baseBranch,
+									autoMergeRequest: lifecycles.some((lifecycle) => lifecycle.autoMergeRequest),
+									ejected,
+									reason: ejected
+										? "one or more stack cars were ejected; auto-merge re-submitted"
+										: state === "closed"
+											? "effort closed; verify every squash on its live base"
+											: "waiting in merge queue",
+									...(stackMode ? { cars: lifecycles } : {}),
+								};
 							})()}
 						</Task>
 					</Loop>
@@ -1857,25 +3883,47 @@ prNumber: pr.prNumber,
 							{() =>
 								(async () => {
 									const pollNo = landingRows.length;
-									if (dryRun) {
-										return {
-											poll: pollNo,
-											landed: fixtures.landingPollLanded,
-											sha: fixtures.landingPollLanded ? "dryrun-squash-sha" : null,
-											subject: `${input.ticket}: dry-run change (#${pr.prNumber})`,
-										};
+									if (!dryRun && pollNo > 0) await sleepSeconds(limits.landingPollSeconds);
+									const queueCars = latestQueue?.cars ??
+										effortCars.map((car) => ({
+											prNumber: car.prNumber,
+											baseBranch: latestQueue?.baseBranch || car.baseBranch,
+										}));
+									const cars = [];
+									for (const car of queueCars) {
+										if (dryRun) {
+											cars.push({
+												prNumber: car.prNumber,
+												baseBranch: car.baseBranch,
+												landed: fixtures.landingPollLanded,
+												sha: fixtures.landingPollLanded
+													? `dryrun-squash-sha-${car.prNumber}`
+													: null,
+												subject: `${input.ticket}: dry-run change (#${car.prNumber})`,
+											});
+											continue;
+										}
+										const commits = await fetchBaseCommitSubjects(
+											github.git,
+											input.worktree,
+											car.baseBranch,
+										);
+										const landed = findLandingCommit(commits, car.prNumber);
+										cars.push({
+											prNumber: car.prNumber,
+											baseBranch: car.baseBranch,
+											landed: landed !== null,
+											sha: landed?.sha ?? null,
+											subject: landed?.subject ?? null,
+										});
 									}
-									if (pollNo > 0) await sleepSeconds(limits.landingPollSeconds);
-									// NEVER rely on the merged flag. Search the live PR base for "(#N)"
-									// to confirm the squash landed.
-									const landingBaseBranch = latestQueue?.baseBranch || baseBranch;
-									const commits = await fetchBaseCommitSubjects(github.git, input.worktree, landingBaseBranch);
-									const landed = findLandingCommit(commits, pr.prNumber);
+									const top = cars.at(-1);
 									return {
 										poll: pollNo,
-										landed: landed !== null,
-										sha: landed?.sha ?? null,
-										subject: landed?.subject ?? null,
+										landed: cars.every((car) => car.landed),
+										sha: top?.sha ?? null,
+										subject: top?.subject ?? null,
+										...(stackMode ? { cars } : {}),
 									};
 								})()
 							}
@@ -1899,8 +3947,24 @@ prNumber: pr.prNumber,
 					</Task>
 				) : null}
 
+				{stackMode && latestLanding?.landed === true && stackSync === undefined ? (
+					<Task id="stack-sync-prune" output={outputs.stackSync} retries={1}>
+						{() =>
+							dryRun
+								? {
+										synced: true,
+										receipt: "dry-run: gh stack sync --prune",
+									}
+								: syncStackPrune(bunExec, {
+										gh: github.gh,
+										worktree: input.worktree,
+									}).then((receipt) => ({ synced: true, receipt }))
+						}
+					</Task>
+				) : null}
+
 				{/* -------------------------------- stage 9: fallout watch */}
-				{latestLanding?.landed === true ? (
+				{latestLanding?.landed === true && (!stackMode || stackSync?.synced === true) ? (
 					<Task id="deploy-evidence" output={outputs.deployEvidence} retries={1}>
 						{() =>
 							(async () => {
@@ -2009,6 +4073,7 @@ prNumber: pr.prNumber,
 							return {
 								ticket: input.ticket,
 								prNumber: pr.prNumber,
+								...(stackMode ? { prNumbers: effortCars.map((car) => car.prNumber) } : {}),
 								landedSha: latestLanding?.sha ?? "",
 								falloutVerdict: falloutRow.verdict,
 								migrationRequired: migRequired,

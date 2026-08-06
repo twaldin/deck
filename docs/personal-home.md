@@ -25,14 +25,14 @@ Run everything below **on the personal host**, as your own user.
 
 1. **Private network.** Host reachable from your laptop (Tailscale or equivalent).
 
-2. **Prerequisites.** `git`, [`bun`](https://bun.sh), `gh` (personal account).
+2. **Prerequisites.** `git`, [`bun`](https://bun.sh), `curl`, and Python 3. A standalone chat needs no GitHub CLI; `ship`/`adopt` require `gh` authenticated to the target repository.
 
 3. **One-shot install**:
 
    ```sh
    export DECK_REPO_URL="https://github.com/<owner>/deck.git"
-   git clone "$DECK_REPO_URL" ~/dev/deck
-   cd ~/dev/deck && git checkout main
+   git clone --branch main "$DECK_REPO_URL" ~/dev/deck
+   cd ~/dev/deck
    ./install.sh
    ```
 
@@ -56,45 +56,43 @@ deck-v2 home push
 ```
 
 Pull is additive. It never deletes local home entries. Review the profile before
-pushing it. The laptop uses the `profile/full` tree. Deckbox uses `profile/personal`. The
-personal profile is built without restricted project files or entries. Never
-copy the full profile to an untrusted host. Runtime state, Smithers runs, questions,
-credentials, and `.env` are machine-local and are never synced.
+pushing it. A trusted host may use `profile/full`; a less-trusted host uses
+`profile/personal`. The personal profile is built without restricted project
+files or entries. Never copy the full profile to an untrusted host. Runtime
+state, Smithers runs, questions, credentials, and `.env` are machine-local.
 
-For a remote operator session, run `~/dev/deck/update.sh`, then
-restart the session with `/reload` if the running pi does not reload the
-extension automatically. The updater is safe to run repeatedly and is the
-primary path for an existing installation. Private repo access requires an
+For a remote operator session, run `~/dev/deck/update.sh`, then start a new
+`prime-conversation`. The updater is safe to run repeatedly and is the primary
+path for an existing installation. Private repo access requires an
 active `gh auth login` before the home repo clone or pull.
 
    Laptop agents: `docs/LAPTOP-AGENTS.md` (inbox + project register).
 
-4. **Broker.** Start the daemon, then log in with **personal accounts only**:
+4. **Model access.** Start the local Deck broker, then use
+   `prime-conversation`. Conversation and workflow seats share the broker
+   accounts belonging on this host:
 
    ```sh
-   bun --cwd ~/dev/deck/broker src/main.ts   # foreground; or your process manager
    bun ~/dev/deck/broker/src/cli.ts login anthropic
-   bun ~/dev/deck/broker/src/cli.ts login openai-codex-device   # optional
-   bun ~/dev/deck/broker/src/cli.ts status
+   bun --cwd ~/dev/deck/broker src/main.ts
    ```
 
    Credentials land in `~/.deck/broker/store.db` (0600) on this host and stay
-   here. On Linux run the broker under your own process manager (systemd user
-   unit or a shell in tmux).
+   here. Keep the broker running with your own process manager when the factory
+   needs it. It is not started by `install.sh`.
 
-5. **Herdr server.** Install the `herdr` binary on the host, then:
+5. **Remote access.** Plain SSH is sufficient:
 
    ```sh
-   herdr server
+   ssh -t <user>@<host> 'source ~/.deck/enter.sh && prime-conversation'
    ```
-
-   Glass in from a laptop with `herdr --remote <user>@<host>`.
 
 6. **Verify.**
 
    ```sh
-   deck-v2 home     # prints ~/.deck
-   deck-v2 fleet    # empty fleet, no errors
+   ~/dev/deck/ops/verify-clean-install.sh
+   source ~/.deck/enter.sh
+   prime-conversation
    ```
 
 ## Shipping a personal project (yolo-ship)
@@ -114,8 +112,8 @@ deck-v2 ship myproj-7 --profile myproj \
 
 That starts the pr-pipeline workflow detached: adversarial review (opposite
 model family) hard-gates the PR open, CI/review watch keeps it mergeable, and
-the merge fires automatically on CI green — no stamp park. Watch it with
-`smithers ps` / `smithers why <run-id>` from `~/dev/deck/workflows/pr-pipeline`.
+the merge fires automatically on CI green — no explicit-approval park. Inspect
+it with `smithers ps` / `smithers why <run-id>` from `~/.deck/state/smithers`.
 A bare `deck-v2 spawn --kind ship` on a profiled repo is refused; that is the
 point — the pipeline is the default, `--no-pipeline` is the escape hatch.
 
@@ -124,8 +122,8 @@ point — the pipeline is the default, `--no-pipeline` is the escape hatch.
 | Host role | Authors deck? | Gets new deck by |
 |---|---|---|
 | Dev laptop | yes | pushes PRs to the deck remote |
-| Work host | no | `git pull` on `main` + `bash v2/install.sh` |
-| Personal orch host | optional personal features | same: `git pull` on `main` + install |
+| Work host | no | `~/dev/deck/update.sh` |
+| Personal operator host | optional personal features | `~/dev/deck/update.sh` |
 
-The pull + install pair is the whole sync path. State never travels; only the
-repo does.
+`update.sh` is the existing-install path. Runtime state never travels; only the
+repository code does.

@@ -1,87 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Install the deck-v2 pi extension and the deck-v2 CLI.
-# INSTALL_TARGET is overridable so tests never touch live ~/.pi.
-#
-# The extension is a DIRECTORY, not a flat symlink. pi discovers both
-# `extensions/*.ts` and `extensions/*/index.ts`; a flat symlink resolves its
-# relative sibling imports next to the SYMLINK rather than the real source, so
-# the imports fail, and a flat sibling dropped beside it gets loaded as its own
-# extension and rejected. The whole extension must live inside one directory
-# where only index.ts is an entrypoint.
-#
-# deck-v2's extension imports ../*.ts from the v2 package, so the directory
-# holds a symlink to the repo source tree instead of copies: one source of
-# truth, and an edit is live without reinstalling.
-# Default target is the ORCHESTRATOR HOME's own .pi, not the global ~/.pi/agent:
-# these tools operate one home's fleet, so scoping them there keeps an unrelated
-# pi session in another directory from loading a fleet-control extension.
-# Override INSTALL_TARGET=$HOME/.pi/agent for a global install.
-# Must match deckV2Home() in src/home.ts (~/.deck), or the extension installs
-# into a pi home no orchestrator session ever starts from.
+# Install Deck's CLI shims and isolated Smithers workspace. The Prime
+# conversation profile and its extension pack are converged by the root
+# installer after this package is installed.
 DECK_V2_HOME_DIR="${DECK_V2_HOME:-$HOME/.deck}"
-INSTALL_TARGET="${INSTALL_TARGET:-$DECK_V2_HOME_DIR/.pi}"
 REPO_V2="$(cd "$(dirname "$0")" && pwd)"
-EXTENSIONS_DIR="$INSTALL_TARGET/extensions"
-DEST="$EXTENSIONS_DIR/deck-v2"
-
-mkdir -p "$EXTENSIONS_DIR"
-
-# Refuse to clobber anything we cannot prove is ours.
-if [ -e "$DEST" ] && [ ! -L "$DEST" ] && [ ! -d "$DEST" ]; then
-  printf 'error: %s exists and is neither our directory nor a symlink.\n' "$DEST" >&2
-  exit 1
-fi
-
-# A stale flat entry keeps failing even after a good directory exists beside it,
-# because pi discovers extensions/*.ts too. Only remove one we can prove is ours.
-stale="$EXTENSIONS_DIR/deck-v2.ts"
-if [ -L "$stale" ]; then
-  resolved="$(readlink "$stale")"
-  case "$resolved" in
-    "$REPO_V2"/*) rm -f "$stale"; printf 'removed stale flat entry %s\n' "$stale" ;;
-    *) printf 'error: %s is a symlink we do not own.\n' "$stale" >&2; exit 1 ;;
-  esac
-elif [ -e "$stale" ]; then
-  printf 'error: %s exists but is not our symlink; remove it by hand.\n' "$stale" >&2
-  exit 1
-fi
-
-# pi resolves an extension's relative imports against the SYMLINK's directory,
-# not the real file, so `index.ts -> .../src/extension/index.ts` cannot find
-# `../events`. Verified: it fails with "Cannot find module '../events'".
-#
-# So the installed directory reproduces the source layout one level down:
-#   deck-v2/extension/index.ts -> real src/extension/index.ts
-#   deck-v2/<module>.ts        -> real src/<module>.ts
-# `../events` from extension/index.ts then resolves to deck-v2/events.ts, which
-# is the real module. Only extension/index.ts is nested, so pi finds exactly one
-# entrypoint: pi discovers `*/index.ts`, not `*/*/index.ts`.
-rm -rf "$DEST"
-mkdir -p "$DEST/extension"
-ln -sfn "$REPO_V2/src/extension/index.ts" "$DEST/extension/index.ts"
-for module in "$REPO_V2"/src/*.ts; do
-  name="$(basename "$module")"
-  # index.ts is deliberately skipped: DEST/index.ts is the generated entrypoint
-  # shim below, and symlinking it here would make the shim's redirect write
-  # straight through the link into the repo's own src/index.ts.
-  [ "$name" = "index.ts" ] && continue
-  ln -sfn "$module" "$DEST/$name"
-done
-# The entrypoint pi loads. Re-exporting keeps the single-entrypoint rule while
-# the real code stays in extension/index.ts next to its siblings.
-rm -f "$DEST/index.ts"
-printf 'export { default } from "./extension/index.ts";\n' > "$DEST/index.ts"
-
-printf 'installed deck-v2 pi extension in %s\n' "$DEST"
-
-# The orchestrator and its worker sessions share this pi agent directory. Install
-# the subagent primitive there so workflow and spawn agents receive the same tool.
-INSTALL_TARGET="$INSTALL_TARGET" "$REPO_V2/../subagents/install.sh"
+BIN_TARGET="${BIN_TARGET:-$HOME/.local/bin}"
+DECK_REPO_ROOT="$(dirname "$REPO_V2")"
 
 # CLI: a shim on PATH pointing at the repo bin, so both faces run one source.
-BIN_TARGET="${BIN_TARGET:-$HOME/.local/bin}"
 mkdir -p "$BIN_TARGET"
 ln -sfn "$REPO_V2/bin/deck-v2" "$BIN_TARGET/deck-v2"
 printf 'installed deck-v2 CLI at %s/deck-v2\n' "$BIN_TARGET"
@@ -95,6 +23,7 @@ if [ -e "$DECK_SHIM" ] && [ ! -L "$DECK_SHIM" ]; then
 fi
 ln -sfn "$REPO_V2/../cli/bin/deck" "$DECK_SHIM"
 printf 'installed deck CLI at %s\n' "$DECK_SHIM"
+
 
 # smithers: a pinned PATH shim, never a global npm install. The version is read
 # from src/smithers.ts — the one pin deck code shells out with — so shim and
@@ -135,11 +64,24 @@ if [ -d "$WORKFLOWS_SOURCE/.smithers" ]; then
     rm -rf "$WORKSPACE_PACK/$name"
     cp -a "$item" "$WORKSPACE_PACK/$name"
   done
-  # agents.ts is part of the pack but its model catalog is owned by the pipeline.
-  # Keep that relative import valid in the isolated runtime workspace.
-  mkdir -p "$WORKSPACE_ROOT/pr-pipeline/lib"
-  rm -f "$WORKSPACE_ROOT/pr-pipeline/lib/models.ts"
+  # Shared agents import the production Prime adapter, so the isolated runtime
+  # receives its complete reviewed source/patch/provider dependency closure.
+  mkdir -p \
+    "$WORKSPACE_ROOT/pr-pipeline/lib/engines" \
+    "$DECK_V2_HOME_DIR/state/ops" \
+    "$DECK_V2_HOME_DIR/state/broker/prime" \
+    "$DECK_V2_HOME_DIR/state/broker/node_modules" \
+    "$DECK_V2_HOME_DIR/state/patches"
   cp -a "$WORKFLOWS_SOURCE/pr-pipeline/lib/models.ts" "$WORKSPACE_ROOT/pr-pipeline/lib/models.ts"
+  cp -a "$WORKFLOWS_SOURCE/pr-pipeline/lib/model-policy.ts" "$WORKSPACE_ROOT/pr-pipeline/lib/model-policy.ts"
+  cp -a "$WORKFLOWS_SOURCE/pr-pipeline/lib/engines/prime.ts" "$WORKSPACE_ROOT/pr-pipeline/lib/engines/prime.ts"
+  cp -a "$WORKFLOWS_SOURCE/pr-pipeline/lib/engines/prime-model-policy.ts" "$WORKSPACE_ROOT/pr-pipeline/lib/engines/prime-model-policy.ts"
+  cp -a "$DECK_REPO_ROOT/ops/prime-deck-profile.json" "$DECK_V2_HOME_DIR/state/ops/prime-deck-profile.json"
+  cp -a "$DECK_REPO_ROOT/ops/prime-patches.sh" "$DECK_V2_HOME_DIR/state/ops/prime-patches.sh"
+  cp -a "$DECK_REPO_ROOT/broker/prime/deck-provider.ts" "$DECK_V2_HOME_DIR/state/broker/prime/deck-provider.ts"
+  rm -rf "$DECK_V2_HOME_DIR/state/patches/prime-agent"
+  cp -a "$DECK_REPO_ROOT/patches/prime-agent" "$DECK_V2_HOME_DIR/state/patches/prime-agent"
+  ln -sfn "$DECK_REPO_ROOT/broker/node_modules/zod" "$DECK_V2_HOME_DIR/state/broker/node_modules/zod"
 fi
 # Keep the old link name only for static compatibility. It is never the runtime
 # workspace and no state is written through it.

@@ -7,16 +7,26 @@ import {
 	ask,
 	compact,
 	formatAge,
-	importLegacyQueue,
-	legacyQueueFile,
 	markDelivered,
 	MAX_EVENT_BYTES,
 	openQuestions,
 	pendingAnswersFor,
 	queueFile,
+	readQuestionHistory,
 	readQuestions,
 	STALE_AFTER_MS,
+	type Question,
 } from "../src/questions-store";
+import {
+	askWorkflowQuestion,
+	resolveWorkflowQuestion,
+	workflowQuestionId,
+	workflowQuestions,
+} from "../src";
+import {
+	routeWorkflowQuestionAnswer,
+	workflowRunIsTerminal,
+} from "../src/workflow-questions";
 import { answerMessage, describe as describeQuestion, registerQuestions } from "../src/questions";
 
 const dirs: string[] = [];
@@ -25,9 +35,8 @@ function freshFile(): string {
 	dirs.push(dir);
 	return path.join(dir, "queue.jsonl");
 }
-/** PI_CONFIG_DIR is pinned to the temp dir so the legacy-queue import can never touch the live ~/.pi. */
 function envFor(file: string): Record<string, string> {
-	return { DECK_QUESTIONS_FILE: file, PI_CONFIG_DIR: path.dirname(file) };
+	return { DECK_QUESTIONS_FILE: file };
 }
 afterAll(() => {
 	for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
@@ -107,7 +116,7 @@ describe("questions store", () => {
 	});
 
 	test("the same stable id from two sessions does not collide", () => {
-		// The log is shared by the whole pi home, so a bare "migration-decision"
+		// The log is shared by the whole conversation home, so a bare id
 		// from two sessions must stay two questions: otherwise the second ask
 		// overwrites the first's asker and its answer goes to the wrong agent.
 		const file = freshFile();
@@ -230,9 +239,6 @@ describe("questions store", () => {
 			if (prev === undefined) delete process.env.DECK_V2_HOME;
 			else process.env.DECK_V2_HOME = prev;
 		}
-		expect(legacyQueueFile({ PI_CONFIG_DIR: "/home/x/.pi/agent" })).toBe(
-			"/home/x/.pi/agent/questions/queue.jsonl",
-		);
 	});
 
 	test("formatAge stays readable across scales", () => {
@@ -242,6 +248,306 @@ describe("questions store", () => {
 		expect(formatAge(90 * 60_000)).toBe("1h30m");
 		expect(formatAge(50 * 3_600_000)).toBe("2d2h");
 	});
+	test("workflow writer is keyed, decision-shaped, and terminal across retries", () => {
+		const file = freshFile();
+		const input = {
+			runId: "run-42",
+			nodeId: "r0-stamp",
+			answerLane: "smithers-approval" as const,
+			resumeHint: "Gateway approval releases the parked node.",
+			originalIssue: "PR #42 is green and waiting for its commit-bound stamp.",
+			proposedAction: "Stamp head abc123 and submit this PR to the merge queue.",
+			blastRadius: "Only PR #42 at abc123; any new head invalidates the stamp.",
+			prNumber: 42,
+			approvalValue: { headSha: "abc123", prNumber: 42 },
+			cwd: "/workflow",
+		};
+		const first = askWorkflowQuestion(file, input);
+		const retry = askWorkflowQuestion(file, input);
+		expect(first.id).toBe(workflowQuestionId("run-42", "r0-stamp"));
+		expect(retry.id).toBe(first.id);
+		expect(readFileSync(file, "utf8").trim().split("\n")).toHaveLength(1);
+		expect(openQuestions(file)[0]).toMatchObject({
+			origin: "workflow",
+			workflow: {
+				runId: "run-42",
+				nodeId: "r0-stamp",
+				answerLane: "smithers-approval",
+				prNumber: 42,
+				originalIssue: input.originalIssue,
+				proposedAction: input.proposedAction,
+				blastRadius: input.blastRadius,
+			},
+		});
+
+		expect(resolveWorkflowQuestion(file, {
+			runId: "run-42",
+			nodeId: "r0-stamp",
+			answer: "Approved by Gateway",
+		})).toBe(true);
+		askWorkflowQuestion(file, input);
+		expect(readFileSync(file, "utf8").trim().split("\n")).toHaveLength(2);
+		expect(openQuestions(file)).toEqual([]);
+		expect(workflowQuestions(file, "run-42", "r0-stamp")[0]?.status).toBe("answered");
+		expect(compact(file, STALE_AFTER_MS * 100)).toEqual({ kept: 1, archived: 0 });
+		askWorkflowQuestion(file, input);
+		expect(openQuestions(file)).toEqual([]);
+		expect(workflowQuestions(file, "run-42", "r0-stamp")[0]?.status).toBe("answered");
+	});
+	test("workflow identity cannot alias delimiter-bearing run, node, or decision keys", () => {
+		expect(workflowQuestionId("run:a", "b", "c")).not.toBe(
+			workflowQuestionId("run", "a:b", "c"),
+		);
+		expect(workflowQuestionId("run:a", "b", "c")).not.toBe(
+			workflowQuestionId("run:a", "b:c"),
+		);
+		expect(() => workflowQuestionId("run\nother", "node")).toThrow(
+			"workflow runId must be one line",
+		);
+		expect(() => workflowQuestionId("run", "x".repeat(201))).toThrow(
+			"workflow nodeId exceeds 200 UTF-8 bytes",
+		);
+	});
+
+
+	test("workflow waits do not age into unresolvable archive ghosts", () => {
+		const file = freshFile();
+		askWorkflowQuestion(file, {
+			runId: "run-old",
+			nodeId: "fallout-escalation",
+			answerLane: "smithers-approval",
+			resumeHint: "Answer the approval.",
+			originalIssue: "The fallout probe is parked.",
+			proposedAction: "Choose whether the run may close.",
+			blastRadius: "Only the recorded fallout verdict.",
+			cwd: "/workflow",
+			now: 1,
+		});
+		expect(compact(file, STALE_AFTER_MS * 2)).toEqual({ kept: 1, archived: 0 });
+		expect(openQuestions(file)).toHaveLength(1);
+	});
+
+	test("workflow answer router submits approval metadata before closing the queue", async () => {
+		const file = freshFile();
+		askWorkflowQuestion(file, {
+			runId: "run-gateway",
+			nodeId: "r1-stamp",
+			answerLane: "smithers-approval",
+			resumeHint: "Gateway releases the stamp node.",
+			originalIssue: "The replacement head needs a fresh stamp.",
+			proposedAction: "Approve the replacement head.",
+			blastRadius: "Only PR #9 at the replacement head.",
+			prNumber: 9,
+			approvalValue: { headSha: "def456", prNumber: 9 },
+			cwd: "/workflow",
+		});
+		const question = openQuestions(file)[0]!;
+		let requestBody: unknown;
+		const result = await routeWorkflowQuestionAnswer(file, question, "Stamp", {
+			env: {
+				SMITHERS_GATEWAY_TOKEN: "smithers-test",
+				SMITHERS_GATEWAY_URL: "http://gateway.test/",
+			},
+			fetch: async (url, init) => {
+				expect(String(url)).toBe("http://gateway.test/v1/rpc/submitApproval");
+				expect(new Headers(init?.headers).get("authorization")).toBe("Bearer smithers-test");
+				requestBody = JSON.parse(String(init?.body));
+				return new Response(JSON.stringify({
+					ok: true,
+					payload: {
+						runId: "run-gateway",
+						nodeId: "r1-stamp",
+						iteration: 0,
+						approved: true,
+					},
+				}), { status: 200 });
+			},
+		});
+		expect(result).toEqual({ lane: "smithers-approval", choice: "approve", applied: true });
+		expect(requestBody).toMatchObject({
+			runId: "run-gateway",
+			nodeId: "r1-stamp",
+			iteration: 0,
+			approved: true,
+			decision: {
+				approved: true,
+				value: { headSha: "def456", prNumber: 9 },
+			},
+		});
+		expect(readQuestions(file)[0]).toMatchObject({ status: "answered", answer: "Stamp" });
+	});
+
+	test("workflow approval preserves an explicit null decision value", async () => {
+		const file = freshFile();
+		askWorkflowQuestion(file, {
+			runId: "run-null-value",
+			nodeId: "r0-stamp",
+			answerLane: "smithers-approval",
+			resumeHint: "Gateway releases the stamp.",
+			originalIssue: "The workflow contract uses JSON null.",
+			proposedAction: "Approve the exact null value.",
+			blastRadius: "Only this approval.",
+			approvalValue: null,
+			cwd: "/workflow",
+		});
+		let submitted: unknown;
+		await routeWorkflowQuestionAnswer(file, openQuestions(file)[0]!, "Stamp", {
+			env: { SMITHERS_GATEWAY_TOKEN: "smithers-test" },
+			fetch: async (_input, init) => {
+				submitted = JSON.parse(String(init?.body));
+				return new Response(JSON.stringify({
+					ok: true,
+					payload: {
+						runId: "run-null-value",
+						nodeId: "r0-stamp",
+						iteration: 0,
+						approved: true,
+					},
+				}), { status: 200 });
+			},
+		});
+		expect(submitted).toMatchObject({ decision: { value: null } });
+	});
+	test("continued Smithers runs are terminal for workflow cleanup", async () => {
+		const file = freshFile();
+		askWorkflowQuestion(file, {
+			runId: "run-continued",
+			nodeId: "r0-watch-fix",
+			answerLane: "store",
+			resumeHint: "No resume remains.",
+			originalIssue: "The run continued as a replacement execution.",
+			proposedAction: "Clear the superseded wait.",
+			blastRadius: "Only the superseded run.",
+			cwd: "/workflow",
+		});
+		expect(await workflowRunIsTerminal(openQuestions(file)[0]!, {
+			env: { SMITHERS_GATEWAY_TOKEN: "status-test" },
+			fetch: async () => new Response(JSON.stringify({
+				ok: true,
+				payload: { runId: "run-continued", status: "continued" },
+			}), { status: 200 }),
+		})).toBe(true);
+	});
+
+
+	test("Gateway failure leaves the workflow approval visibly open", async () => {
+		const file = freshFile();
+		askWorkflowQuestion(file, {
+			runId: "run-gateway-down",
+			nodeId: "r0-stamp",
+			answerLane: "smithers-approval",
+			resumeHint: "Retry after Gateway recovery.",
+			originalIssue: "The PR needs a stamp.",
+			proposedAction: "Submit the stamp.",
+			blastRadius: "Only the recorded PR head.",
+			cwd: "/workflow",
+		});
+		await expect(routeWorkflowQuestionAnswer(
+			file,
+			openQuestions(file)[0]!,
+			"Stamp",
+			{
+				env: { SMITHERS_GATEWAY_TOKEN: "smithers-test" },
+				fetch: async () => new Response("unavailable", { status: 503 }),
+			},
+		)).rejects.toThrow("Smithers approval failed (503)");
+		expect(openQuestions(file)).toHaveLength(1);
+		expect(readFileSync(file, "utf8").trim().split("\n")).toHaveLength(1);
+	});
+
+	test("malformed Gateway success leaves the workflow approval visibly open", async () => {
+		const file = freshFile();
+		askWorkflowQuestion(file, {
+			runId: "run-bad-receipt",
+			nodeId: "r0-stamp",
+			answerLane: "smithers-approval",
+			resumeHint: "Retry after Gateway recovery.",
+			originalIssue: "The PR needs a stamp.",
+			proposedAction: "Submit the stamp.",
+			blastRadius: "Only the recorded PR head.",
+			cwd: "/workflow",
+		});
+		await expect(routeWorkflowQuestionAnswer(file, openQuestions(file)[0]!, "Stamp", {
+			env: { SMITHERS_GATEWAY_TOKEN: "smithers-test" },
+			fetch: async () => new Response("{}", { status: 200 }),
+		})).rejects.toThrow("mismatched success receipt");
+		expect(openQuestions(file)).toHaveLength(1);
+	});
+
+	test("matching AlreadyDecided reconciles a lost receipt without accepting a conflict", async () => {
+		const askStamp = (file: string, runId: string): Question => {
+			askWorkflowQuestion(file, {
+				runId,
+				nodeId: "r0-stamp",
+				answerLane: "smithers-approval",
+				resumeHint: "Reconcile the prior Gateway decision.",
+				originalIssue: "The approval response was lost.",
+				proposedAction: "Confirm the durable approval.",
+				blastRadius: "Only the same approval node and iteration.",
+				cwd: "/workflow",
+			});
+			return openQuestions(file)[0]!;
+		};
+		const response = (runId: string, status: "approved" | "denied"): Response =>
+			new Response(JSON.stringify({
+				ok: false,
+				error: {
+					code: "AlreadyDecided",
+					runId,
+					nodeId: "r0-stamp",
+					iteration: 0,
+					status,
+				},
+			}), { status: 409 });
+
+		const recovered = freshFile();
+		const result = await routeWorkflowQuestionAnswer(
+			recovered,
+			askStamp(recovered, "run-recover"),
+			"Stamp",
+			{
+				env: { SMITHERS_GATEWAY_TOKEN: "smithers-test" },
+				fetch: async () => response("run-recover", "approved"),
+			},
+		);
+		expect(result).toEqual({ lane: "smithers-approval", choice: "approve", applied: true });
+		expect(openQuestions(recovered)).toEqual([]);
+
+		const conflict = freshFile();
+		await expect(routeWorkflowQuestionAnswer(
+			conflict,
+			askStamp(conflict, "run-conflict"),
+			"Stamp",
+			{
+				env: { SMITHERS_GATEWAY_TOKEN: "smithers-test" },
+				fetch: async () => response("run-conflict", "denied"),
+			},
+		)).rejects.toThrow("conflicts with the decision already recorded");
+		expect(openQuestions(conflict)).toHaveLength(1);
+	});
+
+	test("plain workflow answers stay in the store for next-run hydration", async () => {
+		const file = freshFile();
+		askWorkflowQuestion(file, {
+			runId: "run-watch",
+			nodeId: "r0-watch-fix",
+			decisionKey: "thread=https://example.test/thread/1",
+			answerLane: "store",
+			resumeHint: "The next watch-fix seat hydrates this answer.",
+			originalIssue: "Review intent is ambiguous.",
+			proposedAction: "Captain chooses the intended behavior.",
+			blastRadius: "Only this review thread; no push occurs before hydration.",
+			cwd: "/workflow",
+		});
+		const question = openQuestions(file)[0]!;
+		const result = await routeWorkflowQuestionAnswer(file, question, "Keep backward compatibility.");
+		expect(result).toEqual({ lane: "store", applied: true });
+		expect(workflowQuestions(file, "run-watch", "r0-watch-fix")[0]).toMatchObject({
+			status: "answered",
+			answer: "Keep backward compatibility.",
+		});
+	});
+
 });
 
 describe("compact", () => {
@@ -285,8 +591,8 @@ describe("compact", () => {
 	});
 
 	test("REGRESSION: an old answered-but-undelivered question survives compaction and still delivers", async () => {
-		// Compaction runs on session_start BEFORE delivery. Aging these out by
-		// askedAt would destroy a captain answer the asker never saw.
+		// Even exclusive maintenance must preserve an answered question until it
+		// has been delivered to the asking session.
 		const file = freshFile();
 		const asked = ask(file, { question: "old but answered", sessionId: "s", cwd: "/", now: 0 });
 		answer(file, asked.id, "the word", "answered", 1000);
@@ -294,11 +600,11 @@ describe("compact", () => {
 		expect(compact(file, STALE_AFTER_MS * 10)).toEqual({ kept: 1, archived: 0 });
 		expect(pendingAnswersFor(file, "s").map((e) => e.answer)).toEqual(["the word"]);
 
-		const pi = new Harness();
-		pi.currentTime = STALE_AFTER_MS * 10;
-		registerQuestions(pi as any, envFor(file), pi.runtime);
-		await pi.emit("session_start", fakeContext("s"));
-		expect(pi.sent.map((m) => m.content.includes("A: the word"))).toEqual([true]);
+		const agent = new Harness();
+		agent.currentTime = STALE_AFTER_MS * 10;
+		registerQuestions(agent as any, envFor(file), agent.runtime);
+		await agent.emit("session_start", fakeContext("s"));
+		expect(agent.sent.map((m) => m.content.includes("A: the word"))).toEqual([true]);
 	});
 
 	test("the queue dir and files are private to the operator", () => {
@@ -320,51 +626,6 @@ describe("compact", () => {
 	});
 });
 
-describe("legacy queue import", () => {
-	test("moves live open questions, leaves the dead, retires the legacy file", () => {
-		const file = freshFile();
-		const legacy = freshFile();
-		const now = STALE_AFTER_MS * 2;
-		ask(legacy, { question: "live", sessionId: "s", cwd: "/", now });
-		ask(legacy, { question: "stale", sessionId: "s", cwd: "/", now: 0 });
-		const done = ask(legacy, { question: "answered", sessionId: "s", cwd: "/", now });
-		answer(legacy, done.id, "yes", "answered", now);
-
-		expect(importLegacyQueue(file, legacy, now)).toBe(1);
-		expect(openQuestions(file).map((e) => e.question)).toEqual(["live"]);
-		// Retired under a new name, so it can neither re-import nor keep growing.
-		expect(readQuestions(legacy)).toEqual([]);
-		expect(readQuestions(`${legacy}.imported`).map((e) => e.question).sort()).toEqual([
-			"answered",
-			"live",
-			"stale",
-		]);
-	});
-
-	test("no legacy file is a no-op", () => {
-		const file = freshFile();
-		expect(importLegacyQueue(file, path.join(tmpdir(), "deck-q-absent", "queue.jsonl"))).toBe(0);
-		expect(readQuestions(file)).toEqual([]);
-	});
-
-	test("import runs once on session_start and ghosts do not survive", async () => {
-		const file = freshFile();
-		// A dedicated fake pi home: PI_CONFIG_DIR/questions/queue.jsonl is the legacy path.
-		const piHome = mkdtempSync(path.join(tmpdir(), "deck-pihome-"));
-		dirs.push(piHome);
-		const legacyFile = path.join(piHome, "questions", "queue.jsonl");
-		const pi = new Harness();
-		pi.currentTime = STALE_AFTER_MS * 2;
-		ask(legacyFile, { question: "live ghost-era Q", sessionId: "old-session", cwd: "/", now: pi.currentTime });
-		ask(legacyFile, { question: ">15h stale", sessionId: "old-session", cwd: "/", now: 0 });
-		registerQuestions(pi as any, { DECK_QUESTIONS_FILE: file, PI_CONFIG_DIR: piHome }, pi.runtime);
-
-		await pi.emit("session_start", fakeContext("orch-session"));
-		expect(openQuestions(file).map((e) => e.question)).toEqual(["live ghost-era Q"]);
-		expect(existsSync(legacyFile)).toBe(false);
-		expect(existsSync(`${legacyFile}.imported`)).toBe(true);
-	});
-});
 
 // --- extension wiring -------------------------------------------------------
 
@@ -446,11 +707,11 @@ function fakeContext(sessionId: string, selections: string[] = [], written?: str
 describe("questions extension", () => {
 	test("ask_captain queues durably and reports the backlog", async () => {
 		const file = freshFile();
-		const pi = new Harness();
-		registerQuestions(pi as any, envFor(file), pi.runtime);
+		const agent = new Harness();
+		registerQuestions(agent as any, envFor(file), agent.runtime);
 		const ctx = fakeContext("session-a");
 
-		const result = await pi.tools.get("ask_captain")!.execute(
+		const result = await agent.tools.get("ask_captain")!.execute(
 			"call-1",
 			{ question: "Flag or not?", options: ["flag", "no flag"], urgency: "high" },
 			undefined,
@@ -465,12 +726,12 @@ describe("questions extension", () => {
 
 	test("/questions custom overlay confirms newline without scrollback rerenders", async () => {
 		const file = freshFile();
-		const pi = new Harness();
-		registerQuestions(pi as any, envFor(file), pi.runtime);
+		const agent = new Harness();
+		registerQuestions(agent as any, envFor(file), agent.runtime);
 		const asker = fakeContext("session-a");
-		await pi.tools.get("ask_captain")!.execute("c1", { question: "Choose", options: ["yes", "no"] }, undefined, undefined, asker);
+		await agent.tools.get("ask_captain")!.execute("c1", { question: "Choose", options: ["yes", "no"] }, undefined, undefined, asker);
 		const captain = fakeContext("session-captain", [], undefined, ["x", "\n"]);
-		await pi.commands.get("questions")!.handler("", captain);
+		await agent.commands.get("questions")!.handler("", captain);
 		expect(openQuestions(file)).toHaveLength(0);
 		// The harness counts the component's real render calls. Navigation asks
 		// the TUI to repaint, but must not synchronously render scrollback itself.
@@ -479,85 +740,85 @@ describe("questions extension", () => {
 
 	test("/questions answers with a listed option and delivers to the asker", async () => {
 		const file = freshFile();
-		const pi = new Harness();
-		registerQuestions(pi as any, envFor(file), pi.runtime);
+		const agent = new Harness();
+		registerQuestions(agent as any, envFor(file), agent.runtime);
 
 		const asker = fakeContext("session-a");
-		await pi.tools
+		await agent.tools
 			.get("ask_captain")!
 			.execute("c1", { question: "Flag or not?", options: ["flag", "no flag"] }, undefined, undefined, asker);
 
 		// The captain reviews from a DIFFERENT session. Agent options are numbered
 		// so they can never collide with the control labels.
 		const captain = fakeContext("session-captain", ["1. flag"]);
-		await pi.commands.get("questions")!.handler("", captain);
+		await agent.commands.get("questions")!.handler("", captain);
 		expect(captain.prompts[0]).toContain("Flag or not?");
 		expect(openQuestions(file)).toHaveLength(0);
 
 		// The asking session picks the answer up on its next settle.
-		await pi.emit("agent_settled", asker);
-		expect(pi.sent).toHaveLength(1);
-		expect(pi.sent[0]!.content).toContain("A: flag");
-		expect(pi.sent[0]!.triggerTurn).toBe(true);
+		await agent.emit("agent_settled", asker);
+		expect(agent.sent).toHaveLength(1);
+		expect(agent.sent[0]!.content).toContain("A: flag");
+		expect(agent.sent[0]!.triggerTurn).toBe(true);
 
 		// And never twice.
-		await pi.emit("agent_settled", asker);
-		expect(pi.sent).toHaveLength(1);
+		await agent.emit("agent_settled", asker);
+		expect(agent.sent).toHaveLength(1);
 	});
 
 	test("an answer left while the asker was down is delivered on session_start", async () => {
 		const file = freshFile();
-		const pi = new Harness();
-		registerQuestions(pi as any, envFor(file), pi.runtime);
+		const agent = new Harness();
+		registerQuestions(agent as any, envFor(file), agent.runtime);
 		const asked = ask(file, { question: "Q", sessionId: "session-a", cwd: "/work/deck" });
 		answer(file, asked.id, "do it");
 
 		const asker = fakeContext("session-a");
-		await pi.emit("session_start", asker);
-		expect(pi.sent.map((m) => m.content.includes("A: do it"))).toEqual([true]);
+		await agent.emit("session_start", asker);
+		expect(agent.sent.map((m) => m.content.includes("A: do it"))).toEqual([true]);
 	});
 
 	test("the background poll wakes a parked asker when the queue changes", async () => {
 		const file = freshFile();
-		const pi = new Harness();
-		registerQuestions(pi as any, envFor(file), pi.runtime);
+		const agent = new Harness();
+		registerQuestions(agent as any, envFor(file), agent.runtime);
 		const asker = fakeContext("session-a");
 		const asked = ask(file, { question: "Q", sessionId: "session-a", cwd: "/work/deck" });
-		await pi.emit("session_start", asker);
-		expect(pi.sent).toHaveLength(0);
+		await agent.emit("session_start", asker);
+		expect(agent.sent).toHaveLength(0);
 
-		pi.intervals[0]!();
-		expect(pi.sent).toHaveLength(0); // no change yet
+		agent.intervals[0]!();
+		expect(agent.sent).toHaveLength(0); // no change yet
 
 		answer(file, asked.id, "go");
-		pi.intervals[0]!();
-		expect(pi.sent).toHaveLength(1);
-		expect(pi.sent[0]!.triggerTurn).toBe(true);
+		agent.intervals[0]!();
+		expect(agent.sent).toHaveLength(1);
+		expect(agent.sent[0]!.triggerTurn).toBe(true);
 	});
 
 	test("a failed send leaves the answer pending rather than losing it forever", async () => {
 		const file = freshFile();
-		const pi = new Harness();
-		registerQuestions(pi as any, envFor(file), pi.runtime);
+		const agent = new Harness();
+		registerQuestions(agent as any, envFor(file), agent.runtime);
 		const asked = ask(file, { question: "Q", sessionId: "session-a", cwd: "/" });
 		answer(file, asked.id, "go");
 
 		const asker = fakeContext("session-a");
-		pi.sendMessageThrows = true;
-		await expect(pi.emit("session_start", asker)).rejects.toThrow("send failed");
+		agent.sendMessageThrows = true;
+		await expect(agent.emit("session_start", asker)).rejects.toThrow("send failed");
 		expect(readQuestions(file)[0]?.delivered).toBe(false);
 
 		// The next delivery attempt still finds it.
-		pi.sendMessageThrows = false;
-		await pi.emit("agent_settled", asker);
-		expect(pi.sent).toHaveLength(1);
+		agent.sendMessageThrows = false;
+		await agent.emit("agent_settled", asker);
+		expect(agent.sent).toHaveLength(1);
 		expect(readQuestions(file)[0]?.delivered).toBe(true);
 	});
 
 	test("a captain whose answer lost the race is told, and it is not counted", async () => {
 		const file = freshFile();
-		const pi = new Harness();
-		registerQuestions(pi as any, envFor(file), pi.runtime);
+		const agent = new Harness();
+		registerQuestions(agent as any, envFor(file), agent.runtime);
 		const asked = ask(file, {
 			question: "Flag?",
 			options: ["flag"],
@@ -572,7 +833,7 @@ describe("questions extension", () => {
 			return originalSelect(title);
 		};
 
-		await pi.commands.get("questions")!.handler("", captain);
+		await agent.commands.get("questions")!.handler("", captain);
 		expect(readQuestions(file)[0]?.answer).toBe("unguarded");
 		expect(captain.notices.some((n) => n.includes("Already resolved elsewhere"))).toBe(true);
 		expect(captain.notices.at(-1)).toContain("Resolved 0 of 1");
@@ -580,10 +841,10 @@ describe("questions extension", () => {
 
 	test("free-text answers, dismissal, skip, and stop all behave", async () => {
 		const file = freshFile();
-		const pi = new Harness();
-		registerQuestions(pi as any, envFor(file), pi.runtime);
+		const agent = new Harness();
+		registerQuestions(agent as any, envFor(file), agent.runtime);
 		for (const question of ["Q1", "Q2", "Q3", "Q4"]) {
-			ask(file, { question, sessionId: "session-a", cwd: "/", now: pi.currentTime++ });
+			ask(file, { question, sessionId: "session-a", cwd: "/", now: agent.currentTime++ });
 		}
 
 		const captain = fakeContext(
@@ -591,7 +852,7 @@ describe("questions extension", () => {
 			["Write an answer...", "Dismiss", "Skip", "Stop reviewing"],
 			"my own words",
 		);
-		await pi.commands.get("questions")!.handler("", captain);
+		await agent.commands.get("questions")!.handler("", captain);
 
 		const byQuestion = new Map(readQuestions(file).map((entry) => [entry.question, entry]));
 		expect(byQuestion.get("Q1")!.answer).toBe("my own words");
@@ -605,8 +866,8 @@ describe("questions extension", () => {
 		// Matching choices by display string would turn picking the agent's own
 		// "Dismiss" option into a dismissal.
 		const file = freshFile();
-		const pi = new Harness();
-		registerQuestions(pi as any, envFor(file), pi.runtime);
+		const agent = new Harness();
+		registerQuestions(agent as any, envFor(file), agent.runtime);
 		ask(file, {
 			question: "Q",
 			options: ["Dismiss", "Skip", "Stop reviewing", "Write an answer..."],
@@ -615,7 +876,7 @@ describe("questions extension", () => {
 		});
 
 		const captain = fakeContext("session-captain", ["1. Dismiss"]);
-		await pi.commands.get("questions")!.handler("", captain);
+		await agent.commands.get("questions")!.handler("", captain);
 		const [entry] = readQuestions(file);
 		expect(entry?.status).toBe("answered");
 		expect(entry?.answer).toBe("Dismiss");
@@ -623,38 +884,156 @@ describe("questions extension", () => {
 
 	test("the real controls still work when the agent shadows their labels", async () => {
 		const file = freshFile();
-		const pi = new Harness();
-		registerQuestions(pi as any, envFor(file), pi.runtime);
+		const agent = new Harness();
+		registerQuestions(agent as any, envFor(file), agent.runtime);
 		ask(file, { question: "Q", options: ["Dismiss"], sessionId: "session-a", cwd: "/" });
 		const captain = fakeContext("session-captain", ["Dismiss"]);
-		await pi.commands.get("questions")!.handler("", captain);
+		await agent.commands.get("questions")!.handler("", captain);
 		expect(readQuestions(file)[0]?.status).toBe("dismissed");
 	});
 
 	test("a truncated captain answer is reported, not silently clipped", async () => {
 		const file = freshFile();
-		const pi = new Harness();
-		registerQuestions(pi as any, envFor(file), pi.runtime);
+		const agent = new Harness();
+		registerQuestions(agent as any, envFor(file), agent.runtime);
 		ask(file, { question: "Q", sessionId: "session-a", cwd: "/" });
 		const captain = fakeContext(
 			"session-captain",
 			["Write an answer..."],
 			"x".repeat(MAX_EVENT_BYTES),
 		);
-		await pi.commands.get("questions")!.handler("", captain);
+		await agent.commands.get("questions")!.handler("", captain);
 		expect(captain.notices.some((n) => n.includes("truncated"))).toBe(true);
 		expect(readQuestions(file)[0]?.status).toBe("answered");
 	});
 
+	test("/questions routes workflow stamps through the authenticated Gateway", async () => {
+		const file = freshFile();
+		const agent = new Harness();
+		let submitted: unknown;
+		registerQuestions(
+			agent as never,
+			{
+				...envFor(file),
+				SMITHERS_GATEWAY_TOKEN: "smithers-ui-test",
+				SMITHERS_GATEWAY_URL: "http://gateway.test",
+			},
+			{
+				...agent.runtime,
+				fetch: async (_input, init) => {
+					submitted = JSON.parse(String(init?.body));
+					return new Response(JSON.stringify({
+						ok: true,
+						payload: {
+							runId: "run-ui",
+							nodeId: "r0-stamp",
+							iteration: 0,
+							approved: true,
+						},
+					}), { status: 200 });
+				},
+			},
+		);
+		askWorkflowQuestion(file, {
+			runId: "run-ui",
+			nodeId: "r0-stamp",
+			answerLane: "smithers-approval",
+			resumeHint: "Gateway releases the node.",
+			originalIssue: "PR #12 is ready for a stamp.",
+			proposedAction: "Stamp the reviewed head.",
+			blastRadius: "Only PR #12 at head-12.",
+			prNumber: 12,
+			approvalValue: { headSha: "head-12", prNumber: 12 },
+			questionKind: "stamp",
+			options: ["Stamp", "Hold", "Deny gate"],
+			actions: ["stamp", "hold", "deny-gate"],
+			cwd: "/workflow",
+		});
+		await agent.commands.get("questions")!.handler("", fakeContext("captain", ["1. Stamp"]));
+		expect(submitted).toMatchObject({
+			runId: "run-ui",
+			nodeId: "r0-stamp",
+			approved: true,
+			decision: { value: { headSha: "head-12", prNumber: 12 } },
+		});
+		expect(openQuestions(file)).toEqual([]);
+	});
+
+	test("/questions cannot dismiss an active workflow wait into a ghost", async () => {
+		const file = freshFile();
+		const agent = new Harness();
+		registerQuestions(
+			agent as never,
+			{ ...envFor(file), SMITHERS_GATEWAY_TOKEN: "status-test" },
+			{
+				...agent.runtime,
+				fetch: async (input) => {
+					expect(String(input)).toBe("http://127.0.0.1:7331/v1/rpc/getRun");
+					return new Response(JSON.stringify({
+						ok: true,
+						payload: { runId: "run-ui", status: "running" },
+					}), { status: 200 });
+				},
+			},
+		);
+		askWorkflowQuestion(file, {
+			runId: "run-ui",
+			nodeId: "r0-watch-fix",
+			decisionKey: "thread-12",
+			answerLane: "store",
+			resumeHint: "Next watch-fix hydrates the answer.",
+			originalIssue: "Thread 12 needs a product decision.",
+			proposedAction: "State the intended behavior.",
+			blastRadius: "Only thread 12.",
+			cwd: "/workflow",
+		});
+		const captain = fakeContext("captain", ["Dismiss"]);
+		await agent.commands.get("questions")!.handler("", captain);
+		expect(openQuestions(file)).toHaveLength(1);
+		expect(captain.notices).toContain(
+			"Workflow decisions cannot be dismissed while their wait is active; choose Hold, approve/deny the gate, or answer the plain decision.",
+		);
+	});
+	test("/questions dismisses a workflow wait after Gateway reports its run terminal", async () => {
+		const file = freshFile();
+		const agent = new Harness();
+		registerQuestions(
+			agent as never,
+			{ ...envFor(file), SMITHERS_GATEWAY_TOKEN: "status-test" },
+			{
+				...agent.runtime,
+				fetch: async () => new Response(JSON.stringify({
+					ok: true,
+					payload: { runId: "run-cancelled", status: "cancelled" },
+				}), { status: 200 }),
+			},
+		);
+		askWorkflowQuestion(file, {
+			runId: "run-cancelled",
+			nodeId: "r0-watch-fix",
+			decisionKey: "thread-12",
+			answerLane: "store",
+			resumeHint: "Next watch-fix hydrates the answer.",
+			originalIssue: "Thread 12 needs a product decision.",
+			proposedAction: "State the intended behavior.",
+			blastRadius: "Only thread 12.",
+			cwd: "/workflow",
+		});
+		await agent.commands.get("questions")!.handler("", fakeContext("captain", ["Dismiss"]));
+		expect(openQuestions(file)).toEqual([]);
+		expect(readQuestionHistory(file)[0]?.status).toBe("dismissed");
+	});
+
+
 	test("stamp approves the exact gate and resumes the exact run", async () => {
 		const file = freshFile();
-		const pi = new Harness();
+		const agent = new Harness();
 		const commands: Array<{ command: string; args: string[] }> = [];
 		const executor = async (command: string, args: string[]) => { commands.push({ command, args }); return command === "gh" ? { stdout: JSON.stringify({ headRefOid: "head-12", mergeable: "MERGEABLE", mergeStateStatus: "CLEAN", statusCheckRollup: [{ conclusion: "SUCCESS" }] }) } : {}; };
-		registerQuestions(pi as any, envFor(file), pi.runtime, executor as any);
+		registerQuestions(agent as any, envFor(file), agent.runtime, executor as any);
 		ask(file, { id: "deck-fleet:stamp:owner/repo:12:stamp:run-7:stamp", question: "Stamp?", questionKind: "stamp", origin: "fleet", prContext: { prRepo: "owner/repo", prNumber: 12, headSha: "head-12" }, options: ["Stamp"], sessionId: "s", cwd: "/" });
 		const captain = fakeContext("captain", ["1. Stamp"]);
-		await pi.commands.get("questions")!.handler("", captain);
+		await agent.commands.get("questions")!.handler("", captain);
 		expect(commands).toEqual([
 			{ command: "gh", args: ["pr", "view", "12", "--repo", "owner/repo", "--json", "headRefOid,mergeable,mergeStateStatus,statusCheckRollup"] },
 			{ command: "smithers", args: ["approve", "run-7", "--node", "stamp", "--by", "captain"] },
@@ -663,13 +1042,13 @@ describe("questions extension", () => {
 		expect(openQuestions(file)).toHaveLength(0);
 	});
 
-	test("approve question runs the captain's gh approval and resolves only after success", async () => {
+	test("legacy review-gate approval questions fail closed without calling GitHub", async () => {
 		const file = freshFile();
-		const pi = new Harness();
+		const agent = new Harness();
 		const commands: Array<{ command: string; args: string[] }> = [];
-		registerQuestions(pi as any, envFor(file), pi.runtime, async (command, args) => {
+		registerQuestions(agent as any, envFor(file), agent.runtime, async (command, args) => {
 			commands.push({ command, args });
-			return command === "gh" && args[1] === "view" ? { stdout: JSON.stringify({ headRefOid: "head-12", mergeable: "MERGEABLE", mergeStateStatus: "CLEAN", statusCheckRollup: [{ conclusion: "SUCCESS" }] }) } : {};
+			return {};
 		});
 		ask(file, {
 			id: "review-gate-pr-12-head",
@@ -678,32 +1057,23 @@ describe("questions extension", () => {
 			prContext: { prRepo: "owner/repo", prNumber: 12, headSha: "head-12", prUrl: "https://github.com/owner/repo/pull/12", prTitle: "Fix gate" },
 			options: ["Approve", "Hold"], actions: ["approve", "hold"], sessionId: "s", cwd: "/work/deck",
 		});
-		await pi.commands.get("questions")!.handler("", fakeContext("captain", ["1. Approve"]));
-		expect(commands).toEqual([
-			{ command: "gh", args: ["pr", "view", "12", "--repo", "owner/repo", "--json", "headRefOid,mergeable,mergeStateStatus,statusCheckRollup"] },
-			{ command: "gh", args: ["pr", "review", "12", "--repo", "owner/repo", "--approve"] },
-		]);
-		expect(openQuestions(file)).toHaveLength(0);
+		const captain = fakeContext("captain", ["1. Approve"]);
+		await agent.commands.get("questions")!.handler("", captain);
+		expect(commands).toEqual([]);
+		expect(openQuestions(file)).toHaveLength(1);
+		expect(captain.notices).toContain(
+			"Legacy review-gate approvals cannot be submitted. Re-queue this decision through its Smithers workflow.",
+		);
 	});
 
-	test("approve question refuses a changed PR head", async () => {
-		const file = freshFile();
-		const pi = new Harness();
-		const commands: string[][] = [];
-		registerQuestions(pi as any, envFor(file), pi.runtime, async (_command, args) => { commands.push(args); return { stdout: JSON.stringify({ headRefOid: "new-head" }) }; });
-		ask(file, { id: "review-gate-pr-12-head", question: "Captain approval needed", questionKind: "approve", origin: "review-gate", prContext: { prRepo: "owner/repo", prNumber: 12, headSha: "old-head" }, options: ["Approve", "Hold"], actions: ["approve", "hold"], sessionId: "s", cwd: "/" });
-		await pi.commands.get("questions")!.handler("", fakeContext("captain", ["1. Approve"]));
-		expect(commands).toHaveLength(1);
-		expect(openQuestions(file)).toHaveLength(1);
-	});
 
 	test("Close option closes the reviewed PR", async () => {
 		const file = freshFile();
-		const pi = new Harness();
+		const agent = new Harness();
 		const commands: string[][] = [];
-		registerQuestions(pi as any, envFor(file), pi.runtime, async (_command, args) => { commands.push(args); return { stdout: JSON.stringify({ headRefOid: "head-12" }) }; });
+		registerQuestions(agent as any, envFor(file), agent.runtime, async (_command, args) => { commands.push(args); return { stdout: JSON.stringify({ headRefOid: "head-12" }) }; });
 		ask(file, { id: "review-gate-pr-12-head", question: "Captain decision needed", questionKind: "agent", origin: "review-gate", prContext: { prRepo: "owner/repo", prNumber: 12, headSha: "head-12" }, options: ["Hold", "Close"], actions: ["hold", "close-pr"], sessionId: "s", cwd: "/" });
-		await pi.commands.get("questions")!.handler("", fakeContext("captain", ["2. Close"]));
+		await agent.commands.get("questions")!.handler("", fakeContext("captain", ["2. Close"]));
 		expect(commands).toEqual([
 			["pr", "view", "12", "--repo", "owner/repo", "--json", "headRefOid"],
 			["pr", "close", "12", "--repo", "owner/repo"],
@@ -711,17 +1081,6 @@ describe("questions extension", () => {
 		expect(openQuestions(file)).toHaveLength(0);
 	});
 
-	test("approve question stays open when gh rejects the captain approval", async () => {
-		const file = freshFile();
-		const pi = new Harness();
-		registerQuestions(pi as any, envFor(file), pi.runtime, async (command, args) => {
-			if (command === "gh" && args[1] === "view") return { stdout: JSON.stringify({ headRefOid: "head-12", mergeable: "MERGEABLE", mergeStateStatus: "CLEAN", statusCheckRollup: [{ conclusion: "SUCCESS" }] }) };
-			throw new Error("permission denied");
-		});
-		ask(file, { id: "review-gate-pr-12-head", question: "Captain approval needed", questionKind: "approve", origin: "review-gate", prContext: { prRepo: "owner/repo", prNumber: 12, headSha: "head-12" }, options: ["Approve", "Hold"], actions: ["approve", "hold"], sessionId: "s", cwd: "/" });
-		await pi.commands.get("questions")!.handler("", fakeContext("captain", ["1. Approve"]));
-		expect(openQuestions(file)).toHaveLength(1);
-	});
 
 	test("PR context is bounded before it enters the durable queue", () => {
 		const file = freshFile();
@@ -751,85 +1110,85 @@ describe("questions extension", () => {
 
 	test("legacy stamp without PR evidence stays open", async () => {
 		const file = freshFile();
-		const pi = new Harness();
+		const agent = new Harness();
 		const commands: string[][] = [];
-		registerQuestions(pi as any, envFor(file), pi.runtime, async (_command, args) => { commands.push(args); return {}; });
+		registerQuestions(agent as any, envFor(file), agent.runtime, async (_command, args) => { commands.push(args); return {}; });
 		ask(file, { id: "deck-fleet:stamp:owner/repo:12:stamp:run-7:gate", question: "Stamp?", questionKind: "stamp", origin: "fleet", options: ["Stamp"], sessionId: "s", cwd: "/" });
-		await pi.commands.get("questions")!.handler("", fakeContext("captain", ["1. Stamp"]));
+		await agent.commands.get("questions")!.handler("", fakeContext("captain", ["1. Stamp"]));
 		expect(commands).toEqual([]);
 		expect(openQuestions(file)).toHaveLength(1);
 	});
 
 	test("hold keeps the decision open", async () => {
 		const file = freshFile();
-		const pi = new Harness();
-		registerQuestions(pi as any, envFor(file), pi.runtime, async () => ({}));
+		const agent = new Harness();
+		registerQuestions(agent as any, envFor(file), agent.runtime, async () => ({}));
 		ask(file, { id: "deck-fleet:stamp:owner/repo:12:stamp:run-7:gate", question: "Stamp?", questionKind: "stamp", origin: "fleet", prContext: { prRepo: "owner/repo", prNumber: 12, headSha: "head-12" }, options: ["Stamp", "Hold", "Deny gate"], actions: ["stamp", "hold", "deny-gate"], sessionId: "s", cwd: "/" });
-		await pi.commands.get("questions")!.handler("", fakeContext("captain", ["2. Hold"]));
+		await agent.commands.get("questions")!.handler("", fakeContext("captain", ["2. Hold"]));
 		expect(openQuestions(file)).toHaveLength(1);
 	});
 
 	test("stamp refuses when the reviewed PR head changed", async () => {
 		const file = freshFile();
-		const pi = new Harness();
+		const agent = new Harness();
 		const commands: string[][] = [];
-		registerQuestions(pi as any, envFor(file), pi.runtime, async (_command, args) => { commands.push(args); return { stdout: JSON.stringify({ headRefOid: "new-head" }) }; });
+		registerQuestions(agent as any, envFor(file), agent.runtime, async (_command, args) => { commands.push(args); return { stdout: JSON.stringify({ headRefOid: "new-head" }) }; });
 		ask(file, { id: "deck-fleet:stamp:owner/repo:12:stamp:run-7:gate", question: "Stamp?", questionKind: "stamp", origin: "fleet", prContext: { prRepo: "owner/repo", prNumber: 12, headSha: "old-head" }, options: ["Stamp"], sessionId: "s", cwd: "/" });
-		await pi.commands.get("questions")!.handler("", fakeContext("captain", ["1. Stamp"]));
+		await agent.commands.get("questions")!.handler("", fakeContext("captain", ["1. Stamp"]));
 		expect(commands).toHaveLength(1);
 		expect(openQuestions(file)).toHaveLength(1);
 	});
 
 	test("stamp Close denies the exact gate", async () => {
 		const file = freshFile();
-		const pi = new Harness();
+		const agent = new Harness();
 		const commands: string[][] = [];
-		registerQuestions(pi as any, envFor(file), pi.runtime, async (_command, args) => { commands.push(args); return {}; });
+		registerQuestions(agent as any, envFor(file), agent.runtime, async (_command, args) => { commands.push(args); return {}; });
 		ask(file, { id: "deck-fleet:stamp:owner/repo:12:stamp:run-7:gate", question: "Stamp?", questionKind: "stamp", origin: "fleet", prContext: { prRepo: "owner/repo", prNumber: 12, headSha: "head-12" }, options: ["Stamp", "Hold", "Deny gate"], actions: ["stamp", "hold", "deny-gate"], sessionId: "s", cwd: "/" });
-		await pi.commands.get("questions")!.handler("", fakeContext("captain", ["3. Deny gate"]));
+		await agent.commands.get("questions")!.handler("", fakeContext("captain", ["3. Deny gate"]));
 		expect(commands).toEqual([["deny", "run-7", "--node", "gate", "--by", "captain"]]);
 		expect(openQuestions(file)).toHaveLength(0);
 	});
 
 	test("stamp approval failure does not resume or resolve", async () => {
 		const file = freshFile();
-		const pi = new Harness();
+		const agent = new Harness();
 		const commands: string[][] = [];
-		registerQuestions(pi as any, envFor(file), pi.runtime, async (_command, args) => { commands.push(args); throw new Error("permission denied"); });
+		registerQuestions(agent as any, envFor(file), agent.runtime, async (_command, args) => { commands.push(args); throw new Error("permission denied"); });
 		ask(file, { id: "deck-fleet:stamp:owner/repo:12:stamp:run-7:gate", question: "Stamp?", questionKind: "stamp", origin: "fleet", prContext: { prRepo: "owner/repo", prNumber: 12, headSha: "head-12" }, options: ["Stamp"], sessionId: "s", cwd: "/" });
-		await pi.commands.get("questions")!.handler("", fakeContext("captain", ["1. Stamp"]));
+		await agent.commands.get("questions")!.handler("", fakeContext("captain", ["1. Stamp"]));
 		expect(commands).toHaveLength(1);
 		expect(openQuestions(file)).toHaveLength(1);
 	});
 
 	test("stamp keeps the question open when resume fails", async () => {
 		const file = freshFile();
-		const pi = new Harness();
+		const agent = new Harness();
 		const commands: string[][] = [];
-		registerQuestions(pi as any, envFor(file), pi.runtime, async (command, args) => { if (command === "gh") return { stdout: JSON.stringify({ headRefOid: "head-12", mergeable: "MERGEABLE", mergeStateStatus: "CLEAN", statusCheckRollup: [{ conclusion: "SUCCESS" }] }) }; commands.push(args); if (commands.length === 2) throw new Error("resume failed"); return {}; });
+		registerQuestions(agent as any, envFor(file), agent.runtime, async (command, args) => { if (command === "gh") return { stdout: JSON.stringify({ headRefOid: "head-12", mergeable: "MERGEABLE", mergeStateStatus: "CLEAN", statusCheckRollup: [{ conclusion: "SUCCESS" }] }) }; commands.push(args); if (commands.length === 2) throw new Error("resume failed"); return {}; });
 		ask(file, { id: "deck-fleet:stamp:owner/repo:12:stamp:run-7:gate", question: "Stamp?", questionKind: "stamp", origin: "fleet", prContext: { prRepo: "owner/repo", prNumber: 12, headSha: "head-12" }, options: ["Stamp"], sessionId: "s", cwd: "/" });
-		await pi.commands.get("questions")!.handler("", fakeContext("captain", ["1. Stamp"]));
+		await agent.commands.get("questions")!.handler("", fakeContext("captain", ["1. Stamp"]));
 		expect(commands).toHaveLength(2);
 		expect(openQuestions(file)).toHaveLength(1);
 	});
 
 	test("stamp retries resume after an already-approved error", async () => {
 		const file = freshFile();
-		const pi = new Harness();
+		const agent = new Harness();
 		const commands: string[][] = [];
-		registerQuestions(pi as any, envFor(file), pi.runtime, async (command, args) => { if (command === "gh") return { stdout: JSON.stringify({ headRefOid: "head-12", mergeable: "MERGEABLE", mergeStateStatus: "CLEAN", statusCheckRollup: [{ conclusion: "SUCCESS" }] }) }; commands.push(args); if (commands.length === 1) throw new Error("approval is already approved"); return {}; });
+		registerQuestions(agent as any, envFor(file), agent.runtime, async (command, args) => { if (command === "gh") return { stdout: JSON.stringify({ headRefOid: "head-12", mergeable: "MERGEABLE", mergeStateStatus: "CLEAN", statusCheckRollup: [{ conclusion: "SUCCESS" }] }) }; commands.push(args); if (commands.length === 1) throw new Error("approval is already approved"); return {}; });
 		ask(file, { id: "deck-fleet:stamp:owner/repo:12:stamp:run-7:gate", question: "Stamp?", questionKind: "stamp", origin: "fleet", prContext: { prRepo: "owner/repo", prNumber: 12, headSha: "head-12" }, options: ["Stamp"], sessionId: "s", cwd: "/" });
-		await pi.commands.get("questions")!.handler("", fakeContext("captain", ["1. Stamp"]));
+		await agent.commands.get("questions")!.handler("", fakeContext("captain", ["1. Stamp"]));
 		expect(commands).toHaveLength(2);
 		expect(openQuestions(file)).toHaveLength(0);
 	});
 
 	test("/questions on an empty queue says so rather than opening a dialog", async () => {
 		const file = freshFile();
-		const pi = new Harness();
-		registerQuestions(pi as any, envFor(file), pi.runtime);
+		const agent = new Harness();
+		registerQuestions(agent as any, envFor(file), agent.runtime);
 		const captain = fakeContext("session-captain");
-		await pi.commands.get("questions")!.handler("", captain);
+		await agent.commands.get("questions")!.handler("", captain);
 		expect(captain.prompts).toEqual([]);
 		expect(captain.notices[0]).toContain("No open questions");
 	});
@@ -854,12 +1213,12 @@ describe("questions extension", () => {
 	});
 
 	test("session_shutdown stops the poll", async () => {
-		const pi = new Harness();
-		registerQuestions(pi as any, envFor(freshFile()), pi.runtime);
-		await pi.emit("session_start", fakeContext("session-a"));
-		expect(pi.intervals).toHaveLength(1);
-		await pi.emit("session_shutdown", fakeContext("session-a"));
-		expect(pi.intervals).toHaveLength(0);
+		const agent = new Harness();
+		registerQuestions(agent as any, envFor(freshFile()), agent.runtime);
+		await agent.emit("session_start", fakeContext("session-a"));
+		expect(agent.intervals).toHaveLength(1);
+		await agent.emit("session_shutdown", fakeContext("session-a"));
+		expect(agent.intervals).toHaveLength(0);
 	});
 });
 
@@ -871,13 +1230,13 @@ describe("poll does not hold a dead ctx", () => {
 	// the exact failure this extension exists to prevent.
 	test("REGRESSION: the poll still delivers after the session ctx goes stale", async () => {
 		const file = freshFile();
-		const pi = new Harness();
-		registerQuestions(pi as any, envFor(file), pi.runtime);
+		const agent = new Harness();
+		registerQuestions(agent as any, envFor(file), agent.runtime);
 
 		const asker = fakeContext("session-a");
-		await pi.emit("session_start", asker);
+		await agent.emit("session_start", asker);
 
-		// pi replaces the session: the old ctx is now poison. Anything that touches
+		// The host replaces the session: the old ctx is now poison. Anything that touches
 		// it throws, so a poll holding it cannot deliver.
 		asker.sessionManager.getSessionId = () => {
 			throw new Error("This extension ctx is stale after session replacement or reload");
@@ -888,7 +1247,7 @@ describe("poll does not hold a dead ctx", () => {
 		answer(file, queued.id, "yes");
 
 		// The poll must run without throwing and must deliver the answer.
-		expect(() => pi.intervals.forEach((tick) => tick())).not.toThrow();
+		expect(() => agent.intervals.forEach((tick) => tick())).not.toThrow();
 		expect(pendingAnswersFor(file, "session-a")).toHaveLength(0);
 	});
 });

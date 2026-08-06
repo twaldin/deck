@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
 import { buildModelIndex, DEFAULT_ALLOWLIST } from "../src/models";
+import type { FastUsageMonitor } from "../src/fast-usage";
 import { startFastGateway } from "../src/fast-gateway";
+import { startValidatedGateway } from "../src/validated-gateway";
 
 const resources: Array<{ close(): Promise<void> }> = [];
 
@@ -46,6 +48,100 @@ describe("fast gateway proxy", () => {
 
 		expect(response.status).toBe(200);
 		expect(received).toMatchObject({ model: "openai-codex/gpt-5.6-luna", service_tier: "priority" });
+
+		const rejected = await fetch(`${gateway.url}/v1/chat/completions`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ model: "openai-codex/gpt-5.4-mini:fast", messages: [] }),
+		});
+		expect(rejected.status).toBe(400);
+		expect(await rejected.text()).toContain("GPT-5.4, GPT-5.5, or GPT-5.6");
+
+		const standard = await fetch(`${gateway.url}/v1/chat/completions`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ model: "openai-codex/gpt-5.4-mini", messages: [] }),
+		});
+		expect(standard.status).toBe(200);
+		expect(received).toEqual({ model: "openai-codex/gpt-5.4-mini", messages: [] });
+	});
+
+	test("preserves priority through validated routing and account rotation", async () => {
+		const received: Record<string, unknown>[] = [];
+		const upstreamServer = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			async fetch(request) {
+				received.push(await request.json() as Record<string, unknown>);
+				return Response.json({
+					id: `rotation-${received.length}`,
+					choices: [],
+					usage: { prompt_tokens: 10, completion_tokens: 1 },
+				});
+			},
+		});
+		const upstream = {
+			url: `http://127.0.0.1:${upstreamServer.port}`,
+			async close() {
+				upstreamServer.stop(true);
+			},
+		};
+		const index = buildModelIndex(DEFAULT_ALLOWLIST);
+		const pins: number[] = [];
+		const usageCredentialIds: number[] = [];
+		let rotated = false;
+		const gateway = startValidatedGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: [],
+			version: "test",
+			resolveModel: index.resolve,
+			listModels: index.list,
+			quotaAccounts: () => rotated
+				? [
+					{ credentialId: 1, provider: "openai-codex", authProvider: "openai-codex", blocked: [], lastUsedAt: 10 },
+					{ credentialId: 2, provider: "openai-codex", authProvider: "openai-codex", blocked: [], lastUsedAt: 0 },
+				]
+				: [
+					{ credentialId: 1, provider: "openai-codex", authProvider: "openai-codex", blocked: [], lastUsedAt: 0 },
+					{ credentialId: 2, provider: "openai-codex", authProvider: "openai-codex", blocked: [], lastUsedAt: 10 },
+				],
+			quotaPreferences: () => [],
+			storage: {
+				pinSessionOAuthAccount: (_provider: string, _sessionId: string, credentialId: number) => {
+					pins.push(credentialId);
+					return true;
+				},
+			} as AuthStorage,
+			upstream,
+			fastUsageMonitor: {
+				record(attribution: { credentialId?: number }) {
+					if (attribution.credentialId !== undefined) usageCredentialIds.push(attribution.credentialId);
+					return true;
+				},
+			} as unknown as FastUsageMonitor,
+		});
+		resources.push(gateway);
+
+		for (let requestIndex = 0; requestIndex < 2; requestIndex += 1) {
+			const response = await fetch(`${gateway.url}/v1/chat/completions`, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					model: "gpt-5.6-sol:fast",
+					prompt_cache_key: "fast-rotation-session",
+					messages: [{ role: "user", content: `turn ${requestIndex + 1}` }],
+				}),
+			});
+			expect(response.status).toBe(200);
+			await response.json();
+			rotated = true;
+		}
+
+		expect(pins).toEqual([1, 2]);
+		expect(received).toHaveLength(2);
+		expect(received[0]).toMatchObject({ model: "openai-codex/gpt-5.6-sol", service_tier: "priority" });
+		expect(received[1]).toMatchObject({ model: "openai-codex/gpt-5.6-sol", service_tier: "priority" });
+		expect(usageCredentialIds).toEqual([1, 2]);
 	});
 
 	test("forwards bodies for unmatched POST routes", async () => {
@@ -75,7 +171,7 @@ describe("fast gateway proxy", () => {
 		});
 		resources.push(gateway);
 
-		await fetch(`${gateway.url}/v1/pi/stream`, { method: "POST", body: "stream-body" });
+		await fetch(`${gateway.url}/unmatched/post`, { method: "POST", body: "stream-body" });
 		expect(received).toBe("stream-body");
 	});
 });

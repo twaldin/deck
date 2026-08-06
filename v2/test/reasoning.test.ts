@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import deckV2 from "../src/extension/index";
 import { profilesFile, type ProjectProfile } from "../src/projects";
 import { clampLevel, renderReasoning, setSeatReasoning } from "../src/reasoning";
 import { workerReasoningFor } from "../src/spawn";
@@ -90,18 +89,3 @@ describe("reasoning command model", () => {
 	});
 });
 
-describe("/reasoning extension command", () => {
-	test("sets self through the pi API", async () => {
-		const commands = new Map<string, any>();
-		const notifications: string[] = [];
-		let selected = "medium";
-		const pi = {
-			registerTool: () => {}, registerCommand: (name: string, command: any) => commands.set(name, command),
-			on: () => {}, getThinkingLevel: () => selected, setThinkingLevel: (level: string) => { selected = level; },
-		};
-		deckV2(pi);
-		await commands.get("reasoning").handler("self high", { ui: { notify: (value: string) => notifications.push(value) } });
-		expect(selected).toBe("high");
-		expect(notifications[0]).toContain("self  high");
-	});
-});

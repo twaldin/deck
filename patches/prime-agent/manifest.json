@@ -1,0 +1,98 @@
+{
+  "schemaVersion": 1,
+  "upstreamRepository": "PrimeIntellect-ai/prime-agent",
+  "expectedInstallState": "pristine",
+  "base": {
+    "version": "0.7.0",
+    "tag": "v0.7.0",
+    "commit": "be9e2fa0714e7cd1c6bd9bdb1b554d2cc6550387",
+    "artifactUrl": "https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev/releases/v0.7.0/prime-agent-0.7.0.tgz",
+    "artifactSha256": "88b6578518c72cd51a825bc80f28e0fef9a64c67de4a7d6fd7afd7ca1b34da0b",
+    "pristinePackageTreeSha256": "0b0213cfac4ce942ea2b7dd579beb193101167125c324712ed46206b52ab4004",
+    "cliSha256": "ef097dce87e63c32e49493767763c7147376e6b4522818dd275ca9c32218ad35"
+  },
+  "patchedArtifact": {
+    "file": "prime-agent-0.7.0-deck-patched.tgz",
+    "sha256": "aeb924d0636438b0ff66a4ea9ceb09e5060e187ef7d5b18ff41ff89631a1bf94",
+    "packageTreeSha256": "0e1bb084890b6b7d8747df0f80b3de893da27ddf797768f6b8fa464505d1b71a",
+    "cliSha256": "f05c4c220517ec401ae00a40287bb3fd61ed27442ee6d8a13a8fc23fd417e975"
+  },
+  "patches": [
+    {
+      "name": "rlm-child-compaction",
+      "file": "rlm-child-compaction.patch",
+      "sha256": "ad1ed943dde645a410e19e1395eda6325df7f3f9c2fca5c90af7197d853f60af",
+      "fixes": "Waits for a compacted RLM child to resume before declaring its terminal result.",
+      "upstreamPrNumber": 677,
+      "upstreamPrUrl": "https://github.com/PrimeIntellect-ai/prime-agent/pull/677",
+      "upstreamBranch": "fix/rlm-child-compaction-terminal-notice",
+      "sourceCommit": "de041d0e7638a797027860e6da58159862708a28",
+      "baseVersion": "0.7.0",
+      "application": "not-applied",
+      "installedDetection": {
+        "file": "dist/core/agent-session.js",
+        "pristineSha256": "db56597bdfc8a0213c61d4f05b20f8381a1a5e26bbddead957c4fa3e0d861449",
+        "patchedSha256": "bec65362a0452b1663fd52b06af75cc7d8adfe46f16e711e6db154c98cc038cf",
+        "bundleNeedle": "abortCompletion ??="
+      },
+      "status": "upstream-open"
+    },
+    {
+      "name": "preserve-live-workers",
+      "file": "preserve-live-workers.patch",
+      "sha256": "ed8829c02b8daae3683b6b2b076807b8e3cef62621eb7c2753203ba4d212374d",
+      "fixes": "Keeps a live daemon worker during recovery instead of replacing it while its state is still loading.",
+      "upstreamPrNumber": 675,
+      "upstreamPrUrl": "https://github.com/PrimeIntellect-ai/prime-agent/pull/675",
+      "upstreamBranch": "fix/preserve-live-workers-during-recovery",
+      "sourceCommit": "03721182018ea62f71298ff5b7525b472eb55c44",
+      "baseVersion": "0.7.0",
+      "application": "not-applied",
+      "installedDetection": {
+        "file": "dist/modes/daemon/daemon-supervisor.js",
+        "pristineSha256": "77395cbf7369a453691701c9c9dad8066f581ac45391939ed2f1ccd0220e7e77",
+        "patchedSha256": "7b735c925642530429a74b12767719a746edbaf9f6989d9cc05546455eda4aec",
+        "bundleNeedle": "keepRetryingLiveWorker"
+      },
+      "status": "upstream-open"
+    },
+    {
+      "name": "herdr-remote-clipboard-wip",
+      "file": "herdr-remote-clipboard-wip.patch",
+      "sha256": "8a5d71846a756674589560e4b05796d735d6120e67302f592a7add289473a3a0",
+      "fixes": "Routes remote clipboard writes through Herdr instead of the local clipboard bridge.",
+      "upstreamPrNumber": 682,
+      "upstreamPrUrl": "https://github.com/PrimeIntellect-ai/prime-agent/pull/682",
+      "upstreamBranch": "fix/herdr-remote-clipboard",
+      "sourceCommit": "fcd4a446d69405cf76801374ac2f6b6d26b0ef2c",
+      "baseVersion": "0.7.0",
+      "application": "not-applied",
+      "installedDetection": {
+        "file": "dist/utils/clipboard.js",
+        "pristineSha256": "9eb3e5185de42bd559b5ce12a4e143525a8dc5d153551c33b4f542a6adab60df",
+        "patchedSha256": "b9504605c02e9f5ebb4b23c479e413e0577d3a405ed4816c63b3923707d118d8",
+        "bundleNeedle": "env.MOSH_CONNECTION || env.HERDR_ENV === \"1\""
+      },
+      "status": "upstream-open"
+    },
+    {
+      "name": "deck-fast-mode-capability",
+      "file": "deck-fast-mode-capability.patch",
+      "sha256": "e10666d72ddcdcad115b3504efc311f59a2ce1f8f87b192f9d0b1daf0f56ef83",
+      "fixes": "Lets explicitly capable custom OpenAI-compatible providers use native Fast mode and serialize the priority service tier.",
+      "upstreamBranch": "fix/custom-provider-fast-mode-capability",
+      "upstreamPrNumber": null,
+      "upstreamPrUrl": null,
+      "sourceCommit": "96ee5bce0af2f30fb07ff8b8bc3bcb6a9a581b32",
+      "baseVersion": "0.7.0",
+      "application": "not-applied",
+      "installedDetection": {
+        "file": "dist/core/model-registry.js",
+        "pristineSha256": "d77c1c6b8cb1af8945139961b64ca30427aa8b98e0f9172e3aed936b2829e939",
+        "patchedSha256": "480032b831c047661238bfeeb4e4a3acfc29c36482808f88bdaeee6d895f23e8",
+        "bundleNeedle": "model.api === \"openai-completions\" && model.supportsFastMode === true"
+      },
+      "status": "local-only"
+    }
+  ]
+}

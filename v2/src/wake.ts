@@ -924,7 +924,7 @@ export function detectStale(
 				const child = listChildren(pid)[0];
 				const childCpuDelta = child === undefined ? undefined : childCpuDeltas.get(child.pid);
 				// A truncated walk still alerts. The transcript signal is complete on its
-				// own, and a pi worker doing anything appends to its transcript — so
+				// own, and a child agent doing anything appends to its transcript — so
 				// staying quiet here would hide a real wedge in every worktree big enough
 				// to exhaust the walk budget, forever. The reason says the worktree
 				// evidence is partial.
@@ -934,7 +934,7 @@ export function detectStale(
 					reason:
 						child === undefined
 							? `alive as pid ${pid} but has written nothing for ${silentMin} minute(s)${partial} — likely stuck, not working`
-							: `alive as pid ${pid} but has written nothing for ${silentMin} minute(s); child pid ${child.pid} (${childLabel(child.command)})${childCpuDelta === undefined ? "" : ` has CPU delta ${(childCpuDelta / 1000).toFixed(2)}s`} and is still running${partial} — likely a stuck subagent`,
+							: `alive as pid ${pid} but has written nothing for ${silentMin} minute(s); child pid ${child.pid} (${childLabel(child.command)})${childCpuDelta === undefined ? "" : ` has CPU delta ${(childCpuDelta / 1000).toFixed(2)}s`} and is still running${partial} — likely a stuck child agent`,
 				});
 				const backoffMs =
 					record.emitted === fingerprint

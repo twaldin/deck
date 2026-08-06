@@ -1,137 +1,133 @@
-# deck v2
+# Deck runtime
 
-This is my pi setup for running a handful of coding agents at once without losing
-track of them. It is not a framework and not a product — it is the thing I
-actually use, cleaned up enough to read.
+`v2/` is the headless library and CLI behind Deck's current Prime conversation
+shape. The directory name is historical; it does not contain the retired
+orchestrator extension.
 
-## The idea
+**What this is not:** it is not a hosted product or an autonomous agent
+supervisor. It is a local, operator-attended runtime whose durable delivery
+work is delegated to explicit Smithers workflows.
 
-I had a previous version of this built on tmux. Almost all of its complexity
-existed to answer one question: *is that agent still alive, and what is it doing?*
-Long-lived agents made that question hard, so there were pollers, watchers,
-staleness heuristics, and a supervision daemon — and one of those watchers once
-died quietly for most of a day and nobody noticed.
+## Current shape
 
-v2 deletes the question instead of answering it better. A worker is a one-shot
-run: it starts on an event, does one bounded piece of work, writes a receipt, and
-exits. There is nothing to keep alive, so there is nothing to poll.
+Prime conversations start in `~/.deck` with four reviewed extensions:
 
-What is left is small:
+- `deck-questions`
+- `deck-ship`
+- `deck-recall`
+- `deck-usage`
+`deck-ship` exposes the factory as tools. `ship` and `adopt` call the same
+headless dispatch code as the CLI; `status` is read-only. There is no
+orchestrator extension, fleet overlay, wake loop, or second delivery engine in
+the conversation.
 
-- **status files** — append-only, one line per event, `verb: one short line`
-- **receipts** — for anything irreversible, written *before* the act
-- **an event loop in the orchestrator's own process** — not a daemon, so it cannot
-  die silently while everything else keeps running
-
-## Two faces, one library
-
-Everything lives in `src/`. The pi extension (`src/extension/`) imports it
-directly, and the CLI (`bin/deck-v2`) is a thin argument parser over the same
-functions. Neither is a wrapper around the other: no subprocess hop when the
-orchestrator spawns a worker, and no second copy of the logic to keep in sync.
-
+```text
+Prime conversation
+    │ ship / adopt / status
+    ▼
+detached Smithers pr-pipeline
+    └ implementation, adversarial review, PR/reviewer/CI watch,
+      configured merge policy, delivery and fallout evidence
 ```
-deck-v2 bootstrap          # create ~/.deck
+
+The session shapes the issue and handles operator decisions. Smithers persists
+pipeline progress and retries. The broker supplies the model seats configured
+for the current pipeline. OptMem supplies global cross-session memory; effort
+dossiers retain the detailed brief, rationale, alternatives, and checkpoints.
+
+The separate `workflows/review-gate/` poller is an explicitly selected,
+company-specific example. Neither `install.sh` nor `update.sh` starts it.
+
+## Install and discovery
+
+Run the repository-root `install.sh` for first-time setup and root `update.sh`
+for an existing installation. The internal `v2/install.sh` is called by both;
+it is not a competing onboarding command.
+
+The installed layout is:
+
+```text
+~/.deck/AGENTS.md
+~/.deck/.prime/agent/extensions/{deck-questions,deck-ship,deck-recall,deck-usage}/index.ts
+~/.deck/.prime/agent/extensions/deck-provider.ts
+~/.deck/.prime/runtime/
+~/.deck/.prime/sessions/
+~/.deck/state/smithers/
+~/.local/bin/{prime-agent,prime-conversation,deck,deck-v2,smithers}
+```
+
+The root installer mirrors `../extensions-prime/` plus their `v2/src` support
+tree into the fail-closed Prime profile. `v2/install.sh` itself installs only
+the Deck CLI and isolated Smithers workspace.
+
+`~/.deck` is deliberately a plain runtime directory, never a checkout. A
+checkout would bring its own repository instructions and would allow rebases or
+branch changes to move live state.
+
+## Prime credentials and broker-backed seats
+
+The root installer pins and verifies Prime Agent 0.7.0, installs the reviewed
+profile, and exposes `prime-conversation`. Both conversation and workflow seats
+use the `deck` provider, so they require this operator's broker process and
+broker login. Ambient provider credentials are stripped from every seat.
+
+## Library, CLI, and tools
+
+The implementation lives in `src/`. `bin/deck-v2` and the standalone extension
+entrypoints import the same functions:
+
+```text
+deck-v2 bootstrap
 deck-v2 ship <ticket> --profile <id> --worktree <path> --branch <name> ...
-                           # DEFAULT ship path: the project's PR pipeline
-deck-v2 spawn <id> --task "..." --accept "..." --worktree <path>
 deck-v2 status <id>
-deck-v2 fleet              # what everything is doing
+deck-v2 fleet
 ```
 
-## Shipping goes through the pipeline
+An effort that ends in a PR goes through the project profile's PR pipeline.
+`spawn --kind ship` is refused on a profiled repository unless the caller
+explicitly chooses `--no-pipeline`; `spawn` is for bounded seats inside a stage
+and for non-shipping research, not a pipeline bypass.
 
-`src/ship.ts`: an effort that ends in a PR ships through its project profile's
-pipeline (`workflows/pr-pipeline`), where the PR open is a compute node behind
-a hard adversarial-review gate; `lindy-full` parks for the captain's stamp,
-`yolo-ship` auto-merges on green. `spawn --kind ship` on a profiled repo is
-REFUSED without `--no-pipeline` (`assertShipGoesThroughPipeline` in
-`src/spawn.ts`) — spawn is for workers inside a pipeline stage and scouts. See
-`workflows/pr-pipeline/README.md` "This is the DEFAULT ship path".
+Project profiles are loaded wholesale from
+`~/.deck/config/projects.json`. Bootstrap writes an empty list and selects no
+personal or company profile. Every `ship` and `adopt` dispatch also loads
+`selfLogins`, `excludedApprovers`, `reviewerDenylist`, and default `reviewers`
+from `~/.deck/config/reviewers.json`; bootstrap seeds empty arrays, never public
+operator identities.
 
-## Roles
+## Questions
 
-There is one **orchestrator** — the agent I talk to. It dispatches work, judges
-what comes back, and is the only thing that asks me questions. **Workers** do the
-actual work in isolated worktrees and never talk to me directly; if a worker hits
-a decision, it says so in its status file and the orchestrator relays it.
+`src/questions.ts` and `src/questions-store.ts` implement a durable,
+operator-facing queue. The extension supplies question creation, read-only
+listing, first-answer-wins answering, and `/questions`.
 
-That last rule is not politeness, it is a race fix. When both could ask me
-things, I answered one agent's question while the orchestrator independently
-authorized another, and the two orders conflicted. Now workers spawn with the
-question tool excluded, so the second channel cannot exist.
+The queue is `~/.deck/questions/queue.jsonl`
+(`DECK_QUESTIONS_FILE` overrides it for tests). It is an append-only JSONL event
+log folded on read. Delivery sends before it marks, and a first answer wins.
+Archival compaction is exclusive offline maintenance; live conversations never
+rewrite the shared log.
 
-The orchestrator's operating contract lives in `~/.deck/AGENTS.md`, seeded from
-`seed/orchestrator-contract.md`. It stays under the contract size cap on purpose: the previous version was 500
-lines, always loaded, and its rules decayed within days — one was violated three
-days after being written.
 
-## The questions queue
+## State and liveness details
 
-`src/questions.ts` + `src/questions-store.ts`: the durable captain-facing
-decision queue — the `ask_captain` tool and the `/questions` review command.
-It registers from the deck-v2 extension only, so it exists exactly where the
-orchestrator runs and nowhere else; worker `pi -p` sessions never surface a
-competing question dialog. (Its previous life as a globally installed
-extension put it in every pi session on the machine, and the queue filled
-with ghost questions from dead sessions.)
+- `run_epoch` fences local state only. Irreversible actions use a claim and a
+  pending receipt written before the action.
+- Landing is proved by the squash commit on the base branch, not only by a
+  closed or merged pull-request flag.
+- Status files are event logs. `working:` is not progress and silence alone is
+  not failure.
+- Staleness is based on worktree and session-transcript activity since the
+  current run started. Status-line writes do not count as work.
+- Wake delivery is at least once through a durable outbox. A read cannot double
+  as acknowledgement because a failed injection would otherwise lose the event.
 
-The queue lives at `~/.deck/questions/queue.jsonl` (`DECK_QUESTIONS_FILE`
-overrides it for tests). One append-only JSONL event log, folded on read;
-first answer wins; delivery sends before it marks. On session start the store
-imports still-open questions from the legacy `~/.pi/agent/questions/` queue
-once, then purges answered and stale (>7d) entries to `archive.jsonl` beside
-the queue. Open questions show in the statusline as `Nq` next to the task
-count, and in the `/fleet` overlay header.
+## Development
 
-The opt-in real smoke spans two pi processes sharing only the queue file:
+From this directory:
 
-```bash
-cd v2
-bun run smoke/run-questions-smoke.ts
+```sh
+bun test test/
+bun run typecheck
 ```
 
-## The home is not a checkout
-
-`~/.deck` holds `data/` and `state/`. It is deliberately a plain directory, not a
-git repo, and the code refuses to run if you point it at one. Two reasons, both
-learned the hard way: a checkout brings its own `AGENTS.md`, which the agent then
-loads instead of its contract; and live state inside a working tree can get
-rebased out from under a running fleet.
-
-## Things worth knowing if you read the code
-
-- `run_epoch` fences local state only. An epoch grants the right to *start*
-  something; it cannot un-land a push, so irreversible operations use a claim plus
-  a pending receipt instead.
-- Do not infer landing from a pull request's closed or unmerged state. Landing
-  is confirmed by finding the squash commit on the base branch. Trusting only
-  the merged flag can discard work that had actually shipped.
-- Statuses are events, not state. `working:` is not progress, silence is not
-  failure, and `paused:` means deliberately waiting.
-- A live run is judged stuck by SILENCE, not by its budget. The signals are the
-  newest write in the task worktree (node_modules/.git excluded) and the session
-  transcript's mtime and byte growth. A status line is a report about the work,
-  not the work, so its mtime is not activity: a worker looping on a retry can
-  keep appending `working:` while writing nothing. A run still writing is
-  working, however overdue. `DECK_STALE_SILENCE_MS` moves the 10-minute default;
-  the verdict is suppressed with backoff so a standing wedge is not re-reported
-  every cycle, and a suppressed task is rescanned at most once per silence window.
-  `deck-v2 stale` is read-only in both directions: it neither writes suppression
-  nor obeys it, so an inspection always answers with the current verdict. Silence is measured from `run_started`, never from files the
-  previous run left behind: a respawn reuses the worktree, so without that anchor
-  a replacement run inherits the dead run's mtimes and is called stuck at launch.
-- Wake delivery is at-least-once through a durable outbox. Reading the status file
-  advances a cursor, so if that read were also the acknowledgement, a failed
-  injection would lose the event permanently — and a dropped `blocked:` is the
-  worst thing that can happen here.
-
-## Status
-
-Works, and I use it. The pieces here cover spawning, status, wakes, the fleet
-view, teardown safety, and the backlog. It runs alongside the old system rather
-than replacing it outright, with an owner marker deciding which one owns a task.
-
-`bun test` from this directory. Tests are deliberately not one-per-change: each is
-supposed to go red on the behavior it replaced, and several were written by
-reintroducing the original bug to prove they do.
+Tests defend contracts and regressions rather than mirroring each source file.

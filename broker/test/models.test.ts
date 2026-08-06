@@ -45,7 +45,7 @@ describe("default allowlist covers the full catalog", () => {
 
 	test(":fast rejects non-OpenAI models", () => {
 		const index = buildModelIndex(DEFAULT_ALLOWLIST);
-		expect(() => parseFastModel("anthropic/claude-haiku-4-5:fast", index.resolve)).toThrow(":fast is supported only for OpenAI models");
+		expect(() => parseFastModel("anthropic/claude-haiku-4-5:fast", index.resolve)).toThrow(":fast requires a ChatGPT OAuth model");
 	});
 
 	test("an explicit allowlist argument still tightens down", () => {

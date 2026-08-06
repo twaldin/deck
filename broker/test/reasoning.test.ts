@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import registerDeckProvider from "../pi/deck-provider";
+import registerDeckProvider from "../prime/deck-provider";
 import { clampReasoning, nativeReasoning, NATIVE_REASONING_LEVELS, supportedReasoning } from "../src/reasoning";
 
 describe("native reasoning passthrough", () => {
@@ -24,7 +24,7 @@ describe("native reasoning passthrough", () => {
 		expect(nativeReasoning("anthropic", "high")).toEqual({ provider: "anthropic", thinking: { type: "enabled", budget_tokens: 16384 } });
 	});
 
-	test("clamps unsupported named levels down like Pi", () => {
+	test("clamps unsupported named levels downward", () => {
 		expect(clampReasoning("max", supportedReasoning("gpt-5.5", "openai"))).toBe("xhigh");
 		expect(clampReasoning("xhigh", ["low", "high"])).toBe("high");
 		expect(clampReasoning("max", supportedReasoning("gpt-5.6-sol", "openai"))).toBe("max");
@@ -41,6 +41,22 @@ describe("native reasoning passthrough", () => {
 		expect(grok?.thinkingLevelMap?.xhigh).toBe("xhigh");
 		expect(supportedReasoning("grok-4.5", "xai")).toEqual(["low", "medium", "high"]);
 		expect(clampReasoning("xhigh", supportedReasoning("grok-4.5", "xai"))).toBe("high");
+	});
+
+	test("opts only the documented Deck models into Prime Fast capability", () => {
+		let registered: { models: Array<{ id: string; supportsFastMode?: boolean }> } | undefined;
+		registerDeckProvider({ registerProvider: (_name, config) => { registered = config as typeof registered; } });
+		const fastModels = registered?.models
+			.filter(model => model.supportsFastMode)
+			.map(model => model.id)
+			.sort();
+		expect(fastModels).toEqual([
+			"gpt-5.4",
+			"gpt-5.5",
+			"gpt-5.6-luna",
+			"gpt-5.6-sol",
+			"gpt-5.6-terra",
+		]);
 	});
 
 	test("publishes the provider catalog surface", () => {

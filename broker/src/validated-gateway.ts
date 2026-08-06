@@ -1,12 +1,36 @@
-import { startFastGateway, type FastGatewayOptions } from "./fast-gateway";
+import { randomUUID } from "node:crypto";
+import { ARTIFACT_REQUEST_ID_HEADER, startFastGateway, type FastGateway, type FastGatewayOptions } from "./fast-gateway";
+import { FastUsageResponseObserver, type FastUsageAttribution, type FastUsageSummary } from "./fast-usage";
 import { DEFAULT_GATEWAY_BIND } from "./paths";
 import { buildModelIndex } from "./models";
 import { clampReasoning, nativeReasoning, supportedReasoning, type ReasoningEffort } from "./reasoning";
 import { routeModel, NoQuotaError, routingProvider, type QuotaModel } from "./quota";
+import {
+	ArtifactProvenanceRegistry,
+	recordResponseArtifactProvenance,
+	sanitizeAnthropicThinking,
+	SseArtifactProvenanceObserver,
+	sanitizeOpenAIEncryptedArtifacts,
+	type ArtifactProvenance,
+	type ArtifactRoute,
+	type ArtifactSafetyEvent,
+} from "./artifact-safety";
 
-type GatewayUpstream = { url: string; close(): Promise<void> };
+type GatewayUpstream = {
+	url: string;
+	close(): Promise<void>;
+	pinRequestCredential?: FastGateway["pinRequestCredential"];
+	unpinRequestCredential?: FastGateway["unpinRequestCredential"];
+};
 type StartUpstream = (options: FastGatewayOptions) => GatewayUpstream;
+interface ArtifactStorageView {
+	pinSessionOAuthAccount?: (provider: string, sessionId: string, credentialId: number) => boolean;
+}
 type FetchLike = (input: URL | string, init?: RequestInit) => Promise<Response>;
+
+function isObject(value: unknown): value is Record<string, unknown> {
+	return value !== null && typeof value === "object" && !Array.isArray(value);
+}
 
 function gatewayBind(bind: string): { hostname: string; port: number } {
 	const separator = bind.lastIndexOf(":");
@@ -146,6 +170,63 @@ function lastFrameEnd(buffer: Uint8Array): number {
  * degrading to the old splice risk beats growing without bound.
  */
 const MAX_PENDING_FRAME_BYTES = 1 << 20;
+const MAX_TRACKED_JSON_RESPONSE_BYTES = 8 << 20;
+
+/**
+ * Observe a JSON response without delaying or rewriting it. Provenance is
+ * recorded before the client sees EOF, so a turn submitted immediately after
+ * `response.json()` can safely resolve every artifact it replays.
+ */
+function trackJsonResponseArtifacts(
+	response: Response,
+	resolveProvenance: () => ArtifactProvenance | undefined,
+	registry: ArtifactProvenanceRegistry,
+	observePayload?: (payload: unknown) => void,
+	onComplete?: () => void,
+): Response {
+	const body = response.body;
+	if (body === null) return response;
+	const reader = body.getReader();
+	const decoder = new TextDecoder();
+	let captured = "";
+	let captureEnabled = true;
+	const tracked = new ReadableStream<Uint8Array>({
+		async pull(controller) {
+			try {
+				const { done, value } = await reader.read();
+				if (done) {
+					if (captureEnabled) {
+						captured += decoder.decode();
+						try {
+							const payload: unknown = JSON.parse(captured);
+							const provenance = resolveProvenance();
+							if (provenance !== undefined) recordResponseArtifactProvenance(payload, provenance, registry);
+							observePayload?.(payload);
+							onComplete?.();
+						} catch {
+							// The client still receives the upstream bytes unchanged.
+						}
+					}
+					reader.releaseLock();
+					controller.close();
+					return;
+				}
+				if (captureEnabled) {
+					captured += decoder.decode(value, { stream: true });
+					if (captured.length > MAX_TRACKED_JSON_RESPONSE_BYTES) {
+						captured = "";
+						captureEnabled = false;
+					}
+				}
+				controller.enqueue(value);
+			} catch (error) {
+				controller.error(error);
+			}
+		},
+		cancel: reason => reader.cancel(reason),
+	});
+	return new Response(tracked, { status: response.status, statusText: response.statusText, headers: response.headers });
+}
 
 function concat(a: Uint8Array, b: Uint8Array): Uint8Array {
 	const out = new Uint8Array(a.length + b.length);
@@ -169,7 +250,11 @@ function concat(a: Uint8Array, b: Uint8Array): Uint8Array {
  * mid-stream failure on those anyway: it strips content-length, always chunks,
  * and ends the chunked body cleanly even when the source stream errors.
  */
-function guardStreamedBody(response: Response): Response {
+function guardStreamedBody(
+	response: Response,
+	observeFrames?: (frames: Uint8Array) => void,
+	onComplete?: () => void,
+): Response {
 	const body = response.body;
 	if (body === null) return response;
 	if (!(response.headers.get("content-type") ?? "").includes("text/event-stream")) return response;
@@ -193,6 +278,7 @@ function guardStreamedBody(response: Response): Response {
 					if (pending.length > 0) controller.enqueue(pending);
 					pending = new Uint8Array(0);
 					reader.releaseLock();
+					onComplete?.();
 					controller.close();
 					return;
 				}
@@ -212,8 +298,10 @@ function guardStreamedBody(response: Response): Response {
 					pending = buffer;
 					return; // Nothing complete yet; pull again.
 				}
+				const complete = buffer.subarray(0, boundary);
 				pending = buffer.subarray(boundary);
-				controller.enqueue(buffer.subarray(0, boundary));
+				observeFrames?.(complete);
+				controller.enqueue(complete);
 			} catch (error) {
 				// Drop `pending`: it is a frame the upstream never finished.
 				pending = new Uint8Array(0);
@@ -227,6 +315,28 @@ function guardStreamedBody(response: Response): Response {
 	return new Response(guarded, { status: response.status, statusText: response.statusText, headers: response.headers });
 }
 
+async function attachFastUsageSummary(response: Response, summary: FastUsageSummary): Promise<Response> {
+	const body = await response.text();
+	const headers = new Headers(response.headers);
+	headers.delete("content-length");
+	headers.delete("content-encoding");
+	let output = body;
+	try {
+		const payload: unknown = JSON.parse(body);
+		if (isObject(payload) && Array.isArray(payload.reports)) {
+			headers.set("content-type", "application/json; charset=utf-8");
+			output = JSON.stringify({ ...payload, fastTier: summary });
+		}
+	} catch {
+		// Preserve a non-JSON upstream response byte-for-byte after text decoding.
+	}
+	return new Response(output, {
+		status: response.status,
+		statusText: response.statusText,
+		headers,
+	});
+}
+
 export function startValidatedGateway(
 	options: FastGatewayOptions,
 	startUpstream: StartUpstream = startFastGateway,
@@ -236,6 +346,12 @@ export function startValidatedGateway(
 	const quotaAccounts = options.quotaAccounts;
 	const modelIndex = buildModelIndex();
 	const warnedReasoningClamps = new Set<string>();
+	const artifactProvenance = new ArtifactProvenanceRegistry();
+	const emitArtifactEvent = (event: ArtifactSafetyEvent): void => console.warn(JSON.stringify(event));
+	const observedSessionPins = new Map<string, string>();
+	// AuthStorage owns these APIs, but FastGatewayOptions intentionally exposes
+	// only its broader storage type. Keep the narrowed integration view named.
+	const artifactStorage = options.storage as unknown as ArtifactStorageView;
 	const { hostname, port } = gatewayBind(options.bind ?? DEFAULT_GATEWAY_BIND);
 	const server = Bun.serve({
 		hostname,
@@ -245,8 +361,12 @@ export function startValidatedGateway(
 			const url = new URL(request.url);
 			let requestBody: { model?: string } | undefined;
 			let forwardBody: string | undefined;
+			let artifactRoute: ArtifactRoute | undefined;
+			let artifactAccountPinned = false;
+			let artifactRequestId: string | undefined;
+			let fastUsageAttribution: FastUsageAttribution | undefined;
 			if (request.method === "POST" && ["/v1/chat/completions", "/v1/messages", "/v1/responses"].includes(url.pathname)) {
-				let body: { model?: string; reasoning_effort?: string; reasoning?: { effort?: string }; thinking?: { type?: string; budget_tokens?: number }; prompt_cache_key?: string };
+				let body: Record<string, unknown> & { model?: string; service_tier?: string; reasoning_effort?: string; reasoning?: { effort?: string }; thinking?: { type?: string; budget_tokens?: number }; prompt_cache_key?: string };
 				try {
 					body = await request.json() as typeof body;
 					const modelParts = body.model?.split("/") ?? [];
@@ -257,17 +377,69 @@ export function startValidatedGateway(
 						const requested: QuotaModel = { id: modelParts.at(-1) ?? body.model, provider };
 						try {
 							const routed = routeModel(requested, quotaAccounts(), options.quotaPreferences?.() ?? [], options.onQuotaEvent);
-							if (routed.fallback !== undefined) body.model = `${routed.model.provider}/${routed.model.id}`;
+							const resolvedProvider = routed.account.authProvider ?? routed.model.provider;
+							body.model = `${resolvedProvider}/${routed.model.id}`;
 							// AuthStorage uses the request session key for sticky OAuth routing.
 							// Pin the selected account before the upstream parses the request.
 							const sessionId = typeof body.prompt_cache_key === "string" ? body.prompt_cache_key : `deck-route:${routed.model.provider}:${routed.model.id}`;
+							const authProvider = routed.account.authProvider ?? routed.model.provider;
 							body.prompt_cache_key = sessionId;
-							if (typeof (options.storage as unknown as { pinSessionOAuthAccount?: unknown })?.pinSessionOAuthAccount === "function") {
-								(options.storage as unknown as { pinSessionOAuthAccount: (provider: string, sessionId: string, credentialId: number) => boolean }).pinSessionOAuthAccount(routed.account.authProvider ?? routed.model.provider, sessionId, routed.account.credentialId);
+							if (artifactStorage.pinSessionOAuthAccount !== undefined) {
+								const pinned = artifactStorage.pinSessionOAuthAccount(authProvider, sessionId, routed.account.credentialId);
+								if (pinned) {
+									artifactAccountPinned = true;
+									const pinKey = `${authProvider}:${sessionId}`;
+									const pinValue = `${routed.model.id}:${routed.account.credentialId}`;
+									if (observedSessionPins.get(pinKey) !== pinValue) {
+										console.warn(JSON.stringify({
+											type: "reasoning-artifact-safety",
+											action: "pin",
+											provider: authProvider,
+											sessionId,
+											model: routed.model.id,
+											credentialId: routed.account.credentialId,
+										}));
+										observedSessionPins.delete(pinKey);
+										observedSessionPins.set(pinKey, pinValue);
+										if (observedSessionPins.size > 4096) {
+											const oldest = observedSessionPins.keys().next().value;
+											if (oldest !== undefined) observedSessionPins.delete(oldest);
+										}
+									}
+								}
 							}
+							artifactRoute = {
+								model: routed.model.id,
+								credentialId: routed.account.credentialId,
+								authProvider,
+								sessionId,
+							};
 						} catch (error) {
 							if (error instanceof NoQuotaError) return Response.json({ error: { code: error.code, type: "quota_exhausted", message: error.message, provider: error.provider, retry_after_ms: error.retryAfterMs ?? null } }, { status: 503 });
 							throw error;
+						}
+					}
+					const safetyModelParts = body.model?.split("/") ?? [];
+					const safetyRoute = artifactRoute !== undefined && artifactAccountPinned && upstream.pinRequestCredential !== undefined
+						? artifactRoute
+						: {
+							model: artifactRoute?.model ?? safetyModelParts.at(-1) ?? body.model ?? "unknown",
+							credentialId: -1,
+							authProvider: artifactRoute?.authProvider ?? safetyModelParts.at(-2) ?? "unknown",
+							sessionId: artifactRoute?.sessionId ?? (typeof body.prompt_cache_key === "string" ? body.prompt_cache_key : "unknown"),
+						};
+					if (url.pathname === "/v1/responses") {
+						sanitizeOpenAIEncryptedArtifacts(body, safetyRoute, artifactProvenance, emitArtifactEvent);
+					} else if (url.pathname === "/v1/messages") {
+						const sanitized = sanitizeAnthropicThinking(body, safetyRoute, artifactProvenance, emitArtifactEvent);
+						if (!sanitized.ok) {
+							return Response.json({
+								error: {
+									code: "ARTIFACT_PROVENANCE_MISMATCH",
+									type: "invalid_request_error",
+									message: sanitized.message,
+								},
+							}, { status: 409 });
 						}
 					}
 					const reasoningParts = body.model?.split("/") ?? [];
@@ -304,6 +476,19 @@ export function startValidatedGateway(
 						const nativeThinking = nativeReasoning("anthropic", `budget:${body.thinking.budget_tokens ?? ""}`);
 						if ("thinking" in nativeThinking) body.thinking = nativeThinking.thinking;
 					}
+					const usageModelParts = body.model?.split("/") ?? [];
+					const usageModel = usageModelParts.at(-1);
+					if (usageModel !== undefined) {
+						fastUsageAttribution = {
+							provider: artifactRoute?.authProvider
+								?? usageModelParts.at(-2)
+								?? (usageModel.startsWith("claude-") ? "anthropic" : usageModel.startsWith("grok-") ? "xai" : "openai-codex"),
+							model: usageModel,
+							credentialId: artifactRoute?.credentialId,
+							sessionId: artifactRoute?.sessionId ?? body.prompt_cache_key,
+							requestedServiceTier: body.service_tier ?? (usageModel.endsWith(":fast") ? "priority" : undefined),
+						};
+					}
 				} catch (error) {
 					return Response.json({ error: { type: "invalid_request_error", message: error instanceof Error ? error.message : String(error) } }, { status: 400 });
 				}
@@ -315,6 +500,16 @@ export function startValidatedGateway(
 			// body as text would corrupt a binary or multipart upload.
 			const idempotent = request.method === "GET" || request.method === "HEAD";
 			const headers = new Headers(request.headers);
+			if (artifactRoute !== undefined && artifactAccountPinned && upstream.pinRequestCredential !== undefined) {
+				const requestId = randomUUID();
+				upstream.pinRequestCredential(requestId, {
+					provider: artifactRoute.authProvider,
+					sessionId: artifactRoute.sessionId,
+					credentialId: artifactRoute.credentialId,
+				});
+				headers.set(ARTIFACT_REQUEST_ID_HEADER, requestId);
+				artifactRequestId = requestId;
+			}
 			let init: RequestInit;
 			if (forwardBody === undefined) {
 				init = new Request(request, { headers }) as RequestInit;
@@ -324,13 +519,23 @@ export function startValidatedGateway(
 				headers.delete("content-encoding");
 				init = { method: request.method, headers, body: forwardBody };
 			}
-			const response = await forwardWithRetry(
-				target,
-				init,
-				{ replayable: forwardBody !== undefined || idempotent, idempotent },
-				upstreamFetch,
-				ms => Bun.sleep(ms),
-			);
+			let response: Response;
+			try {
+				response = await forwardWithRetry(
+					target,
+					init,
+					{ replayable: forwardBody !== undefined || idempotent, idempotent },
+					upstreamFetch,
+					ms => Bun.sleep(ms),
+				);
+			} catch (error) {
+				if (artifactRequestId !== undefined) upstream.unpinRequestCredential?.(artifactRequestId);
+				throw error;
+			}
+			if (artifactRequestId !== undefined) upstream.unpinRequestCredential?.(artifactRequestId);
+			if (request.method === "GET" && url.pathname === "/v1/usage" && response.ok && options.fastUsageMonitor !== undefined) {
+				return attachFastUsageSummary(response, options.fastUsageMonitor.summary());
+			}
 			if (response.status === 429 && quotaAccounts !== undefined && requestBody?.model !== undefined) {
 				const parts = requestBody.model.split("/");
 				const provider = routingProvider(parts.at(-2) ?? (parts.at(-1)?.startsWith("claude-") ? "anthropic" : parts.at(-1)?.startsWith("grok-") ? "xai" : "openai-codex"));
@@ -344,9 +549,50 @@ export function startValidatedGateway(
 				}
 				// A provider 429 is a quota signal. Do not expose it as a retryable
 				// gateway response while AuthStorage records the cooling block.
+				await response.body?.cancel();
 				return Response.json({ error: { code: "NO_QUOTA", type: "quota_exhausted", message: `no quota is available for provider ${requested.provider}`, provider: requested.provider, retry_after_ms: retryAfterMs ?? null } }, { status: 503 });
 			}
-			return guardStreamedBody(response);
+			const attributionIsPinned = artifactRoute === undefined
+				|| (artifactAccountPinned && upstream.pinRequestCredential !== undefined);
+			const usageObserver = response.ok
+				&& attributionIsPinned
+				&& fastUsageAttribution !== undefined
+				&& options.fastUsageMonitor !== undefined
+				? new FastUsageResponseObserver(options.fastUsageMonitor, fastUsageAttribution)
+				: undefined;
+			let responseProvenance: ArtifactProvenance | undefined;
+			if (response.ok && artifactRoute !== undefined && attributionIsPinned) {
+				// pinRequestCredential serializes this logical session until the
+				// response body ends and makes every inner auth retry resolve only
+				// the selected OAuth row. The producing account is therefore
+				// immutable rather than inferred from later session state.
+				responseProvenance = {
+					model: artifactRoute.model,
+					credentialId: artifactRoute.credentialId,
+				};
+			}
+			const contentType = response.headers.get("content-type") ?? "";
+			let observeFrames: ((frames: Uint8Array) => void) | undefined;
+			if (contentType.includes("text/event-stream")) {
+				const artifactObserver = responseProvenance === undefined
+					? undefined
+					: new SseArtifactProvenanceObserver(() => responseProvenance, artifactProvenance);
+				if (artifactObserver !== undefined || usageObserver !== undefined) {
+					observeFrames = frames => {
+						artifactObserver?.observe(frames);
+						usageObserver?.observeSseFrames(frames);
+					};
+				}
+			} else if (contentType.includes("json") && (responseProvenance !== undefined || usageObserver !== undefined)) {
+				response = trackJsonResponseArtifacts(
+					response,
+					() => responseProvenance,
+					artifactProvenance,
+					payload => usageObserver?.observe(payload),
+					() => usageObserver?.complete(),
+				);
+			}
+			return guardStreamedBody(response, observeFrames, () => usageObserver?.complete());
 		},
 	});
 	return { url: `http://${hostname}:${server.port}`, close: async () => { server.stop(); await upstream.close(); }, port: server.port, hostname };

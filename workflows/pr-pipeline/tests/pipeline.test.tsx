@@ -24,7 +24,8 @@ import { loadProfiles, type ProjectProfile } from "../lib/profiles.ts";
 import { falloutPrompt, localFixPrompt, localReviewPrompt, reviewersDecisionPrompt } from "../lib/prompts.ts";
 import { resolveAdversary } from "../lib/models.ts";
 import { isSchemaEcho, schemaEchoCorrection } from "../lib/schema-echo.ts";
-import { resolveHostPiBinary } from "../lib/host-pi.ts";
+import type { PipelineOutputFixtures } from "./output-fixtures.ts";
+import { PrimeSeatAgent } from "../lib/engines/prime.ts";
 
 const validBrief = {
 	ticket: "LIN-123",
@@ -65,8 +66,8 @@ const baseInput = {
 	branch: "fm/lin-123",
 	brief: validBrief,
 	dryRun: true,
+	wakeDryRun: true,
 };
-
 const fixtureProfiles: ProjectProfile[] = [
 	{
 		id: "deck",
@@ -88,15 +89,29 @@ const fixtureProfiles: ProjectProfile[] = [
 		knowledge: [],
 		depsWarm: true,
 	},
+	{
+		id: "acme-api",
+		repo: "acme/api",
+		primary: "/tmp/acme-api",
+		pipeline: "yolo-ship",
+		yolo: true,
+		stamp: false,
+		production: true,
+		knowledge: [],
+		depsWarm: true,
+	},
 ];
 
 let savedDeckHome: string | undefined;
 let savedProcessHome: string | undefined;
+let savedDevWorkspaceOverride: string | undefined;
 beforeAll(() => {
 	savedDeckHome = process.env.DECK_V2_HOME;
 	savedProcessHome = process.env.HOME;
+	savedDevWorkspaceOverride = process.env.DECK_DEV_WORKSPACE_OK;
 	process.env.DECK_V2_HOME = testHome;
 	process.env.HOME = testHome;
+	process.env.DECK_DEV_WORKSPACE_OK = "1";
 	fs.mkdirSync(path.join(testHome, "config"), { recursive: true });
 	fs.writeFileSync(path.join(testHome, "config", "projects.json"), JSON.stringify(fixtureProfiles));
 });
@@ -105,6 +120,8 @@ afterAll(() => {
 	else process.env.DECK_V2_HOME = savedDeckHome;
 	if (savedProcessHome === undefined) delete process.env.HOME;
 	else process.env.HOME = savedProcessHome;
+	if (savedDevWorkspaceOverride === undefined) delete process.env.DECK_DEV_WORKSPACE_OK;
+	else process.env.DECK_DEV_WORKSPACE_OK = savedDevWorkspaceOverride;
 	fs.rmSync(testHome, { recursive: true, force: true });
 });
 
@@ -145,7 +162,7 @@ describe("workflow rendering contracts", () => {
 		profile: Record<string, unknown>,
 		inputModels: Record<string, unknown> | null | undefined,
 		repo: string,
-	): Promise<{ seats: Record<string, { model: string; thinking: string }>; model: string; thinking: string }> {
+	): Promise<{ seats: Record<string, { engine: string; model: string; thinking: string }>; model: string; thinking: string }> {
 		const savedHome = process.env.DECK_V2_HOME;
 		const home = fs.mkdtempSync(path.join(os.tmpdir(), "deck-pipeline-models-"));
 		try {
@@ -164,22 +181,26 @@ describe("workflow rendering contracts", () => {
 							resolvedReviewerModel: "deck/claude-fable-5",
 						},
 					],
-				},
+				} satisfies PipelineOutputFixtures,
 				workflowPath: path.join(import.meta.dir, "..", "pipeline.tsx"),
 			});
-			const seats: Record<string, { model: string; thinking: string }> = {};
+			const seats: Record<string, { engine: string; model: string; thinking: string }> = {};
 			for (const task of rendered.tasks) {
 				const agent = task.agent;
 				if (agent !== undefined) {
-					expect(Array.isArray(agent)).toBe(false);
+					if (Array.isArray(agent)) throw new Error(`unexpected agent chain on ${task.nodeId}`);
+					const opts = "opts" in agent && agent.opts !== null && typeof agent.opts === "object"
+						? agent.opts
+						: {};
 					seats[task.nodeId] = {
-						model: String((agent as unknown as { model: string }).model),
-						thinking: String((agent as { opts?: { thinking?: string }; thinking?: string }).opts?.thinking ?? (agent as { thinking?: string }).thinking ?? ""),
+						engine: "cliEngine" in agent ? String(agent.cliEngine) : "",
+						model: "model" in agent ? String(agent.model) : "",
+						thinking: "thinking" in opts ? String(opts.thinking ?? "") : "",
 					};
 				}
 			}
 			const implementer = seats.implement;
-			return { seats, model: implementer.model, thinking: implementer.thinking };
+			return { seats, model: implementer?.model ?? "", thinking: implementer?.thinking ?? "" };
 		} finally {
 			if (savedHome === undefined) delete process.env.DECK_V2_HOME;
 			else process.env.DECK_V2_HOME = savedHome;
@@ -201,9 +222,16 @@ describe("workflow rendering contracts", () => {
 		expect(policy.reasoningReviewer).toBe("xhigh");
 		expect(policy.reasoningWatcher).toBe("high");
 		expect(policy.reasoningFallout).toBe("high");
+		expect(policy.reasoningMechanical).toBe("high");
+		const overridden = buildModelPolicy({
+			...profileBase,
+			pipeline: "lindy-full",
+			models: { reasoning: "low" },
+		} as ProjectProfile, false, { reasoningMechanical: "xhigh" });
+		expect(overridden.reasoningMechanical).toBe("xhigh");
 	});
 
-	test("profile reasoning reaches the rendered PiAgent seat", async () => {
+	test("profile reasoning reaches the rendered Prime seat", async () => {
 		const rendered = await renderWithProfile({ ...profileBase, models: { ...fullModels, reasoning: "max" } }, undefined, "example/test");
 		expect(rendered.model).toBe("claude-fable-5");
 		expect(rendered.thinking).toBe("max");
@@ -213,12 +241,35 @@ describe("workflow rendering contracts", () => {
 		expect(rendered.seats["implement"]?.model).toBe("claude-fable-5");
 	});
 
+	test("omitted and explicit profile engines both construct Prime seats", async () => {
+		for (const profile of [
+			{ ...profileBase, models: fullModels },
+			{ ...profileBase, engine: "prime" as const, models: fullModels },
+		]) {
+			const rendered = await renderWithProfile(profile, undefined, "example/test");
+			expect(rendered.seats.implement).toMatchObject({
+				engine: "prime",
+				model: "claude-fable-5",
+				thinking: "xhigh",
+			});
+		}
+	});
+
+	test("invalid Prime model policy renders the preflight refusal path without constructing a seat", async () => {
+		const invalid = await renderWithProfile(
+			{ ...profileBase, models: { ...fullModels, implementer: "deck/not-a-model" } },
+			undefined,
+			"example/test",
+		);
+		expect(invalid.seats.implement).toBeUndefined();
+	});
+
 	test.each([
 		["full profile models", { ...profileBase, models: fullModels }, undefined, "example/test", "claude-fable-5"],
-		["missing profile models", profileBase, undefined, "example/test", "gpt-5.6-luna"],
-		["null profile models", { ...profileBase, models: null }, null, "example/test", "gpt-5.6-luna"],
+		["missing profile models", profileBase, undefined, "example/test", "gpt-5.6-sol"],
+		["null profile models", { ...profileBase, models: null }, null, "example/test", "gpt-5.6-sol"],
 		["partial profile models with input models", { ...profileBase, models: { implementer: "deck/claude-fable-5" } }, { watcher: "deck/gpt-5.6-sol" }, "example/test", "claude-fable-5"],
-		["repo-mismatched profile", { ...profileBase, models: fullModels }, { implementer: "deck/claude-sonnet-5" }, "other/repo", "gpt-5.6-luna"],
+		["repo-mismatched profile", { ...profileBase, models: fullModels }, { implementer: "deck/claude-sonnet-5" }, "other/repo", "gpt-5.6-sol"],
 	] as const)("renders with %s", async (_name, profile, inputModels, repo, expectedImplementer) => {
 		expect((await renderWithProfile(profile, inputModels, repo)).model).toBe(expectedImplementer);
 	});
@@ -242,33 +293,34 @@ describe("fallout prompt rendering contracts", () => {
 		expect(prompt).not.toContain("[object Object]");
 	});
 
-	test("renders every configured PiAgent seat with its profile reasoning", async () => {
+	test("renders every configured PrimeSeatAgent with its profile reasoning", async () => {
 		const rendered = await renderWorkflow(pipeline, {
 			input: {
 				...baseInput,
 				dryRun: false,
 				wakeDryRun: true,
 				profile: "test",
-				models: { implementer: "deck/claude-fable-5", watcher: "deck/gpt-5.6-luna", fallout: "deck/gpt-5.6-sol", familyOpposition: true, oppositionDefaults: { anthropic: "deck/gpt-5.6-luna" }, reasoning: "high", reasoningReviewer: "xhigh", reasoningWatcher: "low", reasoningFallout: "max" },
+				models: { implementer: "deck/gpt-5.6-sol", watcher: "deck/gpt-5.6-luna", fallout: "deck/gpt-5.6-sol", familyOpposition: true, oppositionDefaults: { openai: "deck/claude-fable-5" }, reasoning: "high", reasoningReviewer: "xhigh", reasoningWatcher: "low", reasoningFallout: "max" },
 			},
 			outputs: {
 				preflight: [{ nodeId: "preflight", ok: true, openQuestions: [], briefDigest: "", resolvedReviewerModel: "deck/claude-fable-5" }],
 				implementation: [{ nodeId: "implement", commits: ["fix"], summary: "fixed", testEvidence: "green" }],
-				localReview: [{ nodeId: "local-review", round: 0, approved: true, blockingFindings: [], nits: [] }],
+				localReview: [{ nodeId: "local-review", round: 0, approved: true, blockingFindings: [], nits: [], summary: "approved" }],
 				prRecord: [{ nodeId: "push-pr", prNumber: 80, url: "https://github.com/lindy-ai/lindy/pull/80", headSha: "abc123", baseBranch: "main", watchSetRegistered: true, watchSetPath: "", receipt: "", createdAt: "2026-08-01T00:00:00.000Z" }],
 				reviewerRequest: [{ nodeId: "request-reviewers", skipped: false, requested: ["reviewer"], verified: ["reviewer"], source: "test", at: "2026-08-01T00:00:00.000Z", reviewerPrompt: "" }],
-				watchPoll: [{ nodeId: "r0-watch-poll", round: 0, poll: 0, headSha: "abc123", exitOk: false, disposition: "fix", actionable: true, ci: "red", unresolvedThreads: 1, unansweredComments: 1, reviewersToReRequest: ["reviewer"], reasons: ["unresolved thread"] }],
+				watchPoll: [{ nodeId: "r0-watch-poll", round: 0, poll: 0, headSha: "abc123", exitOk: false, disposition: "fix", actionable: true, ci: "red", unresolvedThreads: 1, unansweredComments: 1, reviewersToReRequest: ["reviewer"], reasons: ["unresolved thread"], rebaseRequired: false }],
+				watchBaseline: [{ nodeId: "r0-watch-baseline", round: 0, afterPoll: 0, headSha: "abc123", valid: true, reason: "test worktree matches polled head" }],
 				readyPoll: [{ nodeId: "r0-ready-poll", round: 0, poll: 0, ready: true, regressed: false, approvedBy: "reviewer", ci: "green", headSha: "abc123", reasons: [], migrationDetected: false, migrationFiles: [], at: "2026-08-01T00:00:00.000Z" }],
 				approvals: [{ nodeId: "r0-stamp", approved: true, note: "ok", decidedBy: "test", decidedAt: "2026-08-01T00:00:00.000Z" }],
 				stampValidity: [{ nodeId: "r0-stamp-validity", round: 0, stampedHead: "abc123", currentHead: "abc123", valid: true, checkedAt: "2026-08-01T00:00:00.000Z" }],
-				mergeHeadCheck: [{ nodeId: "r0-merge-head-check", round: 0, expectedHead: "abc123", currentHead: "abc123", ok: true, checkedAt: "2026-08-01T00:00:00.000Z" }],
+				mergeHeadCheck: [{ nodeId: "r0-merge-head-check", round: 0, expectedHead: "abc123", currentHead: "abc123", ok: true, diffSummary: "head unchanged", checkedAt: "2026-08-01T00:00:00.000Z", submittedAt: "2026-08-01T00:00:00.000Z", receipt: "queued", alreadyLanded: false, mergePath: "dry-run" }],
 				mergeReceipt: [{ nodeId: "enqueue-merge", round: 0, submittedAt: "2026-08-01T00:00:00.000Z", receipt: "queued", alreadyLanded: false, mergePath: "dry-run" }],
-				queuePoll: [{ nodeId: "queue-poll", poll: 0, state: "closed", autoMergeRequest: true, ejected: false, reason: "landed" }],
+				queuePoll: [{ nodeId: "queue-poll", poll: 0, state: "closed", baseBranch: "main", autoMergeRequest: true, ejected: false, reason: "landed" }],
 				landingPoll: [{ nodeId: "landing-poll", poll: 0, landed: true, sha: "squash-sha", subject: "landed" }],
 				deployEvidence: [{ nodeId: "deploy-evidence", evidence: "deployed", deployedAt: "2026-08-01T00:00:00.000Z" }],
 				falloutWindow: [{ nodeId: "fallout-window", windowStart: "2026-08-01T00:00:00.000Z", windowEnd: "2026-08-01T01:00:00.000Z" }],
 				falloutWait: [{ nodeId: "fallout-wait", complete: true, waitedUntil: "2026-08-01T01:00:00.000Z" }],
-			},
+			} satisfies PipelineOutputFixtures,
 			workflowPath: path.join(import.meta.dir, "..", "pipeline.tsx"),
 		});
 		const falloutTask = rendered.tasks.find((task) => task.nodeId === "fallout-watch");
@@ -276,25 +328,20 @@ describe("fallout prompt rendering contracts", () => {
 		const agentsByNode = new Map(
 			rendered.tasks
 				.filter((task) => task.agent !== undefined)
-				.map((task) => [task.nodeId, task.agent as { opts?: { model?: string; thinking?: string } }]),
+				.map((task) => [task.nodeId, task.agent as PrimeSeatAgent]),
 		);
-		expect(agentsByNode.get("implement")?.opts).toMatchObject({ model: "claude-fable-5", thinking: "high" });
+		expect(agentsByNode.get("implement")?.opts).toMatchObject({ model: "gpt-5.6-sol", thinking: "high" });
 		expect(agentsByNode.get("local-review")?.opts).toMatchObject({ model: "claude-fable-5", thinking: "xhigh" });
 		expect(agentsByNode.get("r0-watch-fix")?.opts).toMatchObject({ model: "gpt-5.6-luna", thinking: "low" });
 		expect(agentsByNode.get("fallout-watch")?.opts).toMatchObject({ model: "gpt-5.6-sol", thinking: "max" });
 		expect(agentsByNode.size).toBeGreaterThanOrEqual(4);
-		// Seat-level reasoning threading is a pipeline concern: prove each seat carries
-		// --provider/--model/--thinking into the pi args. The wire mapping of reasoning_effort
-		// to each provider's native field is broker's own concern, proven in
-		// broker/test/validated-gateway.test.ts — do not import broker src here (CI has no broker deps).
-		const expectedThinking: Record<string, string> = { implement: "high", "local-review": "xhigh", "r0-watch-fix": "low", "fallout-watch": "max" };
-		for (const nodeId of ["implement", "local-review", "r0-watch-fix", "fallout-watch"]) {
-			const agent = agentsByNode.get(nodeId) as { opts: { provider: string; model: string; thinking: string }; buildArgs: (input: { prompt: string; cwd: string; mode: string }) => string[]; buildCommand: (input: { prompt: string; cwd: string }) => Promise<{ command: string }> };
-			const args = agent.buildArgs({ prompt: "broker-seat-probe", cwd: "/tmp/lindy-wt", mode: "text" });
-			expect(agent.opts.provider).toBe("deck");
-			expect(agent.opts.thinking).toBe(expectedThinking[nodeId]);
-			expect(args).toEqual(expect.arrayContaining(["--provider", "deck", "--model", agent.opts.model, "--thinking", agent.opts.thinking]));
-			expect(await agent.buildCommand({ prompt: "host-pi-probe", cwd: "/tmp/lindy-wt" })).toMatchObject({ command: resolveHostPiBinary() });
+		const expectedThinking = { implement: "high", "local-review": "xhigh", "r0-watch-fix": "low", "fallout-watch": "max" } as const;
+		for (const nodeId of ["implement", "local-review", "r0-watch-fix", "fallout-watch"] as const) {
+			const agent = agentsByNode.get(nodeId);
+			expect(agent?.constructor.name, nodeId).toBe(PrimeSeatAgent.name);
+			expect(agent?.cliEngine, nodeId).toBe("prime");
+			expect(agent?.opts.provider, nodeId).toBe("deck");
+			expect(agent?.opts.thinking, nodeId).toBe(expectedThinking[nodeId]);
 		}
 		expect(rendered.toXml()).toContain("RATE_LIMIT_ENABLED flag");
 		expect(rendered.toXml()).toContain('{\\"verdict\\":\\"clean|regression\\"');
@@ -311,13 +358,10 @@ describe("reviewer selection contracts", () => {
 		expect(prompt).not.toContain("\\n");
 	});
 
-	test("default ex-employee denylist is configured", () => {
-		expect(DEFAULT_GITHUB.reviewerDenylist).toEqual([
-			"mackcooper1408",
-			"spencer-negri",
-			"daniel-covelli",
-			"akshat-lindy",
-		]);
+	test("reviewer identity defaults are empty and configured per project", () => {
+		expect(DEFAULT_GITHUB.selfLogins).toEqual([]);
+		expect(DEFAULT_GITHUB.excludedApprovers).toEqual([]);
+		expect(DEFAULT_GITHUB.reviewerDenylist).toEqual([]);
 	});
 });
 
@@ -365,11 +409,13 @@ describe("local review contracts", () => {
 		expect(prompt).toContain("Reply with ONLY the result object");
 	});
 
-	test("pipeline prompts name the valid subagent ids and stack fan-out pattern", () => {
+	test("pipeline prompts carry the native RLM depth and model policy", () => {
 		const review = localReviewPrompt(validBrief, "/tmp/wt", "main", 1);
-		expect(review).toContain("worker, worker-gpt, reviewer, reviewer-claude, and scout");
+		expect(review).toContain("Use Prime's native `rlm()`");
+		expect(review).toContain("deck/gpt-5.6-luna at xhigh");
+		expect(review).toContain("deck/claude-fable-5 at high");
+		expect(review).toContain("children are allowed and grandchildren are not");
 		expect(review).toContain("land the schema/base PR first");
-		expect(review).not.toContain("do not use subagents");
 	});
 });
 
@@ -411,10 +457,63 @@ describe("preflight gate", () => {
 		expect(sim.executed).not.toContain("implement");
 	});
 
+	test.each([
+		["the Lindy repo", "lindy-ai/lindy"],
+		["a production profile resolved from the repo", "acme/api"],
+	] as const)("fails at preflight for %s outside the canonical workspace", async (_case, repo) => {
+		const savedOverride = process.env.DECK_DEV_WORKSPACE_OK;
+		delete process.env.DECK_DEV_WORKSPACE_OK;
+		try {
+			const { sim, error } = await run({ ...baseInput, repo, dryRun: false, wakeDryRun: false });
+			expect(sim.status).toBe("failed");
+			expect(String(error)).toContain("PRODUCT WORKSPACE REFUSED");
+			expect(String(error)).toContain("deck ship/adopt/status");
+			expect(sim.executed).toEqual(["workspace-assert"]);
+			expect(sim.executed).not.toContain("preflight");
+			expect(sim.executed).not.toContain("implement");
+			expect(fs.existsSync(path.join(testHome, "state"))).toBe(false);
+		} finally {
+			if (savedOverride === undefined) delete process.env.DECK_DEV_WORKSPACE_OK;
+			else process.env.DECK_DEV_WORKSPACE_OK = savedOverride;
+		}
+	});
+
+	test("does not trust a cached preflight from a product run in the development workspace", async () => {
+		const savedOverride = process.env.DECK_DEV_WORKSPACE_OK;
+		delete process.env.DECK_DEV_WORKSPACE_OK;
+		try {
+			const rendered = await renderWorkflow(pipeline, {
+				input: { ...baseInput, dryRun: false, wakeDryRun: false },
+				outputs: {
+					preflight: [{
+						nodeId: "preflight",
+						ok: true,
+						openQuestions: [],
+						briefDigest: "",
+						resolvedReviewerModel: "deck/claude-fable-5",
+					}],
+				} satisfies PipelineOutputFixtures,
+				workflowPath: path.join(import.meta.dir, "..", "pipeline.tsx"),
+			});
+			expect(rendered.tasks.map((task) => task.nodeId)).toEqual(["workspace-assert"]);
+			expect(fs.existsSync(path.join(testHome, "state"))).toBe(false);
+		} finally {
+			if (savedOverride === undefined) delete process.env.DECK_DEV_WORKSPACE_OK;
+			else process.env.DECK_DEV_WORKSPACE_OK = savedOverride;
+		}
+	});
+
 	test("refuses bypassApprovals without dryRun (no real run can self-approve)", async () => {
-		const { sim, error } = await run({ ...baseInput, dryRun: false, wakeDryRun: true, bypassApprovals: true });
-		expect(sim.status).toBe("failed");
-		expect(String(error)).toContain("bypassApprovals");
+		const savedOverride = process.env.DECK_DEV_WORKSPACE_OK;
+		process.env.DECK_DEV_WORKSPACE_OK = "1";
+		try {
+			const { sim, error } = await run({ ...baseInput, dryRun: false, wakeDryRun: true, bypassApprovals: true });
+			expect(sim.status).toBe("failed");
+			expect(String(error)).toContain("bypassApprovals");
+		} finally {
+			if (savedOverride === undefined) delete process.env.DECK_DEV_WORKSPACE_OK;
+			else process.env.DECK_DEV_WORKSPACE_OK = savedOverride;
+		}
 	});
 
 	test("refuses same-family reviewer when familyOpposition is on", async () => {
@@ -429,7 +528,7 @@ describe("preflight gate", () => {
 
 describe("project profiles (yolo vs stamp is data, not a fork)", () => {
 	test("uses the isolated fixture instead of the operator home", () => {
-		expect(loadProfiles().map((profile) => profile.id)).toEqual(["deck", "lindy"]);
+		expect(loadProfiles().map((profile) => profile.id)).toEqual(["deck", "lindy", "acme-api"]);
 	});
 
 	test("a yolo profile (deck) traverses to done with NO approval bypass: the stamp park is skipped", async () => {
@@ -538,7 +637,7 @@ describe("adopt existing PR (input.existingPr)", () => {
 				preflight: [{ nodeId: "preflight", ok: true, openQuestions: [], briefDigest: "", resolvedReviewerModel: "deck/claude-fable-5" }],
 				implementation: [{ nodeId: "implement", commits: [], summary: "adopted existing PR #777", testEvidence: "dry-run" }],
 				localReview: [{ nodeId: "local-review", round: 0, approved: true, blockingFindings: [], nits: [], summary: "approved" }],
-			},
+			} satisfies PipelineOutputFixtures,
 		});
 		const pushTask = rendered.tasks.find((task) => task.nodeId === "push-pr");
 		expect(pushTask).toBeDefined();
@@ -586,7 +685,7 @@ printf '%s\\n' '${JSON.stringify({ number: 777, html_url: "https://github.com/li
 					adoptBase: [{ nodeId: "adopt-base", baseBranch: "fm/stack-parent" }],
 					implementation: [{ nodeId: "implement", commits: [], summary: "adopted existing PR #777", testEvidence: "CI on the PR" }],
 					localReview: [{ nodeId: "local-review", round: 0, approved: true, blockingFindings: [], nits: [], summary: "approved" }],
-				},
+				} satisfies PipelineOutputFixtures,
 				workflowPath: path.join(import.meta.dir, "..", "pipeline.tsx"),
 			});
 			const pushTask = rendered.tasks.find((task) => task.nodeId === "push-pr");
@@ -616,7 +715,7 @@ printf '%s\\n' '${JSON.stringify({ number: 777, html_url: "https://github.com/li
 					adoptBase: [{ nodeId: "adopt-base", baseBranch: "fm/stack-parent" }],
 					implementation: [{ nodeId: "implement", commits: [], summary: "adopted existing PR #777", testEvidence: "CI on the PR" }],
 					localReview: [{ nodeId: "local-review", round: 0, approved: true, blockingFindings: [], nits: [], summary: "approved" }],
-				},
+				} satisfies PipelineOutputFixtures,
 				workflowPath: path.join(import.meta.dir, "..", "pipeline.tsx"),
 			});
 			const pushTask = rendered.tasks.find((task) => task.nodeId === "push-pr");
@@ -723,15 +822,14 @@ describe("enqueue-merge regressions", () => {
 			prRecord: [{ nodeId: "push-pr", prNumber, url: `https://github.com/lindy-ai/lindy/pull/${prNumber}`, headSha: "abc123", baseBranch, watchSetRegistered: true, watchSetPath: "", receipt: "", createdAt: "2026-08-01T00:00:00.000Z" }],
 			approvals: [{ nodeId: "r0-stamp", approved: true, note: "ok", decidedBy: "test", decidedAt: "2026-08-01T00:00:00.000Z" }],
 			stampValidity: [{ nodeId: "r0-stamp-validity", round: 0, stampedHead: "abc123", currentHead: "abc123", valid: true, checkedAt: "2026-08-01T00:00:00.000Z" }],
-			mergeHeadCheck: [{ nodeId: "r0-merge-head-check", round: 0, expectedHead: "abc123", currentHead: "abc123", ok: true, checkedAt: "2026-08-01T00:00:00.000Z" }],
-		};
+		} satisfies PipelineOutputFixtures;
 	}
 
 	async function renderMergeTask(baseBranch: string, log: string, landed = false) {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "deck-merge-task-"));
 		const git = path.join(dir, "git");
 		const gh = path.join(dir, "gh");
-		fs.writeFileSync(git, `#!/bin/sh\nprintf '%s\\n' \"$*\" >> ${JSON.stringify(log)}\ncase \"$1\" in log) ${landed ? "printf 'squash\\tfix: landed (#42)\\n'" : ":"};; rev-parse) printf 'fm/lin-123\\n';; esac\n`);
+		fs.writeFileSync(git, `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(log)}\ncase "$1" in log) ${landed ? "printf 'squash\\tfix: landed (#42)\\n'" : ":"};; rev-parse) if [ "$2" = "--abbrev-ref" ]; then printf 'fm/lin-123\\n'; else printf 'abc123\\n'; fi;; esac\n`);
 		fs.writeFileSync(gh, `#!/bin/sh
 if [ "$1" = api ] && [ "$3" = --jq ]; then printf 'abc123\\n'
 elif [ "$1" = api ]; then printf '%s\\n' '${JSON.stringify({ number: 42, html_url: "https://github.com/lindy-ai/lindy/pull/42", state: "open", draft: false, head: { ref: "fm/lin-123", sha: "abc123", repo: { full_name: "lindy-ai/lindy" } }, base: { ref: baseBranch } })}'
@@ -744,7 +842,7 @@ else printf 'queued\\n'; fi
 			outputs: mergeTaskOutputs(baseBranch),
 			workflowPath: path.join(import.meta.dir, "..", "pipeline.tsx"),
 		});
-		return { dir, task: rendered.tasks.find((task) => task.nodeId === "enqueue-merge")! };
+		return { dir, task: rendered.tasks.find((task) => task.nodeId === "r0-merge-head-check")! };
 	}
 
 	test("accepts the native GitHub merge queue receipt", () => {
@@ -992,5 +1090,118 @@ describe("full graph traversal (bypassApprovals, dry-run only)", () => {
 		expect(polls.map((poll) => poll.disposition)).toEqual(["wait", "wait", "complete"]);
 		expect(sim.executed.filter((id) => id === "r0-watch-poll")).toHaveLength(3);
 		expect(sim.executed).not.toContain("r0-watch-fix");
+	});
+});
+
+describe("stack graph traversal (bypassApprovals, dry-run only)", () => {
+	const stackInput = {
+		...baseInput,
+		branch: "fm/lin-123-child",
+		bypassApprovals: true,
+		existingPr: null,
+		stack: {
+			specs: [
+				{ branch: "fm/lin-123-parent" },
+				{ branch: "fm/lin-123-child" },
+			],
+		},
+		fixtures: { changedFiles: ["src/feature.ts"] },
+	};
+
+	test("one approval stamps the ordered topology and every merge car is parent first", async () => {
+		const { sim, error } = await run(stackInput);
+		expect(error).toBeUndefined();
+		expect(sim.status).toBe("finished");
+
+		const pushed = (sim.outputs.prRecord as Array<{
+			cars?: Array<{
+				prNumber: number;
+				url: string;
+				branch: string;
+				baseBranch: string;
+				headSha: string;
+				landed: boolean;
+			}>;
+		}>)[0];
+		expect(pushed.cars).toEqual([
+			{ prNumber: 4242, url: "https://github.com/lindy-ai/lindy/pull/4242", branch: "fm/lin-123-parent", baseBranch: "main", headSha: "dryrun-head-sha-4242", landed: false },
+			{ prNumber: 4243, url: "https://github.com/lindy-ai/lindy/pull/4243", branch: "fm/lin-123-child", baseBranch: "fm/lin-123-parent", headSha: "dryrun-head-sha-4243", landed: false },
+		]);
+
+		const stamped = (sim.outputs.stampValidity as Array<{
+			cars?: Array<{ prNumber: number; headSha: string }>;
+		}>)[0];
+		expect(stamped.cars?.map((car) => [car.prNumber, car.headSha])).toEqual([
+			[4242, "dryrun-head-sha-4242"],
+			[4243, "dryrun-head-sha-4243"],
+		]);
+
+		const attempt = (sim.outputs.mergeHeadCheck as Array<{
+			ok: boolean;
+			cars?: Array<{ prNumber: number; receipt: string | null }>;
+		}>)[0];
+		expect(attempt.ok).toBe(true);
+		expect(attempt.cars?.map((car) => car.prNumber)).toEqual([4242, 4243]);
+		expect(attempt.cars?.map((car) => car.receipt)).toEqual([
+			"dry-run: submitted lowest PR #4242",
+			null,
+		]);
+		expect(sim.executed).toContain("stack-sync-prune");
+		expect((sim.outputs.doneRecord as Array<{ prNumbers?: number[] }>)[0]?.prNumbers).toEqual([4242, 4243]);
+	});
+
+	test("persisted null existingPr does not collide with ordered stack adoption", async () => {
+		const { sim, error } = await run({
+			...stackInput,
+			stack: { existingPrNumbers: [7001, 7002] },
+		});
+		expect(error).toBeUndefined();
+		expect(sim.status).toBe("finished");
+		const pushed = (sim.outputs.prRecord as Array<{
+			cars?: Array<{ prNumber: number }>;
+		}>)[0];
+		expect(pushed.cars?.map((car) => car.prNumber)).toEqual([7001, 7002]);
+		expect(sim.executed).toContain("adopt-base");
+		expect(sim.executed).toContain("stack-sync-prune");
+	});
+
+	test("one moved car invalidates the stack at the merge boundary before any enqueue", async () => {
+		const { sim, error } = await run({
+			...stackInput,
+			fixtures: {
+				changedFiles: ["src/feature.ts"],
+				stackMovedPrNumbers: [4243],
+			},
+		});
+		expect(error).toBeUndefined();
+		expect(sim.status).toBe("finished");
+
+		const validity = sim.outputs.stampValidity as Array<{
+			round: number;
+			valid: boolean;
+		}>;
+		expect(validity.find((row) => row.round === 0)?.valid).toBe(true);
+
+		const attempts = sim.outputs.mergeHeadCheck as Array<{
+			round: number;
+			ok: boolean;
+			receipt: string | null;
+			cars?: Array<{ prNumber: number; ok: boolean; receipt: string | null }>;
+		}>;
+		const rejected = attempts.find((row) => row.round === 0);
+		expect(rejected?.ok).toBe(false);
+		expect(rejected?.receipt).toBeNull();
+		expect(rejected?.cars?.map((car) => [car.prNumber, car.ok])).toEqual([
+			[4242, true],
+			[4243, false],
+		]);
+		expect(rejected?.cars?.every((car) => car.receipt === null)).toBe(true);
+
+		expect(sim.executed).toContain("r1-watch-poll");
+		expect(sim.executed).toContain("r1-stamp");
+		const accepted = attempts.find((row) => row.round === 1);
+		expect(accepted?.ok).toBe(true);
+		expect(accepted?.cars?.map((car) => car.prNumber)).toEqual([4242, 4243]);
+		expect((sim.outputs.mergeReceipt as Array<{ round: number }>)[0]?.round).toBe(1);
 	});
 });

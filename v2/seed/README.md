@@ -1,10 +1,12 @@
 # Seed files
 
-`orchestrator-contract.md` becomes `~/.deck/AGENTS.md` during bootstrap. It is an
-operator document. The repository contributor guide is the root `AGENTS.md`.
+`AGENTS.md` becomes `~/.deck/AGENTS.md` during bootstrap. It is the public,
+generic contract for Prime conversations; private names and routing stay under
+`~/.deck/config/`. The repository contributor guide is the root `AGENTS.md`.
 
 ## Move to a new machine
 
-Install deck with `install.sh`, then transfer `~/.deck/data/` and
-`~/.deck/AGENTS.md` from the old machine. Do not transfer credentials, runtime
-state, or a git checkout of `~/.deck`.
+Clone Deck and run the repository-root `install.sh`; bootstrap installs OptMem
+and creates a new plain runtime home. Then transfer only reviewed private
+configuration and dossiers. Never transfer credentials, Smithers runtime state,
+or a git checkout of `~/.deck`.

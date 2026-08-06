@@ -70,6 +70,14 @@ describe("config file", () => {
 		expect(loadProfiles()).toHaveLength(1);
 	});
 
+	test("preserves an explicit production marker and refuses malformed values", () => {
+		writeConfig([{ ...deckOverride, production: true }]);
+		expect(loadProfiles()[0]?.production).toBe(true);
+		expect(() => validateProfiles([{ ...deckOverride, production: "yes" }], "x")).toThrow(
+			/production must be a boolean/,
+		);
+	});
+
 	test("REGRESSION: a pipeline/flags contradiction is refused, not silently obeyed", () => {
 		// yolo-ship with stamp=true is the dangerous kind of typo: whichever
 		// field a consumer happens to read decides whether a merge waits for
@@ -81,6 +89,26 @@ describe("config file", () => {
 	test("model seat config refuses malformed opposition defaults", () => {
 		writeConfig([{ ...deckOverride, models: { implementer: "deck/gpt-5.6-luna", watcher: "deck/gpt-5.6-luna", fallout: "deck/gpt-5.6-sol", familyOpposition: true, oppositionDefaults: { openai: 42 } } }]);
 		expect(() => loadProfiles()).toThrow(/oppositionDefaults values/);
+	});
+
+	test("preserves canonical mechanical and manual judgment-fallback model seats", () => {
+		writeConfig([{
+			...deckOverride,
+			models: {
+				mechanical: { model: "deck/gpt-5.6-luna", reasoning: "xhigh" },
+				judgmentFallback: { model: "deck/claude-opus-5", reasoning: "high" },
+				reasoningMechanical: "xhigh",
+			},
+		}]);
+		expect(loadProfiles()[0]?.models).toMatchObject({
+			mechanical: { model: "deck/gpt-5.6-luna", reasoning: "xhigh" },
+			judgmentFallback: { model: "deck/claude-opus-5", reasoning: "high" },
+			reasoningMechanical: "xhigh",
+		});
+		expect(() => validateProfiles([{
+			...deckOverride,
+			models: { mechanical: { model: "deck/gpt-5.6-luna", reasoning: "minimal" } },
+		}], "x")).toThrow(/reasoning must be one of low/);
 	});
 
 	test.each([

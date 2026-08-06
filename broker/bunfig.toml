@@ -1,0 +1,7 @@
+[test]
+# `paths.ts` resolves DECK_HOME once, at import time. Importing `tmp-home` inside
+# individual test files only works if that file happens to be evaluated before any
+# module that pulls in `paths.ts` — which is not true when the suite runs in one
+# process. Preloading it makes the redirect unconditional, so no test can write
+# into a live ~/.deck.
+preload = ["./test/tmp-home.ts"]

@@ -4,6 +4,8 @@ export function shouldSubmitReview(decision: CaptainDecision): boolean {
   return decision?.approved === true;
 }
 
-export function reviewCommand(prNumber: number, repo: string, approve: boolean): string[] {
-  return ["pr", "review", String(prNumber), "--repo", repo, approve ? "--approve" : "--request-changes"];
+export function reviewCommand(prNumber: number, repo: string, clean: boolean): string[] {
+  return clean
+    ? ["pr", "comment", String(prNumber), "--repo", repo]
+    : ["pr", "review", String(prNumber), "--repo", repo, "--request-changes"];
 }

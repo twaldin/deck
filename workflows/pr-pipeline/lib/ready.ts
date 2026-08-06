@@ -2,9 +2,9 @@
  * Ready-for-stamp (SOP stage 6): real human approval + CI
  * green-or-WILL-BE-green.
  *
- * CAPTAIN RULING 2026-07-27: never gate the stamp on CI green. Flake reruns
- * and trivial CI fixes are agent work inside the watch loop; only real
- * decisions block on Tim. Hard red still blocks (it is watch-loop work).
+ * The explicit approval gate does not wait on CI green. Flake reruns and
+ * trivial CI fixes are agent work inside the watch loop; only real decisions
+ * block on the operator. Hard red still blocks (it is watch-loop work).
  */
 
 import type { CiState, ReadyVerdict, ReviewApproval } from "./types.ts";
@@ -12,7 +12,7 @@ import type { CiState, ReadyVerdict, ReviewApproval } from "./types.ts";
 export interface ReadyOptions {
 	/** The PR author (self approvals never count). */
 	author: string;
-	/** Logins whose approvals do not count (e.g. "ali" per SOP, bots). */
+	/** Logins whose approvals do not count (for example the operator or bots). */
 	excludedApprovers: string[];
 	/**
 	 * yolo profile (e.g. deck): ready needs CI actually green (or no checks),

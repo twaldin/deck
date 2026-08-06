@@ -1,10 +1,8 @@
 /**
- * Captain-facing pending-questions queue. ORCHESTRATOR-ONLY by placement: this
- * registers from the deck-v2 extension, which installs into the deck home's
- * own `.pi/extensions`, so worker `pi -p` sessions never load it and never
- * surface a competing questions UI. Workers that need a decision report
- * `needs-decision:` through their status file; the orchestrator relays it here
- * with `ask_captain`, and the captain clears the backlog with `/questions`.
+ * Durable question queue surface shared by Deck Prime conversations.
+ *
+ * The conversation profile owns this captain-facing queue; Smithers workflow
+ * seats do not load a competing question surface.
  */
 import { Type } from "typebox";
 import { Box, SelectList, Text } from "@earendil-works/pi-tui";
@@ -14,10 +12,7 @@ import { promisify } from "node:util";
 import {
 	answer as recordAnswer,
 	ask,
-	compact,
 	formatAge,
-	importLegacyQueue,
-	legacyQueueFile,
 	markDelivered,
 	openQuestions,
 	pendingAnswersFor,
@@ -27,6 +22,11 @@ import {
 	readQuestionHistory,
 	type Question,
 } from "./questions-store";
+import {
+	routeWorkflowQuestionAnswer,
+	workflowRunIsTerminal,
+	type WorkflowAnswerChoice,
+} from "./workflow-questions";
 
 // Polling audit: before this change the fleet overlay polled every 5s (12/min)
 // and the wake reconciler every 30s (2/min), in addition to this queue poll
@@ -80,6 +80,7 @@ export interface QuestionsRuntime {
 	now(): number;
 	setInterval(callback: () => void, ms: number): ReturnType<typeof setInterval>;
 	clearInterval(handle: ReturnType<typeof setInterval>): void;
+	fetch?(input: string | URL | Request, init?: RequestInit): Promise<Response>;
 }
 
 const defaultRuntime: QuestionsRuntime = {
@@ -137,6 +138,18 @@ export function describe(entry: Question, nowMs: number): string {
 			`mergeStateStatus: ${pr.mergeStateStatus ?? "unknown"}`,
 		);
 	}
+	const workflow = entry.workflow;
+	if (workflow !== undefined) {
+		lines.push(
+			"",
+			`Workflow wait: run ${workflow.runId}; node ${workflow.nodeId}; PR #${workflow.prNumber ?? "pending"}`,
+			`Answer lane: ${workflow.answerLane}`,
+			`ORIGINAL ISSUE: ${workflow.originalIssue}`,
+			`PROPOSED ACTION: ${workflow.proposedAction}`,
+			`BLAST RADIUS: ${workflow.blastRadius}`,
+			`Resume: ${workflow.resumeHint}`,
+		);
+	}
 	lines.push("", entry.question);
 	if (entry.context !== undefined) lines.push("", `context: ${entry.context}`);
 	if (entry.recommendation !== undefined) lines.push("", `agent recommends: ${entry.recommendation}`);
@@ -153,7 +166,7 @@ export function answerMessage(entry: Question): string {
 }
 
 export function registerQuestions(
-	pi: QuestionsExtensionApi,
+	agent: QuestionsExtensionApi,
 	env: Record<string, string | undefined> = process.env,
 	runtime: QuestionsRuntime = defaultRuntime,
 	executor: CommandExecutor = exec as unknown as CommandExecutor,
@@ -178,7 +191,7 @@ export function registerQuestions(
 			// the two lines re-delivers one answer, which is merely noisy, whereas
 			// marking first would drop that answer permanently and silently park
 			// the agent forever - exactly the failure this extension exists to kill.
-			pi.sendMessage(
+			agent.sendMessage(
 				{
 					customType: "deck.captain-answer",
 					content: answerMessage(entry),
@@ -193,7 +206,7 @@ export function registerQuestions(
 		return delivered;
 	};
 
-	pi.registerTool({
+	agent.registerTool({
 		name: "ask_captain",
 		label: "Ask Captain",
 		description:
@@ -206,7 +219,7 @@ export function registerQuestions(
 			"Use ask_captain when a decision needs the captain and the chat message would otherwise be missed; keep working on independent parts instead of waiting.",
 		],
 		// Lengths are bounded at the schema boundary AND again in the store. Every
-		// pi session sharing this queue folds the whole log on every poll, so an
+		// conversation sharing this queue folds the whole log on every poll, so an
 		// unbounded question would degrade sessions that never asked anything.
 		// They are also the practical limits of a question a human reads in a
 		// select dialog.
@@ -233,9 +246,8 @@ export function registerQuestions(
 			recommendation: Type.Optional(
 				Type.String({ description: "What you would do absent an answer", maxLength: 1000 }),
 			),
-			// Plain string, normalized in the store: an enum here would need
-			// pi-ai's StringEnum for Google compatibility, and one severity word is
-			// not worth a second import to resolve at extension load.
+			// Plain string, normalized in the store: an enum here would require a
+			// host-specific schema helper for one severity word.
 			urgency: Type.Optional(Type.String({ description: "low | normal | high (default normal)" })),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -264,7 +276,7 @@ export function registerQuestions(
 		},
 	});
 
-	pi.registerCommand("questions", {
+	agent.registerCommand("questions", {
 		description: "Review and answer all queued agent questions",
 		handler: async (_args, ctx) => {
 			if (!ctx.hasUI) return;
@@ -343,7 +355,29 @@ export function registerQuestions(
 				if (control === "Stop reviewing") break;
 				if (control === "Skip") continue;
 				if (control === "Dismiss") {
-					if (resolve(ctx, entry, DISMISSED, "dismissed")) answered += 1;
+					if (entry.workflow === undefined) {
+						if (resolve(ctx, entry, DISMISSED, "dismissed")) answered += 1;
+						continue;
+					}
+					try {
+						const terminal = await workflowRunIsTerminal(entry, {
+							env,
+							...(runtime.fetch === undefined ? {} : { fetch: runtime.fetch }),
+						});
+						if (terminal) {
+							if (resolve(ctx, entry, DISMISSED, "dismissed")) answered += 1;
+						} else {
+							ctx.ui.notify(
+								"Workflow decisions cannot be dismissed while their wait is active; choose Hold, approve/deny the gate, or answer the plain decision.",
+								"warning",
+							);
+						}
+					} catch (error) {
+						ctx.ui.notify(
+							`Workflow status could not be verified; the question remains open: ${error instanceof Error ? error.message : String(error)}`,
+							"error",
+						);
+					}
 					continue;
 				}
 				let text = options[choice] ?? "";
@@ -359,10 +393,37 @@ export function registerQuestions(
 				if (action === "hold") continue;
 				const trustedStamp = entry.questionKind === "stamp" && entry.origin === "fleet";
 				const trustedReviewGate = entry.origin === "review-gate" && entry.prContext !== undefined;
-				if ((action === "stamp" && trustedStamp || action === undefined && trustedStamp && selectedLabel === "Stamp")) {
+				if (entry.workflow !== undefined) {
+					const choiceOverride: WorkflowAnswerChoice | undefined =
+						action === "stamp" || action === "approve"
+							? "approve"
+							: action === "deny-gate"
+								? "deny"
+								: undefined;
+					try {
+						const routed = await routeWorkflowQuestionAnswer(
+							file,
+							entry,
+							text,
+							{
+								env,
+								now: runtime.now,
+								...(runtime.fetch === undefined ? {} : { fetch: runtime.fetch }),
+							},
+							choiceOverride,
+						);
+						applied = routed.applied;
+					} catch (error) {
+						ctx.ui.notify(
+							`Workflow decision was not recorded; the question remains open: ${error instanceof Error ? error.message : String(error)}`,
+							"error",
+						);
+					}
+				} else if ((action === "stamp" && trustedStamp || action === undefined && trustedStamp && selectedLabel === "Stamp")) {
 					applied = await approveStamp(ctx, entry);
 				} else if ((action === "approve" && trustedReviewGate || action === undefined && trustedReviewGate && entry.questionKind === "approve" && selectedLabel === "Approve")) {
-					applied = await approvePullRequest(ctx, entry);
+					ctx.ui.notify("Legacy review-gate approvals cannot be submitted. Re-queue this decision through its Smithers workflow.", "error");
+					applied = false;
 				} else if ((action === "deny-gate" && (trustedStamp || trustedReviewGate) || action === undefined && trustedStamp && selectedLabel === "Close")) {
 					applied = await closeStamp(ctx, entry);
 				} else if ((action === "close-pr" && trustedReviewGate || action === undefined && trustedReviewGate && entry.questionKind === "agent" && selectedLabel === "Close")) {
@@ -422,39 +483,6 @@ export function registerQuestions(
 		}
 	};
 
-	const approvePullRequest = async (ctx: QuestionsContext, entry: Question): Promise<boolean> => {
-		const pr = entry.prContext;
-		if (pr?.prNumber === undefined || pr.prRepo === undefined || pr.headSha === undefined) {
-			ctx.ui.notify("Approval needs a PR number, repository, and reviewed head.", "error");
-			return false;
-		}
-		try {
-			const current = await executor("gh", ["pr", "view", String(pr.prNumber), "--repo", pr.prRepo, "--json", "headRefOid,mergeable,mergeStateStatus,statusCheckRollup"], { cwd: ctx.cwd, timeout: 15_000 });
-			const currentValue = typeof current === "object" && current !== null && "stdout" in current
-				? JSON.parse(String((current as { stdout: unknown }).stdout))
-				: current;
-			const currentSha = typeof currentValue === "object" && currentValue !== null && "headRefOid" in currentValue
-				? String((currentValue as { headRefOid: unknown }).headRefOid)
-				: "";
-			const checks = typeof currentValue === "object" && currentValue !== null && Array.isArray((currentValue as { statusCheckRollup?: unknown }).statusCheckRollup)
-				? (currentValue as { statusCheckRollup: Array<{ conclusion?: unknown; state?: unknown; status?: unknown }> }).statusCheckRollup
-				: [];
-			const mergeable = typeof currentValue === "object" && currentValue !== null ? String((currentValue as { mergeable?: unknown }).mergeable).toUpperCase() : "UNKNOWN";
-			const mergeState = typeof currentValue === "object" && currentValue !== null ? String((currentValue as { mergeStateStatus?: unknown }).mergeStateStatus).toUpperCase() : "UNKNOWN";
-			const checkStates = checks.map((check) => String(check.conclusion || check.status || check.state).toUpperCase());
-			const safeChecks = checks.length === 0 || checkStates.every((state) => ["SUCCESS", "SKIPPED", "NEUTRAL"].includes(state));
-			const unsafe = mergeable === "UNMERGEABLE" || ["DIRTY", "BEHIND", "UNSTABLE"].includes(mergeState) || !safeChecks;
-			if (currentSha !== pr.headSha || unsafe) {
-				ctx.ui.notify("Approval stopped because the PR head, CI, or merge state changed. Review it again.", "warning");
-				return false;
-			}
-			await executor("gh", ["pr", "review", String(pr.prNumber), "--repo", pr.prRepo, "--approve"], { cwd: ctx.cwd, timeout: 15_000 });
-			return resolve(ctx, entry, "Approve", "answered");
-		} catch (error) {
-			ctx.ui.notify(`Approval was not recorded: ${error instanceof Error ? error.message : "unknown error"}`, "error");
-			return false;
-		}
-	};
 
 	const approveStamp = async (ctx: QuestionsContext, entry: Question): Promise<boolean> => {
 		const pr = entry.prContext;
@@ -536,10 +564,10 @@ export function registerQuestions(
 	 * The poll must NOT capture the session_start ctx.
 	 *
 	 * A captured ctx dies with its session: after ctx.newSession(), fork(),
-	 * switchSession() or reload(), pi rejects it as "stale after session
-	 * replacement" and every later poll throws instead of delivering an answer —
-	 * which parks the asking agent forever, the exact failure this extension
-	 * exists to prevent. Only the session id is actually needed, so the poll reads
+	 * switchSession() or reload(), the host rejects it as stale and every later
+	 * poll throws instead of delivering an answer — which parks the asking agent
+	 * forever, the exact failure this extension exists to prevent.
+	 * Only the session id is actually needed, so the poll reads
 	 * the latest one recorded by a live event.
 	 */
 	const startPolling = (): void => {
@@ -555,27 +583,9 @@ export function registerQuestions(
 		}, QUESTIONS_POLL_INTERVAL_MS);
 	};
 
-	pi.on("session_start", (_event, ctx) => {
-		// Hygiene before anything reads the queue: pull still-open questions out of
-		// the legacy pi-home queue once, then purge answered + stale entries. Both
-		// are best-effort — a hygiene failure must never break session start.
-		//
-		// The import is gated: it renames the legacy file under the PI HOME, which
-		// is live state. It runs only when the caller explicitly points at a pi
-		// home (PI_CONFIG_DIR, tests) or when nothing at all is overridden (the
-		// real orchestrator). A partially-overridden env — a test that redirects
-		// the deck side but not the pi side — must never reach the live ~/.pi.
-		const importSafe =
-			env.PI_CONFIG_DIR !== undefined ||
-			(env.DECK_QUESTIONS_FILE === undefined && process.env.DECK_V2_HOME === undefined);
-		try {
-			if (importSafe) importLegacyQueue(file, legacyQueueFile(env), runtime.now());
-			compact(file, runtime.now());
-		} catch {
-			// the queue stays usable unhygienic
-		}
-		// deck-v2 registers several session_start handlers; a test or RPC ctx may
-		// not carry a session manager, and hygiene above already ran.
+	agent.on("session_start", (_event, ctx) => {
+		// More than one questions hook runs at session start; a test or RPC ctx
+		// may not carry a session manager, and hygiene above already ran.
 		if (ctx?.sessionManager === undefined) return;
 		// Refreshed on every session event so the poll never holds a dead ctx.
 		latestSessionId = ctx.sessionManager.getSessionId();
@@ -589,19 +599,19 @@ export function registerQuestions(
 		startPolling();
 	});
 
-	pi.on("agent_settled", (_event, ctx) => {
+	agent.on("agent_settled", (_event, ctx) => {
 		if (ctx?.sessionManager === undefined) return;
 		latestSessionId = ctx.sessionManager.getSessionId();
 		lastSeenMtimeMs = queueMtimeMs(file);
 		deliverAnswers(ctx, true);
 	});
 
-	pi.on("session_shutdown", () => {
+	agent.on("session_shutdown", () => {
 		if (poll !== undefined) runtime.clearInterval(poll);
 		poll = undefined;
 	});
 }
 
-export default function questionsExtension(pi: QuestionsExtensionApi): void {
-	registerQuestions(pi);
+export default function questionsExtension(agent: QuestionsExtensionApi): void {
+	registerQuestions(agent);
 }

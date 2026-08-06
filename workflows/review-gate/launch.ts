@@ -1,10 +1,13 @@
-/** Ensure exactly one durable captain review-request poller is active. */
+/** Ensure exactly one durable operator review-request poller is active. */
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const LIVE_SMITHERS_WORKSPACE = "/Users/twaldin/.deck/state/smithers";
+export const LIVE_SMITHERS_WORKSPACE =
+  process.env.DECK_SMITHERS_WORKSPACE ??
+  join(process.env.DECK_V2_HOME ?? join(homedir(), ".deck"), "state", "smithers");
 
 export const reviewGateLauncher = {
   workflow: fileURLToPath(new URL("./pipeline.tsx", import.meta.url)),

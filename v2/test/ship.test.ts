@@ -4,11 +4,13 @@
  * project is refused; --no-pipeline is the explicit escape hatch).
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { EventEmitter } from "node:events";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ChildProcess, SpawnOptions } from "node:child_process";
+import { registerDeckShip, type DeckShipApi } from "../../extensions-prime/deck-ship";
 import { validateBrief } from "../../workflows/pr-pipeline/lib/brief";
 import { loadProfiles, profilesFile, type ProjectProfile } from "../src/projects";
 import { existingPrFromFlag, runCli } from "../src/cli";
@@ -53,6 +55,41 @@ const request = (overrides: Partial<ShipRequest> = {}): ShipRequest => ({
 	acceptance: ["it works"],
 	...overrides,
 });
+
+function signalProcessGroup(pid: number, signal: NodeJS.Signals | 0): boolean {
+	try {
+		process.kill(-pid, signal);
+		return true;
+	} catch (error) {
+		if (
+			error !== null &&
+			typeof error === "object" &&
+			"code" in error &&
+			error.code === "ESRCH"
+		) {
+			return false;
+		}
+		throw error;
+	}
+}
+
+async function terminateDetachedProcessGroup(pid: number): Promise<void> {
+	if (!signalProcessGroup(pid, "SIGTERM")) return;
+	// This integration-only failure path waits on the real detached process
+	// group: Smithers handles SIGTERM asynchronously with a five-second backstop.
+	const gracefulDeadline = Date.now() + 5_000;
+	while (Date.now() < gracefulDeadline) {
+		await Bun.sleep(25);
+		if (!signalProcessGroup(pid, 0)) return;
+	}
+	if (!signalProcessGroup(pid, "SIGKILL")) return;
+	const forcedDeadline = Date.now() + 1_000;
+	while (Date.now() < forcedDeadline) {
+		await Bun.sleep(25);
+		if (!signalProcessGroup(pid, 0)) return;
+	}
+	throw new Error(`detached Smithers process group ${pid} survived SIGKILL`);
+}
 
 describe("ship CLI flags", () => {
 	async function runWithCapturedStderr(argv: string[]): Promise<{ exitCode: number; stderr: string }> {
@@ -228,6 +265,92 @@ describe("smithers workspace", () => {
 	});
 });
 
+describe("registered _ship entry contract", () => {
+	test("REGRESSION: a real _ship input survives Smithers persistence and renders the single-PR pipeline", async () => {
+		fs.mkdirSync(smithersWorkspaceCwd(home), { recursive: true });
+		const tools: Array<Parameters<DeckShipApi["registerTool"]>[0]> = [];
+		registerDeckShip({
+			registerTool(tool) {
+				tools.push(tool);
+			},
+		});
+		const ship = tools.find((tool) => tool.name === "ship");
+		if (ship === undefined) throw new Error("deck-ship did not register the ship tool");
+
+		const repoRoot = path.resolve(pipelineDir(), "..", "..");
+		const runId = "ship-entry-contract-pipeline";
+		const result = await ship.execute(
+			"ship-entry-contract",
+			{
+				ticket: "ship-entry-contract",
+				profile: "example-project",
+				worktree: repoRoot,
+				branch: "v4-build",
+				title: "Exercise the ship entry contract",
+				summary: "Pass the registered ship tool input through the real Smithers pipeline entry",
+				acceptance: ["the single-PR workflow renders"],
+				dry_run: true,
+				run_id: runId,
+			},
+			undefined,
+			undefined,
+			{},
+		);
+		const { logPath, pid } = result.details;
+		let terminalObserved = false;
+		let log = "";
+		try {
+			if (typeof logPath !== "string") throw new Error("ship result did not include a log path");
+
+			// The production entry intentionally detaches and exposes completion only
+			// through its log, so this integration test must poll the real subprocess.
+			const deadline = Date.now() + 20_000;
+			while (Date.now() < deadline) {
+				log = fs.existsSync(logPath) ? fs.readFileSync(logPath, "utf8") : "";
+				terminalObserved =
+					log.includes("status: waiting-approval") || log.includes("Run failed");
+				if (terminalObserved) break;
+				await Bun.sleep(50);
+			}
+			if (!terminalObserved) {
+				throw new Error(`timed out waiting for the detached ship run:\n${log}`);
+			}
+
+			const database = new Database(
+				path.join(smithersWorkspaceCwd(home), "smithers.db"),
+				{ readonly: true },
+			);
+			let persistedInput: { stack: string | null; existingPr: number | null } | null;
+			let reviewerRequest: { cars: string | null } | null;
+			try {
+				persistedInput = database
+					.query<{ stack: string | null; existingPr: number | null }, string>(
+						"SELECT stack, existing_pr AS existingPr FROM input WHERE run_id = ?",
+					)
+					.get(runId);
+				reviewerRequest = database
+					.query<{ cars: string | null }, string>(
+						"SELECT cars FROM reviewer_request WHERE run_id = ?",
+					)
+					.get(runId);
+			} finally {
+				database.close();
+			}
+
+			// The entry path must exercise Smithers' NULL hydration and still select
+			// single-PR routing; stack mode would persist reviewer_request.cars.
+			expect(persistedInput).toEqual({ stack: null, existingPr: null });
+			expect(reviewerRequest).toEqual({ cars: null });
+			expect(log).not.toContain(`"specs" in input.stack`);
+			expect(log).not.toContain("workflow run failed with unhandled error");
+			expect(log).toContain("→ preflight");
+			expect(log).toContain("status: waiting-approval");
+		} finally {
+			if (typeof pid === "number") await terminateDetachedProcessGroup(pid);
+		}
+	}, 30_000);
+});
+
 describe("startShip", () => {
 	test("unknown profile refuses before anything is written", async () => {
 		await expect(startShip(request({ profile: "nope" }), home)).rejects.toThrow(
@@ -245,6 +368,19 @@ describe("startShip", () => {
 		await expect(startShip(request({ acceptance: [] }), home)).rejects.toThrow(/acceptance/);
 	});
 
+	test("malformed private reviewer policy fails closed before dispatch", async () => {
+		fs.writeFileSync(
+			path.join(home, "config", "reviewers.json"),
+			JSON.stringify({
+				selfLogins: "operator-login",
+				excludedApprovers: [],
+				reviewerDenylist: [],
+				reviewers: [],
+			}),
+		);
+		await expect(startShip(request(), home)).rejects.toThrow(/selfLogins must be an array/);
+	});
+
 	test("missing pipeline dir refuses with the override hint", async () => {
 		process.env.DECK_PIPELINE_DIR = path.join(home, "not-there");
 		await expect(startShip(request(), home)).rejects.toThrow(/DECK_PIPELINE_DIR/);
@@ -254,11 +390,20 @@ describe("startShip", () => {
 		expect(fs.existsSync(path.join(pipelineDir(), "pipeline.tsx"))).toBe(true);
 	});
 
-	test("REGRESSION: spawn uses the shared workspace cwd and an absolute pipeline path", async () => {
+	test("REGRESSION: production dispatch carries private reviewer policy into the shared workspace input", async () => {
 		const fakeDir = path.join(home, "fake-pipeline");
 		fs.mkdirSync(fakeDir, { recursive: true });
 		fs.writeFileSync(path.join(fakeDir, "pipeline.tsx"), "// fake\\n");
 		process.env.DECK_PIPELINE_DIR = fakeDir;
+		fs.writeFileSync(
+			path.join(home, "config", "reviewers.json"),
+			JSON.stringify({
+				selfLogins: ["operator-login"],
+				excludedApprovers: ["non-counting-approver"],
+				reviewerDenylist: ["unavailable-reviewer"],
+				reviewers: ["default-reviewer"],
+			}),
+		);
 		let command = "";
 		let args: string[] = [];
 		let options: SpawnOptions | undefined;
@@ -276,6 +421,21 @@ describe("startShip", () => {
 		expect(command).toBe("bunx");
 		expect(options?.cwd).toBe(path.join(home, "state", "smithers"));
 		expect(args[2]).toBe(path.join(fakeDir, "pipeline.tsx"));
+		expect(args).toContain("--no-post-failure");
+		const inputIndex = args.indexOf("--input");
+		const dispatched = JSON.parse(args[inputIndex + 1]!) as {
+			github: {
+				selfLogins: string[];
+				excludedApprovers: string[];
+				reviewerDenylist: string[];
+				reviewers: string[];
+			};
+		};
+		expect(dispatched.github.selfLogins).toEqual(["operator-login"]);
+		expect(dispatched.github.excludedApprovers).toEqual(["non-counting-approver"]);
+		expect(dispatched.github.reviewerDenylist).toEqual(["unavailable-reviewer"]);
+		expect(dispatched.github.reviewers).toEqual(["default-reviewer"]);
+		expect(dispatched.github).not.toHaveProperty("skipReviewerRequest");
 	});
 
 	test("REGRESSION: a launch that never starts REJECTS instead of reporting started", async () => {

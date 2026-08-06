@@ -70,9 +70,8 @@ export function discoverSmithersWorkspaces(home = deckV2Home()): string[] {
 }
 
 /**
- * Send a warning through pi's UI when available. The fallback is stderr for
- * command-line callers. Keep this seam: the TUI revamp will define the
- * permanent notification surface here, so it can restyle one place.
+ * Send a warning through the active agent UI when available. The fallback is
+ * stderr for command-line callers.
  */
 export function uiWarn(ctx: { ui?: { notify?: (message: string, type?: "warning") => void } } | undefined, message: string): void {
 	if (typeof ctx?.ui?.notify === "function") {

@@ -1,0 +1,55 @@
+diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
+index 3835a395eca0c9d71ef21a6d5bb1f54cc08b2374..2689308328ce69d445b3507bea93d0887f750e64 100644
+--- a/packages/coding-agent/CHANGELOG.md
++++ b/packages/coding-agent/CHANGELOG.md
+@@ -2,6 +2,8 @@
+ 
+ ## [Unreleased]
+ 
++- Fixed clipboard writes from Herdr panes reaching the foreground remote client.
++
+ ## [0.7.0] - 2026-08-05
+ 
+ ### Breaking Changes
+diff --git a/packages/coding-agent/src/utils/clipboard.ts b/packages/coding-agent/src/utils/clipboard.ts
+index 84166e95ec34d5794ff66ae3d0f230d32abb4b71..c054c750f3bc863bf6aa474271dffd63f7a6c4d9 100644
+--- a/packages/coding-agent/src/utils/clipboard.ts
++++ b/packages/coding-agent/src/utils/clipboard.ts
+@@ -20,7 +20,7 @@ function copyToX11Clipboard(options: NativeClipboardExecOptions): void {
+ const MAX_OSC52_ENCODED_LENGTH = 100_000;
+ 
+ function isRemoteSession(env: NodeJS.ProcessEnv = process.env): boolean {
+-	return Boolean(env.SSH_CONNECTION || env.SSH_CLIENT || env.MOSH_CONNECTION);
++	return Boolean(env.SSH_CONNECTION || env.SSH_CLIENT || env.MOSH_CONNECTION || env.HERDR_ENV === "1");
+ }
+ 
+ function emitOsc52(text: string): boolean {
+diff --git a/packages/coding-agent/test/clipboard.test.ts b/packages/coding-agent/test/clipboard.test.ts
+index ea231b572ff6dab0aac9c76a524273278a34307a..4b920101cbeb44034441a4749503f9b9e1f8a1be 100644
+--- a/packages/coding-agent/test/clipboard.test.ts
++++ b/packages/coding-agent/test/clipboard.test.ts
+@@ -57,6 +57,7 @@ beforeEach(() => {
+ 	vi.stubEnv("SSH_CONNECTION", "");
+ 	vi.stubEnv("SSH_CLIENT", "");
+ 	vi.stubEnv("MOSH_CONNECTION", "");
++	vi.stubEnv("HERDR_ENV", "");
+ 	stdoutWrites = [];
+ 	nativeResolved = false;
+ 	mocks.clipboard.setText.mockReset();
+@@ -111,6 +112,16 @@ describe("copyToClipboard", () => {
+ 		expect(mockedExecSync).not.toHaveBeenCalled();
+ 	});
+ 
++	test("Herdr session emits OSC 52 after native write", async () => {
++		vi.stubEnv("HERDR_ENV", "1");
++
++		await copyToClipboard("hello");
++
++		expect(nativeResolved).toBe(true);
++		expect(osc52Writes()).toHaveLength(1);
++		expect(mockedExecSync).not.toHaveBeenCalled();
++	});
++
+ 	test("local shell fallback success skips OSC 52", async () => {
+ 		mocks.clipboard.setText.mockRejectedValue(new Error("native failed"));
+ 		mockedExecSync.mockReturnValue(Buffer.alloc(0));

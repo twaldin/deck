@@ -23,7 +23,7 @@ export function effortDir(effortId: string): string { return path.join(EFFORTS_D
 export const EFFORT_FILES = { manifest: "manifest.json" } as const;
 
 const sessionRefSchema = z.object({ machine: z.string().min(1), session_id: z.string().min(1), lease_epoch: z.number().int().nonnegative(), last_heartbeat: z.number().nullable() });
-const dispatchSchema = z.object({ id: z.string().min(1), kind: z.enum(["workflow", "subagent"]), target: z.string().min(1), state: z.enum(["pending", "running", "done", "failed", "cancelled"]), started: z.number(), session: sessionRefSchema.nullable(), result_ref: z.string().nullable() });
+const dispatchSchema = z.object({ id: z.string().min(1), kind: z.literal("workflow"), target: z.string().min(1), state: z.enum(["pending", "running", "done", "failed", "cancelled"]), started: z.number(), session: sessionRefSchema.nullable(), result_ref: z.string().nullable() });
 const evidenceSchema = z.object({ ts: z.number(), label: z.string().min(1), ref: z.string().min(1), by: z.enum(["watch", "agent", "tim"]), scope: z.enum(["ci", "review", "deploy", "fallout", "other"]) });
 const sideEffectSchema = z.object({ id: z.string().min(1), kind: z.enum(["push", "merge", "deploy", "migration"]), ref: z.string().min(1), status: z.enum(["attempted", "confirmed", "rolledback"]), ts: z.number(), lease_epoch: z.number().int().nonnegative() });
 export const manifestSchema = z.object({

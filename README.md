@@ -1,103 +1,159 @@
-# deck
+# Deck
 
-**One chat session runs your software factory.**
+Deck is a local, operator-attended software factory used from a pinned
+[Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent) conversation.
+Durable delivery work runs in Smithers when the conversation calls `ship` or
+`adopt`.
 
-You talk to an orchestrator. It starts durable [Smithers](https://github.com/smithers-ai/smithers) workflows per effort. Each workflow owns the menial loop end to end:
+**What this is not:** Deck is not a hosted product, an autonomous supervisor,
+or an unattended merge service. An operator remains responsible for credentials,
+project policy, queued decisions, and any explicit merge authorization.
 
-```
-idea → implement → adversarial review → PR → reviewers
-     → watch CI + human + bot comments → stamp or auto-merge on green
-```
-
-Models share a broker pool of your own subscriptions. Connect from any laptop over your private network (Tailscale or equivalent). The orchestrator stays on a durable host; glass is just a remote shell into that session.
-
-```
-you  ←→  orch (pi)
-              │
-              │  ship
-              ▼
-       smithers pr-pipeline  × N     ← one run owns each PR
-              │
-              seats: implement · adversarial · fix
-              poll:  CI · review bots · humans
-              park:  your merge stamp (or yolo on green)
+```text
+Prime conversation in ~/.deck
+      │  ship · adopt · status
+      ▼
+Smithers pr-pipeline
+      │  implement → adversarial review → PR → reviewers
+      └→ watch CI → optional explicit approval → merge → delivery evidence
 ```
 
-## What it is
+There is no Deck orchestrator extension, fleet overlay, or wake loop. The
+factory is a reviewed Prime extension pack plus broker-routed workflow seats.
 
-| Piece | Job |
+## Components
+
+| Component | Responsibility |
 |---|---|
-| **Orch** | Your face on the factory. Ideas, stamps, rare judgment. Does not babysit N PRs. |
-| **`ship`** | Default path for profiled projects. Starts pr-pipeline. |
-| **pr-pipeline** | Encoded habits: adversarial loop, reviewers, CI/review watch, stamp or yolo. |
-| **Broker** | Multi-account OAuth pool for models. Usage in-session. |
-| **Profiles** | Stamp-at-merge vs merge-on-green. **Same quality gates** either way. |
-| **Fleet** | Attention board: what is running, waiting, and on what. |
+| **Prime conversation** | Understand the issue, inspect evidence, call factory tools, and surface queued decisions. |
+| **`deck-questions`** | Durable questions plus the interactive `/questions` queue. |
+| **`deck-ship`** | `ship`, `adopt`, and read-only `status`; dispatches the project PR pipeline rather than implementing delivery in the chat. |
+| **`deck-recall`** | Reads per-effort dossiers so a new session can recover the deeper brief and decision history. |
+| **Smithers** | Persists and resumes the PR pipeline, including implementation, adversarial review, GitHub review/CI, merge policy, and evidence gates. |
+| **Broker** | Required model provider for the conversation and every Smithers Prime seat. It uses accounts configured by this installation's operator. |
+| **OptMem** | Global append-only identity, decisions, preferences, and lessons. Effort-specific detail stays in dossiers. |
 
-Yolo does **not** skip adversarial review. It skips only the human stamp park at merge time.
+Project and reviewer policy is private machine configuration:
 
-## Quick start (personal host)
+- `~/.deck/config/projects.json`
+- `~/.deck/config/reviewers.json`
+
+The repository ships no personal project profile, reviewer handle, or default
+merge authority. Company-specific profiles may be kept as explicitly selected
+examples; they are never selected by bootstrap.
+
+## Prerequisites
+
+- Git
+- [Bun](https://bun.sh/)
+- `curl`, Node.js, npm, Python 3, and network access for pinned artifact and
+  package downloads
+- the GitHub CLI (`gh`) authenticated to each repository you want the factory
+  to ship
+
+Deck installs the reviewed, patched Prime Agent 0.7.0 artifact under
+`~/.deck/.prime/runtime` and links `prime-agent` and `prime-conversation` into
+the selected binary directory. It never installs or overwrites an unrelated
+agent executable. If `uv` is absent, the installer downloads `uv`/`uvx` 0.11.8,
+verifies its SHA-256, and proves an isolated IPython kernel can execute a cell.
+
+## Clean install
 
 ```sh
-# one-time
 export DECK_REPO_URL="https://github.com/<owner>/deck.git"
-git clone "$DECK_REPO_URL" ~/dev/deck
-cd ~/dev/deck && git checkout main
+git clone --branch main "$DECK_REPO_URL" ~/dev/deck
+cd ~/dev/deck
 ./install.sh
 
-# keep updated
-~/dev/deck/update.sh
-
-# interactive once — personal accounts only
-bun ~/dev/deck/broker/src/cli.ts login anthropic
-
-# glass from a laptop (SSH to your durable host over your tailnet)
-herdr --remote <user>@<host>
-source ~/.deck/enter.sh && pi
+source ~/.deck/enter.sh
+prime-conversation
 ```
 
-Inside the session: fleet, usage, questions, wake, calm, plus `ship` / `spawn`.
+The conversation is fail-closed to the local Deck broker. Configure an account
+owned by this installation's operator, then keep the broker running:
 
-**Laptop agents** (not the orch): see [`docs/LAPTOP-AGENTS.md`](docs/LAPTOP-AGENTS.md) — drop handoffs the orch will pick up.
+```sh
+# interactive, once per provider account
+bun ~/dev/deck/broker/src/cli.ts login anthropic
+
+# keep this process running while conversations or workflow seats execute
+bun --cwd ~/dev/deck/broker src/main.ts
+```
+
+Do not put API keys in this repository. The Prime profile strips ambient
+credentials and loads only Deck's reviewed provider, guard, extension pack, and
+conversation-only process package.
+
+## Install, update, and optional services
+
+- `./install.sh` is the clean-clone and convergence entrypoint. It verifies the
+  isolated IPython runtime, installs the reviewed Prime artifact and patches,
+  the Prime extension pack, pinned process package, command shims, Smithers
+  workspace, OptMem, and `~/.deck`.
+- `./update.sh` refreshes an existing checkout and invokes that same convergent
+  install path. Set `DECK_BRANCH` when updating a branch other than `main`.
+- `./v2/install.sh` installs only Deck CLI and Smithers workspace internals.
+- `./ops/install.sh` previews optional resident launchd services; apply with
+  `./ops/install.sh --yes` only after reviewing the plan.
+
+Neither install nor update starts the separate review-gate poller. The
+`workflows/review-gate/` workflow is a company-specific example and must be
+started deliberately, after its project configuration and authenticated
+Smithers Gateway are ready:
+
+```sh
+cd ~/dev/deck
+bun workflows/review-gate/launch.ts
+```
+
+## Installed layout
+
+```text
+~/dev/deck/                    code and factory definitions (git checkout)
+~/.deck/                       private Prime runtime home (not a checkout)
+~/.deck/AGENTS.md              public seed converged by install/update
+~/.deck/.prime/agent/          credential-stripped Prime conversation profile
+~/.deck/.prime/runtime/        pinned patched Prime Agent and process package
+~/.deck/.prime/sessions/       Prime conversation sessions
+~/.deck/state/smithers/        live Smithers workspace and run state
+~/.deck/efforts/               per-effort dossiers
+~/.optmem/                     global append-only memory
+~/.local/bin/                  prime-agent, prime-conversation, Deck and Smithers shims
+```
+
+Sync code with Git. Never rsync `~/.deck` between hosts: it contains private
+configuration and runtime state.
 
 ## Project profiles
 
-`~/.deck/config/projects.json` — which repo uses which pipeline:
+Each entry in `~/.deck/config/projects.json` chooses a pipeline and its merge
+posture:
 
-- **Stamp profile**: merge waits for your explicit word after human approve + CI green.
-- **Yolo profile**: auto-merge on green; still adversarial + watch.
+- an explicit-approval profile waits for the configured operator decision after
+  repository review and CI requirements pass;
+- an auto-merge profile merges on green but keeps implementation,
+  adversarial-review, CI, and evidence gates.
 
-Keep company work and personal OAuth on separate hosts. Never put company secrets on a personal box.
+Bootstrap creates an empty profile list. Copy and review an example or write a
+profile for your own repository before using `ship`.
 
-## Layout
+Reviewer identity and routing are private machine configuration in
+`~/.deck/config/reviewers.json`. Before shipping, set `selfLogins` to every
+GitHub login whose approval must not count as independent, plus any
+`excludedApprovers`, `reviewerDenylist`, and default `reviewers`. Bootstrap
+creates all four arrays empty; no operator identity ships in the repository.
 
-```
-~/dev/deck/          code (git)
-~/.deck/             orch home (NOT a checkout) — contract, state, data, broker store
-~/.deck/.pi/         deck extension (fleet, ship, spawn, …)
-~/.pi/agent/         user skills + model provider + usage
-```
+## More detail
 
-Sync code with git. **Never rsync `~/.deck` between hosts** (credentials + state).
-
-## Docs
-
-| Doc | For |
+| Document | Subject |
 |---|---|
-| [`docs/personal-home.md`](docs/personal-home.md) | Bootstrap a durable personal host |
-| [`docs/LAPTOP-AGENTS.md`](docs/LAPTOP-AGENTS.md) | Laptop agents handing work to the orch host |
-| [`workflows/pr-pipeline/README.md`](workflows/pr-pipeline/README.md) | Pipeline stages |
-| [`v2/seed/orchestrator-contract.md`](v2/seed/orchestrator-contract.md) | Seed for `~/.deck/AGENTS.md` |
+| [`v2/README.md`](v2/README.md) | Plain-session and library architecture |
+| [`workflows/pr-pipeline/README.md`](workflows/pr-pipeline/README.md) | Pipeline stages and gates |
+| [`v2/seed/AGENTS.md`](v2/seed/AGENTS.md) | Public plain-session contract copied into `~/.deck` |
+| [`ops/README.md`](ops/README.md) | Optional resident services |
+| [`docs/prime-conversation.md`](docs/prime-conversation.md) | Optional Prime conversation profile |
 
-## Layout details
+## Develop Deck
 
-- `cli/` allocates isolated deck worktrees and is linked by `v2/install.sh`.
-- `intake/` is consumed by the `v2` wake loop.
-- `ops/` contains launchd installers and the resource monitor.
-- `subagents/` contains crew agent definitions.
-
-The router-era directories were removed. Their design history is in `docs/archive/router-era/`.
-
-## Develop deck itself
-
-Branch from **`main`**. Ship with the deck profile (yolo).
+Read [`AGENTS.md`](AGENTS.md), branch from `main`, and run only the tests for
+the package you change.

@@ -13,8 +13,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
+      - name: Install v2 dependencies
+        working-directory: v2
+        run: bun install --frozen-lockfile
+      - name: Run home contract tests
+        working-directory: ops
+        run: bun test home-v4.test.ts
       - name: Run ops tests
         run: ./ops/resource-monitor.test.sh
+
+  clean-install:
+    name: clean clone install
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Bootstrap a sandbox home from a clean clone
+        env:
+          DECK_VERIFY_REF: HEAD
+        run: ./ops/verify-clean-install.sh
 
   v2-tests:
     name: v2 tests
@@ -25,44 +42,103 @@ jobs:
       - name: Install v2 dependencies
         working-directory: v2
         run: bun install --frozen-lockfile
+      - name: Install broker dependencies
+        working-directory: broker
+        run: bun install --frozen-lockfile
       - name: Install CLI dependencies
         working-directory: cli
+        run: bun install --frozen-lockfile
+      - name: Install extension test dependencies
+        working-directory: extensions-prime
         run: bun install --frozen-lockfile
       - name: Run v2 tests
         working-directory: v2
         run: bun test test/
 
+      - name: Run extension tests
+        working-directory: extensions-prime
+        run: bun test test/
+      - name: Typecheck Prime extensions
+        working-directory: extensions-prime
+        run: bun run typecheck
+      - name: Run CLI tests
+        working-directory: cli
+        run: bun test
+      - name: Typecheck CLI
+        working-directory: cli
+        run: bun run typecheck
   pipeline-tests:
     name: pipeline tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.8.0
+      - name: Install pinned uv for Prime's isolated IPython runtime
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.11.8"
+          checksum: "56dd1b66701ecb62fe896abb919444e4b83c5e8645cca953e6ddd496ff8a0feb"
+          enable-cache: "false"
       - name: Install Smithers workspace dependencies
         working-directory: workflows/.smithers
         run: bun install --frozen-lockfile
       - name: Install pipeline dependencies
         working-directory: workflows/pr-pipeline
         run: bun install --frozen-lockfile
+      - name: Install broker dependencies
+        working-directory: broker
+        run: bun install --frozen-lockfile
+      # prime-agent is not published on npm (npm view returns 404); this
+      # reviewed release digest, not a mutable registry tag, is the pin.
+      - name: Install pinned Prime Agent
+        run: |
+          artifact="$RUNNER_TEMP/prime-agent-0.7.0.tgz"
+          curl --fail --show-error --silent --location \
+            https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev/releases/v0.7.0/prime-agent-0.7.0.tgz \
+            --output "$artifact"
+          echo "88b6578518c72cd51a825bc80f28e0fef9a64c67de4a7d6fd7afd7ca1b34da0b  $artifact" |
+            sha256sum --check --strict
+          npm install --global "$artifact"
+          # prime-agent 0.7.0 writes its version to stderr, not stdout
+          version="$(prime-agent --version 2>&1)"
+          if [ "$version" != "0.7.0" ]; then
+            echo "Expected prime-agent 0.7.0, got $version" >&2
+            exit 1
+          fi
       - name: Run pipeline tests
         working-directory: workflows/pr-pipeline
         run: bun test
+      - name: Typecheck pipeline
+        working-directory: workflows/pr-pipeline
+        run: bun run typecheck
+      - name: Typecheck Gateway workspace
+        working-directory: workflows/.smithers
+        run: bun run typecheck
+      - name: Run Gateway startup and auth tests
+        run: bun workflows/.smithers/test-gateway-auth.ts
 
-  stack-owner-tests:
-    name: stack owner workflow tests
+  review-gate-tests:
+    name: review gate tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
-      - name: Install workflow dependencies
-        working-directory: workflows/stack-owner-workflow
-        run: bun install
-      - name: Run stack owner tests
-        working-directory: workflows/stack-owner-workflow
+      - name: Install pipeline dependencies
+        working-directory: workflows/pr-pipeline
+        run: bun install --frozen-lockfile
+      - name: Install review gate dependencies
+        working-directory: workflows/review-gate
+        run: bun install --frozen-lockfile
+      - name: Run review gate tests
+        working-directory: workflows/review-gate
         run: bun test
-      - name: Typecheck stack owner workflow
-        working-directory: workflows/stack-owner-workflow
+      - name: Typecheck review gate
+        working-directory: workflows/review-gate
         run: bun run typecheck
+
 
   typecheck:
     name: typecheck
@@ -73,12 +149,20 @@ jobs:
       - name: Install v2 dependencies
         working-directory: v2
         run: bun install --frozen-lockfile
+      - name: Install Prime extension dependencies
+        # v2/test/ship.test.ts imports extensions-prime/deck-ship.ts, so tsc
+        # resolves that file's imports from extensions-prime/node_modules.
+        working-directory: extensions-prime
+        run: bun install --frozen-lockfile
       - name: Typecheck v2
         working-directory: v2
         run: bunx tsc --noEmit
       - name: Install broker dependencies
         working-directory: broker
         run: bun install
+      - name: Run broker tests
+        working-directory: broker
+        run: bun test
       - name: Typecheck broker
         working-directory: broker
         run: bunx tsc --noEmit

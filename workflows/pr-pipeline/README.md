@@ -7,9 +7,8 @@ Here every stage is a smithers node whose successors are render-gated on its
 **Zod-validated persisted output**, so a stage cannot be skipped: the next
 node's input *is* the previous node's validated output row.
 
-Runs on **plain smithers 0.30.0** — no deck router/manifest/TUI dependency.
-Model access goes through pi's `deck/` provider (the deck broker on
-`127.0.0.1:8377`).
+Runs on **Smithers 0.30.0** with Deck's reviewed `PrimeSeatAgent`. Model access
+goes through the `deck/` provider and local broker on `127.0.0.1:8377`.
 
 ### Reproducible test setup
 
@@ -22,7 +21,7 @@ bun install --frozen-lockfile
 bun test tests/
 ```
 
-The expected result is 187 passing tests and 0 failures.
+The package suite and typecheck must both finish with zero failures.
 
 ## This is the DEFAULT ship path
 
@@ -43,6 +42,47 @@ deck-v2 ship deck-42 --profile deck --worktree ~/.deck/wt/deck-3 --branch deck/m
   --base v2 --title "fix(x): y" --summary "..." --accept "tests green;behavior proven"
 ```
 
+### PR and stack effort input
+
+One run owns one effort: either a single PR or one ordered parent-to-child
+stack. The optional `stack` input is a mutually exclusive union:
+
+```ts
+type StackInput =
+  | {
+      specs: Array<{
+        branch: string;
+        baseBranch?: string;
+        title?: string;
+        body?: string;
+      }>;
+    }
+  | {
+      existingPrNumbers: number[];
+    };
+```
+
+`specs` is parent first. An omitted first `baseBranch` inherits the run's
+`baseBranch` (default `main`); every later omitted base inherits the preceding
+car's branch. An explicit base must describe that same chain. The run's
+top-level `branch` is the final car. `stack` and the single-PR `existingPr`
+input cannot both be present.
+
+`specs` implements every declared layer, verifies the exact commits attributed
+to each car, then uses native `gh stack init`, `gh stack submit --auto --open`,
+and `gh stack view --json`. `existingPrNumbers` adopts only those live PR
+identities after validating their repo, state, head SHA, and PR-base topology;
+it never invokes PR creation or stack submission. A single `existingPr`
+continues to use the unchanged single-PR adoption path.
+
+The graph watches every car. `BLOCKED` is benign when it is only the expected
+open-parent base relationship. One approval records every car's
+`{prNumber, branch, baseBranch, headSha}` in `stackTopology.cars`. The merge
+boundary re-fetches every stamped head; movement in one car invalidates the
+whole approval before any enqueue. Only the lowest unlanded car enters the queue. After it lands, the next car is retargeted to the root base, all remaining stamped heads are rechecked, and that car is enqueued. Rework
+uses `gh stack rebase --upstack` plus `gh stack push`; completed stacks run
+`gh stack sync --prune`.
+
 Enforcement is machine-shaped on both sides: here, `push-pr` renders only after
 `local-review` approves (or a human approves `review-escalation`) — no input
 can skip it. Local review loops up to eight rounds, fixes only blocking findings,
@@ -59,14 +99,14 @@ bare worker cannot open the PR that skips this graph. Incident: doctrine PR
 | 0 preflight gate | `preflight`, `preflight-refusal` | compute; **refuses** with the open-question list |
 | 1 implement | `implement` | agent (implementer model) |
 | 2 local adversarial review | `local-review-loop` / `local-review` + `local-fix`, `review-escalation` | agent loop, cross-model, fresh context |
-| 3 push + PR | `push-pr` | compute; PR registered in the watch-set **as a side effect of this node** |
+| 3 push + PR | `push-pr` | compute; creates/adopts one PR or publishes/adopts every ordered stack car; each car is registered in the watch-set |
 | 3b request reviewers | `request-reviewers` | compute; CODEOWNERS + recent-author fallback, verified via `requested_reviewers` |
 | 4 watch-ci-review | `r{N}-watch-loop` / `r{N}-watch-poll` + `r{N}-watch-fix`, `r{N}-watch-escalation` | persisted compute polls; bounded agent fixes |
 | 5 migration gate (conditional) | `migration-check`, `migration-gate` (Approval), `migration-scope`, `migration-{stg,prod}-{run,verify}` | mandatory when diff touches `migrations/` or `packages/database-migrations/` |
 | 6 ready-for-stamp | `r{N}-ready-loop` / `r{N}-ready-poll`, `r{N}-ready-exhausted` | human approval + CI green-or-**will-be**-green |
-| 7 stamp + merge word | `r{N}-stamp` (Approval), `r{N}-stamp-validity` | durable park; head-change invalidates |
-| 8 MQ merge | `r{N}-merge-head-check`, `enqueue-merge` | fresh head re-check at merge time, then compute; GitHub merge queue; receipted; idempotent |
-| 8b landing verification | `landing-loop` / `landing-poll`, `landing-exhausted` | squash commit `(#N)` on main — **never** the merged flag |
+| 7 stamp + merge word | `r{N}-stamp` (Approval), `r{N}-stamp-validity` | one durable effort-wide park; every stamped car head is commit-bound; one change invalidates all |
+| 8 MQ merge | `r{N}-merge-head-check`, `enqueue-merge`, `queue-loop` | re-checks every effort head, enqueues only the lowest unlanded car, then advances parent first after each verified parent landing and child retarget |
+| 8b landing verification | `queue-loop`, `landing-loop`, `stack-sync-prune`, exhausted nodes | every squash commit `(#N)` on its live base — **never** the merged flag; native stacks finish with `gh stack sync --prune` |
 | 9 fallout watch | `deploy-evidence`, `fallout-window`, `fallout-wait`, `fallout-watch`, `fallout-escalation` | anchored to deploy; NAMED break-signal |
 | 10 evidence-gated done | `done` | refuses without landing + deploy evidence + fallout verdict (+ migration evidence when triggered) |
 
@@ -81,9 +121,9 @@ Enforcement notes (each maps to a cited incident in the SOP):
   Explicit entries (`brief.suggestedReviewers` merged with `github.reviewers`)
   may be display names - they resolve to logins via the gh-reviewer-lookup
   pattern (`/users/{login}` first, then commit-author name search); an entry
-  that resolves to nothing **escalates instead of being dropped**. Self and
-  `github.excludedApprovers` (ali, by default) are never requested. After the
-  POST the node re-reads `requested_reviewers` and **escalates on any login GH
+  that resolves to nothing **escalates instead of being dropped**. Logins in
+  per-project `github.selfLogins` or `github.excludedApprovers` are never requested.
+  After the POST the node re-reads `requested_reviewers` and **escalates on any login GH
   silently dropped** (review requests silently no-op on plausible-but-wrong
   logins). Zero candidates also escalates - the only empty-reviewer path is an
   explicit `github.skipReviewerRequest: true`, recorded as `explicit-skip`.
@@ -130,19 +170,19 @@ Enforcement notes (each maps to a cited incident in the SOP):
   approval; ready → synthetic regression + fresh round; rounds → hard throw at
   `limits.stampRounds`; landing → hard throw. No infinite loops.
 
-## Model selection (captain addendum)
+## Model and engine selection
 
-`lib/models.ts` — agent models are **agent-pickable config from the deck
-catalog** (pi harness + `deck/` provider). Pi is the only engine: every agent in
-this pipeline is a `PiAgent` on `provider: "deck"`, so auth is broker-held and
-quota-aware. See `../README.md` "Engine policy: pi only". Defaults:
+`lib/models.ts` is the canonical model policy and agent-pickable Deck catalog.
+Every project profile constructs a reviewed Prime seat; the engine is not
+selectable. Defaults:
 
-| Role | Default |
-|---|---|
-| implementer | `deck/claude-sonnet-5` |
-| reviewer | *derived by family opposition* (→ `deck/gpt-5.6-sol`) |
-| watcher | `deck/gpt-5.6-terra` |
-| fallout | `deck/claude-opus-5` |
+| Role | Default model | Reasoning |
+|---|---|---|
+| implementer | `deck/gpt-5.6-sol` | `xhigh` |
+| reviewer / opposition | `deck/claude-fable-5` | `high` |
+| mechanical (rebases, narrow side work, spawn/RLM default) | `deck/gpt-5.6-luna` | `xhigh` |
+| watcher | `deck/gpt-5.6-luna` | `xhigh` |
+| fallout | `deck/gpt-5.6-sol` | `xhigh` |
 
 **Family opposition is a first-class knob** (`models.familyOpposition`,
 default `true`): adversarial-review/debate nodes pick the OPPOSITE model family
@@ -152,6 +192,14 @@ The catalog (`DECK_AGENT_CATALOG`) mirrors the broker allowlist:
 `claude-opus-5`, `claude-sonnet-5`, `claude-haiku-4-5`, `gpt-5.6-terra`,
 `gpt-5.6-luna`, `gpt-5.6-sol`. Non-catalog or non-`deck/` refs fail preflight
 (`assertDeckModel`, also used by the pack seats in `../.smithers/agents.ts`).
+
+Prime RLM children no longer inherit a root seat's model: bare `rlm(...)`
+defaults deliberately to the policy's `mechanical` seat, while an explicit
+per-call model pin remains authoritative and receives the reasoning paired with
+that model. `judgmentFallback` is `deck/claude-opus-5` and is manual-only. The
+broker does not expose a caller-visible, model-specific quota tier; automatic
+switching must wait for `error.exhausted_tiers: ["fable-7d"]` rather than
+guessing from provider-wide `NO_QUOTA` or generic `all-accounts-cooling`.
 
 ## How a crewmate dispatches a run
 
@@ -192,18 +240,18 @@ bunx smithers-orchestrator@0.30.0 logs lin-123-pipeline    # event stream
 ```
 
 When a gate parks (`migration-gate`, `r{N}-stamp`, escalations): relay the card
-to Tim through firstmate (`needs-decision:`), then resolve it yourself:
+to the operator through the configured decision surface, then resolve it:
 
 ```sh
-bunx smithers-orchestrator@0.30.0 approve lin-123-pipeline --node r0-stamp --by tim
+bunx smithers-orchestrator@0.30.0 approve example-123-pipeline --node r0-stamp --by operator
 #   or: deny ... --node r0-stamp   (onDeny=fail → the run fails closed)
-bunx smithers-orchestrator@0.30.0 up pipeline.tsx --run-id lin-123-pipeline --resume true
+bunx smithers-orchestrator@0.30.0 up pipeline.tsx --run-id example-123-pipeline --resume true
 ```
 
 Long real runs: prefer `up ... --serve --port <p>` to keep the owning process
 alive at gates (plain `up` exits at a park; resume works either way).
 
-The stamp card reaches Tim through firstmate; his answer resumes the run. The
+The stamp card reaches the operator through the configured decision surface; their answer resumes the run. The
 crewmate NEVER approves the stamp itself.
 
 ### Operational invariants
@@ -211,9 +259,9 @@ crewmate NEVER approves the stamp itself.
 - Input is immutable after the first frame — fix the brief, start a NEW run.
 - The run store lives in the nearest `.smithers/` anchor (`workflows/.smithers`).
   Dispatch from this directory so every pipeline run lands in the same store.
-- `push-pr` appends `{ticket, repo, pr, url, registeredAt, runId}` to
-  `watchSetPath` (default `~/dev/fm2/data/watch-set.jsonl`) — the intake
-  watch-set gets the PR the moment it exists; nothing untracked.
+- `push-pr` appends one watch-set row per car, with the complete ordered stack
+  topology on every row. Single-PR efforts append one row. The intake watch-set
+  gets the effort the moment it exists; nothing is left untracked.
 - Rework lands as plain commits on the existing PR branch (agent prompts
   hard-forbid child PRs).
 - Workers own code and push only. They exit after each bounded implementation or
@@ -261,7 +309,7 @@ bun run graph            # render-without-execute sanity check
 
 - `tests/reviewers.test.ts` — request-reviewers stage: CODEOWNERS
   parsing/matching (GitHub semantics: `docs/*` owns direct children only,
-  `**/` matches zero dirs), frequency fallback, ali/self/bot exclusion, the
+  `**/` matches zero dirs), frequency fallback, configured/self/bot exclusion, the
   full `executeReviewerRequest` escalation paths against mocked adapters, and
   the gh adapters (request POST + silent-no-op verification) against a mocked
   exec.
@@ -269,9 +317,10 @@ bun run graph            # render-without-execute sanity check
   check, re-request detection, migration detection + evidence, ready-for-stamp
   (bot/excluded/self approvals never count; will-be-green ruling), landing
   `(#N)` matching, evidence-gated done, model catalog + family opposition.
-- `tests/engine.test.ts` — the pi-only engine invariant across the whole
-  `workflows/` workspace (see `../README.md` "Engine policy: pi only"). It
-  imports `../.smithers/agents.ts`, so it needs `.smithers` deps installed.
+- `tests/engine.test.ts` — the reviewed Prime-only profile and construction
+  invariants, active-tree regression, and direct vendor CLI-agent ban.
+- `tests/prime-engine.test.ts` — Prime RPC, isolation, provenance, liveness,
+  malformed-yield, transport-death, model-pin, Herdr, and credential boundaries.
 - `tests/pipeline.test.tsx` — drives the REAL workflow module through
   `smithers-orchestrator/testing` `simulate()`: preflight refusal paths, parks
   at migration-gate/stamp without bypass, full-graph traversal (clean + migration
@@ -284,7 +333,8 @@ pipeline.tsx            the workflow (all stage wiring)
 lib/types.ts            pure domain types
 lib/brief.ts            preflight validation
 lib/models.ts           deck catalog + deck/ provider guard + family opposition
-tests/engine.test.ts    pi-only engine invariant (whole workspace)
+tests/engine.test.ts    Prime-only construction + active-tree regression
+lib/adopt.ts            single-PR and ordered-stack adoption/publication safety
 lib/watch.ts            watch-ci-review machine-checked exit
 lib/migrations.ts       migration detection + evidence completeness
 lib/ready.ts            ready-for-stamp evaluation

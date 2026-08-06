@@ -16,6 +16,25 @@ import type {
 	WatchExitVerdict,
 	WatchSnapshot,
 } from "./types.ts";
+export const DECISION_CLASS_BLOCKER_PREFIX = "DECISION-CLASS BLOCKER:";
+
+export interface DecisionClassBlocker {
+	threadRef: string;
+	decision: string;
+}
+
+/**
+ * Parses the watch-fixer's no-schema-change escalation contract:
+ * `DECISION-CLASS BLOCKER: thread=<stable id or URL> | decision=<missing decision>`.
+ */
+export function parseDecisionClassBlocker(action: string): DecisionClassBlocker | null {
+	if (!action.startsWith(`${DECISION_CLASS_BLOCKER_PREFIX} `)) return null;
+	const match = /^DECISION-CLASS BLOCKER: thread=(.+?) \| decision=(.+)$/.exec(action);
+	if (match === null) return null;
+	const threadRef = match[1]?.trim() ?? "";
+	const decision = match[2]?.trim() ?? "";
+	return threadRef === "" || decision === "" ? null : { threadRef, decision };
+}
 
 /** Map raw check runs to a single CI assessment. */
 export function needsRebase(snapshot: Pick<WatchSnapshot, "behindBy" | "mergeable" | "mergeStateStatus">): boolean {

@@ -53,7 +53,7 @@ function cloneHome(selectedProfile: HomeSyncProfile): { root: string; repo: stri
 }
 
 function identityEntries(home: string): string[] {
-	return fs.readdirSync(home).filter((name) => ![".git", ".pi", ".env", ".deck-profile", "AGENTS.md", "data", "state", "wt", "logs", "run", "questions", "broker"].includes(name));
+	return fs.readdirSync(home).filter((name) => ![".git", ".prime", ".env", ".deck-profile", "AGENTS.md", "data", "state", "wt", "logs", "run", "questions", "broker"].includes(name));
 }
 
 function copyIdentity(from: string, to: string): void {

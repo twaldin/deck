@@ -24,8 +24,8 @@ export function clampReasoning(level: string, supported: readonly ReasoningEffor
 	if (!ORDER.includes(level as ReasoningEffort)) throw new Error(`Unsupported reasoning effort: ${level}`);
 	if (supported.includes(level as ReasoningEffort)) return level as ReasoningEffort;
 	const requested = ORDER.indexOf(level as ReasoningEffort);
-	// Pi clamps downward: choose the highest supported level that does not
-	// exceed the request. If none is low enough, use the lowest supported level.
+	// Clamp downward: choose the highest supported level that does not exceed
+	// the request. If none is low enough, use the lowest supported level.
 	const ordered = [...supported].sort((a, b) => ORDER.indexOf(a) - ORDER.indexOf(b));
 	return [...ordered].reverse().find(candidate => ORDER.indexOf(candidate) <= requested) ?? ordered[0] ?? "minimal";
 }
@@ -62,9 +62,9 @@ export function supportedReasoning(
 	provider: "openai" | "anthropic" | "xai",
 	capabilities?: readonly ReasoningEffort[],
 ): readonly ReasoningEffort[] {
-	// Deck requests use bare model ids after Pi serializes them. Prefer the
-	// Deck/vendor table for known aliases; the bundled catalog may describe a
-	// different provider route for the same bare id.
+	// Deck requests use bare model ids after the client serializes them. Prefer
+	// the Deck/vendor table for known aliases; the bundled catalog may describe
+	// a different provider route for the same bare id.
 	if (MODEL_REASONING_LEVELS[modelId] !== undefined) return MODEL_REASONING_LEVELS[modelId];
 	if (capabilities !== undefined) return capabilities;
 	return provider === "xai" ? ["low", "high"] : ["low", "high"];

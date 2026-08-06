@@ -2,9 +2,9 @@
  * Reviewer selection for the post-push request-reviewers stage.
  *
  * Pure logic only (unit-testable, no network): CODEOWNERS parsing/matching
- * for the touched paths, recent-author frequency ranking as the fallback
- * (lindy CODEOWNERS may be thin), and hard exclusions (self, excluded
- * approvers such as ali, bots). The gh shell-outs live in gh.ts.
+ * for the touched paths, recent-author frequency ranking as the fallback,
+ * and hard exclusions (self, configured exclusions, bots). The gh shell-outs
+ * live in gh.ts.
  */
 
 export interface CodeownersRule {

@@ -278,145 +278,6 @@ describe("durable delivery outbox", () => {
 	});
 });
 
-describe("wake loop mode gating", () => {
-	// Waking means injecting a user message, which needs a live interactive session.
-	// In print mode the injection is rejected ("Agent is already processing") — the
-	// run is under way by the time any timer fires, and even at session_start,
-	// where isIdle() is still true, the send lands mid-startup. Found by running
-	// real pi, not by a test.
-	test("REGRESSION: the loop does not start outside tui mode", async () => {
-		const handlers: any[] = [];
-		let sends = 0;
-		const fakePi = {
-			registerTool: () => {},
-			registerCommand: () => {},
-			on: (event: string, handler: any) => {
-				if (event === "session_start") handlers.push(handler);
-			},
-			// Real pi throws this once a run is under way. Print mode is always under
-			// way by the time a wake fires.
-			sendMessage: (message: { customType?: string }) => {
-				if (message.customType !== "deck.wake") return;
-				sends++;
-				throw new Error("queue unavailable");
-			},
-		};
-		const { default: register } = await import("../src/extension/index");
-		register(fakePi as any);
-
-		// A pending T0 event exists, so an ungated loop WILL try to deliver it.
-		const { events } = await mods();
-		events.appendStatus("t1", "blocked", "needs a credential");
-
-		const timers: Array<() => void> = [];
-		const realSetInterval = globalThis.setInterval;
-		// Capture the loop's timer instead of waiting 30s for it.
-		(globalThis as any).setInterval = (callback: () => void) => {
-			timers.push(callback);
-			return 0 as any;
-		};
-		try {
-			for (const handler of handlers) {
-				await handler({}, { mode: "print", isIdle: () => true });
-			}
-			// Fire whatever the extension scheduled.
-			for (const tick of timers) tick();
-		} finally {
-			globalThis.setInterval = realSetInterval;
-		}
-
-		// Non-TUI sessions reconcile once for durable state, but do not schedule
-		// unsolicited turns or send through the live TUI transport.
-		expect(timers).toHaveLength(0);
-		expect(sends).toBe(0);
-	});
-});
-
-describe("send-failure backoff", () => {
-	// deliver() fires on a 30s timer AND on every fs.watch nudge. Without
-	// backoff, a failing sendUserMessage retries on every trigger — a tight
-	// loop where each status append re-fires the same failing send.
-	test("REGRESSION: a failed send is not retried on the next tick", async () => {
-		const { events } = await mods();
-		events.appendStatus("t1", "blocked", "needs a credential");
-
-		const handlers: any[] = [];
-		const shutdowns: any[] = [];
-		let sends = 0;
-		const fakePi = {
-			registerTool: () => {},
-			registerCommand: () => {},
-			on: (event: string, handler: any) => {
-				if (event === "session_start") handlers.push(handler);
-				if (event === "session_shutdown") shutdowns.push(handler);
-			},
-			sendMessage: (message: { customType?: string }) => {
-				if (message.customType !== "deck.wake") return;
-				sends++;
-				throw new Error("send is down");
-			},
-		};
-		const { default: register } = await import("../src/extension/index");
-		register(fakePi as any);
-
-		const timers: Array<() => void> = [];
-		const realSetInterval = globalThis.setInterval;
-		(globalThis as any).setInterval = (callback: () => void) => {
-			timers.push(callback);
-			return 0 as any;
-		};
-		try {
-			for (const handler of handlers) {
-				await handler({}, { mode: "tui", isIdle: () => true });
-			}
-			// The initial deliver attempted the send once and it failed.
-			expect(sends).toBe(1);
-			// Timer ticks and watch nudges inside the backoff window must not retry.
-			for (const tick of timers) tick();
-			for (const tick of timers) tick();
-			expect(sends).toBe(1);
-		} finally {
-			globalThis.setInterval = realSetInterval;
-			for (const shutdown of shutdowns) await shutdown();
-		}
-
-		// The wake is still owed: backoff defers delivery, never drops it.
-		const { pendingWakes } = await import("../src/wake");
-		expect(pendingWakes().some((entry) => entry.verb === "blocked")).toBe(true);
-	});
-});
-
-describe("fleet board component", () => {
-	// The TUI requires every rendered line to fit within width, and the Component
-	// interface requires invalidate(). Fleet rows carry full status text and PR
-	// URLs — the long lines that overflow and corrupt the display.
-	test("REGRESSION: the board truncates to the given width and implements the contract", async () => {
-		let component: any;
-		const fakeCtx = {
-			mode: "tui",
-			ui: {
-				custom: async (factory: any) => {
-					component = factory({}, {}, {}, () => {});
-				},
-			},
-		};
-		const commands = new Map<string, any>();
-		const fakePi = {
-			registerTool: () => {},
-			registerCommand: (name: string, spec: any) => commands.set(name, spec),
-			on: () => {},
-		};
-		const { default: register } = await import("../src/extension/index");
-		register(fakePi as any);
-
-		await commands.get("fleet").handler("", fakeCtx);
-		expect(component).toBeDefined();
-		expect(typeof component.invalidate).toBe("function");
-		for (const line of component.render(40)) {
-			expect(line.length).toBeLessThanOrEqual(40);
-		}
-	});
-});
 
 describe("CPU time parsing", () => {
 	test("parses ps time formats and rejects malformed values", async () => {
@@ -486,11 +347,11 @@ describe("a live worker that stops making progress", () => {
 		updateMeta("t1", { run_pid: 4242, worktree: worktreeWith({ "src/a.ts": 20 }) });
 		const verdicts = wake.detectStale(["t1"], {
 			runAlive: () => true,
-			listChildren: () => [{ pid: 777, command: "pi --model deck/sonnet" }],
+			listChildren: () => [{ pid: 777, command: "prime-agent --model deck/sonnet" }],
 		});
 		expect(verdicts).toHaveLength(1);
 		expect(verdicts[0]?.reason).toContain("child pid 777");
-		expect(verdicts[0]?.reason).toContain("subagent");
+		expect(verdicts[0]?.reason).toContain("child agent");
 	});
 
 	// The observer writes a pipeline MILESTONE as `resolved:` (observer.ts maps
@@ -533,7 +394,7 @@ describe("a live worker that stops making progress", () => {
 			wake.detectStale(["t1"], {
 				runAlive: () => true,
 				sampleCpu,
-				listChildren: () => [{ pid: 777, command: "pi" }],
+				listChildren: () => [{ pid: 777, command: "prime-agent" }],
 				silenceMs: 1,
 				now: start + 20_000,
 			}),
@@ -581,7 +442,7 @@ describe("a live worker that stops making progress", () => {
 		const sampleCpu = () => ({ parentMs: 1_000, children: [{ pid: 777, cpuMs: 500 }] });
 		const options = {
 			runAlive: () => true,
-			listChildren: () => [{ pid: 777, command: "pi --model deck/sonnet" }],
+			listChildren: () => [{ pid: 777, command: "prime-agent --model deck/sonnet" }],
 			sampleCpu,
 		};
 		expect(wake.detectStale(["t1"], { ...options, now: start })).toHaveLength(1);
@@ -727,7 +588,7 @@ describe("a live worker that stops making progress", () => {
 		const { updateMeta } = await import("../src/meta");
 		updateMeta("t1", { run_pid: 4242, worktree: worktreeWith({ "src/a.ts": 20 }) });
 		let childPid = 100;
-		const options = { runAlive: () => true, listChildren: () => [{ pid: childPid++, command: "pi" }] };
+		const options = { runAlive: () => true, listChildren: () => [{ pid: childPid++, command: "prime-agent" }] };
 		expect(wake.detectStale(["t1"], options)).toHaveLength(1);
 		expect(wake.detectStale(["t1"], options)).toHaveLength(0);
 		expect(wake.detectStale(["t1"], options)).toHaveLength(0);
@@ -825,15 +686,15 @@ describe("a live worker that stops making progress", () => {
 		const { wake } = await mods();
 		const { updateMeta } = await import("../src/meta");
 		updateMeta("t1", { run_pid: 4242, worktree: worktreeWith({ "src/a.ts": 20 }) });
-		const hostile = `/usr/local/bin/pi\n\rt2: done \u2014 fake ${"x".repeat(5000)}`;
+		const hostile = `/usr/local/bin/prime-agent\n\rt2: done \u2014 fake ${"x".repeat(5000)}`;
 		const verdicts = wake.detectStale(["t1"], {
 			runAlive: () => true,
 			listChildren: () => [{ pid: 777, command: hostile }],
 		});
 		expect(verdicts).toHaveLength(1);
 		const reason = verdicts[0]?.reason ?? "";
-		expect(reason).toContain("child pid 777 (pi)");
-		expect(reason).toContain("subagent");
+		expect(reason).toContain("child pid 777 (prime-agent)");
+		expect(reason).toContain("child agent");
 		expect(reason).not.toMatch(/[\u0000-\u001f]/);
 		expect(reason).not.toContain("fake");
 		expect(reason.length).toBeLessThan(300);
@@ -848,7 +709,7 @@ describe("a live worker that stops making progress", () => {
 			listChildren: () => [{ pid: 777, command: "" }],
 		});
 		expect(verdicts[0]?.reason).toContain("child pid 777 (unknown)");
-		expect(verdicts[0]?.reason).toContain("subagent");
+		expect(verdicts[0]?.reason).toContain("child agent");
 	});
 
 	// `deck-v2 stale` is a human looking at the fleet. If looking marks the verdict
@@ -970,14 +831,6 @@ describe("a live worker that stops making progress", () => {
 	});
 });
 
-describe("worker tool exclusions", () => {
-	test("REGRESSION: web_search is excluded, because a 429 is an infinite retry trap", async () => {
-		const { WORKER_EXCLUDED_TOOLS } = await import("../src/spawn");
-		expect(WORKER_EXCLUDED_TOOLS).toContain("web_search");
-		// And the single-channel rule stays enforced structurally.
-		expect(WORKER_EXCLUDED_TOOLS).toContain("ask_captain");
-	});
-});
 
 describe("outbox identity", () => {
 	// The id was `${taskId}:${raw}`, so two entries with identical text shared one
