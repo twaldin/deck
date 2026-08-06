@@ -404,19 +404,30 @@ async function herdrRequest(
 	return promise;
 }
 
-let herdrAttachQueue: Promise<void> = Promise.resolve();
+const herdrAttachQueues = new Map<string, Promise<void>>();
+const herdrAttachFailures = new Map<string, { at: number; cause: unknown }>();
 
-async function withHerdrAttachLock<T>(attach: () => Promise<T>): Promise<T> {
-	const previous = herdrAttachQueue;
-	let release!: () => void;
-	herdrAttachQueue = new Promise<void>((resolve) => {
-		release = resolve;
-	});
+async function withHerdrAttachLock<T>(socketPath: string, attach: () => Promise<T>): Promise<T> {
+	const previous = herdrAttachQueues.get(socketPath) ?? Promise.resolve();
+	const gate = Promise.withResolvers<void>();
+	herdrAttachQueues.set(socketPath, gate.promise);
 	await previous;
+	let attempted = false;
 	try {
-		return await attach();
+		const failure = herdrAttachFailures.get(socketPath);
+		if (failure !== undefined && Date.now() - failure.at < HERDR_DISCOVERY_TIMEOUT_MS) {
+			throw failure.cause;
+		}
+		attempted = true;
+		const result = await attach();
+		herdrAttachFailures.delete(socketPath);
+		return result;
+	} catch (cause) {
+		if (attempted) herdrAttachFailures.set(socketPath, { at: Date.now(), cause });
+		throw cause;
 	} finally {
-		release();
+		gate.resolve();
+		if (herdrAttachQueues.get(socketPath) === gate.promise) herdrAttachQueues.delete(socketPath);
 	}
 }
 
@@ -1743,7 +1754,7 @@ export class PrimeSeatAgent implements AgentLike {
 			socketPath = await discoverHerdrSocketPath();
 		}
 		if (!socketValidated) await herdrRequest(socketPath, "workspace.list", {});
-		return withHerdrAttachLock(async () => {
+		return withHerdrAttachLock(socketPath, async () => {
 			const deckIdentityMatchesSocket = deckSocketPath !== undefined
 				&& deckSocketPath === socketPath;
 			const ambientParentPaneId = nonEmpty(process.env.HERDR_PANE_ID);
