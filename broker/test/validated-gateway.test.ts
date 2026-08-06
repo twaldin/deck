@@ -231,6 +231,58 @@ describe("validated gateway outbound requests", () => {
 		expect(warnings.filter(line => line.includes('\"action\":\"pin\"')).some(line => line.includes('\"credentialId\":2'))).toBe(true);
 	});
 
+	test("preserves encrypted OpenAI reasoning for a proven same-model same-account continuation", async () => {
+		let activeCredentialId: number | undefined;
+		const { gateway, forwarded } = await withFakeUpstream({
+			quotaAccounts: () => [{ credentialId: 1, provider: "openai-codex", authProvider: "openai-codex", blocked: [] }],
+			storage: {
+				pinSessionOAuthAccount: (_provider: string, _sessionId: string, credentialId: number) => {
+					activeCredentialId = credentialId;
+					return true;
+				},
+				listOAuthAccounts: () => [{ credentialId: 1, active: activeCredentialId === 1 }],
+			} as never,
+		}, () => Response.json({
+			id: "resp_stable",
+			object: "response",
+			output: [{
+				type: "reasoning",
+				id: "rs_stable",
+				encrypted_content: "encrypted-stable",
+				summary: [{ type: "summary_text", text: "stable summary" }],
+			}],
+		}));
+		const artifact = {
+			type: "reasoning",
+			id: "rs_stable",
+			encrypted_content: "encrypted-stable",
+			summary: [{ type: "summary_text", text: "stable summary" }],
+		};
+		const first = await fetch(`${gateway.url}/v1/responses`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "openai-codex/gpt-5.6-sol",
+				prompt_cache_key: "stable-session",
+				input: [{ role: "user", content: "first" }],
+			}),
+		});
+		expect(first.status).toBe(200);
+		await first.json();
+		const second = await fetch(`${gateway.url}/v1/responses`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "openai-codex/gpt-5.6-sol",
+				prompt_cache_key: "stable-session",
+				input: [artifact, { role: "user", content: "second" }],
+			}),
+		});
+		expect(second.status).toBe(200);
+		await second.json();
+		expect(forwarded[1]?.body.input).toEqual([artifact, { role: "user", content: "second" }]);
+	});
+
 	test("demotes only foreign prior Anthropic thinking after a quota model fallback", async () => {
 		let fallback = false;
 		let activeCredentialId: number | undefined;
@@ -583,7 +635,7 @@ describe("validated gateway outbound requests", () => {
 		expect(forwarded).toEqual([]);
 	});
 
-	test("rejects pi-native bodies because their provider payload artifacts cannot be sanitized", async () => {
+	test("strips unknown pi-native provider artifacts and forwards the canonical request", async () => {
 		const { gateway, forwarded } = await withFakeUpstream();
 		const response = await fetch(`${gateway.url}/v1/pi/stream`, {
 			method: "POST",
@@ -601,9 +653,66 @@ describe("validated gateway outbound requests", () => {
 				},
 			}),
 		});
-		expect(response.status).toBe(501);
-		expect(await response.json()).toMatchObject({ error: { code: "ARTIFACT_UNSAFE_ROUTE" } });
-		expect(forwarded).toEqual([]);
+		expect(response.status).toBe(200);
+		await response.json();
+		expect(forwarded[0]?.body).toMatchObject({
+			context: { messages: [{ providerPayload: { type: "openaiResponsesHistory", items: [] } }] },
+		});
+	});
+
+	test("preserves proven pi-native reasoning on a stable model and credential", async () => {
+		let activeCredentialId: number | undefined;
+		const signature = JSON.stringify({ type: "reasoning", encrypted_content: "pi-stable" });
+		const message = {
+			role: "assistant",
+			model: "gpt-5.6-sol",
+			provider: "openai-codex",
+			api: "openai-codex-responses",
+			content: [{ type: "thinking", thinking: "visible pi summary", thinkingSignature: signature }],
+			providerPayload: {
+				type: "openaiResponsesHistory",
+				items: [{ type: "reasoning", id: "rs_pi", encrypted_content: "pi-stable", summary: [{ type: "summary_text", text: "visible pi summary" }] }],
+			},
+		};
+		let call = 0;
+		const { gateway, forwarded } = await withFakeUpstream({
+			quotaAccounts: () => [{ credentialId: 1, provider: "openai-codex", authProvider: "openai-codex", blocked: [] }],
+			storage: {
+				pinSessionOAuthAccount: (_provider: string, _sessionId: string, credentialId: number) => {
+					activeCredentialId = credentialId;
+					return true;
+				},
+				listOAuthAccounts: () => [{ credentialId: 1, active: activeCredentialId === 1 }],
+			} as never,
+		}, () => {
+			call += 1;
+			return Response.json({ message: call === 1 ? message : { ...message, content: [{ type: "text", text: "continued" }] } });
+		});
+		const first = await fetch(`${gateway.url}/v1/pi/stream`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				modelId: "openai-codex/gpt-5.6-sol",
+				context: { messages: [{ role: "user", content: "first", timestamp: 1 }] },
+				options: { sessionId: "pi-stable-session" },
+				stream: false,
+			}),
+		});
+		expect(first.status).toBe(200);
+		await first.json();
+		const second = await fetch(`${gateway.url}/v1/pi/stream`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				modelId: "openai-codex/gpt-5.6-sol",
+				context: { messages: [message, { role: "user", content: "second", timestamp: 2 }] },
+				options: { sessionId: "pi-stable-session" },
+				stream: false,
+			}),
+		});
+		expect(second.status).toBe(200);
+		await second.json();
+		expect(forwarded[1]?.body.context).toMatchObject({ messages: [message, { role: "user", content: "second" }] });
 	});
 
 	test("returns 400 and does not forward invalid provider payloads", async () => {

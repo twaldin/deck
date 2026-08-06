@@ -8,6 +8,30 @@ afterEach(async () => {
 	for (const resource of resources.splice(0)) await resource.close();
 });
 
+function openAIReasoningSuccess(): string {
+	const item = {
+		type: "reasoning",
+		id: "rs_stable_wire",
+		status: "completed",
+		encrypted_content: "wire-ciphertext",
+		summary: [{ type: "summary_text", text: "wire visible summary" }],
+	};
+	const response = {
+		id: "resp_stable_wire",
+		object: "response",
+		status: "completed",
+		output: [item],
+		usage: { input_tokens: 1, output_tokens: 1, output_tokens_details: { reasoning_tokens: 1 } },
+	};
+	const events = [
+		{ type: "response.created", response },
+		{ type: "response.output_item.added", output_index: 0, item },
+		{ type: "response.output_item.done", output_index: 0, item },
+		{ type: "response.completed", response },
+	];
+	return events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join("");
+}
+
 describe("OpenAI artifact vendor egress", () => {
 	test("demotes encrypted reasoning to visible assistant text before the real Responses transport", async () => {
 		const captured: Array<{ path: string; body: unknown }> = [];
@@ -155,5 +179,74 @@ describe("OpenAI artifact vendor egress", () => {
 		expect(targetedPositions.length).toBeGreaterThan(0);
 		expect(new Set(targetedPositions)).toEqual(new Set([0]));
 		expect(unpinnedGetApiKeyCalls).toBe(0);
+	}, 30_000);
+
+	test("preserves encrypted reasoning end to end for a stable model and credential", async () => {
+		const captured: Array<Record<string, unknown>> = [];
+		const vendor = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			async fetch(request) {
+				captured.push(await request.json() as Record<string, unknown>);
+				return new Response(openAIReasoningSuccess(), { headers: { "content-type": "text/event-stream" } });
+			},
+		});
+		resources.push({ close: async () => vendor.stop(true) });
+		const index = buildModelIndex(DEFAULT_ALLOWLIST);
+		const bundled = index.resolve("openai/gpt-5.4");
+		if (bundled === undefined) throw new Error("missing OpenAI Responses transport test model");
+		const model = { ...bundled, baseUrl: `http://127.0.0.1:${vendor.port}/v1` };
+		let activeCredentialId: number | undefined;
+		const gateway = startValidatedGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: [],
+			version: "test",
+			resolveModel: id => id.split("/").at(-1) === model.id ? model : undefined,
+			listModels: () => [model],
+			storage: {
+				getApiKey: async () => "stable-token",
+				getOAuthAccessAt: async () => ({ ok: true, accessToken: "stable-token", credentialId: 1 }),
+				pinSessionOAuthAccount: (_provider: string, _sessionId: string, credentialId: number) => {
+					activeCredentialId = credentialId;
+					return true;
+				},
+				listOAuthAccounts: () => [{ position: 0, credentialId: 1, active: activeCredentialId === 1 }],
+			} as never,
+			quotaAccounts: () => [{ credentialId: 1, provider: "openai", authProvider: "openai", blocked: [] }],
+			quotaPreferences: () => [],
+		});
+		resources.push(gateway);
+		const first = await fetch(`${gateway.url}/v1/responses`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "openai/gpt-5.4",
+				prompt_cache_key: "stable-wire-session",
+				input: "first",
+			}),
+		});
+		expect(first.status).toBe(200);
+		const firstBody = await first.json() as { output?: unknown[] };
+		const reasoning = firstBody.output?.find(item =>
+			item !== null && typeof item === "object" && "type" in item && item.type === "reasoning"
+		);
+		expect(JSON.stringify(reasoning)).toContain("wire-ciphertext");
+		expect(reasoning).toBeDefined();
+		const second = await fetch(`${gateway.url}/v1/responses`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "openai/gpt-5.4",
+				prompt_cache_key: "stable-wire-session",
+				input: [reasoning, { role: "user", content: "second" }],
+			}),
+		});
+		expect(second.status).toBe(200);
+		await second.json();
+		expect(captured).toHaveLength(2);
+		const secondVendorBody = JSON.stringify(captured[1]);
+		expect(secondVendorBody).toContain("wire-ciphertext");
+		expect(secondVendorBody).toContain("rs_stable_wire");
+		expect(secondVendorBody).toContain('"type":"reasoning"');
 	}, 30_000);
 });

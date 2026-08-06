@@ -40,7 +40,7 @@ describe("default allowlist covers the full catalog", () => {
 
 	test(":fast strips the suffix and selects priority for OpenAI", () => {
 		const index = buildModelIndex(DEFAULT_ALLOWLIST);
-		expect(parseFastModel("openai-codex/gpt-5.6-luna:fast", index.resolve)).toEqual({ modelId: "openai-codex/gpt-5.6-luna", serviceTier: "priority" });
+		expect(parseFastModel("openai-codex/gpt-5.6-luna:fast", index.resolve)).toEqual({ modelId: "gpt-5.6-luna", serviceTier: "priority" });
 	});
 
 	test(":fast rejects non-OpenAI models", () => {
