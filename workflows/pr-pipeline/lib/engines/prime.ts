@@ -24,8 +24,38 @@ import {
 export const PRIME_AGENT_VERSION = "0.7.0";
 export const PRIME_AGENT_BINARY = "prime-agent";
 export const PRIME_MIN_NODE_VERSION = "22.8.0";
+/**
+ * Largest SINGLE unterminated RPC event a seat may emit.
+ *
+ * This is a memory bound, not a throughput budget. It previously capped lifetime
+ * accumulated stdout, which guarded nothing - that counter never held memory -
+ * while failing healthy long runs, because Prime RPC deltas repeat accumulated
+ * messages and tool arguments and so grow with protocol repetition rather than
+ * with real output. A multi-arch container build crossed 16 MiB that way and
+ * killed a real project run; raising the ceiling would only have postponed the
+ * same deterministic failure.
+ *
+ * Run length is bounded by `timeoutMs` instead. What remains worth refusing is
+ * one event large enough to exhaust memory before a newline arrives, which is a
+ * protocol violation. Raise per environment with `DECK_PRIME_MAX_OUTPUT_BYTES`.
+ */
 export const PRIME_SEAT_DEFAULT_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
-export const PRIME_SEAT_IDLE_TIMEOUT_MS = 5 * 60_000;
+/**
+ * How long a seat may emit NOTHING before it is treated as hung.
+ *
+ * This measures silence on the child's stdio, and a Prime seat running a single
+ * long tool call is silent for that call's whole duration - it does not stream
+ * partial tool output over RPC. At five minutes, three real project runs were
+ * killed mid-work: a multi-arch container build legitimately produces no seat
+ * output for far longer than that.
+ *
+ * Fifteen minutes is chosen against the work, not the hang: it still catches a
+ * wedged seat inside one node's budget, while covering image builds, dependency
+ * installs, and full test suites. Override per seat with `idleTimeoutMs`, or per
+ * environment with `DECK_PRIME_IDLE_TIMEOUT_MS`, when a project's slowest honest
+ * tool call is longer still.
+ */
+export const PRIME_SEAT_IDLE_TIMEOUT_MS = 15 * 60_000;
 export const PRIME_SEAT_CAPABILITY_PROFILES = {
 	"workflow-seat": {
 		rlmDepth: 0,
@@ -475,6 +505,28 @@ export function primeMaxOutputBytes(agentLimit: number | undefined, environmentL
 	// Prime RPC deltas repeat accumulated messages and tool arguments. A normal
 	// xhigh coding seat can cross Smithers' 200 KiB tool default in seconds.
 	return Math.max(smithersLimit ?? 0, PRIME_SEAT_DEFAULT_MAX_OUTPUT_BYTES);
+}
+
+/**
+ * Resolve the silence budget: explicit seat option, then environment, then the
+ * default. A malformed value is refused rather than silently ignored, because
+ * the failure it produces - a seat killed mid-build - looks like a code defect
+ * and costs a full run to diagnose.
+ */
+export function primeIdleTimeoutMs(agentLimit: number | undefined, environmentLimit: string | undefined): number {
+	const raw = agentLimit ?? (environmentLimit === undefined || environmentLimit === "" ? undefined : Number(environmentLimit));
+	if (raw === undefined) return PRIME_SEAT_IDLE_TIMEOUT_MS;
+	if (!Number.isSafeInteger(raw) || raw <= 0) {
+		throw new PrimeSeatError({
+			status: "failed",
+			code: "PRIME_STALLED",
+			message: "PrimeSeatAgent.idleTimeoutMs and DECK_PRIME_IDLE_TIMEOUT_MS must be positive integers",
+			exitStatus: { code: null, signal: null },
+			wallClockMs: 0,
+			stderr: "",
+		});
+	}
+	return raw;
 }
 
 function withTaskContext(
@@ -1490,7 +1542,10 @@ export class PrimeSeatAgent implements AgentLike {
 		const timeoutMs = typeof options.timeout === "number" && Number.isFinite(options.timeout)
 			? Math.min(options.timeout, this.opts.timeoutMs)
 			: this.opts.timeoutMs;
-		const idleTimeoutMs = Math.min(this.opts.idleTimeoutMs ?? PRIME_SEAT_IDLE_TIMEOUT_MS, timeoutMs);
+		const idleTimeoutMs = Math.min(
+			primeIdleTimeoutMs(this.opts.idleTimeoutMs, process.env.DECK_PRIME_IDLE_TIMEOUT_MS),
+			timeoutMs,
+		);
 
 		const terminationGraceMs = this.opts.terminationGraceMs ?? DEFAULT_TERMINATION_GRACE_MS;
 		let stderrTail = "";
@@ -1694,14 +1749,28 @@ export class PrimeSeatAgent implements AgentLike {
 					stdoutBytes += chunk.byteLength;
 					options.onStdout?.(text);
 					armIdleTimer();
-					if (stdoutBytes > maxOutputBytes) {
+					stdoutBuffer += text;
+					// Bound the UNPARSED buffer, not lifetime throughput.
+					//
+					// The old check failed a run once its accumulated stdout crossed the
+					// limit. That guarded nothing: `stdoutBytes` is a counter, while the
+					// only thing held in memory is this buffer, which drains at every
+					// newline. Worse, Prime RPC deltas repeat accumulated messages and
+					// tool arguments, so lifetime bytes grow with protocol repetition
+					// rather than with real output - a long, healthy seat crossed 16 MiB
+					// on ordinary build logs, and raising the number only moves the
+					// deterministic failure later.
+					//
+					// Run length is already bounded by `timeoutMs`. What remains worth
+					// refusing is a single unterminated event large enough to exhaust
+					// memory, which is a protocol violation rather than verbose work.
+					if (Buffer.byteLength(stdoutBuffer, "utf8") > maxOutputBytes) {
 						forceStop({
 							code: "PRIME_OUTPUT_LIMIT",
-							message: `Prime RPC output exceeded ${maxOutputBytes} bytes. Raise DECK_PRIME_MAX_OUTPUT_BYTES, PrimeSeatAgent.maxOutputBytes, or Smithers --max-output-bytes above the ${PRIME_SEAT_DEFAULT_MAX_OUTPUT_BYTES}-byte Prime floor.`,
+							message: `A single Prime RPC event exceeded ${maxOutputBytes} bytes without a newline. Raise DECK_PRIME_MAX_OUTPUT_BYTES, PrimeSeatAgent.maxOutputBytes, or Smithers --max-output-bytes above the ${PRIME_SEAT_DEFAULT_MAX_OUTPUT_BYTES}-byte Prime floor.`,
 						});
 						return;
 					}
-					stdoutBuffer += text;
 					let newline = stdoutBuffer.indexOf("\n");
 					while (newline >= 0) {
 						const line = stdoutBuffer.slice(0, newline).replace(/\r$/, "");

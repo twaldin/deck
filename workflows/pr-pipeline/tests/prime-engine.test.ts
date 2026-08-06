@@ -14,6 +14,8 @@ import {
 	PRIME_MIN_NODE_VERSION,
 	primeMaxOutputBytes,
 	PRIME_SEAT_DEFAULT_MAX_OUTPUT_BYTES,
+	PRIME_SEAT_IDLE_TIMEOUT_MS,
+	primeIdleTimeoutMs,
 	PRIME_WORKFLOW_SEAT_TOOLS,
 	resolveDeckPrimeProfilePaths,
 	PrimeSeatError,
@@ -220,6 +222,7 @@ type FakeMode =
 	| "missing-transcript"
 	| "no-model-provenance"
 	| "output-burst"
+	| "delta-repetition"
 	| "transport-death"
 	| "wrong-model"
 	| "stall"
@@ -309,6 +312,14 @@ process.stdin.on("data", (chunk) => {
       send({ id: request.id, type: "response", command: "prompt", success: true });
       if (mode === "output-burst") {
         send({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "" }, padding: "x".repeat(300_000) });
+      }
+      if (mode === "delta-repetition") {
+        // Prime RPC deltas repeat accumulated state, so a healthy long seat emits
+        // far more lifetime bytes than any single event. Each line here is small
+        // and newline-terminated; the total is deliberately over the cap.
+        for (let i = 0; i < 400; i += 1) {
+          send({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "d" }, padding: "y".repeat(1000) });
+        }
       }
       if (mode === "transport-death") {
         send({ type: "session", version: 3, id: "root-session", timestamp: new Date().toISOString(), cwd: process.cwd() });
@@ -720,7 +731,43 @@ describe("Prime seat adapter fault contract", () => {
 		expect(failure.result.stderr).toContain("exit 1");
 	});
 
-	test("gives Prime RPC a 16 MiB floor and names every supported override on overflow", async () => {
+	test("gives a seat a 15 minute silence budget, overridable, and refuses a malformed one", () => {
+		// A seat running one long tool call emits nothing for that call's whole
+		// duration. At 5 minutes three real project runs were killed mid-build.
+		expect(PRIME_SEAT_IDLE_TIMEOUT_MS).toBe(15 * 60_000);
+		expect(primeIdleTimeoutMs(undefined, undefined)).toBe(15 * 60_000);
+
+		// Explicit seat option wins over the environment.
+		expect(primeIdleTimeoutMs(90_000, "600000")).toBe(90_000);
+		expect(primeIdleTimeoutMs(undefined, "600000")).toBe(600_000);
+		// An empty variable is absence, not zero.
+		expect(primeIdleTimeoutMs(undefined, "")).toBe(15 * 60_000);
+
+		// Refused rather than ignored: a silently dropped override produces a seat
+		// killed mid-build, which reads as a code defect and costs a run to chase.
+		for (const bad of ["0", "-1", "abc", "1.5"]) {
+			expect(() => primeIdleTimeoutMs(undefined, bad), bad).toThrow(/must be positive integers/);
+		}
+		expect(() => primeIdleTimeoutMs(0, undefined)).toThrow(/must be positive integers/);
+	});
+
+	test("a long seat whose repeated deltas exceed the cap in total still finishes", async () => {
+		// The cap bounds ONE unterminated event, never lifetime throughput. Prime
+		// RPC deltas repeat accumulated messages and tool arguments, so total bytes
+		// grow with protocol repetition rather than with real output — capping the
+		// lifetime sum killed healthy runs (a multi-arch build crossed 16 MiB on
+		// build logs) and raising the number would only postpone that.
+		const binary = await fakePrime("delta-repetition");
+		const result = runRecordSchema.parse(await agent(binary).generate({
+			prompt: "many small deltas",
+			// 400 events of ~1 KB each is comfortably past this, with every single
+			// event far below it.
+			maxOutputBytes: 200_000,
+		}));
+		expect(result.providerMetadata.prime.exitStatus).toEqual({ code: 0, signal: null });
+	});
+
+	test("gives Prime RPC a 16 MiB per-event floor and names every supported override on overflow", async () => {
 		expect(PRIME_SEAT_DEFAULT_MAX_OUTPUT_BYTES).toBe(16 * 1024 * 1024);
 		expect(primeMaxOutputBytes(undefined, undefined, 200_000)).toBe(16 * 1024 * 1024);
 		const binary = await fakePrime("output-burst");
