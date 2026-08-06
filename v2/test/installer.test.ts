@@ -1,5 +1,5 @@
 /**
- * Installed-shape tests for the three standalone pi extensions.
+ * Installed-shape tests for the four standalone pi extensions.
  *
  * Source entrypoints import ../v2/src/*. Their directory symlinks and the
  * shared v2/src symlink tree must preserve that relative layout without
@@ -55,9 +55,9 @@ function install(): void {
 const extensionDir = (name: string) => path.join(target, "agent", "extensions", name);
 
 describe("installer layout", () => {
-	test("installs three directory extensions with one entrypoint each", () => {
+	test("installs four directory extensions with one entrypoint each", () => {
 		install();
-		for (const name of ["deck-questions", "deck-ship", "deck-recall"]) {
+		for (const name of ["deck-questions", "deck-ship", "deck-recall", "deck-usage"]) {
 			const entry = path.join(extensionDir(name), "index.ts");
 			expect(fs.lstatSync(entry).isSymbolicLink()).toBe(true);
 			expect(fs.realpathSync(entry)).toBe(
@@ -115,11 +115,11 @@ describe("installer layout", () => {
 
 	test("reruns converge", () => {
 		install();
-		const first = ["deck-questions", "deck-ship", "deck-recall"].map((name) =>
+		const first = ["deck-questions", "deck-ship", "deck-recall", "deck-usage"].map((name) =>
 			fs.realpathSync(path.join(extensionDir(name), "index.ts"))
 		);
 		install();
-		expect(["deck-questions", "deck-ship", "deck-recall"].map((name) =>
+		expect(["deck-questions", "deck-ship", "deck-recall", "deck-usage"].map((name) =>
 			fs.realpathSync(path.join(extensionDir(name), "index.ts"))
 		)).toEqual(first);
 	});
@@ -235,7 +235,7 @@ describe("installer layout", () => {
 			encoding: "utf8",
 			stdio: ["ignore", "pipe", "pipe"],
 		});
-		for (const name of ["deck-questions", "deck-ship", "deck-recall"]) {
+		for (const name of ["deck-questions", "deck-ship", "deck-recall", "deck-usage"]) {
 			expect(fs.existsSync(path.join(target, ".deck", ".pi", "extensions", name, "index.ts"))).toBe(true);
 		}
 	});

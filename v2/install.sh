@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Install Deck's three standalone pi extensions and the deck-v2 CLI.
+# Install Deck's four standalone pi extensions and the deck-v2 CLI.
 # INSTALL_TARGET is overridable so tests never touch live ~/.deck.
 #
 # Each extension is a DIRECTORY entrypoint. pi discovers both extensions/*.ts
@@ -98,7 +98,7 @@ for module in "$REPO_V2"/src/*.ts; do
   ln -sfn "$module" "$LIB_DEST/$name"
 done
 
-for extension in deck-questions deck-ship deck-recall; do
+for extension in deck-questions deck-ship deck-recall deck-usage; do
   source="$EXTENSION_SOURCE/$extension.ts"
   dest="$EXTENSIONS_DIR/$extension"
   flat="$EXTENSIONS_DIR/$extension.ts"
