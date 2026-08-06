@@ -11,10 +11,6 @@ export interface IdleCompactionConfig {
 	minGrowthTokens: number;
 	minGrowthPercent: number;
 	minimumCompactionIntervalMs: number;
-	/** Send a tiny request instead of compacting at the cache deadline. */
-	keepWarm: boolean;
-	/** Context percentage at which pre-miss compaction may run. */
-	keepWarmContextPercent: number;
 	retryDelayMs: number;
 	maxRetriesPerContext: number;
 	notify: boolean;
@@ -29,8 +25,6 @@ export const DEFAULT_IDLE_COMPACTION_CONFIG: Readonly<IdleCompactionConfig> = {
 	minGrowthTokens: 1_024,
 	minGrowthPercent: 5,
 	minimumCompactionIntervalMs: 4 * 60_000,
-	keepWarm: false,
-	keepWarmContextPercent: 50,
 	retryDelayMs: 60_000,
 	maxRetriesPerContext: 2,
 	notify: true,
@@ -39,20 +33,6 @@ export const DEFAULT_IDLE_COMPACTION_CONFIG: Readonly<IdleCompactionConfig> = {
 export interface IdleCompactionModel {
 	provider: string;
 	id: string;
-}
-
-/** Native compaction is available only on direct provider routes today. */
-export function hasProviderNativeCompaction(model: IdleCompactionModel | undefined): boolean {
-	if (model === undefined) return false;
-	if (model.provider === "xai" || model.provider === "xai-oauth") return false;
-	if (model.provider === "anthropic" || model.provider === "openai" || model.provider === "openai-codex") return true;
-	// Deck resolves to provider-native Anthropic/OpenAI routes by model family.
-	// Keep unknown broker models on the legacy path until capability is advertised.
-	if (model.provider === "deck") {
-		const id = model.id.slice(model.id.lastIndexOf("/") + 1);
-		return id.startsWith("claude-") || id.startsWith("gpt-") || id.startsWith("glm-");
-	}
-	return false;
 }
 
 /**
@@ -65,8 +45,6 @@ export type IdleCompactionCacheRoute = IdleCompactionProvider | "anthropic-long"
 
 export interface ParsedIdleCompactionConfig {
 	config: IdleCompactionConfig;
-	/** Undefined means the operator did not set the keep-warm override. */
-	keepWarmOverride: boolean | undefined;
 	providerConfigs: Readonly<Partial<Record<IdleCompactionProvider, IdleCompactionConfig>>>;
 	builtinConfigs: Readonly<Partial<Record<IdleCompactionCacheRoute, IdleCompactionConfig>>>;
 	warnings: string[];
@@ -125,11 +103,7 @@ export function selectIdleCompactionConfig(
 	if (provider === undefined) return parsed.config;
 	const route = cacheRouteForModel(model);
 	const envProfile = parsed.providerConfigs[provider];
-	if (envProfile !== undefined) {
-		return route === "anthropic-long" || route === "openai-long"
-			? { ...envProfile, keepWarm: parsed.keepWarmOverride ?? true }
-			: envProfile;
-	}
+	if (envProfile !== undefined) return envProfile;
 	return route === undefined ? parsed.config : (parsed.builtinConfigs[route] ?? parsed.config);
 }
 
@@ -145,9 +119,7 @@ export type IdleCompactionDecision =
 				| "usage-unknown"
 				| "below-context-floor"
 				| "no-context-growth"
-				| "keep-warm"
-				| "cooldown"
-				| "provider-native-unavailable";
+				| "cooldown";
 			waitMs?: number;
 	  };
 
@@ -158,70 +130,30 @@ export interface IdleCompactionInput {
 	isIdle: boolean;
 	hasPendingMessages: boolean;
 	inFlightToolCalls: number;
-	/** When the current tool burst started; null when no tool is in flight. */
-	toolsInFlightSinceMs?: number | null;
 	contextTokens: number | null;
 	contextWindow: number;
 	currentContextMarker: string | null;
 	lastCompactedContextMarker: string | null;
 	lastCompactedTokens: number | null;
 	lastCompactedAtMs: number | null;
-	/** True only when the resolved provider route exposes native compaction. */
-	providerNativeCompactionAvailable?: boolean;
 }
 
 export function idleThresholdMs(config: IdleCompactionConfig): number {
 	return config.cacheTtlMs - config.marginMs;
 }
 
-/**
- * A tool call still in flight past this ceiling counts as hung. Past it the
- * cache deadline is re-evaluated without waiting for a `tool_execution_end`
- * that may never arrive; a wedged tool must not starve keep-warm for the run.
- */
-export function toolHangCeilingMs(config: IdleCompactionConfig): number {
-	return 2 * idleThresholdMs(config);
-}
-
-export function areToolsHung(
-	input: Pick<
-		IdleCompactionInput,
-		"config" | "nowMs" | "inFlightToolCalls" | "toolsInFlightSinceMs"
-	>,
-): boolean {
-	const since = input.toolsInFlightSinceMs;
-	if (input.inFlightToolCalls <= 0 || since === null || since === undefined) return false;
-	return input.nowMs - since >= toolHangCeilingMs(input.config);
-}
-
-/** How long the caller should wait before re-checking a busy session. */
-function busyWaitMs(input: IdleCompactionInput): number {
-	const since = input.toolsInFlightSinceMs;
-	if (input.inFlightToolCalls > 0 && since !== null && since !== undefined) {
-		return Math.max(1, since + toolHangCeilingMs(input.config) - input.nowMs);
-	}
-	return input.config.retryDelayMs;
-}
-
 export function decideIdleCompaction(input: IdleCompactionInput): IdleCompactionDecision {
 	const { config } = input;
 	if (!config.enabled) return { compact: false, reason: "disabled" };
 	if (config.engine !== "client") return { compact: false, reason: "unsupported-engine" };
-	const toolsHung = areToolsHung(input);
-	if (!toolsHung && (!input.isIdle || input.hasPendingMessages || input.inFlightToolCalls > 0)) {
-		return { compact: false, reason: "busy", waitMs: busyWaitMs(input) };
+	if (!input.isIdle || input.hasPendingMessages || input.inFlightToolCalls > 0) {
+		return { compact: false, reason: "busy", waitMs: config.retryDelayMs };
 	}
 
 	const idleForMs = Math.max(0, input.nowMs - input.lastCacheTouchMs);
 	const waitMs = idleThresholdMs(config) - idleForMs;
 	if (waitMs > 0) {
 		return { compact: false, reason: "cache-still-fresh", waitMs };
-	}
-
-	if (toolsHung) {
-		return config.keepWarm
-			? { compact: false, reason: "keep-warm" }
-			: { compact: false, reason: "busy", waitMs: config.retryDelayMs };
 	}
 
 	if (
@@ -241,22 +173,6 @@ export function decideIdleCompaction(input: IdleCompactionInput): IdleCompaction
 
 	if (input.contextTokens === null || input.contextWindow <= 0) {
 		return { compact: false, reason: "usage-unknown" };
-	}
-
-	const keepWarmThreshold = Math.ceil(
-		input.contextWindow * (config.keepWarmContextPercent / 100),
-	);
-	const nativeAvailable = input.providerNativeCompactionAvailable ?? true;
-	// Pre-miss compaction requires both native support and at least 50% usage.
-	// Keep-warm remains an explicit opt-in, including for non-native routes.
-	if (input.contextTokens < keepWarmThreshold) {
-		return {
-			compact: false,
-			reason: config.keepWarm ? "keep-warm" : "below-context-floor",
-		};
-	}
-	if (!nativeAvailable) {
-		return { compact: false, reason: "provider-native-unavailable" };
 	}
 
 	const floorTokens = Math.ceil(input.contextWindow * (config.contextFloorPercent / 100));
@@ -356,14 +272,6 @@ const CONFIG_VARIABLES: ConfigVariable[] = [
 		minimum: 0,
 		maximum: MAX_TIMER_DELAY_MS,
 	},
-	{ key: "keepWarm", env: "PI_IDLE_COMPACTION_KEEP_WARM", kind: "boolean" },
-	{
-		key: "keepWarmContextPercent",
-		env: "PI_IDLE_COMPACTION_KEEP_WARM_CONTEXT_PERCENT",
-		kind: "number",
-		minimum: 0,
-		maximum: 100,
-	},
 	{
 		key: "retryDelayMs",
 		env: "PI_IDLE_COMPACTION_RETRY_MS",
@@ -452,15 +360,6 @@ export function parseIdleCompactionConfig(
 	const config: IdleCompactionConfig = { ...DEFAULT_IDLE_COMPACTION_CONFIG };
 	const warnings: string[] = [];
 	parseConfigVariables(config, CONFIG_VARIABLES, env, warnings);
-	const rawKeepWarm = env.PI_IDLE_COMPACTION_KEEP_WARM?.trim().toLowerCase();
-	const keepWarmOverride =
-		rawKeepWarm === undefined || rawKeepWarm === ""
-			? undefined
-			: ["1", "true", "yes", "on"].includes(rawKeepWarm)
-				? true
-				: ["0", "false", "no", "off"].includes(rawKeepWarm)
-					? false
-					: undefined;
 	normalizeTiming(
 		config,
 		"PI_IDLE_COMPACTION_TTL_MS",
@@ -522,14 +421,10 @@ export function parseIdleCompactionConfig(
 	for (const [route, timing] of Object.entries(DEFAULT_ROUTE_TIMINGS) as Array<
 		[IdleCompactionCacheRoute, Pick<IdleCompactionConfig, "cacheTtlMs" | "marginMs">]
 	>) {
-		const profile = {
-			...config,
-			...timing,
-			keepWarm: keepWarmOverride ?? (route === "anthropic-long" || route === "openai-long"),
-		};
+		const profile = { ...config, ...timing };
 		normalizeTiming(profile, "builtin ttl", "builtin margin", capCooldown, warnings);
 		builtinConfigs[route] = profile;
 	}
 
-	return { config, keepWarmOverride, providerConfigs, builtinConfigs, warnings };
+	return { config, providerConfigs, builtinConfigs, warnings };
 }

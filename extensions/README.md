@@ -59,17 +59,12 @@ and name each provider as real-call or unit-only in the PR body.
 
 ## Idle compaction
 
-`src/idle-compaction.ts` keeps a parked pi session's provider prompt cache warm
-or compacts it before the cache deadline. It targets long-lived primaries,
-secondmates, and crew that repeatedly work and park without exiting.
+`src/idle-compaction.ts` compacts a parked pi session before the provider cache
+deadline. It targets long-lived primaries, secondmates, and crew that repeatedly
+work and park without exiting.
 
-For the built-in long routes (`deck` `claude-*` and GPT-5.6+), the extension
-sends one hidden `Reply with exactly idle.` turn while context is below 70% of
-the model window. At or above that threshold it uses client compaction instead.
-The keep-warm turn is a normal provider request: it can receive a cached input
-read, but it still consumes input and output tokens. Disable it with
-`PI_IDLE_COMPACTION_KEEP_WARM=0` if measured cache savings do not justify the
-extra request.
+The extension never sends synthetic provider turns. Below the configured
+context floor it does nothing; at or above the floor it uses client compaction.
 
 Pi 0.82's own auto-compaction is intentionally late: it runs when
 `contextTokens > contextWindow - reserveTokens`. Idle compaction is a separate,
@@ -168,8 +163,6 @@ process and are useful for persistent-agent launchers.
 | `PI_IDLE_COMPACTION_MIN_GROWTH_TOKENS` | `1024` | Absolute minimum growth above the post-compaction estimate before another idle compaction. |
 | `PI_IDLE_COMPACTION_MIN_GROWTH_PERCENT` | `5` | Window-relative minimum growth; the effective gate is the larger token/percentage value. |
 | `PI_IDLE_COMPACTION_MIN_INTERVAL_MS` | `240000` | Cooldown between compactions, independent of context growth. |
-| `PI_IDLE_COMPACTION_KEEP_WARM` | long routes only | Set `0`, `false`, `no`, or `off` to use compaction instead of a keep-warm turn on the built-in long routes. |
-| `PI_IDLE_COMPACTION_KEEP_WARM_CONTEXT_PERCENT` | `70` | Context percentage at which long routes switch from keep-warm to compaction. |
 | `PI_IDLE_COMPACTION_RETRY_MS` | `60000` | Initial retry delay when usage is temporarily unknown or compaction fails. Failures back off exponentially. |
 | `PI_IDLE_COMPACTION_MAX_RETRIES` | `2` | Maximum retries after the initial failure for one unchanged context marker (0–10). |
 | `PI_IDLE_COMPACTION_NOTIFY` | `true` | Show start/completion/failure notifications when UI is available. |

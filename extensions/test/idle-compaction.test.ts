@@ -36,10 +36,8 @@ import {
 	DEFAULT_IDLE_COMPACTION_CONFIG,
 	decideIdleCompaction,
 	idleThresholdMs,
-	toolHangCeilingMs,
 	parseIdleCompactionConfig,
 	selectIdleCompactionConfig,
-	hasProviderNativeCompaction,
 } from "../src/idle-compaction-policy.ts";
 
 class FakeRuntime implements IdleCompactionRuntime {
@@ -82,7 +80,6 @@ type Handler = (event: any, context: TestContext) => Promise<void> | void;
 class ExtensionHarness implements IdleCompactionExtensionApi {
 	readonly hooks = new Map<string, Handler[]>();
 	readonly appended: Array<{ customType: string; data: unknown }> = [];
-	readonly sentMessages: Array<{ message: unknown; options: unknown }> = [];
 	noIdleCompaction = false;
 
 	on(event: string, handler: Handler): void {
@@ -93,10 +90,6 @@ class ExtensionHarness implements IdleCompactionExtensionApi {
 
 	appendEntry(customType: string, data?: unknown): void {
 		this.appended.push({ customType, data });
-	}
-
-	sendMessage(message: unknown, options: unknown): void {
-		this.sentMessages.push({ message, options });
 	}
 
 	registerFlag(): void {}
@@ -123,7 +116,6 @@ class TestContext {
 	];
 	readonly notifications: Array<{ message: string; level?: string }> = [];
 	readonly compactCalls: Array<{
-		customInstructions?: string;
 		onComplete?: (result: { tokensBefore: number; estimatedTokensAfter: number }) => void;
 		onError?: (error: Error) => void;
 	}> = [];
@@ -187,7 +179,6 @@ describe("idle compaction policy", () => {
 	test("defaults to the warm-cache deadline and a 30% context floor", () => {
 		expect(idleThresholdMs({ ...DEFAULT_IDLE_COMPACTION_CONFIG })).toBe(240_000);
 		expect(DEFAULT_IDLE_COMPACTION_CONFIG.contextFloorPercent).toBe(30);
-		expect(DEFAULT_IDLE_COMPACTION_CONFIG.keepWarmContextPercent).toBe(50);
 		expect(DEFAULT_IDLE_COMPACTION_CONFIG.engine).toBe("client");
 	});
 
@@ -201,7 +192,6 @@ describe("idle compaction policy", () => {
 			inFlightToolCalls: 0,
 			contextTokens: 120_000,
 			contextWindow: 200_000,
-			providerNativeCompactionAvailable: true,
 			currentContextMarker: "message-2",
 			lastCompactedContextMarker: "message-1",
 			lastCompactedTokens: 20_000,
@@ -232,76 +222,6 @@ describe("idle compaction policy", () => {
 			compact: false,
 			reason: "below-context-floor",
 		});
-		expect(decideIdleCompaction({ ...base, providerNativeCompactionAvailable: false })).toEqual({
-			compact: false,
-			reason: "provider-native-unavailable",
-		});
-	});
-
-	test("uses keep-warm only when configured and identifies native routes", () => {
-		const base = {
-			config: { ...DEFAULT_IDLE_COMPACTION_CONFIG, keepWarm: true },
-			nowMs: 240_000,
-			lastCacheTouchMs: 0,
-			isIdle: true,
-			hasPendingMessages: false,
-			inFlightToolCalls: 0,
-			contextTokens: 40_000,
-			contextWindow: 200_000,
-			currentContextMarker: "message-2",
-			lastCompactedContextMarker: "message-1",
-			lastCompactedTokens: 20_000,
-			lastCompactedAtMs: null,
-			providerNativeCompactionAvailable: false,
-		};
-		expect(decideIdleCompaction(base)).toEqual({ compact: false, reason: "keep-warm" });
-		expect(hasProviderNativeCompaction({ provider: "xai", id: "grok-4" })).toBeFalse();
-		expect(hasProviderNativeCompaction({ provider: "deck", id: "grok-4" })).toBeFalse();
-		expect(hasProviderNativeCompaction({ provider: "unknown", id: "custom-model" })).toBeFalse();
-		expect(hasProviderNativeCompaction({ provider: "deck", id: "claude-sonnet-4-5" })).toBeTrue();
-	});
-
-	test("treats a tool call past the hang ceiling as re-checkable, never compactable", () => {
-		const config = { ...DEFAULT_IDLE_COMPACTION_CONFIG, keepWarm: true };
-		expect(toolHangCeilingMs(config)).toBe(480_000);
-		const base = {
-			config,
-			nowMs: 240_000,
-			lastCacheTouchMs: 0,
-			isIdle: false,
-			hasPendingMessages: false,
-			inFlightToolCalls: 1,
-			toolsInFlightSinceMs: 0,
-			contextTokens: 160_000,
-			contextWindow: 200_000,
-			currentContextMarker: "message-2",
-			lastCompactedContextMarker: null,
-			lastCompactedTokens: null,
-			lastCompactedAtMs: null,
-			providerNativeCompactionAvailable: true,
-		};
-		// Below the ceiling the busy answer now carries the wait until the ceiling.
-		expect(decideIdleCompaction(base)).toEqual({
-			compact: false,
-			reason: "busy",
-			waitMs: 240_000,
-		});
-		// Past it, keep-warm is allowed and compaction still is not.
-		expect(decideIdleCompaction({ ...base, nowMs: 480_000 })).toEqual({
-			compact: false,
-			reason: "keep-warm",
-		});
-		expect(
-			decideIdleCompaction({ ...base, nowMs: 480_000, contextTokens: 40_000 }),
-		).toEqual({ compact: false, reason: "keep-warm" });
-		// Without keep-warm there is no cache action left, so re-check at the ceiling.
-		expect(
-			decideIdleCompaction({
-				...base,
-				config: { ...config, keepWarm: false },
-				nowMs: 480_000,
-			}),
-		).toEqual({ compact: false, reason: "busy", waitMs: config.retryDelayMs });
 	});
 
 	test("enforces cooldown and window-relative growth before re-compacting", () => {
@@ -314,7 +234,6 @@ describe("idle compaction policy", () => {
 			inFlightToolCalls: 0,
 			contextTokens: 25_000,
 			contextWindow: 200_000,
-			providerNativeCompactionAvailable: true,
 			currentContextMarker: "message-2",
 			lastCompactedContextMarker: "compaction-1",
 			lastCompactedTokens: 20_000,
@@ -330,7 +249,6 @@ describe("idle compaction policy", () => {
 				lastCompactedAtMs: 0,
 				contextTokens: 120_000,
 				lastCompactedTokens: 118_000,
-				providerNativeCompactionAvailable: true,
 			}),
 		).toEqual({ compact: false, reason: "no-context-growth" });
 	});
@@ -474,13 +392,6 @@ describe("idle compaction policy", () => {
 		});
 	});
 
-	test("enables keep-warm for long cache routes", () => {
-		const parsed = parseIdleCompactionConfig({});
-		expect(selectIdleCompactionConfig(parsed, { provider: "deck", id: "claude-sonnet-4-5" }).keepWarm).toBeTrue();
-		expect(selectIdleCompactionConfig(parsed, { provider: "deck", id: "gpt-5.6-sol" }).keepWarm).toBeTrue();
-		expect(parsed.config.keepWarm).toBeFalse();
-	});
-
 	test("gives deck claude routes the broker's 1h retention and GPT-5.6+ the 30m minimum", () => {
 		const parsed = parseIdleCompactionConfig({});
 		// deck claude-*: the broker's pi-ai layer requests ttl "1h" on oauth.
@@ -586,36 +497,9 @@ describe("idle compaction extension", () => {
 		expect(context.compactCalls).toHaveLength(0);
 		runtime.advance(1);
 		expect(context.compactCalls).toHaveLength(1);
-		// Assert the identifiers a cold resume cannot reconstruct, not the prose:
-		// an agent that wakes without its run receipt starts a second run of work
-		// already executing, and one without its pending decision asks twice.
-		const instructions = context.compactCalls[0]?.customInstructions ?? "";
-		expect(instructions).toContain("task id");
-		expect(instructions).toContain("run receipts");
-		expect(instructions).toContain("pending decision");
 	});
 
-	test("sends a tiny keep-warm turn for a long route below the compaction threshold", async () => {
-		const { runtime, harness, context } = setup({
-			PI_IDLE_COMPACTION_ANTHROPIC_TTL_MS: "1000",
-			PI_IDLE_COMPACTION_ANTHROPIC_MARGIN_MS: "200",
-		});
-		context.model = { provider: "deck", id: "claude-sonnet-4-5", baseUrl: "http://deck.test/v1" };
-		context.tokens = 40_000;
-		await harness.emit("session_start", context);
-		await warmAndSettle(harness, context);
-		runtime.advance(800);
-		expect(harness.sentMessages).toHaveLength(1);
-		expect(context.compactCalls).toHaveLength(0);
-		expect(harness.sentMessages[0]?.message).toMatchObject({
-			customType: "deck.idle-keepwarm.v1",
-			content: "Reply with exactly idle. Do not call tools.",
-			display: false,
-		});
-		expect(harness.sentMessages[0]?.options).toEqual({ triggerTurn: true, deliverAs: "followUp" });
-	});
-
-	test("falls back to compaction for a long route with a large context", async () => {
+	test("compacts a long route once the context reaches the floor", async () => {
 		const { runtime, harness, context } = setup({
 			PI_IDLE_COMPACTION_ANTHROPIC_TTL_MS: "1000",
 			PI_IDLE_COMPACTION_ANTHROPIC_MARGIN_MS: "200",
@@ -625,7 +509,17 @@ describe("idle compaction extension", () => {
 		await harness.emit("session_start", context);
 		await warmAndSettle(harness, context);
 		runtime.advance(800);
-		expect(harness.sentMessages).toHaveLength(0);
+		expect(context.compactCalls).toHaveLength(1);
+	});
+
+	test("uses the xAI profile deadline for client compaction", async () => {
+		const { runtime, harness, context } = setup();
+		context.model = { provider: "deck", id: "grok-4-fast", baseUrl: "http://deck.test/v1" };
+		await harness.emit("session_start", context);
+		await warmAndSettle(harness, context);
+		runtime.advance(89_999);
+		expect(context.compactCalls).toHaveLength(0);
+		runtime.advance(1);
 		expect(context.compactCalls).toHaveLength(1);
 	});
 
@@ -762,42 +656,6 @@ describe("idle compaction extension", () => {
 		expect(context.compactCalls).toHaveLength(1);
 	});
 
-	test("keeps the cache warm when a tool call never ends", async () => {
-		for (const tokens of [40_000, 160_000]) {
-			const { runtime, harness, context } = setup({
-				PI_IDLE_COMPACTION_ANTHROPIC_TTL_MS: "1000",
-				PI_IDLE_COMPACTION_ANTHROPIC_MARGIN_MS: "200",
-			});
-			context.model = { provider: "deck", id: "claude-sonnet-4-5", baseUrl: "http://deck.test/v1" };
-			context.tokens = tokens;
-			await harness.emit("session_start", context);
-			await warmAndSettle(harness, context);
-			runtime.advance(700);
-			await harness.emit("tool_execution_start", context);
-			context.idle = false;
-			// No tool_execution_end and no agent_settled ever arrive: only the
-			// duration watchdog can re-arm the deadline (ceiling = 2 x 800ms).
-			runtime.advance(2_000);
-			expect(harness.sentMessages).toHaveLength(1);
-			expect(harness.sentMessages[0]?.message).toMatchObject({
-				customType: "deck.idle-keepwarm.v1",
-			});
-			expect(context.compactCalls).toHaveLength(0);
-			// A wedged agent loop may never run the injected turn, so the watchdog
-			// keeps re-checking but must not queue one ping per cadence.
-			runtime.advance(8_000);
-			expect(harness.sentMessages).toHaveLength(1);
-
-			// Once a keep-warm turn actually runs, the cadence resumes.
-			await harness.emit("before_agent_start", context);
-			await harness.emit("agent_start", context);
-			await warmAndSettle(harness, context);
-			runtime.advance(800);
-			expect(harness.sentMessages).toHaveLength(2);
-			expect(context.compactCalls).toHaveLength(0);
-		}
-	});
-
 	test("does not clear an unresolved tool on agent_settled", async () => {
 		const { runtime, harness, context } = setup({
 			PI_IDLE_COMPACTION_TTL_MS: "1000",
@@ -811,42 +669,11 @@ describe("idle compaction extension", () => {
 		await harness.emit("agent_settled", context);
 
 		// A settled agent turn does not prove that a tool without an end event
-		// stopped. The watchdog must keep compaction disabled until the end event.
+		// stopped. The timer remains disarmed until the end event.
 		runtime.advance(5_000);
 		expect(context.compactCalls).toHaveLength(0);
 
 		await harness.emit("tool_execution_end", context);
-		runtime.advance(800);
-		expect(context.compactCalls).toHaveLength(1);
-	});
-
-	test("a keep-warm turn during a hang does not license compacting over that tool", async () => {
-		const { runtime, harness, context } = setup({
-			PI_IDLE_COMPACTION_ANTHROPIC_TTL_MS: "1000",
-			PI_IDLE_COMPACTION_ANTHROPIC_MARGIN_MS: "200",
-		});
-		context.model = { provider: "deck", id: "claude-sonnet-4-5", baseUrl: "http://deck.test/v1" };
-		context.tokens = 160_000;
-		await harness.emit("session_start", context);
-		await warmAndSettle(harness, context);
-		runtime.advance(700);
-		await harness.emit("tool_execution_start", context);
-		context.idle = false;
-		runtime.advance(2_000);
-		expect(harness.sentMessages).toHaveLength(1);
-
-		// The injected keep-warm runs its own turn while the tool is STILL hung.
-		// Its lifecycle must not be read as proof that the tool ended.
-		await harness.emit("before_agent_start", context);
-		await harness.emit("agent_start", context);
-		context.idle = true;
-		await warmAndSettle(harness, context);
-		runtime.advance(10_000);
-		expect(context.compactCalls).toHaveLength(0);
-
-		// When the tool finally ends, normal compaction is available again.
-		await harness.emit("tool_execution_end", context);
-		await harness.emit("agent_settled", context);
 		runtime.advance(800);
 		expect(context.compactCalls).toHaveLength(1);
 	});

@@ -1,31 +1,13 @@
 import {
-	areToolsHung,
 	decideIdleCompaction,
 	idleThresholdMs,
-	toolHangCeilingMs,
 	MAX_TIMER_DELAY_MS,
 	parseIdleCompactionConfig,
 	selectIdleCompactionConfig,
-	hasProviderNativeCompaction,
 	type IdleCompactionConfig,
 } from "./idle-compaction-policy.ts";
 
 const STATE_ENTRY_TYPE = "deck.idle-compaction.v1";
-const KEEP_WARM_MESSAGE_TYPE = "deck.idle-keepwarm.v1";
-const KEEP_WARM_PROMPT = "Reply with exactly idle. Do not call tools.";
-/**
- * Supplements pi's own structured compaction template (pi appends this as
- * "Additional focus:"), so it names only what a PARKED FLEET AGENT uniquely
- * needs and does not restate Goal/Progress/Next-Steps, which pi already covers.
- *
- * The previous text asked for "goals, constraints, decisions, progress, next
- * steps" — all of which pi's template already demands — and asked for none of
- * the identifiers a resuming agent actually cannot reconstruct. An agent that
- * wakes without its run receipt starts a second run of something already
- * executing; one that wakes without its pending decision asks the captain twice.
- */
-const COMPACTION_INSTRUCTIONS =
-	"This agent is parking and will resume cold. Additionally preserve, exactly: its task id and current status-file state; worktree path and branch; PR URLs with their last known CI and review state; any pending decision it is waiting on and who owes the answer; run receipts (endpoint, run id, poller) for anything still executing remotely; and the precise next command or action it would have taken. Prefer exact identifiers over descriptions.";
 
 type TimerHandle = ReturnType<typeof setTimeout>;
 
@@ -72,7 +54,6 @@ interface IdleCompactionContext {
 	getContextUsage(): ContextUsage | undefined;
 	sessionManager: ReadonlySessionManager;
 	compact(options: {
-		customInstructions?: string;
 		onComplete?: (result: CompactionResult) => void;
 		onError?: (error: Error) => void;
 	}): void;
@@ -83,10 +64,6 @@ type EventHandler = (event: any, context: IdleCompactionContext) => Promise<void
 export interface IdleCompactionExtensionApi {
 	on(event: string, handler: EventHandler): void;
 	appendEntry(customType: string, data?: unknown): void;
-	sendMessage(
-		message: { customType: string; content: string; display: boolean },
-		options: { triggerTurn: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
-	): void;
 	registerFlag?(
 		name: string,
 		options: { description: string; type: "boolean"; default: boolean },
@@ -148,7 +125,7 @@ export function registerIdleCompaction(
 	runtime: IdleCompactionRuntime = defaultRuntime,
 ): void {
 	pi.registerFlag?.("no-idle-compaction", {
-		description: "Disable warm-cache idle compaction for this pi session",
+		description: "Disable idle compaction for this pi session",
 		type: "boolean",
 		default: false,
 	});
@@ -164,10 +141,7 @@ export function registerIdleCompaction(
 	let latestContext: IdleCompactionContext | undefined;
 	let compacting = false;
 	let idleCompactionRequested = false;
-	let keepWarmRequested = false;
 	let inFlightToolCalls = 0;
-	let toolsInFlightSinceMs: number | null = null;
-	let keepWarmSentAtMs: number | null = null;
 	let lastCompactedContextMarker: string | null = null;
 	let lastCompactedTokens: number | null = null;
 	let lastCompactedAtMs: number | null = null;
@@ -241,12 +215,6 @@ export function registerIdleCompaction(
 			} else if (failuresForContext > currentConfig.maxRetriesPerContext) {
 				return;
 			}
-			const toolsHung = areToolsHung({
-				config: currentConfig,
-				nowMs: runtime.now(),
-				inFlightToolCalls,
-				toolsInFlightSinceMs,
-			});
 			const decision = decideIdleCompaction({
 				config: { ...currentConfig, enabled: enabledForSession },
 				nowMs: runtime.now(),
@@ -254,53 +222,15 @@ export function registerIdleCompaction(
 				isIdle: ctx.isIdle(),
 				hasPendingMessages: ctx.hasPendingMessages(),
 				inFlightToolCalls,
-				toolsInFlightSinceMs,
 				contextTokens: usage?.tokens ?? null,
 				contextWindow: usage?.contextWindow ?? 0,
 				currentContextMarker,
 				lastCompactedContextMarker,
 				lastCompactedTokens,
 				lastCompactedAtMs,
-				providerNativeCompactionAvailable: hasProviderNativeCompaction(ctx.model),
 			});
 
 			if (!decision.compact) {
-				if (decision.reason === "keep-warm") {
-					// A hung tool call is exactly the case keep-warm must survive: the
-					// session is not idle and no tool end will re-arm the deadline. A
-					// wedged agent loop may never run the injected turn, so require the
-					// previous ping to have landed instead of queueing one per cadence.
-					const mayKeepWarm = toolsHung
-						? keepWarmSentAtMs === null || lastCacheTouchMs > keepWarmSentAtMs
-						: !keepWarmRequested &&
-							ctx.isIdle() &&
-							!ctx.hasPendingMessages() &&
-							inFlightToolCalls === 0;
-					if (mayKeepWarm && modelIdentity(ctx) === cacheTouchModelIdentity) {
-						keepWarmRequested = true;
-						keepWarmSentAtMs = runtime.now();
-						notify(ctx, "Idle keep-warm request started");
-						try {
-							pi.sendMessage(
-								{
-									customType: KEEP_WARM_MESSAGE_TYPE,
-									content: KEEP_WARM_PROMPT,
-									display: false,
-								},
-								{ triggerTurn: true, deliverAs: "followUp" },
-							);
-						} catch (error) {
-							keepWarmRequested = false;
-							keepWarmSentAtMs = null;
-							notify(ctx, `Idle keep-warm failed: ${error instanceof Error ? error.message : String(error)}`, "warning");
-						}
-					}
-					// A wedged tool produces no lifecycle event to re-arm from, and a
-					// single ping cannot outlive the cache. Hold the keep-warm cadence
-					// for as long as the tool stays hung.
-					if (toolsHung) scheduleAfter(idleThresholdMs(currentConfig));
-					return;
-				}
 				if (
 					decision.reason === "cache-still-fresh" ||
 					decision.reason === "cooldown" ||
@@ -327,7 +257,6 @@ export function registerIdleCompaction(
 				`Idle compaction started at ${usage?.tokens?.toLocaleString()} tokens (${Math.round(decision.idleForMs / 1000)}s idle)`,
 			);
 			ctx.compact({
-				customInstructions: COMPACTION_INSTRUCTIONS,
 				onComplete: (result) => {
 					if (!active) return;
 					compacting = false;
@@ -366,27 +295,13 @@ export function registerIdleCompaction(
 		scheduleAfter(Math.max(0, lastCacheTouchMs + idleThresholdMs(config) - runtime.now()));
 	};
 
-	/**
-	 * Watchdog: a tool call that never ends must not disable cache protection for
-	 * the rest of the run. Arm a re-evaluation at the hang ceiling instead of
-	 * leaving the session with no timer at all.
-	 */
-	const scheduleToolWatchdog = (): void => {
-		if (latestContext === undefined || toolsInFlightSinceMs === null) return;
-		const config = configFor(latestContext);
-		scheduleAfter(Math.max(0, toolsInFlightSinceMs + toolHangCeilingMs(config) - runtime.now()));
-	};
-
 	pi.on("session_start", (_event, ctx) => {
 		active = true;
 		enabledForSession = parsed.config.enabled && pi.getFlag?.("no-idle-compaction") !== true;
 		latestContext = ctx;
 		compacting = false;
 		idleCompactionRequested = false;
-		keepWarmRequested = false;
-		keepWarmSentAtMs = null;
 		inFlightToolCalls = 0;
-		toolsInFlightSinceMs = null;
 		lastCacheTouchMs = runtime.now();
 		hasCacheTouch = false;
 		providerResponseThisTurn = false;
@@ -414,11 +329,9 @@ export function registerIdleCompaction(
 		latestContext = ctx;
 		compacting = false;
 		idleCompactionRequested = false;
-		keepWarmRequested = false;
 		providerResponseThisTurn = false;
 		successfulResponseThisRun = false;
 		clearScheduled();
-		if (inFlightToolCalls > 0) scheduleToolWatchdog();
 	});
 	pi.on("before_provider_request", (_event, ctx) => {
 		latestContext = ctx;
@@ -444,27 +357,16 @@ export function registerIdleCompaction(
 		providerResponseThisTurn = false;
 		successfulResponseThisRun = false;
 		cacheTouchModelIdentity = null;
-		if (inFlightToolCalls === 0) {
-			toolsInFlightSinceMs = null;
-			keepWarmSentAtMs = null;
-		}
 		clearScheduled();
-		if (inFlightToolCalls > 0) scheduleToolWatchdog();
 	});
 	pi.on("tool_execution_start", (_event, ctx) => {
 		latestContext = ctx;
-		if (inFlightToolCalls === 0) toolsInFlightSinceMs = runtime.now();
 		inFlightToolCalls += 1;
-		if (!compacting) scheduleToolWatchdog();
-		else clearScheduled();
+		clearScheduled();
 	});
 	pi.on("tool_execution_end", (_event, ctx) => {
 		latestContext = ctx;
 		inFlightToolCalls = Math.max(0, inFlightToolCalls - 1);
-		if (inFlightToolCalls === 0) {
-			toolsInFlightSinceMs = null;
-			keepWarmSentAtMs = null;
-		}
 		// A tool can outlive the cache deadline. Re-arm the deadline as soon as
 		// the last tool ends instead of waiting for agent_settled.
 		if (!compacting && inFlightToolCalls === 0 && hasCacheTouch && ctx.isIdle()) scheduleFromCacheTouch();
@@ -475,10 +377,8 @@ export function registerIdleCompaction(
 		// its end event; only tool_execution_end proves that it is no longer live.
 		// Cache warmth is per run: a failed/aborted run with no provider response must
 		// not reuse an older run's warm-cache deadline for its changed context.
-		// its end event; only tool_execution_end proves that it is no longer live.
 		hasCacheTouch = successfulResponseThisRun;
-		if (!compacting && hasCacheTouch) scheduleFromCacheTouch();
-		if (!compacting && inFlightToolCalls > 0) scheduleToolWatchdog();
+		if (!compacting && inFlightToolCalls === 0 && hasCacheTouch) scheduleFromCacheTouch();
 	});
 	pi.on("session_before_compact", (_event, ctx) => {
 		latestContext = ctx;
@@ -495,8 +395,6 @@ export function registerIdleCompaction(
 	});
 	pi.on("session_shutdown", () => {
 		active = false;
-		keepWarmRequested = false;
-		keepWarmSentAtMs = null;
 		latestContext = undefined;
 		clearScheduled();
 	});
