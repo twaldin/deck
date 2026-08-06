@@ -6,7 +6,7 @@ import { renderWorkflow } from "smithers-orchestrator/testing";
 import { openQuestions } from "../../../v2/src/questions-store.ts";
 import { routeWorkflowQuestionAnswer } from "../../../v2/src/workflow-questions.ts";
 import { reviewCommand, shouldSubmitReview } from "../decision.ts";
-import workflow, { assessCi, createReviewGateAgent, queueReviewGateDecision } from "../pipeline.tsx";
+import workflow, { assessCi, createReviewGateAgent, queueReviewGateDecision, reviewSubmissionMarker } from "../pipeline.tsx";
 import { PrimeSeatAgent } from "../../pr-pipeline/lib/engines/prime.ts";
 import { DECK_PROVIDER } from "../../pr-pipeline/lib/models.ts";
 import {
@@ -331,6 +331,8 @@ test("blocker reports draft findings and submit only follows captain approval", 
   expect(source).toContain("draftFingerprint");
   expect(source).toContain("draftBody");
   expect(source).toContain("— automated review");
+  expect(source).toContain("posted: false, requestedChanges: false");
+  expect(source).not.toContain('posted[`comment:${fingerprint}`]');
 });
 
 test("clean and exhausted rounds use different captain decisions without self-approval", () => {
@@ -348,6 +350,15 @@ test("captain decision is required before exactly one review command", () => {
   expect(shouldSubmitReview({ approved: true })).toBe(true);
   expect(reviewCommand(7, "owner/repo", true)).toEqual(["pr", "comment", "7", "--repo", "owner/repo"]);
   expect(reviewCommand(7, "owner/repo", false)).toEqual(["pr", "review", "7", "--repo", "owner/repo", "--request-changes"]);
+  expect(reviewSubmissionMarker(7, "head-a", "", "comment")).toBe(
+    "submitted:7:head-a:clean:comment",
+  );
+  expect(reviewSubmissionMarker(7, "head-b", "", "comment")).not.toBe(
+    reviewSubmissionMarker(7, "head-a", "", "comment"),
+  );
+  expect(() => reviewSubmissionMarker(7, "", "", "comment")).toThrow(
+    "review submission marker needs the reviewed head",
+  );
 });
 
 test("polling and every requested PR are durable workflow paths", () => {
