@@ -24,6 +24,18 @@ function pidAlive(pid: number): boolean {
 	try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
+/**
+ * True when a worktree is claimed by a process that is still alive.
+ *
+ * A dead pid's lock is stale and does not block reclamation, which is the same
+ * rule `claimWorktree` uses. Anything that DELETES a worktree must consult this
+ * first: the teardown guard cannot see locks.
+ */
+export function worktreeLockIsLive(worktree: string): boolean {
+	const lock = readLock(lockPath(worktree));
+	return lock !== null && pidAlive(lock.pid);
+}
+
 export function releaseWorktree(worktree: string, owner: string): void {
 	const file = lockPath(worktree);
 	const lock = readLock(file);

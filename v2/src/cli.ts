@@ -20,7 +20,7 @@ import {
 import { bootstrapHome, formatBootstrap } from "./bootstrap";
 import { homeSyncPull, homeSyncPush, homeSyncStatus } from "./home-sync";
 import { readStatus } from "./events";
-import { buildFrame, renderFrame } from "./monitor";
+import { buildFrame, collectRuns, effortLiveness, renderFrame, type PsRun } from "./monitor";
 import { projectFleet } from "./herdr";
 import { assertHomeIsNotACheckout, assertHomeIsNotAnotherFleet, deckV2Home, stateFiles } from "./home";
 import { readMeta } from "./meta";
@@ -41,7 +41,10 @@ import {
 } from "./questions-store";
 import { routeWorkflowQuestionAnswer } from "./workflow-questions";
 import { buildHydration } from "./hydrate";
-import { listEffortMetas, resolveEffortReference } from "./recall";
+import { listEffortMetas, parsePrReference, resolveEffortReference } from "./recall";
+import { claimWorktree, worktreeLockIsLive } from "./worktree-lock";
+import { reapWorktrees } from "./reap";
+
 
 
 const USAGE = `deck-v2 — fleet primitives
@@ -75,6 +78,7 @@ const USAGE = `deck-v2 — fleet primitives
   wake [--json]                    one reconcile pass (T0 now, T1 folded, T2 silent)
   stale                            runs that vanished without a terminal status
   teardown <id> [--pr N]           evaluate the teardown guard (never destructive)
+  reap [--apply]                   remove worktrees the teardown guard clears; dry run by default
   backlog ls|add|close|externalize|sweep|check
   home                             print the resolved home
   home sync [status|pull|push]      sync the private home repository (plain git)
@@ -138,6 +142,37 @@ export function parseModelSlots(value: string): Record<string, string> {
 	}
 	if (Object.keys(slots).length === 0) throw new Error("--models needs at least one slot=model pair");
 	return slots;
+}
+
+/**
+ * Smithers runs for the reaper's liveness test, with an explicit health flag.
+ *
+ * A sentinel "everything is running" row does NOT work: the caller filters rows
+ * by effort id, so a synthetic row matches nothing and a failed enumeration
+ * silently reads as "nothing is live". The caller must refuse outright instead.
+ */
+async function psRunsForReap(): Promise<{ runs: PsRun[]; healthy: boolean }> {
+	try {
+		const { runs, health } = await collectRuns(smithersWorkspaceCwd());
+		return { runs, healthy: health.state === "ok" };
+	} catch {
+		return { runs: [], healthy: false };
+	}
+}
+
+/** MERGED | CLOSED | OPEN | UNKNOWN for a PR reference, via gh. */
+function prIsLanded(reference: string): string {
+	const parsed = parsePrReference(reference);
+	if (parsed === null) return "UNKNOWN";
+	const repoArgs = parsed.repo === undefined ? [] : ["--repo", parsed.repo];
+	const read = Bun.spawnSync({
+		cmd: ["gh", "pr", "view", String(parsed.number), ...repoArgs, "--json", "state", "--jq", ".state"],
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	if (!read.success) return "UNKNOWN";
+	const state = read.stdout.toString().trim().toUpperCase();
+	return state === "" ? "UNKNOWN" : state;
 }
 
 export async function runCli(argv: string[]): Promise<number> {
@@ -476,6 +511,36 @@ export async function runCli(argv: string[]): Promise<number> {
 				return verdict.allowed ? 0 : 1;
 			}
 
+			case "reap": {
+				const result = await reapWorktrees({
+					efforts: listEffortMetas,
+					wtRoot: () => fs.realpathSync(path.join(deckV2Home(), "wt")),
+					prState: prIsLanded,
+					runs: async () => {
+						const { runs, healthy } = await psRunsForReap();
+						const live = new Set<string>();
+						for (const run of runs) {
+							if (effortLiveness(run) === "live") live.add(run.id.replace(/-pipeline(-\d+)?$/, ""));
+						}
+						return { liveEffortIds: live, healthy };
+					},
+					claim: (worktree, owner) => claimWorktree(worktree, owner),
+					lockIsLive: worktreeLockIsLive,
+					remove: (worktree) => {
+						const removed = Bun.spawnSync({
+							cmd: ["git", "-C", worktree, "worktree", "remove", worktree],
+							stdout: "pipe",
+							stderr: "pipe",
+						});
+						return removed.success ? null : removed.stderr.toString().trim();
+					},
+				}, args.flags.apply === true);
+				process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+				if (!result.apply && result.cleared.length > 0) {
+					process.stdout.write(`\n${result.cleared.length} worktree(s) would be removed. Re-run with --apply.\n`);
+				}
+				return 0;
+			}
 
 			case "backlog":
 				return backlog(args);
