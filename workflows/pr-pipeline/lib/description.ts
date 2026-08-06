@@ -76,7 +76,7 @@ function findInternalContext(value: string): RegExp | undefined {
 export function formatPullRequestTitle(ticket: string, title: string): string {
 	const ticketId = assertTeamFacingInput(ticket, "ticket", true);
 	if (!/^[A-Z][A-Z0-9]+-\d+$/.test(ticketId)) {
-		throw new Error("PR ticket must use `TICKET-123` format.");
+		throw new Error(`PR ticket must use \`TICKET-123\` format; received \`${ticketId}\`.`);
 	}
 	const teamTitle = assertTeamFacingInput(title, "title", true);
 	if (/[\r\n]/.test(teamTitle)) throw new Error("PR title must be a single line.");
@@ -220,7 +220,7 @@ export function generatePullRequestDescription(input: TeamFacingPullRequestDescr
 	}
 	const title = assertTeamFacingInput(input.title, "title", true);
 	if (!TITLE_FORMATS.some((pattern) => pattern.test(title))) {
-		throw new Error("PR title must use `[TICKET-123] Title` or `feat(username): Title` format.");
+		throw new Error(`PR title must use \`[TICKET-123] Title\` or \`feat(username): Title\` format; received \`${title}\`.`);
 	}
 
 	const acceptanceCriteria = input.acceptanceCriteria.map((criterion) =>
