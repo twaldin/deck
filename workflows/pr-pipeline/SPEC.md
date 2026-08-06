@@ -9,6 +9,35 @@ Adoption is not a special mode; it is the same graph entered later.
 
 ---
 
+## Review topology — declared by the profile, never hardcoded
+
+Approval requirements are **per profile**, resolved at runtime from the project
+config. No repo name, owner, or host may be special-cased in pipeline code.
+Getting this wrong produces an unsatisfiable wait, which is how the first canary
+runs hung: they waited for a human approval on repos that have no human
+reviewers.
+
+The profile declares the required approver set. The existing fields carry it:
+
+| Profile field | Meaning |
+|---|---|
+| `yolo: true` | No stamp required. Merge authorization is automatic once the required bot review is resolved, CI is green on the current head, and the PR is mergeable. |
+| `stamp: true` | The captain's stamp is required before merge. |
+| `reviewers` / CODEOWNERS | Human approvers required for this repo, if any. An empty set means NO human approval is required — never wait for one. |
+
+Current shape, as configuration rather than as rule: repos deckbox already owns
+run `yolo` with a bot reviewer and no humans; repos new to deckbox run `stamp`
+deliberately, to keep that path exercised; Lindy requires human reviewers plus
+Claude-bot plus the stamp.
+
+The captain self-approving his own PR is a real but rare case: support it, never
+require it, never block on it.
+
+Step 4's exit condition is therefore "every approver REQUIRED BY THIS PROFILE
+has approved" — never a hardcoded "human AND claude".
+
+---
+
 ## Step 1 — Produce code
 
 Input: a prompt — brief, spec doc, ticket, or an existing PR branch to adopt.
@@ -56,7 +85,12 @@ A single loop. Any of these is a trigger; each **wakes a seat with the effort's
 original context plus the trigger payload**:
 
 ```
-loop until (human approved AND claude approved):
+# resolvedReviewPolicy comes from the profile. An EMPTY required set is
+# satisfied immediately — it must never mean "wait forever".
+reviewsSatisfied := resolvedReviewPolicy.requiredApprovers
+                      .every(approver => approver resolved on the CURRENT head)
+
+loop until reviewsSatisfied:
     on merge conflict      -> rebase; on genuine ambiguity wake a seat, never
                               blind-resolve ours/theirs
     on red CI              -> wake seat: diagnose and fix, push
@@ -77,22 +111,39 @@ Invariants:
 - A bot review never counts as human approval. An agent-assisted review posted
   from a human's account does.
 
-## Step 5 — Await the captain's stamp
+## Step 5 — Reach merge authorization, then merge when actually safe
+
+Authorization and merging are separate. On a `stamp` profile the stamp is
+**merge AUTHORIZATION, not a merge trigger** — it may arrive before CI is green.
+Merging on the stamp alone would merge red or pending CI.
 
 ```
-loop until stamped:
+authorized := reviewsSatisfied && (!profile.stamp || validStampForCurrentHead)
+
+loop until authorized:
     keep rebasing on conflicts
     keep watching CI
     surface state
-on stamp: merge
+
+loop until (CI green on the CURRENT head AND mergeable AND no conflicts):
+    keep rebasing on conflicts
+    keep fixing red CI          # step 4's triggers stay live
+    if a rebase moved the head: revalidate approvals and CI against the new head
+
+merge
 ```
 
 Invariants:
-- The stamp is the captain's, always. Agents never approve and never merge
-  without it.
-- **The stamp becomes available after human + Claude approval, and MAY precede
-  CI green.** Do not gate the stamp on CI.
-- Rebase and CI watch continue while waiting; the PR must not go stale.
+- Agents never approve, never stamp, and never merge outside this gate.
+- **On a `stamp` profile the stamp MAY precede CI green.** Do not gate the stamp
+  on CI.
+- **Never gate the MERGE on authorization alone.** Merge requires authorized AND
+  green CI on the current head AND mergeable.
+- Any rebase invalidates CI and approval evidence for the old head; revalidate
+  both against the new head before merging.
+- On a `yolo` profile there is no stamp; authorization is the resolved bot
+  review. The merge conditions are otherwise identical.
+- Rebase and CI watch continue throughout; the PR must not go stale.
 
 ---
 
