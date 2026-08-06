@@ -14,6 +14,11 @@ const PINNED_TAG = "v0.7.0";
 const PINNED_COMMIT = "be9e2fa0714e7cd1c6bd9bdb1b554d2cc6550387";
 const INSTALLER = path.join(import.meta.dir, "install-prime-conversation.sh");
 const SEED = fs.readFileSync(path.join(import.meta.dir, "..", "v2", "seed", "AGENTS.md"), "utf8");
+const DECK_PRIME_PROFILE = z.strictObject({
+	daemonSocketRelative: z.string().min(1),
+}).parse(JSON.parse(
+	fs.readFileSync(path.join(import.meta.dir, "prime-deck-profile.json"), "utf8"),
+));
 const liveBrokerTest = process.env.DECK_LIVE_BROKER_CHECK === "1" ? test : test.skip;
 
 let root: string;
@@ -212,7 +217,7 @@ beforeAll(() => {
 	deckHome = path.join(home, ".deck");
 	agentDir = path.join(deckHome, ".prime", "agent");
 	wrapper = path.join(deckHome, ".prime", "bin", "prime-conversation");
-	daemonSocket = path.join(deckHome, ".prime", "run", "conversation.sock");
+	daemonSocket = path.join(deckHome, DECK_PRIME_PROFILE.daemonSocketRelative);
 	fs.mkdirSync(deckHome, { recursive: true });
 	fs.writeFileSync(path.join(deckHome, "AGENTS.md"), SEED);
 	const globalPrimeAgent = path.join(home, ".prime", "agent");
@@ -256,9 +261,14 @@ exit 2
 }, 30_000);
 
 afterAll(() => {
-	if (wrapper !== undefined && fs.existsSync(wrapper)) {
-		spawnSync(wrapper, ["shutdown"], {
-			env: { ...installEnv, HERDR_ENV: "0" },
+	if (primeBinary !== undefined && daemonSocket !== undefined) {
+		spawnSync(primeBinary, ["shutdown", "--force", "--daemon-socket", daemonSocket], {
+			env: {
+				...installEnv,
+				HERDR_ENV: "0",
+				PRIME_AGENT_CODING_AGENT_DIR: agentDir,
+				PRIME_AGENT_SESSION_DIR: path.join(deckHome, ".prime", "sessions"),
+			},
 			encoding: "utf8",
 			timeout: 10_000,
 		});
@@ -575,19 +585,13 @@ describe("Prime conversation runtime guards", () => {
 		}
 	});
 
-	test("shuts down only the isolated conversation daemon", async () => {
-		const unrelatedSocket = path.join(root, "unrelated.sock");
-		const unrelated = await startHerdrStub(unrelatedSocket);
-		try {
-			const result = combinedOutput(wrapper, ["shutdown"], installEnv);
-			expect(result.status).toBe(0);
-			expect(result.output).toContain("Prime conversation daemon stopped");
-			expect(fs.existsSync(daemonSocket)).toBe(false);
-			expect(fs.existsSync(unrelatedSocket)).toBe(true);
-		} finally {
-			await unrelated.close();
-		}
-	}, 15_000);
+	test("refuses to shut down the shared Deck daemon", () => {
+		expect(fs.existsSync(daemonSocket)).toBe(true);
+		const result = combinedOutput(wrapper, ["shutdown"], installEnv);
+		expect(result.status).toBe(2);
+		expect(result.output).toContain("shared Deck Prime daemon is not owned");
+		expect(fs.existsSync(daemonSocket)).toBe(true);
+	});
 });
 
 describe("Prime upgrade tripwire", () => {

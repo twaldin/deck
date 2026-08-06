@@ -26,39 +26,52 @@ export type TeamFacingPullRequestDescriptionInput = PullRequestDescriptionInput 
 
 const INTERNAL_CONTEXT_PATTERNS = [
 	/\bDECISIONS-FOR-[^\s/\\)]*/i,
-	/\b(?:CAPTAIN\s+)?DOCTRINE(?:\s+\d{4}-\d{2}-\d{2})?(?:\s*\([^)]+\))?/i,
-	/\b(?:MEETING|DEBATE)\s+FOLD-IN(?:\s+\d{4}-\d{2}-\d{2})?/i,
-	/\b(?:STANDING[- ]RULES|REPORT\.md)\b/i,
-	/(?:file:\/\/\/(?:Users|home|tmp|private|var|opt|mnt|workspace|srv|etc|root)\/|(?:^|[\s("'`=:])(?:\/(?:Users|home|tmp|private|var|opt|mnt|workspace|srv|etc|root)\/|~\/|\.deck\/|[A-Za-z]:[\\/]))/i,
+	/(?:^|[^A-Za-z0-9])(?:CAPTAIN[\s_-]+DOCTRINE(?=$|[\s_,.();:/-])|DOCTRINE(?=$|[\s_,.();:/-])(?:[\s_-]+\d{4}-\d{2}-\d{2})?)(?:\s*\([^)]+\))?/,
+	/\b(?:MEETING|DEBATE)[\s_-]+FOLD[\s_-]+IN(?:[\s_-]+\d{4}-\d{2}-\d{2})?/i,
+	/\b(?:STANDING[- _]RULES|REPORT\.md)\b/i,
+	/(?:^|[^A-Za-z0-9])\.deck(?:[\\/]|$)/i,
 	/\$(?:DECK_HOME|HOME)\b/i,
 	/\b(?:effort|implementation|decision)\s+dossier\b|(?:^|[/\\])(?:efforts?|dossiers?)(?:[/\\]|$)/i,
 	/\bali-eval-fix-[a-z0-9-]*\b/i,
 	/\b(?:eval-harness|factory|selfloop|retro)-[a-z0-9][a-z0-9-]*\b/i,
 	/\b[a-z][a-z0-9]*-(?:eval|pipeline|retro|selfloop)-(?:fix|slice|spike|run|rewrite|hardening)-\d+\b/i,
 	/\b(?:lane\s+[A-Z]\d*|lane-[a-z0-9][a-z0-9-]*)\b/i,
-	/\b(?:run|execution|task|effort|lane)[-_ ]?id[:= ]+?[A-Za-z0-9_-]{6,}\b/i,
+	/\b(?:run|execution|task|effort|lane)[-_ ]?id[:= ]+?[A-Za-z0-9_-]+\b/i,
 	/\bworkflow\s+run\s+[A-Za-z0-9_-]{6,}\b/i,
 	/\b[0-9a-f]{40}\b/i,
 	/\b(?:captain|orch(?:estrator)?|fleet|stamp(?:able)?|yolo|smithers|worktree|implementer|adversar(?:y|ial)|factory)\b/i,
 	/\b(?:workflow seat|watch-loop|push-pr|rebase-and-push|recut)\b/i,
 	/\b(?:priority\s*#?\s*\d+|Spec\s*[:=]|PR\s*\d+[A-Z]?\s+of|Managed by|Local review nits|review round|round[- ]?\d+|must approve)\b/i,
 	/\b(?:implementation brief|task brief|brief acceptance criteria)\b/i,
-	/(?:^|\n)(?:--\s+[^ \n]+(?:'s)?\s+agent|(?:generated|written|authored|prepared)\s+by\s+[^.\n]{1,80}\bagent)[.!]?\s*$/im,
+	/(?:^|\n)--\s+[^ \n]+(?:'s)?\s+agent[.!]?\s*$/im,
+	/\b(?:generated|written|authored|prepared)\s+by\s+[^.\n]{0,80}\bagent\b/i,
+	/(?:^|\n)(?:generated|written|authored|prepared)\s+by\s+[^.\n]{1,80}[.!]?\s*$/im,
 ];
+
+const MACHINE_PATH_PATTERN =
+	/(?:file:\/\/\/(?:Users|home|tmp|private|var|opt|mnt|workspace|srv|etc|root|usr|Volumes|data|Library|System|Applications|dev|proc|sys|run)\/|(?<![A-Za-z0-9./])\/(?:Users|home|tmp|private|var|opt|mnt|workspace|srv|etc|root|usr|Volumes|data|Library|System|Applications|dev|proc|sys|run)\/|(?<![A-Za-z0-9])~\/|(?<![A-Za-z0-9])[A-Za-z]:[\\/])/i;
 
 const MALFORMED_TEXT_PATTERNS = [
 	/(?:^|[.!?]\s+|\n)[ \t]*[-–—,:;][ \t]*(?=\S)/,
 	/(?:^|[\s:(])[-–—][ \t]*(?=(?:approved|decided|recorded|required|specified|stamped)\b)|\b(?:a|an|the|this|that|these|those)[ \t]*[,;:][ \t]+(?=(?:approved|decided|recorded|required|specified|stamped)\b)/i,
 	/\b[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*(?:[-_]{2,}[A-Za-z0-9_-]*|[-_])\.[A-Za-z0-9]{1,10}\b/,
 ];
-const INPUT_DENYLIST = [...INTERNAL_CONTEXT_PATTERNS, ...MALFORMED_TEXT_PATTERNS];
 
+const PUBLIC_URL_PATTERN = /\bhttps?:\/\/[^\s<>()]+/gi;
+const SUMMARY_SENTENCE_END_PATTERN = /[.!?](?=(?:["'”’)\]]+)?(?:\s|$))/g;
 const REQUIRED_SECTIONS = ["## Summary", "## Testing"] as const;
 const SECTION_ORDER = [...REQUIRED_SECTIONS, "## Checklist", "## Notes", "## Review"] as const;
 const TITLE_FORMATS = [
-	/^\[[A-Z][A-Z0-9]+-\d+\]\s+\S/,
-	/^(?:build|chore|ci|docs|feat|fix|perf|refactor|revert|test)\([a-z0-9._-]+\):\s+\S/i,
+	/^\[[A-Z][A-Z0-9]+-\d+\]\s+[^\r\n]+$/,
+	/^(?:build|chore|ci|docs|feat|fix|perf|refactor|revert|test)\([a-z0-9._-]+\):\s+[^\r\n]+$/i,
 ];
+
+function findInternalContext(value: string): RegExp | undefined {
+	const namedArtifact = INTERNAL_CONTEXT_PATTERNS.find((pattern) => pattern.test(value));
+	if (namedArtifact !== undefined) return namedArtifact;
+	const publicUrlsRemoved = value.replace(PUBLIC_URL_PATTERN, "");
+	return MACHINE_PATH_PATTERN.test(publicUrlsRemoved) ? MACHINE_PATH_PATTERN : undefined;
+}
 
 export function formatPullRequestTitle(ticket: string, title: string): string {
 	const ticketId = assertTeamFacingInput(ticket, "ticket", true);
@@ -66,7 +79,8 @@ export function formatPullRequestTitle(ticket: string, title: string): string {
 		throw new Error("PR ticket must use `TICKET-123` format.");
 	}
 	const teamTitle = assertTeamFacingInput(title, "title", true);
-	const existingTicket = teamTitle.match(/^\[([A-Z][A-Z0-9]+-\d+)\]\s+\S/);
+	if (/[\r\n]/.test(teamTitle)) throw new Error("PR title must be a single line.");
+	const existingTicket = teamTitle.match(/^\[([A-Z][A-Z0-9]+-\d+)\]\s+[^\r\n]+$/);
 	if (existingTicket !== null && existingTicket[1] !== ticketId) {
 		throw new Error(`PR title ticket ${existingTicket[1]} does not match ${ticketId}.`);
 	}
@@ -95,7 +109,7 @@ export function sanitizeDescriptionInput(input: PullRequestDescriptionInput): Te
 }
 
 function assertTeamFacingInput(value: string, field = "generated text", required = false): string {
-	const hit = INPUT_DENYLIST.find((pattern) => pattern.test(value));
+	const hit = findInternalContext(value) ?? MALFORMED_TEXT_PATTERNS.find((pattern) => pattern.test(value));
 	if (hit !== undefined) {
 		throw new Error(
 			`PR description ${field} contains internal context or malformed text; regenerate it in team-facing English: ${hit}`,
@@ -111,7 +125,7 @@ function assertTeamFacingInput(value: string, field = "generated text", required
 function assertTeamFacingSummary(text: string): string {
 	const summary = assertTeamFacingInput(text, "summary", true);
 	const wordCount = summary.split(/\s+/).length;
-	const sentenceCount = summary.match(/[.!?](?=\s|$)/g)?.length ?? 1;
+	const sentenceCount = summary.match(SUMMARY_SENTENCE_END_PATTERN)?.length ?? 1;
 	if (sentenceCount < 2 || sentenceCount > 4 || wordCount > 80) {
 		throw new Error(
 			`PR description summary must contain 2-4 sentences and at most 80 words; regenerate it in team-facing English (received ${sentenceCount} sentences and ${wordCount} words).`,
@@ -122,7 +136,7 @@ function assertTeamFacingSummary(text: string): string {
 
 function buildTeamFacingSummary(summary: string, acceptanceCriteria: string[]): string {
 	const source = assertTeamFacingInput(summary, "summary", true);
-	const sourceSentenceCount = source.match(/[.!?](?=\s|$)/g)?.length ?? 1;
+	const sourceSentenceCount = source.match(SUMMARY_SENTENCE_END_PATTERN)?.length ?? 1;
 	if (sourceSentenceCount !== 1) return assertTeamFacingSummary(source);
 	const secondSentence = acceptanceCriteria[0];
 	if (secondSentence === undefined) {
@@ -130,19 +144,27 @@ function buildTeamFacingSummary(summary: string, acceptanceCriteria: string[]): 
 			"PR description summary has one sentence and no acceptance criterion to preserve as a second sentence; regenerate it in team-facing English.",
 		);
 	}
-	const first = /[.!?]$/.test(source) ? source : `${source}.`;
-	const second = /[.!?]$/.test(secondSentence) ? secondSentence : `${secondSentence}.`;
-	return assertTeamFacingSummary(`${first} ${second}`);
+	const first = /[.!?](?:["'”’)\]]+)?$/.test(source) ? source : `${source}.`;
+	const criterion = /[.!?](?:["'”’)\]]+)?$/.test(secondSentence)
+		? secondSentence
+		: `${secondSentence}.`;
+	return assertTeamFacingSummary(`${first} It must satisfy this acceptance criterion: ${criterion}`);
 }
 
 export function assertTeamFacingPullRequestDescription(body: string): string {
 	const normalized = body.trim();
-	const leak = INTERNAL_CONTEXT_PATTERNS.find((pattern) => pattern.test(normalized));
+	const leak = findInternalContext(normalized);
 	if (leak !== undefined) throw new Error(`PR description contains internal context: ${leak}`);
 	if (/^[ \t]*#{1,6}\s+Test[- ]plan\b/im.test(normalized)) {
 		throw new Error('PR description must not include a "Test plan" section.');
 	}
-	const markdownHeadings = normalized.match(/^[ \t]*#{1,6}\s+.+$/gm) ?? [];
+	if (/^[ \t]*Test[- ]plan[ \t]*\n[ \t]*(?:=+|-+)[ \t]*$/im.test(normalized)) {
+		throw new Error('PR description must not include a "Test plan" section.');
+	}
+	if (/^[^\n]+\n[ \t]*(?:=+|-+)[ \t]*$/m.test(normalized)) {
+		throw new Error("PR description contains an unsupported Setext heading.");
+	}
+	const markdownHeadings = normalized.match(/^[ \t]*#{1,6}(?:[ \t]+.*)?$/gm) ?? [];
 	if (markdownHeadings.some((heading) => !heading.startsWith("## "))) {
 		throw new Error("PR description contains an unsupported heading level.");
 	}

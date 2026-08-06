@@ -90,22 +90,26 @@ paths, but Prime does not expose an explicit numeric budget through `--thinking`
 Prime's `registerProvider` API supports only `openai-completions` and
 `anthropic-messages`; `/v1/pi/stream` would require a custom transport.
 
-## Isolation and custody
+## Shared Deck daemon and custody
 
 The profile uses these Prime paths instead of Deck's existing `.pi` paths:
 
 ```text
-~/.deck/.prime/agent/       project and user config for this profile
-~/.deck/.prime/sessions/    conversation session files
+~/.deck/.prime/agent/       shared Deck config and starved native-auth store
+~/.deck/.prime/sessions/    captain conversation session files
 ~/.deck/.prime/run/conversation.sock
-                            profile-only daemon socket
+                            shared Deck Prime daemon socket
 ```
 
-Prime's default daemon socket is per UID and outside `HOME`. The wrapper always
-passes the profile socket and rejects daemon, cwd, session-directory,
-system-prompt, provider, model-scope, extension, external resume, and fork
-overrides. This prevents attachment to the default daemon and prevents loading
-another profile's session or extension state.
+`ops/prime-deck-profile.json` is the single source for the socket's relative
+path. The captain conversation, workflow seats, spawn agents, and their RLM
+children join this one Deck-scoped daemon so they appear in one Agents View.
+It remains distinct from Prime's default per-UID socket, so non-Deck Prime usage
+cannot join it. Every shared-daemon seat uses `~/.deck/.prime/agent`, including
+its empty native-auth store and Deck-only settings. The wrapper rejects socket,
+cwd, system-prompt, provider, model-scope, extension, external resume, and fork
+overrides. The conversation wrapper also refuses `shutdown`: no conversation
+client owns the shared factory daemon.
 
 `APPEND_SYSTEM.md` contains the custody contract in Prime's immutable base-prompt
 construction. It is read-only and digest-pinned in
@@ -131,9 +135,9 @@ sandbox:
   only the separate Deck broker routing token; it holds no Smithers stamp or
   Gateway-admin credential. A workflow stamp or denial is valid only when an
   independently authenticated Gateway accepts it.
-- Killing Prime or its isolated daemon must not pause, advance, cancel, or
-  orphan a workflow. The factory never depends on this seat's heartbeat, goal,
-  transcript, kernel, or A2A delivery.
+- Killing the captain conversation client must not shut down the shared Deck
+  daemon, pause, advance, cancel, or orphan a workflow. The factory never
+  depends on this seat's heartbeat, goal, transcript, kernel, or A2A delivery.
 
 Prime-local `rlm()` children are allowed for bounded conversational
 composition. They are not Smithers workers and inherit the same non-custodial
@@ -170,7 +174,7 @@ Prime Agent `0.7.0` includes its own Herdr reporter. No
 starts headless RPC sessions against a stub Herdr socket and observes
 `pane.report_agent` with source `herdr:pi`, state `idle`, and a matching
 `pane.release_agent` on exit. A concurrent two-session drill on the same
-isolated Prime daemon verifies that each session keeps its own `HERDR_PANE_ID`.
+shared Deck daemon verifies that each session keeps its own `HERDR_PANE_ID`.
 The built-in lifecycle also reports `working` during an agent turn and `blocked`
 for an explicit block or a terminal retry failure.
 
@@ -270,12 +274,12 @@ neutralized with `PI_SKIP_VERSION_CHECK=1`, `PI_OFFLINE=1`, and `--offline`.
 
 A manual upgrade is a reviewed pin change:
 
-1. Enter cold pi and stop Prime's isolated daemon before changing the global
-   binary:
+1. Enter cold pi, drain every Deck Prime seat, then stop the shared Deck daemon
+   explicitly before changing the global binary:
 
    ```sh
-   cd ~/.deck && ./.prime/bin/prime-conversation shutdown
    cd ~/.deck && pi
+   prime-agent shutdown --force --daemon-socket ~/.deck/.prime/run/conversation.sock
    ```
 
 2. Review the upstream release, bind its version/tag to an exact commit, record

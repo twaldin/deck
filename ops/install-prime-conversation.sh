@@ -39,6 +39,7 @@ EXTENSION_SOURCE="$REPO_ROOT/extensions-pi"
 PROVIDER_SOURCE="$REPO_ROOT/broker/pi/deck-provider.ts"
 ZOD_SOURCE="$REPO_ROOT/broker/node_modules/zod"
 SEED_SOURCE="$REPO_V2/seed/AGENTS.md"
+PROFILE_CONFIG="$REPO_ROOT/ops/prime-deck-profile.json"
 DECK_HOME="${PRIME_CONVERSATION_HOME:-$HOME/.deck}"
 PROFILE_ROOT="$DECK_HOME/.prime"
 AGENT_DIR="$PROFILE_ROOT/agent"
@@ -53,8 +54,17 @@ GUARD_FILE="$EXTENSIONS_DIR/prime-conversation-guard.ts"
 AUTH_FILE="$AGENT_DIR/auth.json"
 MANIFEST_FILE="$AGENT_DIR/deck-prime-conversation.json"
 WRAPPER="$PROFILE_ROOT/bin/prime-conversation"
-RUN_DIR="$PROFILE_ROOT/run"
-SOCKET="$RUN_DIR/conversation.sock"
+SOCKET_RELATIVE="$(node -e '
+const fs = require("node:fs");
+const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8")).daemonSocketRelative;
+if (typeof value !== "string" || value.startsWith("/") || value.split("/").includes("..")) process.exit(1);
+process.stdout.write(value);
+' "$PROFILE_CONFIG")" || {
+  printf 'error: invalid Deck Prime profile socket contract: %s\n' "$PROFILE_CONFIG" >&2
+  exit 1
+}
+SOCKET="$DECK_HOME/$SOCKET_RELATIVE"
+RUN_DIR="$(dirname "$SOCKET")"
 SESSIONS_DIR="$PROFILE_ROOT/sessions"
 
 if [[ -n "${PRIME_CONVERSATION_PRIME_BIN:-}" ]]; then
@@ -522,93 +532,8 @@ case "\${1:-}" in
     exit 1
     ;;
   shutdown)
-    if [[ \$# -ne 1 ]]; then
-      printf 'error: usage: prime-conversation shutdown\n' >&2
-      exit 2
-    fi
-    node - "\$SOCKET" "\$PINNED_VERSION" <<'PRIME_CONVERSATION_SHUTDOWN'
-const net = require("node:net");
-const socketPath = process.argv[2];
-const pinnedVersion = process.argv[3];
-const client = net.createConnection(socketPath);
-let buffer = "";
-let requestId;
-let acknowledged = false;
-let settled = false;
-const timer = setTimeout(() => fail("timed out"), 10_000);
-function finish(message) {
-  if (settled) return;
-  settled = true;
-  clearTimeout(timer);
-  console.log(message);
-  client.destroy();
-}
-function fail(message) {
-  if (settled) return;
-  settled = true;
-  clearTimeout(timer);
-  console.error("error: isolated Prime daemon shutdown failed: " + message);
-  client.destroy();
-  process.exitCode = 1;
-}
-client.setEncoding("utf8");
-client.on("data", (chunk) => {
-  buffer += chunk;
-  for (;;) {
-    const newline = buffer.indexOf("\n");
-    if (newline < 0) break;
-    const line = buffer.slice(0, newline);
-    buffer = buffer.slice(newline + 1);
-    let message;
-    try {
-      message = JSON.parse(line);
-    } catch {
-      fail("daemon sent malformed JSON");
-      return;
-    }
-    if (message.type === "daemon_hello") {
-      if (message.socketPath !== socketPath ||
-          message.appVersion !== pinnedVersion ||
-          message.protocol?.name !== "prime-agent.daemon" ||
-          message.protocol?.version !== 7) {
-        fail("daemon identity does not match the pinned conversation profile");
-        return;
-      }
-      requestId = "prime_conversation_shutdown_" + process.pid;
-      client.write(JSON.stringify({
-        type: "command",
-        id: requestId,
-        protocol: message.protocol,
-        clientId: "prime-conversation-shutdown:" + process.pid,
-        command: { type: "shutdown", force: true, id: requestId },
-      }) + "\n");
-      continue;
-    }
-    if (message.type === "response" && message.id === requestId) {
-      if (message.success !== true) {
-        fail(typeof message.error === "string" ? message.error : "daemon rejected shutdown");
-        return;
-      }
-      acknowledged = true;
-      continue;
-    }
-  }
-});
-client.on("error", (error) => {
-  if (error.code === "ENOENT") {
-    finish("Prime conversation daemon is not running.");
-    return;
-  }
-  fail(error.message);
-});
-client.on("close", () => {
-  if (!settled) {
-    if (acknowledged) finish("Prime conversation daemon stopped.");
-    else fail("daemon closed before acknowledging shutdown");
-  }
-});
-PRIME_CONVERSATION_SHUTDOWN
-    exit \$?
+    printf 'error: shared Deck Prime daemon is not owned by the conversation seat and cannot be shut down here\n' >&2
+    exit 2
     ;;
 esac
 

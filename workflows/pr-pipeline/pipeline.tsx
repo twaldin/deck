@@ -1852,20 +1852,8 @@ export default smithers((ctx) => {
 										specs: stackCreateSpecs,
 										reported: implementation.stackCars,
 									});
-									const cars = await submitStack(bunExec, {
-										gh: github.gh,
-										repo: input.repo,
-										worktree: input.worktree,
-										rootBaseBranch: declaredBaseBranch,
-										specs: stackCreateSpecs,
-									});
-									for (let index = 0; index < cars.length; index += 1) {
-										const car = cars[index];
-										if (car.headSha !== verified[index].headSha) {
-											throw new Error(
-												`[escalate] submitted stack PR #${car.prNumber} head ${car.headSha} does not match verified branch head ${verified[index].headSha}.`,
-											);
-										}
+									const stackDescriptions: Array<{ title: string; body: string }> = [];
+									for (let index = 0; index < specs.length; index += 1) {
 										const spec = specs[index];
 										const changedFiles = (
 											await execOrThrow(
@@ -1880,7 +1868,7 @@ export default smithers((ctx) => {
 										const descriptionInput = sanitizeDescriptionInput({
 											title: formatPullRequestTitle(
 												input.ticket,
-												spec.title ?? `${brief?.title ?? input.ticket} (${index + 1}/${cars.length})`,
+												spec.title ?? `${brief?.title ?? input.ticket} (${index + 1}/${specs.length})`,
 											),
 											summary: spec.body ?? brief?.summary ?? "",
 											acceptanceCriteria: brief?.acceptanceCriteria ?? [],
@@ -1888,6 +1876,29 @@ export default smithers((ctx) => {
 											reviewOutcome: latestLocalReview?.summary,
 											changedFiles,
 										});
+										stackDescriptions.push({
+											title: descriptionInput.title,
+											body: generatePullRequestDescription(descriptionInput),
+										});
+									}
+									const cars = await submitStack(bunExec, {
+										gh: github.gh,
+										repo: input.repo,
+										worktree: input.worktree,
+										rootBaseBranch: declaredBaseBranch,
+										specs: stackCreateSpecs,
+									});
+									for (let index = 0; index < cars.length; index += 1) {
+										const car = cars[index];
+										if (car.headSha !== verified[index].headSha) {
+											throw new Error(
+												`[escalate] submitted stack PR #${car.prNumber} head ${car.headSha} does not match verified branch head ${verified[index].headSha}.`,
+											);
+										}
+										const description = stackDescriptions[index];
+										if (description === undefined) {
+											throw new Error(`[escalate] missing validated description for stack car ${index + 1}.`);
+										}
 										await execOrThrow(
 											bunExec,
 											[
@@ -1898,9 +1909,9 @@ export default smithers((ctx) => {
 												"--repo",
 												input.repo,
 												"--title",
-												descriptionInput.title,
+												description.title,
 												"--body",
-												generatePullRequestDescription(descriptionInput),
+												description.body,
 											],
 											{ cwd: input.worktree },
 										);
