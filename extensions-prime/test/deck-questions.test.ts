@@ -6,6 +6,7 @@ import { registerDeckQuestions } from "../deck-questions";
 import {
 	ask,
 	askWorkflowQuestion,
+	openQuestions,
 	readQuestionHistory,
 	readQuestions,
 } from "../../v2/src/questions-store";
@@ -141,8 +142,7 @@ describe("deck-questions tools", () => {
 		expect(fs.readFileSync(file, "utf8").trim().split("\n")).toHaveLength(2);
 	});
 
-	test("routes workflow approvals through Gateway and plain decisions through the store", async () => {
-		let approvalRequest: unknown;
+	test("keeps workflow approvals human-only while routing plain decisions through the store", async () => {
 		let gatewayCalls = 0;
 		const { file, tools, ctx } = fixture({
 			env: {
@@ -151,7 +151,6 @@ describe("deck-questions tools", () => {
 			},
 			fetch: async (_input, init) => {
 				gatewayCalls += 1;
-				approvalRequest = JSON.parse(String(init?.body));
 				return new Response(JSON.stringify({
 					ok: true,
 					payload: {
@@ -185,22 +184,18 @@ describe("deck-questions tools", () => {
 		expect(listed.content[0]?.text).toContain('"answerLane": "smithers-approval"');
 		expect(listed.content[0]?.text).toContain('"originalIssue": "PR #7 is waiting for a stamp."');
 		expect(listed.content[0]?.text).toContain('"resumeHint": "Gateway releases the parked node."');
-		const stampResult = await tools.get("answer_question")!.execute(
+		await expect(tools.get("answer_question")!.execute(
 			"stamp-answer",
 			{ id: stamp.id, answer: "Stamp" },
 			undefined,
 			undefined,
 			ctx,
+		)).rejects.toThrow(
+			"workflow approvals require the interactive /questions command",
 		);
-		expect(stampResult.details).toMatchObject({
-			lane: "smithers-approval",
-			choice: "approve",
-		});
-		expect(approvalRequest).toMatchObject({
-			runId: "run-1",
-			nodeId: "r0-stamp",
-			approved: true,
-			decision: { value: { headSha: "abc", prNumber: 7 } },
+		expect(openQuestions(file).find((question) => question.id === stamp.id)).toMatchObject({
+			status: "open",
+			workflow: { answerLane: "smithers-approval" },
 		});
 
 		const blocker = askWorkflowQuestion(file, {
@@ -222,7 +217,7 @@ describe("deck-questions tools", () => {
 			ctx,
 		);
 		expect(plainResult.details).toMatchObject({ lane: "store" });
-		expect(gatewayCalls).toBe(1);
+		expect(gatewayCalls).toBe(0);
 		expect(readQuestions(file).find((question) => question.id === blocker.id)).toMatchObject({
 			status: "answered",
 			answer: "Preserve the current behavior.",

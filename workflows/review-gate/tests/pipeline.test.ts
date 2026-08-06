@@ -170,7 +170,7 @@ test("review-gate queues one Smithers approval and closes it only after Gateway 
     runId: "run-review-gate",
     repo: "owner/repo",
     worktree: dir,
-    pr: { number: 7, url: "https://github.test/owner/repo/pull/7", title: "Prime gate" },
+    pr: { number: 7, url: "https://github.test/owner/repo/pull/7", title: "Prime gate", headRefOid: "head-7" },
     headSha: "head-7",
     originalIssue: "Review PR 7.",
     draftBody: "No blockers remain.",
@@ -186,8 +186,9 @@ test("review-gate queues one Smithers approval and closes it only after Gateway 
   expect(openQuestions(file)).toHaveLength(1);
   expect(first.workflow).toMatchObject({
     runId: "run-review-gate",
-    nodeId: "review-approval-gate-7",
+    nodeId: "review-approval-gate-7-head-7",
     answerLane: "smithers-approval",
+    decisionKey: "head-7",
     approvalValue: { prNumber: 7, headSha: "head-7", verdict: "comment" },
   });
 
@@ -203,7 +204,7 @@ test("review-gate queues one Smithers approval and closes it only after Gateway 
         ok: true,
         payload: {
           runId: "run-review-gate",
-          nodeId: "review-approval-gate-7",
+          nodeId: "review-approval-gate-7-head-7",
           iteration: 0,
           approved: true,
         },
@@ -213,7 +214,7 @@ test("review-gate queues one Smithers approval and closes it only after Gateway 
   expect(routed).toEqual({ lane: "smithers-approval", choice: "approve", applied: true });
   expect(submitted).toMatchObject({
     runId: "run-review-gate",
-    nodeId: "review-approval-gate-7",
+    nodeId: "review-approval-gate-7-head-7",
     approved: true,
     decision: {
       approved: true,
@@ -221,6 +222,17 @@ test("review-gate queues one Smithers approval and closes it only after Gateway 
     },
   });
   expect(openQuestions(file)).toEqual([]);
+  const nextHead = queueReviewGateDecision(file, {
+    ...request,
+    pr: { ...request.pr, headRefOid: "head-8" },
+    headSha: "head-8",
+  });
+  expect(nextHead.id).not.toBe(first.id);
+  expect(nextHead.workflow).toMatchObject({
+    nodeId: "review-approval-gate-7-head-8",
+    decisionKey: "head-8",
+    approvalValue: { headSha: "head-8" },
+  });
 });
 
 test("polls the captain review-request queue programmatically", () => {

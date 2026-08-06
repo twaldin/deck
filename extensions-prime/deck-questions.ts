@@ -1,9 +1,9 @@
 /**
  * Deck questions has exactly two workflow answer lanes:
- * 1. `smithers-approval` (stamps and other Approval nodes) submits the
- *    authenticated Gateway `submitApproval` RPC, then folds the queue closed.
- * 2. `store` appends the operator's plain answer only; the owning run hydrates
- *    that durable answer into its next decision-capable seat.
+ * 1. `smithers-approval` is submitted only by a human selecting an action in
+ *    the interactive `/questions` command. The model-callable answer tool
+ *    cannot advance an Approval node.
+ * 2. `store` appends an answer for the owning run to hydrate.
  *
  * Both lanes are declared by the workflow question record. Presentation text
  * never grants approval authority or changes the route.
@@ -136,7 +136,7 @@ export function registerDeckQuestions(
 		name: "answer_question",
 		label: "Answer Question",
 		description:
-			"Answer an open question. Workflow approvals accept Stamp/Approve, Deny gate, or Hold and route through Smithers; plain answers append to the store.",
+			"Answer a plain open question. Workflow approvals are human-only and must be resolved through the interactive /questions command.",
 		parameters: Type.Object({
 			id: Type.String({ description: "Queued question id", minLength: 1, maxLength: 512 }),
 			answer: Type.String({ description: "Operator answer or workflow action", minLength: 1, maxLength: 7000 }),
@@ -152,6 +152,11 @@ export function registerDeckQuestions(
 				throw new Error(existing === undefined
 					? `question ${id} does not exist`
 					: `question ${id} is already ${existing.status}`);
+			}
+			if (entry.workflow?.answerLane === "smithers-approval") {
+				throw new Error(
+					"workflow approvals require the interactive /questions command; answer_question cannot advance a Smithers gate",
+				);
 			}
 			const routed = entry.workflow === undefined
 				? undefined
