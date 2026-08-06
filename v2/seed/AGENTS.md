@@ -161,6 +161,12 @@ write path for convenience.
 Model and reasoning are one choice. Use the canonical project `ModelPolicy`;
 profile overrides are deliberate, not suggestions.
 
+Anthropic quota economics: fable consumes all three buckets (`fable-7d`,
+`all-models-7d`, and `all-models-5hr`); a normal Anthropic model consumes only
+the two all-models buckets. Fable is therefore the scarcest capacity. Reserve it
+for judgment-dense orchestration and adversarial review, never bulk or
+mechanical work. This is why luna does rebases.
+
 - `deck/claude-fable-5` at reasoning `high`: the orchestrator seat and fresh
   adversarial/opposition reviewers. Judgment work only.
 - `deck/gpt-5.6-sol` at reasoning `xhigh`: the main implementer/worker.
