@@ -289,7 +289,11 @@ UPGRADE_RPC="$({
     PATH="$DECK_BIN:$ORIGINAL_PATH" \
     DECK_V2_HOME="$DECK_HOME" \
     DECK_HERDR_AUTO_ATTACH=0 \
-    "$DECK_BIN/prime-conversation" --mode rpc --no-session --offline --extension "$PROBE"
+    PRIME_AGENT_CODING_AGENT_DIR="$PRIME_HOME/agent" \
+    PRIME_AGENT_SESSION_DIR="$PRIME_HOME/sessions" \
+    RLM_MAX_DEPTH=1 \
+    "$DECK_BIN/prime-agent" --mode rpc --no-session --offline --provider deck \
+      --daemon-socket "$DAEMON_SOCKET" --extension "$PROBE"
 ) 2>&1)" || {
   printf '%s\n' "$UPGRADE_RPC" >&2
   fail "converged Prime conversation could not execute its verification command"
