@@ -156,6 +156,94 @@ function approvalReadyOutputs(baseBranch = "main", prNumber = 42): ApprovalReady
 	};
 }
 
+function runGit(cwd: string, ...args: string[]): string {
+	const result = Bun.spawnSync({
+		cmd: ["git", ...args],
+		cwd,
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	if (result.exitCode !== 0) {
+		throw new Error(
+			`git ${args.join(" ")} failed (${result.exitCode}): ${Buffer.from(result.stderr).toString("utf8")}`,
+		);
+	}
+	return Buffer.from(result.stdout).toString("utf8").trim();
+}
+
+function commitFixtureFile(repo: string, file: string, content: string, message: string): string {
+	fs.writeFileSync(path.join(repo, file), content);
+	runGit(repo, "add", "--", file);
+	runGit(repo, "commit", "--only", "-m", message, "--", file);
+	return runGit(repo, "rev-parse", "HEAD");
+}
+
+function createImplementationRepo(root: string, publishPreexistingCommit: boolean): {
+	repo: string;
+	remoteBaseSha: string;
+	preexistingSha: string;
+} {
+	const repo = path.join(root, "repo");
+	const remote = path.join(root, "remote.git");
+	fs.mkdirSync(repo, { recursive: true });
+	runGit(root, "init", "--bare", remote);
+	runGit(repo, "init", "--initial-branch=main");
+	runGit(repo, "config", "user.name", "Deck Test");
+	runGit(repo, "config", "user.email", "deck-test@example.com");
+	runGit(repo, "config", "commit.gpgsign", "false");
+	const remoteBaseSha = commitFixtureFile(repo, "base.txt", "base\n", "base");
+	runGit(repo, "remote", "add", "origin", remote);
+	runGit(repo, "push", "-u", "origin", "main");
+	const preexistingSha = commitFixtureFile(repo, "unrelated.txt", "unrelated\n", "unrelated local work");
+	if (publishPreexistingCommit) runGit(repo, "push", "origin", "main");
+	runGit(repo, "switch", "-c", baseInput.branch);
+	return { repo, remoteBaseSha, preexistingSha };
+}
+
+async function captureImplementationBaseline(input: typeof baseInput & {
+	worktree: string;
+	github: { git: string; gh: string };
+	watchSetPath: string;
+}) {
+	const preflight = approvalReadyOutputs().preflight;
+	const rendered = await renderWorkflow(pipeline, {
+		input,
+		outputs: { preflight } satisfies PipelineOutputFixtures,
+		workflowPath: path.join(import.meta.dir, "..", "pipeline.tsx"),
+	});
+	const task = rendered.tasks.find((candidate) => candidate.nodeId === "implement-baseline");
+	if (task?.computeFn === undefined) throw new Error("implement-baseline did not render");
+	return schemas.implementationBaseline.parse(await task.computeFn());
+}
+
+async function computeImplementationReport(
+	input: typeof baseInput & {
+		worktree: string;
+		github: { git: string; gh: string };
+		watchSetPath: string;
+	},
+	baseline: { branch: string; headSha: string },
+) {
+	const ready = approvalReadyOutputs();
+	const rendered = await renderWorkflow(pipeline, {
+		input,
+		outputs: {
+			preflight: ready.preflight,
+			implementationBaseline: [{ nodeId: "implement-baseline", ...baseline }],
+			implementationSeat: [{
+				nodeId: "implement-seat",
+				summary: "implemented the focused change",
+				testEvidence: "focused test passed",
+			}],
+			localReview: ready.localReview,
+		} satisfies PipelineOutputFixtures,
+		workflowPath: path.join(import.meta.dir, "..", "pipeline.tsx"),
+	});
+	const task = rendered.tasks.find((candidate) => candidate.nodeId === "implement");
+	if (task?.computeFn === undefined) throw new Error("deterministic implement report did not render");
+	return schemas.implementation.parse(await task.computeFn());
+}
+
 describe("standing-rules seat injection", () => {
 	test("prepends the byte-bounded committed fallback to all five seat prompts", () => {
 		const home = fs.mkdtempSync(path.join(os.tmpdir(), "deck-standing-fallback-"));
@@ -207,6 +295,12 @@ describe("standing-rules seat injection", () => {
 			);
 		}
 		expect(Buffer.byteLength(standingRulesDigest(), "utf8")).toBeLessThanOrEqual(8 * 1024);
+	});
+
+	test("leaves commit attribution to the deterministic workflow report", () => {
+		const prompt = implementPrompt(validBrief, "/tmp/wt", "feature");
+		expect(prompt).toContain('"summary":"Implemented the brief."');
+		expect(prompt).not.toContain('"commits"');
 	});
 
 	test("labels every committed standing-rule obligation by actor", () => {
@@ -516,6 +610,205 @@ describe("standing-rules seat injection", () => {
 			reRequested: ["reviewer"],
 		});
 		expect(fs.readFileSync(log, "utf8")).toContain("requested_reviewers");
+	});
+	test("reports only the commit added after the persisted seat baseline and allows honest initial publication", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "deck-implementation-honest-"));
+		tempRoots.push(dir);
+		process.env.DECK_V2_HOME = path.join(dir, "home");
+		const fixture = createImplementationRepo(dir, true);
+		const gh = path.join(dir, "gh");
+		const watchSetPath = path.join(dir, "watch-set.jsonl");
+		const input = {
+			...baseInput,
+			worktree: fixture.repo,
+			github: { git: "git", gh },
+			watchSetPath,
+		};
+		const baseline = await captureImplementationBaseline(input);
+		expect(baseline).toEqual({
+			branch: baseInput.branch,
+			headSha: fixture.preexistingSha,
+		});
+		const seatSha = commitFixtureFile(
+			fixture.repo,
+			"focused.txt",
+			"focused observer debounce\n",
+			"focused implementation",
+		);
+		const report = await computeImplementationReport(input, baseline);
+		expect(report).toMatchObject({
+			commits: [seatSha],
+			baselineHeadSha: fixture.preexistingSha,
+		});
+
+		fs.writeFileSync(
+			gh,
+			`#!/bin/sh
+case "$1:$2" in
+  pr:list) printf '[]\\n' ;;
+  pr:create) printf 'https://github.com/lindy-ai/lindy/pull/101\\n' ;;
+  api:*) printf '%s\\n' '${seatSha}' ;;
+  *) exit 64 ;;
+esac
+`,
+		);
+		fs.chmodSync(gh, 0o755);
+		const ready = approvalReadyOutputs();
+		const rendered = await renderWorkflow(pipeline, {
+			input,
+			outputs: {
+				preflight: ready.preflight,
+				implementation: [{ nodeId: "implement", ...report }],
+				localReview: ready.localReview,
+			} satisfies PipelineOutputFixtures,
+			workflowPath: path.join(import.meta.dir, "..", "pipeline.tsx"),
+		});
+		const push = rendered.tasks.find((task) => task.nodeId === "push-pr");
+		if (push?.computeFn === undefined) throw new Error("push-pr did not render");
+		const receipt = schemas.prRecord.parse(await push.computeFn());
+		expect(receipt).toMatchObject({
+			prNumber: 101,
+			headSha: seatSha,
+			receipt: `pushed ${baseInput.branch}; PR #101`,
+		});
+		expect(fs.readFileSync(watchSetPath, "utf8")).toContain('"pr":101');
+	});
+
+	test("waits for local review and includes implementer fix commits in the final report", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "deck-implementation-review-fix-"));
+		tempRoots.push(dir);
+		process.env.DECK_V2_HOME = path.join(dir, "home");
+		const fixture = createImplementationRepo(dir, true);
+		const input = {
+			...baseInput,
+			worktree: fixture.repo,
+			github: { git: "git", gh: "gh" },
+			watchSetPath: path.join(dir, "watch-set.jsonl"),
+		};
+		const baseline = await captureImplementationBaseline(input);
+		const seatSha = commitFixtureFile(
+			fixture.repo,
+			"focused.txt",
+			"focused change\n",
+			"focused implementation",
+		);
+		const ready = approvalReadyOutputs();
+		const beforeReview = await renderWorkflow(pipeline, {
+			input,
+			outputs: {
+				preflight: ready.preflight,
+				implementationBaseline: [{ nodeId: "implement-baseline", ...baseline }],
+				implementationSeat: [{
+					nodeId: "implement-seat",
+					summary: "implemented the focused change",
+					testEvidence: "focused test passed",
+				}],
+			} satisfies PipelineOutputFixtures,
+			workflowPath: path.join(import.meta.dir, "..", "pipeline.tsx"),
+		});
+		expect(beforeReview.tasks.find((task) => task.nodeId === "implement")).toBeUndefined();
+		const fixSha = commitFixtureFile(
+			fixture.repo,
+			"review-fix.txt",
+			"review fix\n",
+			"address local review",
+		);
+
+		const report = await computeImplementationReport(input, baseline);
+
+		expect(report.commits).toEqual([seatSha, fixSha]);
+	});
+
+	test("derives the report from the captured local base when a new origin/main has unrelated history", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "deck-implementation-new-remote-"));
+		tempRoots.push(dir);
+		process.env.DECK_V2_HOME = path.join(dir, "home");
+		const fixture = createImplementationRepo(dir, true);
+		const input = {
+			...baseInput,
+			worktree: fixture.repo,
+			github: { git: "git", gh: "gh" },
+			watchSetPath: path.join(dir, "watch-set.jsonl"),
+		};
+		const tree = runGit(fixture.repo, "write-tree");
+		const unrelatedRemoteHead = runGit(
+			fixture.repo,
+			"commit-tree",
+			tree,
+			"-m",
+			"new remote root",
+		);
+		runGit(
+			fixture.repo,
+			"update-ref",
+			"refs/remotes/origin/main",
+			unrelatedRemoteHead,
+		);
+		const baseline = await captureImplementationBaseline(input);
+		expect(baseline.headSha).toBe(fixture.preexistingSha);
+		expect(baseline.headSha).not.toBe(unrelatedRemoteHead);
+		const seatSha = commitFixtureFile(
+			fixture.repo,
+			"focused.txt",
+			"focused change\n",
+			"focused implementation",
+		);
+
+		const report = await computeImplementationReport(input, baseline);
+
+		expect(report.commits).toEqual([seatSha]);
+		expect(report.baselineHeadSha).toBe(fixture.preexistingSha);
+	});
+
+	test("keeps initial publication fail-closed when the branch carried a foreign commit before the seat", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "deck-implementation-contamination-"));
+		tempRoots.push(dir);
+		process.env.DECK_V2_HOME = path.join(dir, "home");
+		const fixture = createImplementationRepo(dir, false);
+		const input = {
+			...baseInput,
+			worktree: fixture.repo,
+			github: { git: "git", gh: "/usr/bin/false" },
+			watchSetPath: path.join(dir, "watch-set.jsonl"),
+		};
+		const baseline = await captureImplementationBaseline(input);
+		const seatSha = commitFixtureFile(
+			fixture.repo,
+			"focused.txt",
+			"focused change\n",
+			"focused implementation",
+		);
+		const report = await computeImplementationReport(input, baseline);
+		expect(report.commits).toEqual([seatSha]);
+
+		const ready = approvalReadyOutputs();
+		const rendered = await renderWorkflow(pipeline, {
+			input,
+			outputs: {
+				preflight: ready.preflight,
+				implementation: [{ nodeId: "implement", ...report }],
+				localReview: ready.localReview,
+			} satisfies PipelineOutputFixtures,
+			workflowPath: path.join(import.meta.dir, "..", "pipeline.tsx"),
+		});
+		const push = rendered.tasks.find((task) => task.nodeId === "push-pr");
+		if (push?.computeFn === undefined) throw new Error("push-pr did not render");
+		let message = "";
+		try {
+			await push.computeFn();
+		} catch (error) {
+			message = String(error);
+		}
+		expect(message).toContain("initial publication commit attribution mismatch");
+		expect(message).toContain(`claimed by implementation: ${JSON.stringify([seatSha])}`);
+		expect(message).toContain(
+			`actually added in origin/main@${fixture.remoteBaseSha}..HEAD: ${JSON.stringify([
+				fixture.preexistingSha,
+				seatSha,
+			])}`,
+		);
+		expect(message).toContain(`implementation capture base: ${fixture.preexistingSha}`);
+		expect(message).toContain("refusing initial publication");
 	});
 	test("rejects initial publication when implementation commit attribution is incomplete", async () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "deck-initial-publish-"));

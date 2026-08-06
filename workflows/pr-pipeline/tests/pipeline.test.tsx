@@ -181,6 +181,11 @@ describe("workflow rendering contracts", () => {
 							resolvedReviewerModel: "deck/claude-fable-5",
 						},
 					],
+					implementationBaseline: [{
+						nodeId: "implement-baseline",
+						branch: baseInput.branch,
+						headSha: "baseline-head",
+					}],
 				} satisfies PipelineOutputFixtures,
 				workflowPath: path.join(import.meta.dir, "..", "pipeline.tsx"),
 			});
@@ -199,7 +204,7 @@ describe("workflow rendering contracts", () => {
 					};
 				}
 			}
-			const implementer = seats.implement;
+			const implementer = seats["implement-seat"];
 			return { seats, model: implementer?.model ?? "", thinking: implementer?.thinking ?? "" };
 		} finally {
 			if (savedHome === undefined) delete process.env.DECK_V2_HOME;
@@ -238,7 +243,7 @@ describe("workflow rendering contracts", () => {
 		expect(rendered.seats["local-review"]?.thinking).toBeUndefined();
 		expect(rendered.seats["r0-watch-poll"]).toBeUndefined();
 		expect(rendered.seats["fallout-watch"]).toBeUndefined();
-		expect(rendered.seats["implement"]?.model).toBe("claude-fable-5");
+		expect(rendered.seats["implement-seat"]?.model).toBe("claude-fable-5");
 	});
 
 	test("omitted and explicit profile engines both construct Prime seats", async () => {
@@ -247,7 +252,7 @@ describe("workflow rendering contracts", () => {
 			{ ...profileBase, engine: "prime" as const, models: fullModels },
 		]) {
 			const rendered = await renderWithProfile(profile, undefined, "example/test");
-			expect(rendered.seats.implement).toMatchObject({
+			expect(rendered.seats["implement-seat"]).toMatchObject({
 				engine: "prime",
 				model: "claude-fable-5",
 				thinking: "xhigh",
@@ -261,7 +266,7 @@ describe("workflow rendering contracts", () => {
 			undefined,
 			"example/test",
 		);
-		expect(invalid.seats.implement).toBeUndefined();
+		expect(invalid.seats["implement-seat"]).toBeUndefined();
 	});
 
 	test.each([
@@ -304,6 +309,7 @@ describe("fallout prompt rendering contracts", () => {
 			},
 			outputs: {
 				preflight: [{ nodeId: "preflight", ok: true, openQuestions: [], briefDigest: "", resolvedReviewerModel: "deck/claude-fable-5" }],
+				implementationBaseline: [{ nodeId: "implement-baseline", branch: baseInput.branch, headSha: "baseline-head" }],
 				implementation: [{ nodeId: "implement", commits: ["fix"], summary: "fixed", testEvidence: "green" }],
 				localReview: [{ nodeId: "local-review", round: 0, approved: true, blockingFindings: [], nits: [], summary: "approved" }],
 				prRecord: [{ nodeId: "push-pr", prNumber: 80, url: "https://github.com/lindy-ai/lindy/pull/80", headSha: "abc123", baseBranch: "main", watchSetRegistered: true, watchSetPath: "", receipt: "", createdAt: "2026-08-01T00:00:00.000Z" }],
@@ -330,13 +336,13 @@ describe("fallout prompt rendering contracts", () => {
 				.filter((task) => task.agent !== undefined)
 				.map((task) => [task.nodeId, task.agent as PrimeSeatAgent]),
 		);
-		expect(agentsByNode.get("implement")?.opts).toMatchObject({ model: "gpt-5.6-sol", thinking: "high" });
+		expect(agentsByNode.get("implement-seat")?.opts).toMatchObject({ model: "gpt-5.6-sol", thinking: "high" });
 		expect(agentsByNode.get("local-review")?.opts).toMatchObject({ model: "claude-fable-5", thinking: "xhigh" });
 		expect(agentsByNode.get("r0-watch-fix")?.opts).toMatchObject({ model: "gpt-5.6-luna", thinking: "low" });
 		expect(agentsByNode.get("fallout-watch")?.opts).toMatchObject({ model: "gpt-5.6-sol", thinking: "max" });
 		expect(agentsByNode.size).toBeGreaterThanOrEqual(4);
-		const expectedThinking = { implement: "high", "local-review": "xhigh", "r0-watch-fix": "low", "fallout-watch": "max" } as const;
-		for (const nodeId of ["implement", "local-review", "r0-watch-fix", "fallout-watch"] as const) {
+		const expectedThinking = { "implement-seat": "high", "local-review": "xhigh", "r0-watch-fix": "low", "fallout-watch": "max" } as const;
+		for (const nodeId of ["implement-seat", "local-review", "r0-watch-fix", "fallout-watch"] as const) {
 			const agent = agentsByNode.get(nodeId);
 			expect(agent?.constructor.name, nodeId).toBe(PrimeSeatAgent.name);
 			expect(agent?.cliEngine, nodeId).toBe("prime");
