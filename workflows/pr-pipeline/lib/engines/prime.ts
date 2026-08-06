@@ -1222,7 +1222,6 @@ export class PrimeSeatAgent implements AgentLike {
 			GCM_INTERACTIVE: "never",
 			PRIME_AGENT_CODING_AGENT_DIR: sharedProfile.agentDir,
 			PRIME_AGENT_SESSION_DIR: sessionDir,
-			PI_SKIP_VERSION_CHECK: "1",
 			RLM_DEPTH: "0",
 			RLM_MAX_DEPTH: "1",
 			...(brokerApiKey === undefined ? {} : { DECK_GATEWAY_API_KEY: brokerApiKey }),
@@ -1269,7 +1268,6 @@ export class PrimeSeatAgent implements AgentLike {
 		daemonEnv.HOME = sourceEnv.HOME ?? os.homedir();
 		daemonEnv.PRIME_AGENT_CODING_AGENT_DIR = sharedProfile.agentDir;
 		daemonEnv.PRIME_AGENT_SESSION_DIR = sharedProfile.sessionDir;
-		daemonEnv.PI_SKIP_VERSION_CHECK = "1";
 		const prompt = typeof options.prompt === "string" ? options.prompt : extractText(options.prompt ?? options.messages);
 		const timeoutMs = typeof options.timeout === "number" && Number.isFinite(options.timeout)
 			? Math.min(options.timeout, this.opts.timeoutMs)

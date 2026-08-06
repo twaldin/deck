@@ -268,8 +268,8 @@ unset DECK_LIVE_BROKER_TOKEN
 ```
 
 Do not run `prime-agent update`; the profile wrapper rejects it. Prime's `update`
-command follows a moving release and has no version selector. Startup checks are
-neutralized with `PI_SKIP_VERSION_CHECK=1`, `PI_OFFLINE=1`, and `--offline`.
+command follows a moving release and has no version selector. Deck invokes the
+verified pinned binary with `--offline`.
 
 A manual upgrade is a reviewed pin change:
 

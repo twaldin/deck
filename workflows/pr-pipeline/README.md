@@ -317,8 +317,8 @@ bun run graph            # render-without-execute sanity check
   check, re-request detection, migration detection + evidence, ready-for-stamp
   (bot/excluded/self approvals never count; will-be-green ruling), landing
   `(#N)` matching, evidence-gated done, model catalog + family opposition.
-- `tests/engine.test.ts` — the reviewed Pi/Prime profile allowlist, Deck-model
-  invariants, and direct vendor CLI-agent ban across the workspace.
+- `tests/engine.test.ts` — the reviewed Prime-only profile and construction
+  invariants, active-tree regression, and direct vendor CLI-agent ban.
 - `tests/prime-engine.test.ts` — Prime RPC, isolation, provenance, liveness,
   malformed-yield, transport-death, model-pin, Herdr, and credential boundaries.
 - `tests/pipeline.test.tsx` — drives the REAL workflow module through

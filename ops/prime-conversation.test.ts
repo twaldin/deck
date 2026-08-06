@@ -779,10 +779,10 @@ describe("Prime conversation runtime guards", () => {
 		const workflowSessions = path.join(root, "workflow-sessions");
 		fs.writeFileSync(probeExtension, `
 import * as fs from "node:fs";
-export default function workflowToolProbe(pi: { getAllTools(): Array<{ name: string }>; on(event: string, handler: () => void): void }): void {
-  pi.on("session_start", () => {
+export default function workflowToolProbe(agent: { getAllTools(): Array<{ name: string }>; on(event: string, handler: () => void): void }): void {
+  agent.on("session_start", () => {
     fs.writeFileSync(process.env.PRIME_WORKFLOW_PROBE!, JSON.stringify({
-      tools: pi.getAllTools().map((tool) => tool.name).sort(),
+      tools: agent.getAllTools().map((tool) => tool.name).sort(),
     }));
   });
 }
@@ -815,8 +815,6 @@ export default function workflowToolProbe(pi: { getAllTools(): Array<{ name: str
 				PRIME_AGENT_SESSION_DIR: workflowSessions,
 				PRIME_WORKFLOW_PROBE: probeOutput,
 				DECK_V2_HOME: deckHome,
-				PI_SKIP_VERSION_CHECK: "1",
-				PI_OFFLINE: "1",
 				RLM_DEPTH: "0",
 				RLM_MAX_DEPTH: "1",
 			},

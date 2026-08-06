@@ -63,7 +63,7 @@ describe("Prime-only seat engine invariant", () => {
 	});
 
 	test("active repository surfaces cannot reintroduce a retired engine path", () => {
-		const banned = /(?:\bPiAgent\b|createHostPiAgent|host-pi|extensions-pi|PI_CODING_AGENT_DIR|PI_CONFIG_DIR|\.deck\/\.pi|engine\s*[:=]\s*["']pi["'])/;
+		const banned = /(?:\bPiAgent\b|createHostPiAgent|host-pi|extensions-pi|PI_(?:CODING_AGENT_DIR|CONFIG_DIR|SKIP_VERSION_CHECK|OFFLINE)|\.deck\/\.pi|engine\s*[:=]\s*["']pi["'])/;
 		const offenders = activeFiles(repoRoot)
 			.filter((file) => file !== import.meta.path)
 			.filter((file) => banned.test(readFileSync(file, "utf8")));
