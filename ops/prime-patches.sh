@@ -59,8 +59,12 @@ function sha256(file) {
 }
 requireValue(manifest.schemaVersion === 1, "schemaVersion must be 1");
 requireValue(typeof manifest.upstreamRepository === "string", "upstreamRepository is required");
+requireValue(["pristine", "patched"].includes(manifest.expectedInstallState), "expectedInstallState must be pristine or patched");
 requireValue(typeof manifest.base?.version === "string", "base.version is required");
 requireValue(/^[0-9a-f]{40}$/.test(manifest.base?.commit), "base.commit must be a full commit SHA");
+for (const key of ["artifactSha256", "pristinePackageTreeSha256", "cliSha256"]) {
+  requireValue(/^[0-9a-f]{64}$/.test(manifest.base?.[key]), `base.${key} must be a SHA-256`);
+}
 requireValue(Array.isArray(manifest.patches) && manifest.patches.length > 0, "patches must not be empty");
 const names = new Set();
 for (const patch of manifest.patches) {
@@ -70,6 +74,17 @@ for (const patch of manifest.patches) {
   requireValue(typeof patch.file === "string" && path.basename(patch.file) === patch.file, `${patch.name} has an unsafe file name`);
   requireValue(typeof patch.fixes === "string" && /[.!?]$/.test(patch.fixes), `${patch.name} needs a plain sentence in fixes`);
   requireValue(patch.baseVersion === manifest.base.version, `${patch.name} baseVersion does not match base.version`);
+  requireValue(patch.application === "not-applied", `${patch.name} application must be not-applied`);
+  const detection = patch.installedDetection;
+  requireValue(
+    typeof detection?.file === "string"
+      && !path.isAbsolute(detection.file)
+      && !detection.file.split(/[\\/]/).includes(".."),
+    `${patch.name} installedDetection.file is unsafe`,
+  );
+  requireValue(/^[0-9a-f]{64}$/.test(detection?.pristineSha256), `${patch.name} needs installedDetection.pristineSha256`);
+  requireValue(/^[0-9a-f]{64}$/.test(detection?.patchedSha256), `${patch.name} needs installedDetection.patchedSha256`);
+  requireValue(typeof detection?.bundleNeedle === "string" && detection.bundleNeedle.length > 0, `${patch.name} needs installedDetection.bundleNeedle`);
   requireValue(["upstream-open", "local-only"].includes(patch.status), `${patch.name} has an invalid status`);
   requireValue(/^[0-9a-f]{40}$/.test(patch.sourceCommit), `${patch.name} needs a full sourceCommit SHA`);
   requireValue(typeof patch.upstreamBranch === "string" && patch.upstreamBranch.length > 0, `${patch.name} needs upstreamBranch`);
@@ -101,9 +116,11 @@ const fs = require("node:fs");
 const m = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
 process.stdout.write([
   m.upstreamRepository,
+  m.expectedInstallState,
   m.base.version,
   m.base.commit,
   m.base.pristinePackageTreeSha256,
+  m.base.cliSha256,
   m.patchedArtifact.file,
   m.patchedArtifact.sha256,
   m.patchedArtifact.packageTreeSha256,
@@ -111,8 +128,8 @@ process.stdout.write([
 ].join("\t"));
 NODE
 )"
-  IFS=$'\t' read -r UPSTREAM_REPOSITORY BASE_VERSION BASE_COMMIT PRISTINE_TREE_SHA \
-    PATCHED_ARTIFACT_FILE PATCHED_ARTIFACT_SHA PATCHED_TREE_SHA PATCHED_CLI_SHA <<<"$values"
+  IFS=$'\t' read -r UPSTREAM_REPOSITORY EXPECTED_INSTALL_STATE BASE_VERSION BASE_COMMIT PRISTINE_TREE_SHA \
+    PRISTINE_CLI_SHA PATCHED_ARTIFACT_FILE PATCHED_ARTIFACT_SHA PATCHED_TREE_SHA PATCHED_CLI_SHA <<<"$values"
   PATCHED_ARTIFACT="$PATCH_DIR/$PATCHED_ARTIFACT_FILE"
 }
 
@@ -130,6 +147,9 @@ resolve_install_root() {
   local binary="${PRIME_AGENT_BIN:-}"
   if [[ -z "$binary" ]]; then
     binary="$(command -v prime-agent || true)"
+  fi
+  if [[ "$binary" != */* ]]; then
+    binary="$(command -v "$binary" || true)"
   fi
   [[ -n "$binary" ]] || return 1
   node - "$binary" <<'NODE'
@@ -151,7 +171,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const root = process.argv[2];
 const roots = ["dist", "docs", "examples", "skills"];
-const files = ["postinstall.cjs", "CHANGELOG.md", "package.json"];
+const files = ["postinstall.cjs", "CHANGELOG.md", "README.md", "package.json"];
 const entries = [];
 function walk(directory) {
   for (const name of fs.readdirSync(directory).sort()) {
@@ -242,11 +262,36 @@ NODE
 }
 
 print_patch_rows() {
-  node - "$MANIFEST" <<'NODE'
+  local root="$1"
+  node - "$MANIFEST" "$root" <<'NODE'
+const crypto = require("node:crypto");
 const fs = require("node:fs");
+const path = require("node:path");
 const manifest = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const root = process.argv[3];
+const bundleDir = path.join(root, "dist", "bundle");
+let bundleText = "";
+try {
+  bundleText = fs.readdirSync(bundleDir)
+    .filter((name) => name.endsWith(".js"))
+    .sort()
+    .map((name) => fs.readFileSync(path.join(bundleDir, name), "utf8"))
+    .join("\\n");
+} catch {}
+const sha256 = (file) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
 for (const patch of manifest.patches) {
+  const detection = patch.installedDetection;
+  let fileSha = "";
+  try {
+    fileSha = sha256(path.join(root, detection.file));
+  } catch {}
+  const bundlePresent = bundleText.includes(detection.bundleNeedle);
+  let presence = "unknown";
+  if (fileSha === detection.patchedSha256 && bundlePresent) presence = "present";
+  else if (fileSha === detection.pristineSha256 && !bundlePresent) presence = "missing";
   console.log([
+    presence,
+    patch.application,
     patch.name,
     patch.fixes,
     patch.upstreamPrNumber ?? "-",
@@ -277,8 +322,9 @@ report_upstream() {
     printf '    upstream: %s (%s)\n' "$state" "$url"
     return
   fi
-  comparison="$(gh api "repos/$UPSTREAM_REPOSITORY/compare/$merge_sha...$BASE_COMMIT" --jq .status 2>/dev/null || true)"
-  if [[ "$comparison" == "ahead" || "$comparison" == "identical" ]]; then
+  if ! comparison="$(gh api "repos/$UPSTREAM_REPOSITORY/compare/$merge_sha...$BASE_COMMIT" --jq .status 2>/dev/null)"; then
+    printf '    upstream: MERGED; inclusion in pinned %s unavailable (gh comparison failed; %s)\n' "$BASE_VERSION" "$url"
+  elif [[ "$comparison" == "ahead" || "$comparison" == "identical" ]]; then
     printf '    upstream: MERGED and included in pinned %s — REMOVABLE (%s)\n' "$BASE_VERSION" "$url"
   else
     printf '    upstream: MERGED but not included in pinned %s; keep until the pin advances (%s)\n' "$BASE_VERSION" "$url"
@@ -286,7 +332,7 @@ report_upstream() {
 }
 
 status_command() {
-  local root version tree_sha install_state marker_state presence
+  local root version tree_sha install_state marker_state row_presence application name fixes number url
   if ! root="$(resolve_install_root)" || [[ ! -f "$root/package.json" ]]; then
     fail "prime-agent install not found"
   fi
@@ -294,16 +340,12 @@ status_command() {
   tree_sha="$(package_tree_sha "$root")"
   if [[ "$version" != "$BASE_VERSION" ]]; then
     install_state="version-mismatch"
-    presence="unknown"
   elif [[ "$tree_sha" == "$PATCHED_TREE_SHA" ]]; then
     install_state="patched"
-    presence="present"
   elif [[ "$tree_sha" == "$PRISTINE_TREE_SHA" ]]; then
     install_state="pristine"
-    presence="missing"
   else
     install_state="unknown/dirty"
-    presence="unknown"
   fi
   if [[ -f "$root/$MARKER_NAME" ]]; then
     if marker_is_valid "$root" "$tree_sha"; then marker_state="matches manifest"; else marker_state="INVALID"; fi
@@ -312,38 +354,44 @@ status_command() {
   fi
   printf 'prime-agent %s: %s\n' "${version:-<unknown>}" "$root"
   printf 'fingerprint: %s (%s)\n' "$install_state" "$tree_sha"
+  printf 'expected: %s\n' "$EXPECTED_INSTALL_STATE"
   printf 'marker: %s\n' "$marker_state"
   printf 'patches:\n'
-  while IFS=$'\t' read -r name fixes number url; do
-    printf '  %-8s %s — %s\n' "$presence" "$name" "$fixes"
+  while IFS=$'\t' read -r row_presence application name fixes number url; do
+    if [[ "$version" != "$BASE_VERSION" ]]; then row_presence="unknown"; fi
+    printf '  %-8s %s (expected %s) — %s\n' "$row_presence" "$name" "$application" "$fixes"
     report_upstream "$number" "$url"
-  done < <(print_patch_rows)
+  done < <(print_patch_rows "$root")
 }
 
 verify_command() {
-  local root version tree_sha cli_sha
+  local root version tree_sha cli_sha expected_tree expected_cli
   if ! root="$(resolve_install_root)" || [[ ! -f "$root/package.json" ]]; then
     fail "prime-agent install not found"
   fi
   version="$(installed_version "$root" || true)"
   [[ "$version" == "$BASE_VERSION" ]] || fail "expected prime-agent $BASE_VERSION, got ${version:-<unknown>}"
-  tree_sha="$(package_tree_sha "$root")"
-  if [[ "$tree_sha" != "$PATCHED_TREE_SHA" ]]; then
-    if [[ "$tree_sha" == "$PRISTINE_TREE_SHA" ]]; then
-      fail "prime-agent $BASE_VERSION is pristine; the Deck patch set is missing"
-    fi
-    fail "prime-agent package tree is dirty or unknown (got $tree_sha, expected $PATCHED_TREE_SHA)"
+  [[ -x "$root/dist/bundle/cli.js" ]] || fail "prime-agent CLI is missing or not executable"
+  if [[ "$EXPECTED_INSTALL_STATE" == "pristine" ]]; then
+    expected_tree="$PRISTINE_TREE_SHA"
+    expected_cli="$PRISTINE_CLI_SHA"
+  else
+    expected_tree="$PATCHED_TREE_SHA"
+    expected_cli="$PATCHED_CLI_SHA"
   fi
+  tree_sha="$(package_tree_sha "$root")"
+  [[ "$tree_sha" == "$expected_tree" ]] || fail "manifest expects $EXPECTED_INSTALL_STATE prime-agent, got package tree $tree_sha"
   cli_sha="$(sha256_file "$root/dist/bundle/cli.js")"
-  [[ "$cli_sha" == "$PATCHED_CLI_SHA" ]] || fail "patched CLI fingerprint mismatch"
+  [[ "$cli_sha" == "$expected_cli" ]] || fail "$EXPECTED_INSTALL_STATE CLI fingerprint mismatch"
   if [[ -f "$root/$MARKER_NAME" ]] && ! marker_is_valid "$root" "$tree_sha"; then
     fail "Prime patch marker does not match the manifest; run apply to refresh it"
   fi
-  printf 'prime-agent %s patch set verified (%s)\n' "$BASE_VERSION" "$tree_sha"
+  printf 'prime-agent %s %s install verified (%s)\n' "$BASE_VERSION" "$EXPECTED_INSTALL_STATE" "$tree_sha"
 }
 
 apply_command() {
-  local root version tree_sha npm_root installed_root
+  local root version tree_sha npm_root installed_root unpack_root unpacked_root entry
+  [[ "$EXPECTED_INSTALL_STATE" == "patched" ]] || fail "manifest expects a pristine install; refusing to apply patches until expectedInstallState is changed to patched"
   if [[ -n "${PRIME_AGENT_BIN:-}" || -n "${PRIME_AGENT_ROOT:-}" ]]; then
     fail "apply does not accept PRIME_AGENT_BIN or PRIME_AGENT_ROOT; use PRIME_PATCH_NPM_PREFIX for a non-default install"
   fi
@@ -363,16 +411,34 @@ apply_command() {
   [[ "$(sha256_file "$PATCHED_ARTIFACT")" == "$PATCHED_ARTIFACT_SHA" ]] || fail "patched artifact SHA-256 mismatch"
 
   if [[ -n "${PRIME_PATCH_NPM_PREFIX:-}" ]]; then
-    npm install --global --prefix "$PRIME_PATCH_NPM_PREFIX" "$PATCHED_ARTIFACT"
     npm_root="$(npm root --global --prefix "$PRIME_PATCH_NPM_PREFIX")"
   else
     npm_root="$(npm root --global)"
     installed_root="$npm_root/prime-agent"
     [[ "$installed_root" == "$root" ]] || fail "active npm prefix targets $installed_root, not installed Prime at $root"
-    npm install --global "$PATCHED_ARTIFACT"
   fi
   root="$npm_root/prime-agent"
-  [[ -f "$root/package.json" ]] || fail "npm did not produce $root"
+  [[ -f "$root/package.json" ]] || fail "npm prefix does not contain $root"
+
+  unpack_root="$(mktemp -d "${TMPDIR:-/tmp}/deck-prime-patches.XXXXXX")"
+  if ! tar -xzf "$PATCHED_ARTIFACT" -C "$unpack_root"; then
+    rm -rf "$unpack_root"
+    fail "could not unpack patched artifact"
+  fi
+  unpacked_root="$unpack_root/package"
+  [[ -f "$unpacked_root/package.json" ]] || { rm -rf "$unpack_root"; fail "patched artifact has no package root"; }
+  [[ "$(package_tree_sha "$unpacked_root")" == "$PATCHED_TREE_SHA" ]] || { rm -rf "$unpack_root"; fail "unpacked artifact tree fingerprint mismatch"; }
+  [[ -x "$unpacked_root/dist/bundle/cli.js" ]] || { rm -rf "$unpack_root"; fail "unpacked artifact CLI is not executable"; }
+  [[ "$(sha256_file "$unpacked_root/dist/bundle/cli.js")" == "$PATCHED_CLI_SHA" ]] || { rm -rf "$unpack_root"; fail "unpacked artifact CLI fingerprint mismatch"; }
+
+  for entry in dist docs examples skills postinstall.cjs CHANGELOG.md README.md package.json; do
+    rm -rf "${root:?}/$entry"
+  done
+  if ! tar -xzf "$PATCHED_ARTIFACT" --strip-components=1 -C "$root"; then
+    rm -rf "$unpack_root"
+    fail "could not overlay patched artifact"
+  fi
+  rm -rf "$unpack_root"
   version="$(installed_version "$root" || true)"
   [[ "$version" == "$BASE_VERSION" ]] || fail "patched artifact installed unexpected version ${version:-<unknown>}"
   tree_sha="$(package_tree_sha "$root")"
@@ -392,6 +458,7 @@ main() {
     status) status_command ;;
     apply)
       require_command npm
+      require_command tar
       apply_command
       ;;
     verify) verify_command ;;
