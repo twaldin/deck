@@ -140,6 +140,11 @@ jobs:
       - name: Install v2 dependencies
         working-directory: v2
         run: bun install --frozen-lockfile
+      - name: Install extensions-pi dependencies
+        # v2/test/ship.test.ts imports extensions-pi/deck-ship.ts, so tsc resolves
+        # that file's imports from extensions-pi/node_modules
+        working-directory: extensions-pi
+        run: bun install --frozen-lockfile
       - name: Typecheck v2
         working-directory: v2
         run: bunx tsc --noEmit
