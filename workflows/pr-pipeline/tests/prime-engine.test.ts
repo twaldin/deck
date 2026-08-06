@@ -656,10 +656,13 @@ describe("Prime seat adapter fault contract", () => {
 			else process.env.DECK_PRIME_AGENT_BINARY = originalOverride;
 		}
 
+		const shadowRoot = await fs.mkdtemp(path.join(os.tmpdir(), "deck-prime-shadow-"));
+		roots.push(shadowRoot);
+		writeFileSync(path.join(shadowRoot, "prime-agent"), "not executable\n", { mode: 0o600 });
 		await agent(success, {
 			binary: undefined,
 			brokerApiKey: "test-broker-token",
-			env: { PATH: `${path.dirname(success)}${path.delimiter}${process.env.PATH ?? ""}` },
+			env: { PATH: `${shadowRoot}${path.delimiter}${path.dirname(success)}${path.delimiter}${process.env.PATH ?? ""}` },
 		}).generate({ prompt: "PATH fallback" });
 
 		const missingRoot = await fs.mkdtemp(path.join(os.tmpdir(), "deck-prime-missing-"));
@@ -685,7 +688,8 @@ describe("Prime seat adapter fault contract", () => {
 		const binary = await fakePrime("success");
 
 		await agent(binary, {
-			env: { HOME: runtimeHome, PATH: path.dirname(unsupported) },
+			binary: undefined,
+			env: { HOME: runtimeHome, PATH: `${path.dirname(binary)}${path.delimiter}${path.dirname(unsupported)}` },
 		}).preflight();
 	});
 
@@ -700,7 +704,18 @@ describe("Prime seat adapter fault contract", () => {
 		expect(failure.result.stderr).toContain("v18.19.1");
 	});
 
+	test("rejects a Node probe that prints a supported version but exits unsuccessfully", async () => {
+		const broken = await fakeNode("v24.18.0", false);
+		const script = readFileSync(broken, "utf8").replace("exit 0", "exit 1");
+		writeFileSync(broken, script, { mode: 0o700 });
+		const failure = await expectPrimeError(agent(await fakePrime("success"), {
+			env: { DECK_PRIME_NODE_BINARY: broken },
+		}).preflight(), "PRIME_VERSION_MISMATCH");
+		expect(failure.result.stderr).toContain("exit 1");
+	});
+
 	test("gives Prime RPC a 16 MiB floor and names every supported override on overflow", async () => {
+		expect(PRIME_SEAT_DEFAULT_MAX_OUTPUT_BYTES).toBe(16 * 1024 * 1024);
 		const binary = await fakePrime("output-burst");
 		const result = runRecordSchema.parse(await agent(binary).generate({
 			prompt: "large RPC",

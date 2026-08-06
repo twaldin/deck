@@ -328,7 +328,7 @@ async function resolvePathExecutable(name: string, searchPath: string | undefine
 		if (directory === "") continue;
 		const candidate = path.resolve(cwd, directory, name);
 		try {
-			await fs.access(candidate);
+			await fs.access(candidate, process.platform === "win32" ? fs.constants.F_OK : fs.constants.X_OK);
 			return candidate;
 		} catch {
 			// Keep searching PATH.
@@ -356,13 +356,14 @@ async function probeNodeRuntime(binary: string, env: Record<string, string>, cwd
 				resolve({ stdout, stderr, code, signal });
 			});
 		});
-		const version = (result.stdout.trim() || result.stderr.trim()).split(/\s+/)[0];
+		const observedVersion = (result.stdout.trim() || result.stderr.trim()).split(/\s+/)[0];
+		const succeeded = result.code === 0 && result.signal === null;
 		return {
 			binary,
-			version,
-			detail: result.code === 0 && result.signal === null
-				? `${binary}=${version || "empty version"}`
-				: `${binary}=exit ${String(result.code ?? result.signal)} (${version || "no output"})`,
+			version: succeeded && observedVersion !== "" ? observedVersion : undefined,
+			detail: succeeded
+				? `${binary}=${observedVersion || "empty version"}`
+				: `${binary}=exit ${String(result.code ?? result.signal)} (${observedVersion || "no output"})`,
 		};
 	} catch (cause) {
 		return { binary, detail: `${binary}=${cause instanceof Error ? cause.message : String(cause)}` };
@@ -388,6 +389,26 @@ async function resolvePrimeNodeBinary(
 	}
 	const candidates: string[] = [];
 	if (explicit !== undefined && explicit !== "") {
+		const conventionalName = process.platform === "win32" ? "node.exe" : "node";
+		const conventionalBinary = path.join(path.dirname(explicit), conventionalName);
+		try {
+			const [configuredTarget, conventionalTarget] = await Promise.all([
+				fs.realpath(explicit),
+				fs.realpath(conventionalBinary),
+			]);
+			if (configuredTarget !== conventionalTarget) {
+				throw new Error(`${conventionalBinary} resolves to a different executable`);
+			}
+		} catch (cause) {
+			throw new PrimeSeatError({
+				status: "failed",
+				code: "PRIME_VERSION_MISMATCH",
+				message: `DECK_PRIME_NODE_BINARY must identify the executable selected as ${conventionalBinary}: ${String(cause)}`,
+				exitStatus: { code: null, signal: null },
+				wallClockMs: 0,
+				stderr: String(cause),
+			}, { cause });
+		}
 		candidates.push(explicit);
 	} else {
 		const fromPath = await resolvePathExecutable("node", merged.PATH, cwd);
@@ -1209,6 +1230,7 @@ export class PrimeSeatAgent implements AgentLike {
 
 	private async verifyVersion(): Promise<void> {
 		const startedAt = Date.now();
+
 		const binary = await this.primeBinary();
 		const env = await this.runtimeEnvironment();
 		const result = await new Promise<{ stdout: string; stderr: string; code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
@@ -1307,6 +1329,11 @@ export class PrimeSeatAgent implements AgentLike {
 	async generate(options: AgentGenerateOptions = {}): Promise<unknown> {
 		await this.preflight();
 		const startedAt = Date.now();
+		const maxOutputBytes = primeMaxOutputBytes(
+			this.opts.maxOutputBytes,
+			this.opts.env?.DECK_PRIME_MAX_OUTPUT_BYTES ?? process.env.DECK_PRIME_MAX_OUTPUT_BYTES,
+			options.maxOutputBytes,
+		);
 		let brokerApiKey: string | undefined;
 		try {
 			brokerApiKey = await this.loadBrokerApiKey();
@@ -1463,11 +1490,7 @@ export class PrimeSeatAgent implements AgentLike {
 			? Math.min(options.timeout, this.opts.timeoutMs)
 			: this.opts.timeoutMs;
 		const idleTimeoutMs = Math.min(this.opts.idleTimeoutMs ?? PRIME_SEAT_IDLE_TIMEOUT_MS, timeoutMs);
-		const maxOutputBytes = primeMaxOutputBytes(
-			this.opts.maxOutputBytes,
-			this.opts.env?.DECK_PRIME_MAX_OUTPUT_BYTES ?? process.env.DECK_PRIME_MAX_OUTPUT_BYTES,
-			options.maxOutputBytes,
-		);
+
 		const terminationGraceMs = this.opts.terminationGraceMs ?? DEFAULT_TERMINATION_GRACE_MS;
 		let stderrTail = "";
 		let stdoutBytes = 0;
