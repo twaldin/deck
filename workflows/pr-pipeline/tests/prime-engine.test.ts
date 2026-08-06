@@ -12,6 +12,7 @@ import {
 	buildSeatEnvironment,
 	PrimeSeatAgent,
 	PRIME_MIN_NODE_VERSION,
+	primeMaxOutputBytes,
 	PRIME_SEAT_DEFAULT_MAX_OUTPUT_BYTES,
 	PRIME_WORKFLOW_SEAT_TOOLS,
 	resolveDeckPrimeProfilePaths,
@@ -659,10 +660,13 @@ describe("Prime seat adapter fault contract", () => {
 		const shadowRoot = await fs.mkdtemp(path.join(os.tmpdir(), "deck-prime-shadow-"));
 		roots.push(shadowRoot);
 		writeFileSync(path.join(shadowRoot, "prime-agent"), "not executable\n", { mode: 0o600 });
+		const directoryShadowRoot = await fs.mkdtemp(path.join(os.tmpdir(), "deck-prime-directory-shadow-"));
+		roots.push(directoryShadowRoot);
+		await fs.mkdir(path.join(directoryShadowRoot, "prime-agent"));
 		await agent(success, {
 			binary: undefined,
 			brokerApiKey: "test-broker-token",
-			env: { PATH: `${shadowRoot}${path.delimiter}${path.dirname(success)}${path.delimiter}${process.env.PATH ?? ""}` },
+			env: { PATH: `${directoryShadowRoot}${path.delimiter}${shadowRoot}${path.delimiter}${path.dirname(success)}${path.delimiter}${process.env.PATH ?? ""}` },
 		}).generate({ prompt: "PATH fallback" });
 
 		const missingRoot = await fs.mkdtemp(path.join(os.tmpdir(), "deck-prime-missing-"));
@@ -686,6 +690,8 @@ describe("Prime seat adapter fault contract", () => {
 		const supported = path.join(runtimeHome, ".nvm", "versions", "node", "v24.18.0", "bin", "node");
 		await writeFakeNode(supported, "v24.18.0");
 		const binary = await fakePrime("success");
+		const competingPrime = await fakePrime("version-mismatch");
+		writeFileSync(path.join(path.dirname(supported), "prime-agent"), readFileSync(competingPrime), { mode: 0o700 });
 
 		await agent(binary, {
 			binary: undefined,
@@ -716,6 +722,7 @@ describe("Prime seat adapter fault contract", () => {
 
 	test("gives Prime RPC a 16 MiB floor and names every supported override on overflow", async () => {
 		expect(PRIME_SEAT_DEFAULT_MAX_OUTPUT_BYTES).toBe(16 * 1024 * 1024);
+		expect(primeMaxOutputBytes(undefined, undefined, 200_000)).toBe(16 * 1024 * 1024);
 		const binary = await fakePrime("output-burst");
 		const result = runRecordSchema.parse(await agent(binary).generate({
 			prompt: "large RPC",

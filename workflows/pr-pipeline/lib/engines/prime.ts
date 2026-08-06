@@ -329,6 +329,7 @@ async function resolvePathExecutable(name: string, searchPath: string | undefine
 		const candidate = path.resolve(cwd, directory, name);
 		try {
 			await fs.access(candidate, process.platform === "win32" ? fs.constants.F_OK : fs.constants.X_OK);
+			if (!(await fs.stat(candidate)).isFile()) continue;
 			return candidate;
 		} catch {
 			// Keep searching PATH.
@@ -456,7 +457,7 @@ function pinNodeRuntime(env: Record<string, string>, nodeBinary: string): Record
 	return { ...env, PATH: [nodeDirectory, ...existing].join(path.delimiter) };
 }
 
-function primeMaxOutputBytes(agentLimit: number | undefined, environmentLimit: string | undefined, smithersLimit: number | undefined): number {
+export function primeMaxOutputBytes(agentLimit: number | undefined, environmentLimit: string | undefined, smithersLimit: number | undefined): number {
 	const raw = agentLimit ?? (environmentLimit === undefined ? undefined : Number(environmentLimit));
 	if (raw !== undefined) {
 		if (!Number.isSafeInteger(raw) || raw <= 0) {
