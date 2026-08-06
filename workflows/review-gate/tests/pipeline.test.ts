@@ -6,7 +6,7 @@ import { renderWorkflow } from "smithers-orchestrator/testing";
 import { openQuestions } from "../../../v2/src/questions-store.ts";
 import { routeWorkflowQuestionAnswer } from "../../../v2/src/workflow-questions.ts";
 import { reviewCommand, shouldSubmitReview } from "../decision.ts";
-import workflow, { assessCi, createReviewGateAgent, planReviewSubmission, queueReviewGateDecision, reviewDecisionBlockers, reviewSubmissionMarker } from "../pipeline.tsx";
+import workflow, { assessCi, createReviewGateAgent, hasOpenReviewQuestionForHead, planReviewSubmission, queueReviewGateDecision, reviewApprovalNote, reviewBodyFingerprint, reviewDecisionBlockers, reviewSubmissionMarker } from "../pipeline.tsx";
 import { PrimeSeatAgent } from "../../pr-pipeline/lib/engines/prime.ts";
 import { DECK_PROVIDER } from "../../pr-pipeline/lib/models.ts";
 import {
@@ -180,20 +180,23 @@ test("review-gate queues one Smithers approval and closes it only after Gateway 
     ciGreen: true,
     verdict: "comment" as const,
   };
+  const initialFingerprint = reviewBodyFingerprint(request.draftBody);
+  const initialApprovalNote = reviewApprovalNote("comment", initialFingerprint);
   const first = queueReviewGateDecision(file, request);
   const second = queueReviewGateDecision(file, request);
   expect(first.id).toBe(second.id);
+  expect(hasOpenReviewQuestionForHead(file, 7, "head-7")).toBe(true);
   expect(openQuestions(file)).toHaveLength(1);
   expect(first.workflow).toMatchObject({
     runId: "run-review-gate",
     nodeId: "review-approval-gate-7-head-7",
     answerLane: "smithers-approval",
-    decisionKey: "head-7",
-    approvalValue: { prNumber: 7, headSha: "head-7", verdict: "comment" },
+    decisionKey: `head-7:${initialFingerprint}`,
+    approvalValue: { prNumber: 7, headSha: "head-7", verdict: "comment", bodyFingerprint: initialFingerprint },
   });
 
   let submitted: unknown;
-  const routed = await routeWorkflowQuestionAnswer(file, openQuestions(file)[0]!, "Acknowledge evidence", {
+  const routed = await routeWorkflowQuestionAnswer(file, openQuestions(file)[0]!, initialApprovalNote, {
     env: {
       SMITHERS_GATEWAY_TOKEN: "review-gate-token",
       SMITHERS_GATEWAY_URL: "http://gateway.test/",
@@ -216,23 +219,41 @@ test("review-gate queues one Smithers approval and closes it only after Gateway 
     runId: "run-review-gate",
     nodeId: "review-approval-gate-7-head-7",
     approved: true,
+    note: initialApprovalNote,
     decision: {
       approved: true,
-      value: { prNumber: 7, headSha: "head-7", verdict: "comment" },
+      value: { prNumber: 7, headSha: "head-7", verdict: "comment", bodyFingerprint: initialFingerprint },
     },
   });
   expect(openQuestions(file)).toEqual([]);
+  expect(hasOpenReviewQuestionForHead(file, 7, "head-7")).toBe(false);
+  const changedBody = "A required check failed.";
+  const changedFingerprint = reviewBodyFingerprint(changedBody);
+  const changedDraft = queueReviewGateDecision(file, {
+    ...request,
+    draftBody: changedBody,
+    verdict: "request-changes",
+  });
+  expect(changedDraft.id).not.toBe(first.id);
+  expect(changedDraft.workflow).toMatchObject({
+    nodeId: "review-approval-gate-7-head-7",
+    decisionKey: `head-7:${changedFingerprint}`,
+    approvalValue: { headSha: "head-7", verdict: "request-changes", bodyFingerprint: changedFingerprint },
+  });
+  expect(hasOpenReviewQuestionForHead(file, 7, "head-7")).toBe(true);
   const nextHead = queueReviewGateDecision(file, {
     ...request,
-    pr: { ...request.pr, headRefOid: "head-8" },
     headSha: "head-8",
   });
   expect(nextHead.id).not.toBe(first.id);
   expect(nextHead.workflow).toMatchObject({
     nodeId: "review-approval-gate-7-head-8",
-    decisionKey: "head-8",
-    approvalValue: { headSha: "head-8" },
+    decisionKey: `head-8:${initialFingerprint}`,
+    approvalValue: { headSha: "head-8", bodyFingerprint: initialFingerprint },
   });
+  expect(source).toContain("fresh?.headSha !== pr.headRefOid");
+  expect(source).not.toContain("readQuestionHistory(queueFile())");
+  expect(source).toContain("hasOpenReviewQuestionForHead(queueFile()");
 });
 
 test("polls the captain review-request queue programmatically", () => {
@@ -386,7 +407,7 @@ test("clean and exhausted rounds use different captain decisions without self-ap
   expect(source).toContain('maxIterations={rounds}');
   expect(source).toContain('Math.min(input.limits?.rounds ?? 3, 3)');
   expect(source).toContain('const clean = request.verdict === "comment"');
-  expect(source).toContain('["Acknowledge evidence", "Hold", "Deny gate"]');
+  expect(source).toContain("reviewApprovalNote(\"comment\", bodyFingerprint)");
   expect(source).toContain('reviewCommand(pr.number, input.repo, plan.headSha, plan.verdict === "comment")');
   expect(source).toContain('shouldSubmitReview(decision)');
 });
@@ -439,7 +460,21 @@ test("submission carries the exact approved head and refuses a changed PR", () =
     headSha: "head-a",
     summary: "clean",
   };
-  expect(planReviewSubmission(reviewedPr, review, approvedState, approvedState)).toMatchObject({
+  const approvedBody = [
+    "Review checked the full diff, tests, security, failure modes, CI, and merge state for PR #7.",
+    "Result: clean",
+    "No blockers remain.",
+    "The operator must approve this PR.",
+    "— automated review",
+  ].join("\n");
+  const approvedDraft = {
+    approvedHeadSha: "head-a",
+    approvedVerdict: "comment" as const,
+    approvedBody,
+    approvedBodyFingerprint: reviewBodyFingerprint(approvedBody),
+  };
+  const approvalDecision = { note: reviewApprovalNote("comment", reviewBodyFingerprint(approvedBody)) };
+  expect(planReviewSubmission(reviewedPr, review, approvedState, approvedState, approvedDraft, approvalDecision)).toMatchObject({
     submitted: true,
     headSha: "head-a",
   });
@@ -448,9 +483,58 @@ test("submission carries the exact approved head and refuses a changed PR", () =
     review,
     approvedState,
     { ...approvedState, headSha: "head-b" },
+    approvedDraft,
+    approvalDecision,
   )).toEqual({
     submitted: false,
     reason: "PR head changed since the approved review decision",
+  });
+  expect(planReviewSubmission(
+    reviewedPr,
+    review,
+    approvedState,
+    approvedState,
+    approvedDraft,
+    { note: "Acknowledge evidence without a fingerprint" },
+  )).toEqual({
+    submitted: false,
+    reason: "approval decision did not bind the reviewed body",
+  });
+});
+
+test("submission refuses a review body that changed after human approval", () => {
+  const pr = { number: 7, url: "https://github.test/owner/repo/pull/7", title: "Reviewed", headRefOid: "head-a" };
+  const review = { approvable: false, blockers: ["Blocker A"], headSha: "head-a", summary: "blocked" };
+  const approvedState = {
+    mergeable: true,
+    ciGreen: true,
+    ciPending: false,
+    mergeStateStatus: "CLEAN",
+    headSha: "head-a",
+    summary: "clean",
+  };
+  const approvedBody = [
+    "Review found 1 blocker(s) on PR #7.",
+    "1. Blocker A",
+    "Fix each blocker, then push the branch.",
+    "— automated review",
+  ].join("\n");
+  const approvedDraft = {
+    approvedHeadSha: "head-a",
+    approvedVerdict: "request-changes" as const,
+    approvedBody,
+    approvedBodyFingerprint: reviewBodyFingerprint(approvedBody),
+  };
+  expect(planReviewSubmission(
+    pr,
+    review,
+    approvedState,
+    { ...approvedState, ciGreen: false, summary: "a required check failed" },
+    approvedDraft,
+    { note: reviewApprovalNote("request-changes", reviewBodyFingerprint(approvedBody)) },
+  )).toEqual({
+    submitted: false,
+    reason: "review body changed since the approved review decision",
   });
 });
 
