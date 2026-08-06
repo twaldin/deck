@@ -672,6 +672,7 @@ export interface MergeSafetyAssessment {
 export function assessMergeSafety(
 	snapshot: WatchSnapshot,
 	expectedHead: string,
+	reviewOptions?: WatchExitOptions,
 ): MergeSafetyAssessment {
 	const ci = classifyCiEvidence(snapshot);
 	if (snapshot.headSha !== expectedHead) {
@@ -689,6 +690,17 @@ export function assessMergeSafety(
 			ciClassification: ci.classification,
 			reason: `PR ${snapshot.mergeable}/${snapshot.mergeStateStatus} has a merge conflict.`,
 		};
+	}
+	if (reviewOptions !== undefined) {
+		const review = evaluateWatchExit(snapshot, reviewOptions);
+		if (!review.exitOk) {
+			return {
+				ok: false,
+				retryable: false,
+				ciClassification: review.ciClassification,
+				reason: `Fresh review watch regressed before merge: ${review.reasons.join(" ")}`,
+			};
+		}
 	}
 	if (ci.classification !== "TERMINAL_SUCCESS" || ci.state !== "green") {
 		return {
