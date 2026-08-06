@@ -165,11 +165,12 @@ installed_version() {
 }
 
 package_tree_sha() {
-  node - "$1" <<'NODE'
+  node - "$1" "$MARKER_NAME" <<'NODE'
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const root = process.argv[2];
+const markerName = process.argv[3];
 const roots = ["dist", "docs", "examples", "skills"];
 const files = ["postinstall.cjs", "CHANGELOG.md", "README.md", "package.json"];
 const entries = [];
@@ -184,8 +185,21 @@ function walk(directory) {
   }
 }
 try {
-  for (const name of roots.sort()) walk(path.join(root, name));
-  for (const name of files.sort()) entries.push(name);
+  const allowedRootEntries = new Set([...roots, ...files, "node_modules", markerName]);
+  for (const name of fs.readdirSync(root)) {
+    if (!allowedRootEntries.has(name)) throw new Error(`unexpected package-root entry: ${name}`);
+  }
+  for (const name of roots.sort()) {
+    const absolute = path.join(root, name);
+    const stat = fs.lstatSync(absolute);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error(`${name} is not a real directory`);
+    walk(absolute);
+  }
+  for (const name of files.sort()) {
+    const stat = fs.lstatSync(path.join(root, name));
+    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error(`${name} is not a regular file`);
+    entries.push(name);
+  }
   const hash = crypto.createHash("sha256");
   for (const relative of entries.sort()) {
     const absolute = path.join(root, relative);
