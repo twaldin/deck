@@ -215,6 +215,16 @@ beforeAll(() => {
 	daemonSocket = path.join(deckHome, ".prime", "run", "conversation.sock");
 	fs.mkdirSync(deckHome, { recursive: true });
 	fs.writeFileSync(path.join(deckHome, "AGENTS.md"), SEED);
+	const globalPrimeAgent = path.join(home, ".prime", "agent");
+	fs.mkdirSync(globalPrimeAgent, { recursive: true });
+	fs.writeFileSync(path.join(globalPrimeAgent, "settings.json"), JSON.stringify({
+		defaultProvider: "openai-codex",
+		defaultModel: "gpt-5.6-sol",
+	}));
+	fs.writeFileSync(path.join(globalPrimeAgent, "auth.json"), JSON.stringify({
+		anthropic: { type: "oauth", access: "must-not-reach-profile" },
+		"openai-codex": { type: "oauth", access: "must-not-reach-profile" },
+	}));
 	const memo = path.join(home, ".optmem", "memo");
 	fs.mkdirSync(path.dirname(memo), { recursive: true });
 	fs.writeFileSync(memo, `#!/bin/sh
@@ -257,20 +267,23 @@ afterAll(() => {
 });
 
 describe("Prime conversation installer", () => {
-	test("is dry-run by default and claims no sandbox paths", () => {
+	test("is dry-run by default and writes no profile", () => {
 		const dryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "deck-prime-dry-"));
 		try {
 			const dryHome = path.join(dryRoot, "home");
 			fs.mkdirSync(dryHome);
+			const dryDeckHome = path.join(dryHome, ".deck");
+			fs.mkdirSync(dryDeckHome);
+			fs.writeFileSync(path.join(dryDeckHome, "AGENTS.md"), SEED);
 			const result = combinedOutput("bash", [INSTALLER], {
 				...installEnv,
 				HOME: dryHome,
-				PRIME_CONVERSATION_HOME: path.join(dryHome, ".deck"),
+				PRIME_CONVERSATION_HOME: dryDeckHome,
 			});
 			expect(result.status).toBe(0);
 			expect(result.output).toContain("DRY RUN — no files will be changed");
 			expect(result.output).toContain(`${PINNED_VERSION}, ${PINNED_TAG}, ${PINNED_COMMIT}`);
-			expect(fs.existsSync(path.join(dryHome, ".deck"))).toBe(false);
+			expect(fs.existsSync(path.join(dryDeckHome, ".prime"))).toBe(false);
 		} finally {
 			fs.rmSync(dryRoot, { recursive: true, force: true });
 		}
@@ -362,6 +375,7 @@ describe("Prime conversation runtime guards", () => {
 				"adopt",
 				"status",
 				"recall_effort",
+				"ipython",
 			]));
 			expect(probe.tools).not.toContain("subagent");
 			expect(typeof probe.systemPrompt).toBe("string");
@@ -379,6 +393,29 @@ describe("Prime conversation runtime guards", () => {
 		} finally {
 			await herdr.close();
 		}
+	}, 30_000);
+
+	test("rejects non-Deck provider selection despite global native OAuth logins", async () => {
+		expect(JSON.parse(fs.readFileSync(path.join(agentDir, "auth.json"), "utf8"))).toEqual({});
+		expect(JSON.parse(fs.readFileSync(path.join(home, ".prime", "agent", "auth.json"), "utf8"))).toHaveProperty("anthropic");
+		const result = await runRpc(
+			["--mode", "rpc", "--no-session"],
+			[
+				{ id: "models", type: "get_available_models" },
+				{ id: "state", type: "get_state" },
+			],
+			installEnv,
+		);
+		const frames = rpcFrames(result.stdout);
+		const modelsResponse = frames.find((frame) =>
+			frame.command === "get_available_models" && frame.success === true);
+		const models = ModelsDataSchema.parse(modelsResponse?.data).models;
+		expect(models.length).toBeGreaterThan(0);
+		expect(models.every((model) => model.provider === "deck")).toBe(true);
+		expect(selectedProvider(frames)).toBe("deck");
+		const cliSelection = combinedOutput(wrapper, ["--provider", "anthropic"], installEnv);
+		expect(cliSelection.status).toBe(2);
+		expect(cliSelection.output).toContain("fixed by the prime conversation profile");
 	}, 30_000);
 
 	test("keeps built-in Herdr reports scoped across concurrent RPC sessions", async () => {
@@ -489,7 +526,7 @@ describe("Prime conversation runtime guards", () => {
 			expect(rejected.status).toBe(2);
 			expect(rejected.output).toContain("is fixed by the prime conversation profile");
 		}
-	});
+	}, 15_000);
 
 	test("keeps custody immutable while /refine owns writable supplemental state", () => {
 		const custody = path.join(agentDir, "APPEND_SYSTEM.md");

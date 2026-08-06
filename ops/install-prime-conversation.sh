@@ -301,6 +301,7 @@ interface PrimeGuardApi {
 export default function primeConversationGuard(pi: PrimeGuardApi): void {
   const enforceDeck = (model: PrimeModel | undefined, context: PrimeContext): void => {
     if (model?.provider === "deck") return;
+    console.error(`error: Prime conversation fail-closed: provider ${model?.provider ?? "<none>"} is forbidden; Deck broker provider required`);
     context.abort();
     context.shutdown();
   };
@@ -480,6 +481,41 @@ if [[ "\$actual_guard_sha" != "\$GUARD_SHA256" ]]; then
   printf 'error: Prime conversation provider guard failed its launch digest check\n' >&2
   exit 1
 fi
+for digest_spec in \
+  "settings:\$SETTINGS_FILE:\$SETTINGS_SHA256" \
+  "native auth:\$AUTH_FILE:\$AUTH_SHA256" \
+  "Deck seed:\$SEED_FILE:\$SEED_SHA256"; do
+  label="\${digest_spec%%:*}"
+  remainder="\${digest_spec#*:}"
+  file="\${remainder%:*}"
+  expected="\${digest_spec##*:}"
+  actual="\$(shasum -a 256 "\$file" 2>/dev/null | cut -d ' ' -f 1)"
+  if [[ "\$actual" != "\$expected" ]]; then
+    printf 'error: Prime conversation %s failed its launch digest check\n' "\$label" >&2
+    exit 1
+  fi
+done
+for entry in "\$EXTENSIONS_DIR"/*; do
+  [[ -e "\$entry" || -L "\$entry" ]] || continue
+  case "\$(basename "\$entry")" in
+    deck-questions|deck-ship|deck-recall|deck-provider.ts|prime-conversation-guard.ts|node_modules|v2) ;;
+    *)
+      printf 'error: Prime conversation fail-closed: unapproved extension %s\n' "\$entry" >&2
+      exit 1
+      ;;
+  esac
+done
+for extension in deck-questions deck-ship deck-recall; do
+  if [[ "\$(realpath "\$EXTENSIONS_DIR/\$extension/index.ts" 2>/dev/null || true)" != "\$(realpath "\$EXTENSION_SOURCE/\$extension.ts")" ]]; then
+    printf 'error: Prime conversation extension pin failed for %s\n' "\$extension" >&2
+    exit 1
+  fi
+done
+if [[ "\$(realpath "\$EXTENSIONS_DIR/deck-provider.ts" 2>/dev/null || true)" != "\$(realpath "\$PROVIDER_SOURCE")" ]] ||
+   [[ "\$(realpath "\$EXTENSIONS_DIR/node_modules/zod" 2>/dev/null || true)" != "\$(realpath "\$ZOD_SOURCE")" ]]; then
+  printf 'error: Prime conversation Deck provider resource pin failed\n' >&2
+  exit 1
+fi
 case "\${1:-}" in
   update|package)
     printf 'error: prime-agent %s is disabled for the pinned conversation profile; follow docs/prime-conversation.md\n' "\$1" >&2
@@ -599,6 +635,7 @@ for argument in "\$@"; do
     --system-prompt|--system-prompt=*|--append-system-prompt|--append-system-prompt=*|\\
     --provider|--provider=*|--no-context-files|-nc|--no-extensions|-ne|\\
     --extension|--extension=*|-e|--models|--models=*|\\
+    --no-builtin-tools|--nbt|--no-tools|-nt|--tools|--tools=*|-t|\\
     --resume|--resume=*|-r|--fork|--fork=*)
       printf 'error: %s is fixed by the prime conversation profile\\n' "\$argument" >&2
       exit 2

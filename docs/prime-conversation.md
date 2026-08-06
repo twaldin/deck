@@ -65,15 +65,30 @@ cd ~/.deck && ./.prime/bin/prime-conversation
 
 The wrapper always changes to `~/.deck`, so the closest `AGENTS.md` is the Deck
 home seed. The guard captures Prime's actual system prompt and requires the
-complete `v2/seed/AGENTS.md` text. Provider selection is fixed to `deck`,
-`enabledModels` is scoped to `deck/*`, provider/model cycling overrides are
-rejected, and a startup catalog probe fails closed unless Deck has models and
-the selected model is Deck. No captain model is hardcoded. A bare Deck model id
-may be selected for one session:
+complete `v2/seed/AGENTS.md` text. The project-scoped settings make `deck` the
+default and scope `enabledModels` to `deck/*`. Prime 0.7 has no separate
+enabled-providers allowlist, so the profile also supplies a read-only empty
+`~/.deck/.prime/agent/auth.json`, points `PRIME_AGENT_CODING_AGENT_DIR` at that
+profile, removes direct vendor-key variables, rejects provider/model cycling
+overrides, and shuts down if any non-Deck model reaches the runtime guard.
+Global `~/.prime/agent/auth.json` OAuth logins are therefore neither copied nor
+visible to this seat. A startup catalog probe fails visibly unless Deck has
+models and the selected model is Deck; there is no native-provider fallback.
+No captain model is hardcoded. A bare Deck model id may be selected for one
+session:
 
 ```sh
 cd ~/.deck && ./.prime/bin/prime-conversation --model gpt-5.6-sol
 ```
+
+An empirical transparent-proxy probe exercised a real top-level request and a
+real `rlm()` child with `--thinking xhigh`. All 14 broker-ingress calls carried
+the exact `reasoning_effort: xhigh`; no native thinking payload reached ingress.
+The broker validates/clamps that named level and converts it to the native
+Anthropic thinking budget after routing. Named thinking levels survive both
+paths, but Prime does not expose an explicit numeric budget through `--thinking`.
+Prime's `registerProvider` API supports only `openai-completions` and
+`anthropic-messages`; `/v1/pi/stream` would require a custom transport.
 
 ## Isolation and custody
 
