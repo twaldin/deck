@@ -169,7 +169,7 @@ fs.writeFileSync(manifestPath, `${JSON.stringify({
 NODE
 chmod 444 "$PRIME_HOME/agent/deck-prime-conversation.json"
 
-for extension in deck-questions deck-ship deck-recall deck-usage; do
+for extension in deck-questions deck-recall deck-usage; do
   legacy_source="$RETIRED_EXTENSION_DIR/$extension.ts"
   mkdir -p "$(dirname "$legacy_source")" "$PRIME_HOME/agent/extensions/$extension"
   printf 'export default function legacyExtension() {}\n' > "$legacy_source"
@@ -345,7 +345,7 @@ PROCESS_IDENTITY="$(node -e 'const p=require(process.argv[1]); process.stdout.wr
 case "$(cat "$PRIME_HOME/bin/prime-conversation")" in
   *"stale previous-generation wrapper"*) fail "upgrade retained the stale wrapper" ;;
 esac
-for extension in deck-questions deck-ship deck-recall deck-usage; do
+for extension in deck-questions deck-recall deck-usage; do
   expected="$CLONE_DIR/extensions-prime/$extension.ts"
   actual="$(readlink "$PRIME_HOME/agent/extensions/$extension/index.ts")"
   [ "$actual" = "$expected" ] || fail "$extension still targets $actual instead of $expected"

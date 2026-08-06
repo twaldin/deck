@@ -144,7 +144,6 @@ fi
 
 for source in \
   "$EXTENSION_SOURCE/deck-questions.ts" \
-  "$EXTENSION_SOURCE/deck-ship.ts" \
   "$EXTENSION_SOURCE/deck-recall.ts" \
   "$EXTENSION_SOURCE/deck-usage.ts" \
   "$PROVIDER_SOURCE" \
@@ -207,7 +206,7 @@ DRY RUN — no files will be changed
 Prime Agent: $PRIME_BIN ($PINNED_VERSION, $PINNED_TAG, $PINNED_COMMIT)
 Deck home:   $DECK_HOME
 Profile:     $AGENT_DIR
-Extensions:  deck-questions, deck-ship, deck-recall, deck-usage, deck-provider
+Extensions:  deck-questions, deck-recall, deck-usage, deck-provider
 Package:     $PROCESS_PACKAGE_SPEC
 Custody:     $CUSTODY_FILE (read-only base-prompt supplement)
 Refinement:  $HARNESS_DIR (writable supplemental state)
@@ -253,7 +252,7 @@ if [[ -d "$EXTENSIONS_DIR" ]]; then
   for existing in "$EXTENSIONS_DIR"/*; do
     [[ -e "$existing" || -L "$existing" ]] || continue
     case "$(basename "$existing")" in
-      deck-questions|deck-ship|deck-recall|deck-usage|deck-provider.ts|prime-conversation-guard.ts|node_modules|v2) ;;
+      deck-questions|deck-recall|deck-usage|deck-provider.ts|prime-conversation-guard.ts|node_modules|v2) ;;
       *)
         printf 'error: unapproved conversation-profile extension is present: %s\n' "$existing" >&2
         exit 1
@@ -354,7 +353,7 @@ for module in "$REPO_V2"/src/*.ts; do
   ensure_symlink "$module" "$LIB_DEST/$name"
 done
 
-for extension in deck-questions deck-ship deck-recall deck-usage; do
+for extension in deck-questions deck-recall deck-usage; do
   destination="$EXTENSIONS_DIR/$extension"
   if [[ -L "$destination" || ( -e "$destination" && ! -d "$destination" ) ]]; then
     printf 'error: %s exists and is not an extension directory\n' "$destination" >&2
@@ -653,14 +652,14 @@ done
 for entry in "\$EXTENSIONS_DIR"/*; do
   [[ -e "\$entry" || -L "\$entry" ]] || continue
   case "\$(basename "\$entry")" in
-    deck-questions|deck-ship|deck-recall|deck-usage|deck-provider.ts|prime-conversation-guard.ts|node_modules|v2) ;;
+    deck-questions|deck-recall|deck-usage|deck-provider.ts|prime-conversation-guard.ts|node_modules|v2) ;;
     *)
       printf 'error: Prime conversation fail-closed: unapproved extension %s\n' "\$entry" >&2
       exit 1
       ;;
   esac
 done
-for extension in deck-questions deck-ship deck-recall deck-usage; do
+for extension in deck-questions deck-recall deck-usage; do
   if [[ "\$(realpath "\$EXTENSIONS_DIR/\$extension/index.ts" 2>/dev/null || true)" != "\$(realpath "\$EXTENSION_SOURCE/\$extension.ts")" ]]; then
     printf 'error: Prime conversation extension pin failed for %s\n' "\$extension" >&2
     exit 1

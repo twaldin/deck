@@ -1,76 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import {
-	parsePrReference,
-	registerDeckRecall,
-	resolveEffortReference,
-	type DeckRecallDependencies,
-} from "../deck-recall";
+import { registerDeckRecall } from "../deck-recall";
 
-interface RegisteredTool {
-	name: string;
-	execute(...args: unknown[]): Promise<{ content: Array<{ type: "text"; text: string }>; details: Record<string, unknown> }>;
-}
-
-describe("recall_effort argument handling", () => {
-	const efforts = [
-		{ id: "alpha", run_epoch: 4, pr: "https://github.com/acme/widgets/pull/17" },
-		{ id: "beta", run_epoch: 2, pr: "other/tools#17" },
-		{ id: "123", run_epoch: 8, pr: "#99" },
-	];
-
-	test("parses supported PR spellings", () => {
-		expect(parsePrReference("17")).toEqual({ number: 17 });
-		expect(parsePrReference("#17")).toEqual({ number: 17 });
-		expect(parsePrReference("Acme/Widgets#17")).toEqual({ repo: "acme/widgets", number: 17 });
-		expect(parsePrReference("https://github.com/Acme/Widgets/pull/17/files")).toEqual({
-			repo: "acme/widgets",
-			number: 17,
-		});
-		expect(parsePrReference("not a pr")).toBeNull();
-	});
-
-	test("prefers an exact task id and requires unique bare PRs", () => {
-		expect(resolveEffortReference("123", efforts)).toEqual({ taskId: "123", epoch: 8 });
-		expect(resolveEffortReference("acme/widgets#17", efforts)).toEqual({ taskId: "alpha", epoch: 4 });
-		expect(() => resolveEffortReference("#17", efforts)).toThrow("ambiguous");
-		expect(() => resolveEffortReference("missing", efforts)).toThrow('no Deck effort matches "missing"');
-		expect(() => resolveEffortReference("   ", efforts)).toThrow("needs a task id or PR reference");
-	});
-
-	test("passes the resolved task and current epoch to buildHydration", async () => {
-		const tools = new Map<string, RegisteredTool>();
-		const calls: Array<[string, number]> = [];
-		const dependencies: DeckRecallDependencies = {
-			wake: async () => null,
-			efforts: () => efforts,
-			hydrate: (taskId, epoch) => {
-				calls.push([taskId, epoch]);
-				return { text: `hydrated ${taskId}@${epoch}`, messageIds: ["message-1"] };
-			},
-		};
-		registerDeckRecall({
-			registerTool: (tool) => tools.set(tool.name, tool as RegisteredTool),
-			on() {},
-			sendMessage() {},
-		}, dependencies);
-
-		const result = await tools.get("recall_effort")!.execute(
-			"recall-1",
-			{ effort: "https://github.com/acme/widgets/pull/17" },
-			undefined,
-			undefined,
-			{},
-		);
-		expect(calls).toEqual([["alpha", 4]]);
-		expect(result.content[0]?.text).toBe("hydrated alpha@4");
-		expect(result.details).toEqual({ taskId: "alpha", epoch: 4, messageIds: ["message-1"] });
-		await expect(tools.get("recall_effort")!.execute(
-			"recall-2",
-			{ effort: 17 },
-			undefined,
-			undefined,
-			{},
-		)).rejects.toThrow("needs an effort string");
+describe("deck-recall extension", () => {
+	test("registers no agent-callable tool", () => {
+		const names: string[] = [];
+		registerDeckRecall({ registerTool: (tool) => names.push(tool.name), on() {}, sendMessage() {} });
+		expect(names).toEqual([]);
 	});
 
 	test("injects memo wake at session start and once per compaction id", async () => {

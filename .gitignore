@@ -6,3 +6,4 @@ node_modules/
 /smithers.db
 /smithers.db-*
 /claude-playground/
+__pycache__/
