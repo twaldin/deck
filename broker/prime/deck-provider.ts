@@ -3,7 +3,7 @@ interface DeckModel {
 	name: string;
 	api?: "openai-completions" | "anthropic-messages";
 	reasoning: boolean;
-	/** Pi-native reasoning selector. Pi uses this map at runtime. */
+	/** Prime reasoning selector passed through to the broker. */
 	thinkingLevelMap?: Record<string, string | null>;
 	input: ("text" | "image")[];
 	cost: {
@@ -18,7 +18,7 @@ interface DeckModel {
 	compat?: { supportsReasoningEffort?: boolean };
 }
 
-interface PiExtensionApi {
+interface PrimeExtensionApi {
 	registerProvider(
 		name: string,
 		config: {
@@ -42,7 +42,7 @@ const loopbackGatewayOrigin = z.url().refine((value) => {
 
 const extensionEnv = z
 	.looseObject({
-		DECK_PI_MAX_TOKENS: z.coerce.number().int().positive().optional(),
+		DECK_PRIME_MAX_TOKENS: z.coerce.number().int().positive().optional(),
 		DECK_GATEWAY_ORIGIN: loopbackGatewayOrigin.optional(),
 		DECK_GATEWAY_API_KEY: z.string().min(1).optional(),
 	})
@@ -52,12 +52,11 @@ const GATEWAY_ORIGIN = (extensionEnv.DECK_GATEWAY_ORIGIN ?? DEFAULT_GATEWAY_ORIG
 const GATEWAY_API_KEY = extensionEnv.DECK_GATEWAY_API_KEY ?? "!cat ~/.deck/broker/gateway.token";
 
 function maxTokens(supportedMaxTokens: number): number {
-	return Math.min(extensionEnv.DECK_PI_MAX_TOKENS ?? supportedMaxTokens, supportedMaxTokens);
+	return Math.min(extensionEnv.DECK_PRIME_MAX_TOKENS ?? supportedMaxTokens, supportedMaxTokens);
 }
 
-// Keep all named levels explicit so Pi passes the requested native selector
-// to the broker. The broker owns the per-model support table and emits the
-// requested/effective warning when the provider does not support a level.
+// Keep every named level explicit so Prime passes the requested selector to
+// the broker. The broker owns support policy and reports any effective clamp.
 const NATIVE_REASONING: Record<string, string> = {
 	minimal: "minimal", low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max",
 };
@@ -232,8 +231,8 @@ export const models: DeckModel[] = [
 	},
 ];
 
-export default function registerDeckProvider(pi: PiExtensionApi): void {
-	pi.registerProvider("deck", {
+export default function registerDeckProvider(agent: PrimeExtensionApi): void {
+	agent.registerProvider("deck", {
 		name: "Deck Broker",
 		baseUrl: `${GATEWAY_ORIGIN}/v1`,
 		apiKey: GATEWAY_API_KEY,

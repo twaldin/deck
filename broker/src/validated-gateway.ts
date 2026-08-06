@@ -8,7 +8,6 @@ import { routeModel, NoQuotaError, routingProvider, type QuotaModel } from "./qu
 import {
 	ArtifactProvenanceRegistry,
 	recordResponseArtifactProvenance,
-	sanitizePiNativeArtifacts,
 	sanitizeAnthropicThinking,
 	SseArtifactProvenanceObserver,
 	sanitizeOpenAIEncryptedArtifacts,
@@ -366,97 +365,6 @@ export function startValidatedGateway(
 			let artifactAccountPinned = false;
 			let artifactRequestId: string | undefined;
 			let fastUsageAttribution: FastUsageAttribution | undefined;
-			if (request.method === "POST" && url.pathname === "/v1/pi/stream") {
-				try {
-					const body = await request.json() as Record<string, unknown>;
-					const objectModel = isObject(body.model) ? body.model : undefined;
-					const rawModel = typeof body.modelId === "string"
-						? body.modelId
-						: typeof body.model === "string"
-							? body.model
-							: typeof objectModel?.id === "string"
-								? objectModel.id
-								: undefined;
-					if (rawModel === undefined) throw new Error("Missing `modelId` (or `model.id`) field");
-					const objectProvider = typeof objectModel?.provider === "string" ? objectModel.provider : undefined;
-					const qualifiedModel = rawModel.includes("/") || objectProvider === undefined ? rawModel : `${objectProvider}/${rawModel}`;
-					const modelId = rawModel.split("/").at(-1) ?? rawModel;
-					const requestOptions = isObject(body.options) ? body.options : {};
-					const resolved = options.resolveModel?.(qualifiedModel);
-					const requested: QuotaModel = {
-						id: modelId,
-						provider: resolved?.provider ?? objectProvider ?? (modelId.startsWith("claude-") ? "anthropic" : modelId.startsWith("grok-") ? "xai" : "openai-codex"),
-					};
-					const routed = quotaAccounts === undefined
-						? undefined
-						: routeModel(requested, quotaAccounts(), options.quotaPreferences?.() ?? [], options.onQuotaEvent);
-					if (routed !== undefined) {
-						const authProvider = routed.account.authProvider ?? routed.model.provider;
-						const rawOptions = requestOptions;
-						const sessionId = typeof rawOptions.sessionId === "string"
-							? rawOptions.sessionId
-							: typeof rawOptions.promptCacheKey === "string"
-								? rawOptions.promptCacheKey
-								: `deck-route:${routed.model.provider}:${routed.model.id}`;
-						body.modelId = `${authProvider}/${routed.model.id}`;
-						body.options = { ...rawOptions, sessionId, promptCacheKey: sessionId };
-						requestBody = { model: `${authProvider}/${routed.model.id}` };
-						const pinned = artifactStorage.pinSessionOAuthAccount?.(authProvider, sessionId, routed.account.credentialId) === true;
-						artifactAccountPinned = pinned;
-						artifactRoute = {
-							model: routed.model.id,
-							credentialId: routed.account.credentialId,
-							authProvider,
-							sessionId,
-						};
-						if (pinned) {
-							console.warn(JSON.stringify({
-								type: "reasoning-artifact-safety",
-								action: "pin",
-								provider: authProvider,
-								sessionId,
-								model: routed.model.id,
-								credentialId: routed.account.credentialId,
-							}));
-						}
-					}
-					const effectiveModel = typeof body.modelId === "string" ? body.modelId : qualifiedModel;
-					const effectiveModelParts = effectiveModel.split("/");
-					const effectiveOptions = isObject(body.options) ? body.options : requestOptions;
-					fastUsageAttribution = {
-						provider: artifactRoute?.authProvider ?? effectiveModelParts.at(-2) ?? requested.provider,
-						model: effectiveModelParts.at(-1) ?? effectiveModel,
-						credentialId: artifactRoute?.credentialId,
-						sessionId: artifactRoute?.sessionId
-							?? (typeof effectiveOptions.sessionId === "string" ? effectiveOptions.sessionId : undefined),
-						requestedServiceTier: typeof effectiveOptions.serviceTier === "string"
-							? effectiveOptions.serviceTier
-							: effectiveModel.endsWith(":fast") ? "priority" : undefined,
-					};
-					const route = artifactRoute !== undefined && artifactAccountPinned && upstream.pinRequestCredential !== undefined
-						? artifactRoute
-						: {
-							model: artifactRoute?.model ?? modelId,
-							credentialId: -1,
-							authProvider: artifactRoute?.authProvider ?? resolved?.provider ?? "unknown",
-							sessionId: artifactRoute?.sessionId ?? "unknown",
-						};
-					const sanitized = sanitizePiNativeArtifacts(body, route, artifactProvenance, emitArtifactEvent);
-					if (!sanitized.ok) {
-						return Response.json({
-							error: {
-								code: "ARTIFACT_PROVENANCE_MISMATCH",
-								type: "invalid_request_error",
-								message: sanitized.message,
-							},
-						}, { status: 409 });
-					}
-					forwardBody = JSON.stringify(body);
-				} catch (error) {
-					if (error instanceof NoQuotaError) return Response.json({ error: { code: error.code, type: "quota_exhausted", message: error.message, provider: error.provider, retry_after_ms: error.retryAfterMs ?? null } }, { status: 503 });
-					return Response.json({ error: { type: "invalid_request_error", message: error instanceof Error ? error.message : String(error) } }, { status: 400 });
-				}
-			}
 			if (request.method === "POST" && ["/v1/chat/completions", "/v1/messages", "/v1/responses"].includes(url.pathname)) {
 				let body: Record<string, unknown> & { model?: string; service_tier?: string; reasoning_effort?: string; reasoning?: { effort?: string }; thinking?: { type?: string; budget_tokens?: number }; prompt_cache_key?: string };
 				try {

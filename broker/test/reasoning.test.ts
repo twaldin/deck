@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import registerDeckProvider from "../pi/deck-provider";
+import registerDeckProvider from "../prime/deck-provider";
 import { clampReasoning, nativeReasoning, NATIVE_REASONING_LEVELS, supportedReasoning } from "../src/reasoning";
 
 describe("native reasoning passthrough", () => {
@@ -24,7 +24,7 @@ describe("native reasoning passthrough", () => {
 		expect(nativeReasoning("anthropic", "high")).toEqual({ provider: "anthropic", thinking: { type: "enabled", budget_tokens: 16384 } });
 	});
 
-	test("clamps unsupported named levels down like Pi", () => {
+	test("clamps unsupported named levels downward", () => {
 		expect(clampReasoning("max", supportedReasoning("gpt-5.5", "openai"))).toBe("xhigh");
 		expect(clampReasoning("xhigh", ["low", "high"])).toBe("high");
 		expect(clampReasoning("max", supportedReasoning("gpt-5.6-sol", "openai"))).toBe("max");

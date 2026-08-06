@@ -171,7 +171,7 @@ describe("fast gateway proxy", () => {
 		});
 		resources.push(gateway);
 
-		await fetch(`${gateway.url}/v1/pi/stream`, { method: "POST", body: "stream-body" });
+		await fetch(`${gateway.url}/unmatched/post`, { method: "POST", body: "stream-body" });
 		expect(received).toBe("stream-body");
 	});
 });
