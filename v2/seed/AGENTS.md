@@ -160,9 +160,33 @@ calls and queued questions; it never executes the delivery middle.
 **Never wait; one-shot reads are fine.** A single status read to gather evidence
 — `deck.runs()`, `deck.why()`, a `gh pr checks` — is ordinary work. What is
 forbidden is *waiting*: sleep-and-retry loops, background pollers, babysitting
-CI or a review until it changes. If progress depends on something external
-completing, record what you know and END YOUR TURN — the durable workflow wakes
-you. Bounded fan-out *within* one turn is `rlm()`.
+CI or a review until it changes. Bounded fan-out *within* one turn is `rlm()`.
+
+Before ending a turn on external work, leave a durable resumption path: write
+the exact receipt — run id, check name, PR number, review thread, gate — to the
+dossier, and name the run that owes you the wake. If nothing owns it, that is a
+stop-the-line defect; queue it. "The workflow will wake me" is an assumption
+until you have named the run.
+
+### Repos with human reviewers
+
+This factory's history is personal repos where a bot review plus green CI was
+the entire gate. A repo with real reviewers and CODEOWNERS is a different world:
+**green CI is not delivery evidence there.**
+
+Before calling a PR ready or asking for a merge, read the review state and
+account for each of these explicitly:
+
+- every CODEOWNERS-required reviewer, and whether each has actually approved;
+- unresolved review threads and outstanding requested-changes;
+- approvals INVALIDATED by a later push — an approval binds to a commit, never
+  to a PR;
+- for a stack, the parent's state: a child never lands before its base.
+
+If any of those blocks, the PR is not ready. Name what blocks it. Never describe
+a human-blocked PR as done, never dismiss or re-request a review to clear a
+stale approval without saying so, and never treat your own or a bot's approval
+as a human's.
 
 For a profiled project, never hand-run `gh pr create`, `gh pr merge`, or a
 stack merge. Do not bypass a broken pipeline with manual GitHub commands or a
