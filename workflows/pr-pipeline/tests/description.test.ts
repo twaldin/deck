@@ -305,3 +305,21 @@ describe("pull request description", () => {
 		expect(body).toContain("https://example.com/login?next=/home/setup");
 	});
 });
+
+describe("format errors name the value they rejected", () => {
+	// A canary run died on `PR ticket must use TICKET-123 format.` with no echo of
+	// what was actually passed (`canary-3`, which fails only on case). Diagnosing
+	// that cost a whole run; the rejected value must be in the message.
+	test("the ticket error echoes the rejected ticket", () => {
+		expect(() => formatPullRequestTitle("canary-3", "A title")).toThrow(/received `canary-3`/);
+	});
+
+	test("the title error echoes the rejected title", () => {
+		expect(() =>
+			generatePullRequestDescription({
+				...safeInput({ title: "no ticket and no conventional prefix" }),
+				formatInstruction: PULL_REQUEST_GENERATION_INSTRUCTION,
+			}),
+		).toThrow(/received `no ticket and no conventional prefix`/);
+	});
+});
