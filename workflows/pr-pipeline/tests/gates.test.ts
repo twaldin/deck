@@ -1025,6 +1025,28 @@ describe("watch helpers", () => {
 		).toBe("will-be-green");
 		expect(
 			assessCi([
+				{
+					name: "lint",
+					workflowName: "CI",
+					status: "completed",
+					conclusion: "cancelled",
+					completedAt: "2026-07-30T11:00:00Z",
+					appId: 1,
+					headSha: "abc123",
+				},
+				{
+					name: "test",
+					workflowName: "CI",
+					status: "completed",
+					conclusion: "success",
+					completedAt: "2026-07-30T12:00:00Z",
+					appId: 1,
+					headSha: "abc123",
+				},
+			]),
+		).toBe("red");
+		expect(
+			assessCi([
 				{ name: "ci", workflowName: "CI", status: "completed", conclusion: "cancelled", completedAt: "2026-07-30T11:00:00Z" },
 				{ name: "ci", workflowName: "CI", status: "completed", conclusion: "failure", completedAt: "2026-07-30T12:00:00Z" },
 			]),
