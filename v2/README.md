@@ -1,7 +1,7 @@
 # Deck runtime
 
-`v2/` is the headless library and CLI behind Deck's current v4 plain-session
-shape. The directory name is historical; it does not contain the retired v2
+`v2/` is the headless library and CLI behind Deck's current Prime conversation
+shape. The directory name is historical; it does not contain the retired
 orchestrator extension.
 
 **What this is not:** it is not a hosted product or an autonomous agent
@@ -10,21 +10,19 @@ work is delegated to explicit Smithers workflows.
 
 ## Current shape
 
-Any number of ordinary Pi sessions may start in `~/.deck`. Each session loads
-three independent project-local extensions while those components remain in the
-tree:
+Prime conversations start in `~/.deck` with four reviewed extensions:
 
 - `deck-questions`
 - `deck-ship`
 - `deck-recall`
-
+- `deck-usage`
 `deck-ship` exposes the factory as tools. `ship` and `adopt` call the same
 headless dispatch code as the CLI; `status` is read-only. There is no
 orchestrator extension, fleet overlay, wake loop, or second delivery engine in
 the conversation.
 
 ```text
-plain Pi chat
+Prime conversation
     │ ship / adopt / status
     ▼
 detached Smithers pr-pipeline
@@ -50,35 +48,28 @@ The installed layout is:
 
 ```text
 ~/.deck/AGENTS.md
-~/.deck/.pi/extensions/deck-questions/index.ts
-~/.deck/.pi/extensions/deck-ship/index.ts
-~/.deck/.pi/extensions/deck-recall/index.ts
-~/.deck/.pi/extensions/v2/src/*.ts
+~/.deck/.prime/agent/extensions/{deck-questions,deck-ship,deck-recall,deck-usage}/index.ts
+~/.deck/.prime/agent/extensions/deck-provider.ts
+~/.deck/.prime/runtime/
+~/.deck/.prime/sessions/
 ~/.deck/state/smithers/
-~/.local/bin/{pi,deck,deck-v2,smithers}
+~/.local/bin/{prime-agent,prime-conversation,deck,deck-v2,smithers}
 ```
 
-The extension entrypoints in `../extensions-pi/` import this directory's source.
-`v2/install.sh` preserves that relative layout with a marked support tree under
-`~/.deck/.pi/extensions/v2/`; support modules are not independently discovered
-as extensions.
+The root installer mirrors `../extensions-prime/` plus their `v2/src` support
+tree into the fail-closed Prime profile. `v2/install.sh` itself installs only
+the Deck CLI and isolated Smithers workspace.
 
 `~/.deck` is deliberately a plain runtime directory, never a checkout. A
 checkout would bring its own repository instructions and would allow rebases or
 branch changes to move live state.
 
-## Standalone Pi credentials and broker-backed seats
+## Prime credentials and broker-backed seats
 
-The root installer pins Pi locally, so no global Pi or Node installation is
-needed. A new operator can enter `~/.deck`, start `pi`, use `/login` to store
-their own supported subscription or API key in Pi's user configuration, and
-choose it with `/model`. This loads the Deck extensions and public seed without
-using another person's broker.
-
-The current PR-pipeline model seats use the `deck` provider, so executing those
-seats additionally requires this operator's broker process and broker login.
-Merely entering a plain session, reading questions, checking status, or
-recalling a dossier does not.
+The root installer pins and verifies Prime Agent 0.7.0, installs the reviewed
+profile, and exposes `prime-conversation`. Both conversation and workflow seats
+use the `deck` provider, so they require this operator's broker process and
+broker login. Ambient provider credentials are stripped from every seat.
 
 ## Library, CLI, and tools
 
@@ -113,16 +104,9 @@ listing, first-answer-wins answering, and `/questions`.
 The queue is `~/.deck/questions/queue.jsonl`
 (`DECK_QUESTIONS_FILE` overrides it for tests). It is an append-only JSONL event
 log folded on read. Delivery sends before it marks, and a first answer wins.
-Session start imports still-open records from the retired global queue once.
-Archival compaction is exclusive offline maintenance; live sessions never
+Archival compaction is exclusive offline maintenance; live conversations never
 rewrite the shared log.
 
-The optional real smoke uses two Pi processes sharing only the queue file:
-
-```sh
-cd v2
-bun run smoke/run-questions-smoke.ts
-```
 
 ## State and liveness details
 

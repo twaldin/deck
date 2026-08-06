@@ -1,16 +1,16 @@
 # Deck
 
-Deck is a local, operator-attended software factory used from ordinary
-[Pi](https://github.com/earendil-works/pi) sessions. The conversation stays a
-plain Pi chat; durable delivery work runs in Smithers when the chat calls
-`ship` or `adopt`.
+Deck is a local, operator-attended software factory used from a pinned
+[Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent) conversation.
+Durable delivery work runs in Smithers when the conversation calls `ship` or
+`adopt`.
 
 **What this is not:** Deck is not a hosted product, an autonomous supervisor,
 or an unattended merge service. An operator remains responsible for credentials,
 project policy, queued decisions, and any explicit merge authorization.
 
 ```text
-plain Pi session in ~/.deck
+Prime conversation in ~/.deck
       │  ship · adopt · status
       ▼
 Smithers pr-pipeline
@@ -19,18 +19,18 @@ Smithers pr-pipeline
 ```
 
 There is no Deck orchestrator extension, fleet overlay, or wake loop. The
-factory is a set of tools loaded into a plain session.
+factory is a reviewed Prime extension pack plus broker-routed workflow seats.
 
 ## Components
 
 | Component | Responsibility |
 |---|---|
-| **Plain Pi session** | Understand the issue, inspect evidence, call factory tools, and surface queued decisions. |
+| **Prime conversation** | Understand the issue, inspect evidence, call factory tools, and surface queued decisions. |
 | **`deck-questions`** | Durable questions plus the interactive `/questions` queue. |
 | **`deck-ship`** | `ship`, `adopt`, and read-only `status`; dispatches the project PR pipeline rather than implementing delivery in the chat. |
 | **`deck-recall`** | Reads per-effort dossiers so a new session can recover the deeper brief and decision history. |
 | **Smithers** | Persists and resumes the PR pipeline, including implementation, adversarial review, GitHub review/CI, merge policy, and evidence gates. |
-| **Broker** | Optional multi-account model provider for the conversation; required by the current Smithers model seats. It uses accounts configured by this installation's operator. |
+| **Broker** | Required model provider for the conversation and every Smithers Prime seat. It uses accounts configured by this installation's operator. |
 | **OptMem** | Global append-only identity, decisions, preferences, and lessons. Effort-specific detail stays in dossiers. |
 
 Project and reviewer policy is private machine configuration:
@@ -46,21 +46,16 @@ examples; they are never selected by bootstrap.
 
 - Git
 - [Bun](https://bun.sh/)
-- `curl`, Python 3, and network access for the pinned OptMem installer and
+- `curl`, Node.js, npm, Python 3, and network access for pinned artifact and
   package downloads
-- a Pi-supported model account or API key
 - the GitHub CLI (`gh`) authenticated to each repository you want the factory
-  to ship; it is not needed for a standalone conversation
+  to ship
 
-Deck installs its pinned Pi CLI under `~/.local/bin/pi`; a global Pi or Node
-installation is not required. If `uv` is absent, the installer downloads
-`uv`/`uvx` 0.11.8 for the host platform, verifies the release's published
-SHA-256, installs both beside the Deck shims, and proves an isolated IPython
-kernel can execute a cell. A kernel bootstrap failure aborts the install.
-
-An existing non-Deck `pi` command is never overwritten. The installer stops
-before downloads or home changes and prints an exact `BIN_TARGET` command for
-installing Deck's shims in a separate directory.
+Deck installs the reviewed, patched Prime Agent 0.7.0 artifact under
+`~/.deck/.prime/runtime` and links `prime-agent` and `prime-conversation` into
+the selected binary directory. It never installs or overwrites an unrelated
+agent executable. If `uv` is absent, the installer downloads `uv`/`uvx` 0.11.8,
+verifies its SHA-256, and proves an isolated IPython kernel can execute a cell.
 
 ## Clean install
 
@@ -71,43 +66,33 @@ cd ~/dev/deck
 ./install.sh
 
 source ~/.deck/enter.sh
-pi
+prime-conversation
 ```
 
-Review and accept Pi's project-local trust prompt for `~/.deck/.pi`. In Pi, run
-`/login`, choose your own provider subscription or API-key provider, then use
-`/model`. Pi stores that credential in its own user configuration under
-`~/.pi/agent/`; no broker account belonging to another operator is needed for a
-standalone conversation.
-
-An environment variable such as `ANTHROPIC_API_KEY` is also supported, but do
-not put API keys in this repository.
-
-The standalone path loads questions, shipping/status, recall, and the seed
-`~/.deck/AGENTS.md`. Calls that start the current PR-pipeline model seats
-additionally need the Deck broker:
+The conversation is fail-closed to the local Deck broker. Configure an account
+owned by this installation's operator, then keep the broker running:
 
 ```sh
 # interactive, once per provider account
 bun ~/dev/deck/broker/src/cli.ts login anthropic
 
-# keep this process running while broker-backed seats execute
+# keep this process running while conversations or workflow seats execute
 bun --cwd ~/dev/deck/broker src/main.ts
 ```
 
-The broker is not started by `install.sh`, and it is not required merely to
-enter and use a plain session with your own Pi credential.
+Do not put API keys in this repository. The Prime profile strips ambient
+credentials and loads only Deck's reviewed provider, guard, extension pack, and
+conversation-only process package.
 
 ## Install, update, and optional services
 
-- `./install.sh` is the first-time, clean-clone bootstrap. It installs or
-  verifies `uv`, proves the isolated IPython tool runtime, installs package
-  dependencies, the Deck-scoped Pi extension pack, command shims, the isolated
-  Smithers workspace, OptMem, and the plain `~/.deck` home.
-- `./update.sh` refreshes an existing checkout and converges the same installed
-  files. Set `DECK_BRANCH` when updating a branch other than `main`.
-- `./v2/install.sh` is the internal component installer used by both paths; it
-  is not a second onboarding entrypoint.
+- `./install.sh` is the clean-clone and convergence entrypoint. It verifies the
+  isolated IPython runtime, installs the reviewed Prime artifact and patches,
+  the Prime extension pack, pinned process package, command shims, Smithers
+  workspace, OptMem, and `~/.deck`.
+- `./update.sh` refreshes an existing checkout and invokes that same convergent
+  install path. Set `DECK_BRANCH` when updating a branch other than `main`.
+- `./v2/install.sh` installs only Deck CLI and Smithers workspace internals.
 - `./ops/install.sh` previews optional resident launchd services; apply with
   `./ops/install.sh --yes` only after reviewing the plan.
 
@@ -125,14 +110,15 @@ bun workflows/review-gate/launch.ts
 
 ```text
 ~/dev/deck/                    code and factory definitions (git checkout)
-~/.deck/                       private plain-Pi runtime home (not a checkout)
-~/.deck/AGENTS.md              public seed copied on first bootstrap
-~/.deck/.pi/extensions/        deck-questions, deck-ship, and deck-recall
+~/.deck/                       private Prime runtime home (not a checkout)
+~/.deck/AGENTS.md              public seed converged by install/update
+~/.deck/.prime/agent/          credential-stripped Prime conversation profile
+~/.deck/.prime/runtime/        pinned patched Prime Agent and process package
+~/.deck/.prime/sessions/       Prime conversation sessions
 ~/.deck/state/smithers/        live Smithers workspace and run state
 ~/.deck/efforts/               per-effort dossiers
 ~/.optmem/                     global append-only memory
-~/.local/bin/                  pinned pi, deck, deck-v2, and smithers shims
-~/.pi/agent/                   the operator's Pi credentials and global config
+~/.local/bin/                  prime-agent, prime-conversation, Deck and Smithers shims
 ```
 
 Sync code with Git. Never rsync `~/.deck` between hosts: it contains private

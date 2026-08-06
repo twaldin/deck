@@ -1,7 +1,7 @@
 # Contributing to deck
 
 This guide is for agents that change the deck repository. The public seed for a
-plain pi home is `v2/seed/AGENTS.md`.
+Prime conversation home is `v2/seed/AGENTS.md`.
 
 ## Package map
 
@@ -10,7 +10,7 @@ plain pi home is `v2/seed/AGENTS.md`.
 - `cli/`: isolated worktree allocation.
 - `intake/`: incoming work poller.
 - `ops/`: launchd installers and resource monitor.
-- `extensions/`: pi extensions and installer tests.
+- `extensions-prime/`: Prime conversation extensions and installer tests.
 - `workflows/`: Smithers workflows and pipeline tests.
 
 ## Build and test

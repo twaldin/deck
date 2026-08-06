@@ -49,14 +49,14 @@ jobs:
         working-directory: cli
         run: bun install --frozen-lockfile
       - name: Install extension test dependencies
-        working-directory: extensions-pi
+        working-directory: extensions-prime
         run: bun install --frozen-lockfile
       - name: Run v2 tests
         working-directory: v2
         run: bun test test/
 
       - name: Run extension tests
-        working-directory: extensions-pi
+        working-directory: extensions-prime
         run: bun test test/
   pipeline-tests:
     name: pipeline tests
@@ -140,10 +140,10 @@ jobs:
       - name: Install v2 dependencies
         working-directory: v2
         run: bun install --frozen-lockfile
-      - name: Install extensions-pi dependencies
-        # v2/test/ship.test.ts imports extensions-pi/deck-ship.ts, so tsc resolves
-        # that file's imports from extensions-pi/node_modules
-        working-directory: extensions-pi
+      - name: Install Prime extension dependencies
+        # v2/test/ship.test.ts imports extensions-prime/deck-ship.ts, so tsc
+        # resolves that file's imports from extensions-prime/node_modules.
+        working-directory: extensions-prime
         run: bun install --frozen-lockfile
       - name: Typecheck v2
         working-directory: v2

@@ -11,13 +11,11 @@ The reviewed release is fixed at:
 - tag `v0.7.0`
 - commit `be9e2fa0714e7cd1c6bd9bdb1b554d2cc6550387`
 
-Base pi remains installed as a cold rollback. There is no automatic Prime-to-pi
-fallback and no second live authority path.
 
 ## Install and enter
 
-Prime Agent is installed globally. The profile installer does not install a
-second copy and never writes `~/.prime`.
+Prime Agent is installed into Deck's managed `~/.deck/.prime/runtime`; install
+and update converge that reviewed artifact without writing global `~/.prime`.
 `patches/prime-agent/manifest.json` is the single source for the expected
 install state and its full package-tree and CLI fingerprints. The current
 policy is the pristine pinned `0.7.0`; the tracked fixes remain unapplied while
@@ -50,11 +48,11 @@ It is safe to rerun. Apply requires `~/.deck/AGENTS.md` to match the checked-in
 v4 seed exactly and refuses to replace an unowned settings, prompt, wrapper,
 guard, or extension path. It writes only:
 
-- `deck-questions`, `deck-ship`, and `deck-recall` under
+- `deck-questions`, `deck-ship`, `deck-recall`, and `deck-usage` under
   `~/.deck/.prime/agent/extensions/`;
-- `broker/pi/deck-provider.ts`, its adjacent `zod` dependency, and a
+- `broker/prime/deck-provider.ts`, its adjacent `zod` dependency, and a
   profile-local fail-closed provider guard;
-- the `v2/src` support tree used by those three extensions;
+- the `v2/src` support tree used by those four extensions;
 - the exact package setting `npm:@aliou/pi-processes@0.10.4` and a
   profile-local link to that exact, already-global package (missing or
   mismatched versions fail closed);
@@ -97,7 +95,7 @@ The broker validates/clamps that named level and converts it to the native
 Anthropic thinking budget after routing. Named thinking levels survive both
 paths, but Prime does not expose an explicit numeric budget through `--thinking`.
 Prime's `registerProvider` API supports only `openai-completions` and
-`anthropic-messages`; `/v1/pi/stream` would require a custom transport.
+`anthropic-messages`; an additional native stream would require a custom transport.
 
 ## Session-scoped process watches
 
@@ -110,8 +108,8 @@ workflow seats—including PR-pipeline stages, review-gate, and every
 Smithers-launched seat—must use Smithers for durable waiting and must not receive
 this tool. Prime-selected workflow seats enforce that boundary with
 `--no-extensions`, only the adapter-reviewed extensions, and the `ipython`
-tool allowlist. Pi-engine seats, including review-gate, use Pi's separate
-configuration; Deck does not declare this Prime-profile package there.
+tool allowlist. Review-gate and every other workflow use the same reviewed
+Prime adapter without the conversation-only process package.
 
 A child's watcher wakes that CHILD, not its parent. Put the watcher in the seat
 that must react. Deleting or shutting down a child also stops processes managed
@@ -119,7 +117,7 @@ by that child.
 
 ## Shared Deck daemon and custody
 
-The profile uses these Prime paths instead of Deck's existing `.pi` paths:
+The profile uses these Deck-owned Prime paths:
 
 ```text
 ~/.deck/.prime/agent/       shared Deck config and starved native-auth store
@@ -187,8 +185,8 @@ replication found depth two and above less accurate and much slower.
 
 The captain's kernel is intentionally enabled. `rlm()` and `/refine` live in the
 IPython-backed runtime; disabling the kernel would remove the main Prime
-capabilities being adopted. The existing pi chat already has bash and edit, so
-arbitrary local execution is not a new authority granted by this cutover.
+capabilities being adopted. This is an execution surface, not an additional
+factory authority.
 
 This does not turn IPython interception into a security boundary. The spike
 proved that Python filesystem, subprocess, and network actions happen inside
@@ -201,7 +199,7 @@ validation, and the existing Smithers/review/stamp/MQ gates.
 Prime Agent `0.7.0` includes its own Herdr reporter. No
 `herdr-agent-state.ts` file is installed in this profile. The focused guard
 starts headless RPC sessions against a stub Herdr socket and observes
-`pane.report_agent` with source `herdr:pi`, state `idle`, and a matching
+`pane.report_agent` in state `idle`, and a matching
 `pane.release_agent` on exit. The built-in lifecycle also reports `working`
 during an agent turn and `blocked` for an explicit block or terminal retry
 failure.
@@ -218,9 +216,9 @@ a recursion guard prevents another allocation. Every CLI call is bounded; if
 the CLI or server is unavailable or wedged, the wrapper continues locally
 instead of blocking the conversation.
 
-This does not fight Deck's fleet projection. Prime reports the captain process
-with source `herdr:pi`; Deck's best-effort fleet projection uses source `deck`
-on Deck-managed effort panes. Smithers and Deck state remain authoritative.
+This does not fight Deck's fleet projection. Prime reports the captain process;
+Deck's best-effort fleet projection uses source `deck` on Deck-managed effort
+panes. Smithers and Deck state remain authoritative.
 Prime also defers its built-in reporter if a file-based Herdr integration is
 present, but Deck does not install one.
 
@@ -228,48 +226,17 @@ Known limitation: Prime `rlm()` children share the parent's Herdr pane. Herdr
 visibility is therefore per conversation seat, not one pane per RLM child.
 Prime's child registry remains the detailed child view.
 
-## Not adopted yet
+## Workflow seats
 
-### Prime Smithers worker seats
+Every Smithers agent task, including PR-pipeline and review-gate, constructs the
+reviewed `PrimeSeatAgent`. Project profiles cannot select another engine.
+Workflow seats load only `ipython`; they do not receive the conversation-only
+process package. Native RLM children are bounded by the adapter's capability
+profile and inherit the canonical mechanical model policy.
 
-Smithers worker seats remain on the current engine until all of these gates pass:
-
-1. A JSON/RPC adapter pins the Prime binary, root provider/model, resources,
-   config/session/socket roots, and records binary, prompt, extension, provider,
-   profile, and actual model provenance.
-2. Engine choice is a reviewed per-profile allowlist, never agent-selected;
-   there is no silent Prime-to-pi or broker-to-vendor fallback.
-3. The adapter returns only typed result/error receipts and handles malformed
-   output, RPC/daemon failure, manual cancel, hard TTL, retry, and deterministic
-   root/kernel/daemon/descendant teardown with no orphan.
-4. Every node starts with fresh disposable config, sessions, and harness state.
-   Publisher, push, stamp, merge/MQ, and Gateway-admin credentials stay outside.
-5. The adapter suite, paired read-only replay, write-capable non-Lindy node,
-   complete non-Lindy pipeline, and one reversible Lindy profile canary pass
-   with zero hard custody/provenance/liveness violations. Quality must be at
-   least pi, intervention no worse, and one predeclared cost, duration, steer,
-   or failure metric must improve without regression elsewhere.
-
-The captain conversation profile is the only profile permitted to dispatch a
-one-off top-level Prime `spawn-agent` for longer work. The single no-dispatch
-capability definition lives in `workflows/pr-pipeline/lib/engines/prime.ts` as
-`PRIME_SEAT_CAPABILITY_PROFILES["spawn-agent"]`: `RLM_MAX_DEPTH=1`, only
-`ipython`, and `dispatch:false`. The identical `workflow-seat` profile is also
-no-dispatch, so spawn-to-spawn nesting is impossible. This installer does not
-install a spawn launcher: spawning remains unavailable here until a reviewed
-launcher invokes that adapter-owned profile; it must never be emulated with a
-subprocess or another extension.
-
-### Native RLM delegation
-
-Deck exposes no separate child-agent extension or delegation tool. Prime seats
-decompose bounded work only through native `rlm()`. RLM depth is one: children
-are allowed and grandchildren are not. A bare child uses
-`deck/gpt-5.6-luna` at `xhigh`; escalation requires an explicit model pin.
-Reserve `deck/claude-fable-5` at `high` for judgment and adversarial work
-because it consumes all three Anthropic quota buckets, while ordinary models
-consume two. Smithers cross-family review remains an independently pinned
-workflow seat rather than an RLM child.
+The adapter pins binary, provider, model, resource roots, credentials, and
+provenance; validates typed results; and owns timeout, cancellation, teardown,
+and Herdr lifecycle behavior.
 
 ## Guard and manual upgrade
 
@@ -306,11 +273,10 @@ neutralized with `PI_SKIP_VERSION_CHECK=1`, `PI_OFFLINE=1`, and `--offline`.
 
 A manual upgrade is a reviewed pin change:
 
-1. Enter cold pi, drain every Deck Prime seat, then stop the shared Deck daemon
-   explicitly before changing the global binary:
+1. Drain every Deck Prime seat and stop the shared daemon explicitly before
+   changing the managed runtime:
 
    ```sh
-   cd ~/.deck && pi
    prime-agent shutdown --force
    ```
 
@@ -335,13 +301,3 @@ A manual upgrade is a reviewed pin change:
 Do not re-enter Prime if the tripwire, extension/provider load, custody prompt,
 OptMem, workspace refusal, socket, or Herdr guard fails.
 
-## Cold rollback
-
-The rollback command is:
-
-```sh
-cd ~/.deck && pi
-```
-
-Prime is not automatically selected again. Diagnose and pin a reviewed fix,
-then rerun the failed guard and its dependent gates before re-entry.

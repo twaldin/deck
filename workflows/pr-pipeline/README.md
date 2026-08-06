@@ -7,9 +7,8 @@ Here every stage is a smithers node whose successors are render-gated on its
 **Zod-validated persisted output**, so a stage cannot be skipped: the next
 node's input *is* the previous node's validated output row.
 
-Runs on **plain smithers 0.30.0** — no deck router/manifest/TUI dependency.
-Model access goes through pi's `deck/` provider (the deck broker on
-`127.0.0.1:8377`).
+Runs on **Smithers 0.30.0** with Deck's reviewed `PrimeSeatAgent`. Model access
+goes through the `deck/` provider and local broker on `127.0.0.1:8377`.
 
 ### Reproducible test setup
 
@@ -173,10 +172,9 @@ Enforcement notes (each maps to a cited incident in the SOP):
 
 ## Model and engine selection
 
-`lib/models.ts` defines agent-pickable Deck broker models. Each project profile
-may select the reviewed `pi` or `prime` engine; omission defaults to Pi and no
-shipped profile currently selects Prime. See `../../docs/prime-seat-adapter.md`
-for Prime safety, canary, metrics, and rollback. Defaults:
+`lib/models.ts` is the canonical model policy and agent-pickable Deck catalog.
+Every project profile constructs a reviewed Prime seat; the engine is not
+selectable. Defaults:
 
 | Role | Default model | Reasoning |
 |---|---|---|
@@ -335,7 +333,7 @@ pipeline.tsx            the workflow (all stage wiring)
 lib/types.ts            pure domain types
 lib/brief.ts            preflight validation
 lib/models.ts           deck catalog + deck/ provider guard + family opposition
-tests/engine.test.ts    pi-only engine invariant (whole workspace)
+tests/engine.test.ts    Prime-only construction + active-tree regression
 lib/adopt.ts            single-PR and ordered-stack adoption/publication safety
 lib/watch.ts            watch-ci-review machine-checked exit
 lib/migrations.ts       migration detection + evidence completeness

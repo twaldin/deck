@@ -1,7 +1,7 @@
 # Seed files
 
 `AGENTS.md` becomes `~/.deck/AGENTS.md` during bootstrap. It is the public,
-generic contract for plain pi sessions; private names and routing stay under
+generic contract for Prime conversations; private names and routing stay under
 `~/.deck/config/`. The repository contributor guide is the root `AGENTS.md`.
 
 ## Move to a new machine

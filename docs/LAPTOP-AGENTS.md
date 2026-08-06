@@ -1,8 +1,8 @@
 # Remote-agent → Deck-host handoff
 
 For agents running on another machine. Prepare work and drop files that any
-plain Pi session on the durable Deck host can pick up. Smithers owns pipelines
-and delivery state on that host.
+Prime conversation on the durable Deck host can pick up. Smithers owns
+pipelines and delivery state on that host.
 
 ## Reach the Deck host
 
@@ -109,7 +109,7 @@ ssh <user>@<deck-host> '~/dev/deck/update.sh'
 ## Enter a plain session remotely
 
 ```sh
-ssh -t <user>@<deck-host> 'source ~/.deck/enter.sh && pi'
+ssh -t <user>@<deck-host> 'source ~/.deck/enter.sh && prime-conversation'
 ```
 
 Then describe the work, point at inbox files, and answer queued decisions when
