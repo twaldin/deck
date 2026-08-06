@@ -287,26 +287,122 @@ for prerequisite in node npm shasum tar; do
   command -v "$prerequisite" >/dev/null 2>&1 || fail "$prerequisite is required"
 done
 NODE_BIN_DIR="$(dirname "$(command -v node)")"
-PRIME_DAEMON_SOCKET="$HOME/.deck/run/prime-agent.sock"
-PRIME_DAEMON_WAS_LIVE=false
-if node - "$PRIME_DAEMON_SOCKET" <<'NODE'
+PRIME_DAEMON_SOCKET="$(node - "$REPO/ops/prime-deck-profile.json" "$HOME/.deck" <<'NODE'
+const fs = require("node:fs");
+const path = require("node:path");
+const [profilePath, deckHome] = process.argv.slice(2);
+const relative = JSON.parse(fs.readFileSync(profilePath, "utf8")).daemonSocketRelative;
+if (
+  typeof relative !== "string" ||
+  relative.length === 0 ||
+  path.isAbsolute(relative) ||
+  relative.split(/[\\/]/).includes("..")
+) process.exit(1);
+process.stdout.write(path.join(deckHome, relative));
+NODE
+)" || fail "invalid Deck Prime daemon socket contract"
+PRIME_DAEMON_ENV=(
+  "HOME=$HOME"
+  "PATH=$NODE_BIN_DIR:$PRIME_RUNTIME/bin:/usr/bin:/bin"
+  "PRIME_AGENT_CODING_AGENT_DIR=$HOME/.deck/.prime/agent"
+  "PRIME_AGENT_SESSION_DIR=$HOME/.deck/.prime/sessions"
+)
+for allowed_name in TMPDIR TMP TEMP DECK_GATEWAY_ORIGIN DECK_PRIME_MAX_TOKENS; do
+  if [ -n "${!allowed_name+x}" ]; then
+    PRIME_DAEMON_ENV+=("$allowed_name=${!allowed_name}")
+  fi
+done
+
+prime_daemon_is_live() {
+  node - "$PRIME_DAEMON_SOCKET" <<'NODE'
 const net = require("node:net");
 const socket = net.createConnection(process.argv[2]);
 const timer = setTimeout(() => { socket.destroy(); process.exit(1); }, 250);
 socket.once("connect", () => { clearTimeout(timer); socket.destroy(); process.exit(0); });
 socket.once("error", () => { clearTimeout(timer); process.exit(1); });
 NODE
-then
+}
+prime_daemon_request() {
+  local request_type="$1"
+  local daemon_module_root="$PRIME_RUNTIME/lib/node_modules/prime-agent/dist/modes/daemon"
+  local client_module="$daemon_module_root/daemon-client.js"
+  local ownership_module="$daemon_module_root/daemon-supervisor-ownership.js"
+  [ -f "$client_module" ] ||
+    fail "managed Prime runtime cannot control its daemon: missing $client_module"
+  [ -f "$ownership_module" ] ||
+    fail "managed Prime runtime cannot fence its daemon restart: missing $ownership_module"
+  env -i "${PRIME_DAEMON_ENV[@]}" "$NODE_BIN_DIR/node" --input-type=module - \
+    "$client_module" "$ownership_module" "$PRIME_DAEMON_SOCKET" "$request_type" <<'NODE'
+import { pathToFileURL } from "node:url";
+const [clientModule, ownershipModule, socketPath, requestType] = process.argv.slice(2);
+const { DaemonClient } = await import(pathToFileURL(clientModule).href);
+const client = new DaemonClient(socketPath);
+try {
+  await client.connect();
+  const hello = await client.waitForHello();
+  if (requestType !== "drain") throw new Error(`unsupported daemon request: ${requestType}`);
+  const prepared = await client.request({ type: "prepare_update_restart" }, 120_000);
+  if (prepared.success !== true) {
+    throw new Error(prepared.error ?? "prepare_update_restart failed");
+  }
+  const { persistDaemonStartupFenceFromOwner } =
+    await import(pathToFileURL(ownershipModule).href);
+  await persistDaemonStartupFenceFromOwner(socketPath, hello);
+  const stopped = await client.request({ type: "shutdown", force: false }, 10_000);
+  if (stopped.success !== true) throw new Error(stopped.error ?? "shutdown failed");
+  process.stdout.write(JSON.stringify(prepared.data ?? {}));
+} finally {
+  client.close();
+}
+NODE
+}
+
+
+wait_for_prime_daemon() {
+  local expected="$1"
+  node - "$PRIME_DAEMON_SOCKET" "$expected" <<'NODE'
+const net = require("node:net");
+const [socketPath, expected] = process.argv.slice(2);
+const deadline = Date.now() + 15_000;
+function probe() {
+  const socket = net.createConnection(socketPath);
+  const timer = setTimeout(() => {
+    socket.destroy();
+    retry();
+  }, 200);
+  socket.once("connect", () => {
+    clearTimeout(timer);
+    socket.destroy();
+    if (expected === "up") process.exit(0);
+    retry();
+  });
+  socket.once("error", () => {
+    clearTimeout(timer);
+    if (expected === "down") process.exit(0);
+    retry();
+  });
+}
+function retry() {
+  if (Date.now() >= deadline) process.exit(1);
+  setTimeout(probe, 100);
+}
+probe();
+NODE
+}
+
+PRIME_DAEMON_WAS_LIVE=false
+if prime_daemon_is_live; then
   PRIME_DAEMON_WAS_LIVE=true
   [ -x "$PRIME_AGENT_TARGET" ] ||
     fail "a Deck Prime daemon is live but its managed executable is missing"
-  env -i \
-    HOME="$HOME" \
-    PATH="$NODE_BIN_DIR:$PRIME_RUNTIME/bin:/usr/bin:/bin" \
-    PRIME_AGENT_CODING_AGENT_DIR="$HOME/.deck/.prime/agent" \
-    PRIME_AGENT_SESSION_DIR="$HOME/.deck/.prime/sessions" \
-    "$PRIME_AGENT_TARGET" shutdown --force --json >/dev/null ||
-    fail "could not drain the existing Deck Prime daemon before runtime convergence"
+  PRIME_AGENT_BIN="$PRIME_AGENT_TARGET" "$REPO/ops/prime-patches.sh" verify >/dev/null ||
+    fail "the existing Deck Prime runtime failed integrity verification; no daemon command was sent"
+  printf 'draining Deck Prime daemon at %s; in-flight work will finish its checkpoint first...\n' \
+    "$PRIME_DAEMON_SOCKET"
+  prime_daemon_request drain >/dev/null ||
+    fail "could not safely prepare and drain the existing Deck Prime daemon"
+  wait_for_prime_daemon down ||
+    fail "existing Deck Prime daemon did not finish its graceful shutdown"
 fi
 
 
@@ -347,10 +443,6 @@ ln -sfn "$PRIME_AGENT_TARGET" "$BIN_TARGET/prime-agent"
 
 bash "$REPO/v2/install.sh"
 bun "$REPO/v2/bin/deck-v2" bootstrap
-# The public contract is repository-owned, not operator-authored. Converge it
-# before the fail-closed Prime profile validates its digest.
-cp -f "$REPO/v2/seed/AGENTS.md" "$HOME/.deck/AGENTS.md"
-chmod 644 "$HOME/.deck/AGENTS.md"
 
 
 PRIME_CONVERSATION_HOME="$HOME/.deck" \
@@ -361,30 +453,12 @@ ln -sfn "$PRIME_CONVERSATION_TARGET" "$BIN_TARGET/prime-conversation"
 
 if [ "$PRIME_DAEMON_WAS_LIVE" = true ]; then
   daemon_log="$HOME/.deck/.prime/agent/logs/install-restart.log"
-  mkdir -p "$(dirname "$daemon_log")" "$HOME/.deck/run" "$HOME/.deck/.prime/sessions"
-  env -i \
-    HOME="$HOME" \
-    PATH="$NODE_BIN_DIR:$PRIME_RUNTIME/bin:/usr/bin:/bin" \
-    PRIME_AGENT_CODING_AGENT_DIR="$HOME/.deck/.prime/agent" \
-    PRIME_AGENT_SESSION_DIR="$HOME/.deck/.prime/sessions" \
+  mkdir -p "$(dirname "$daemon_log")" "$(dirname "$PRIME_DAEMON_SOCKET")" "$HOME/.deck/.prime/sessions"
+  env -i "${PRIME_DAEMON_ENV[@]}" \
     "$PRIME_AGENT_TARGET" --mode daemon --daemon-socket "$PRIME_DAEMON_SOCKET" \
     </dev/null >>"$daemon_log" 2>&1 &
-  node - "$PRIME_DAEMON_SOCKET" <<'NODE'
-const net = require("node:net");
-const socketPath = process.argv[2];
-const deadline = Date.now() + 10_000;
-function probe() {
-  const socket = net.createConnection(socketPath);
-  const timer = setTimeout(() => socket.destroy(), 200);
-  socket.once("connect", () => { clearTimeout(timer); socket.destroy(); process.exit(0); });
-  socket.once("error", () => {
-    clearTimeout(timer);
-    if (Date.now() >= deadline) process.exit(1);
-    setTimeout(probe, 100);
-  });
-}
-probe();
-NODE
+  wait_for_prime_daemon up ||
+    fail "converged Deck Prime daemon did not restart; inspect $daemon_log"
 fi
 if [ -n "${DECK_HOME_PROFILE:-}" ]; then
   case "$DECK_HOME_PROFILE" in
