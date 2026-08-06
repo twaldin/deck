@@ -10,7 +10,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ChildProcess, SpawnOptions } from "node:child_process";
-import { registerDeckShip, type DeckShipApi } from "../../extensions-pi/deck-ship";
+import { registerDeckShip, type DeckShipApi } from "../../extensions-prime/deck-ship";
 import { validateBrief } from "../../workflows/pr-pipeline/lib/brief";
 import { loadProfiles, profilesFile, type ProjectProfile } from "../src/projects";
 import { existingPrFromFlag, runCli } from "../src/cli";

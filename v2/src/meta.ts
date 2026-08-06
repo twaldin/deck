@@ -28,7 +28,7 @@ export type TaskMeta = {
 	model?: string;
 	/** Bumped on every run start. Fences stale writers. */
 	run_epoch?: number;
-	/** pi session dir for this task's runs. */
+	/** Agent session directory for this task's runs. */
 	session_dir?: string;
 	/** Smithers run id when the task is workflow-backed. */
 	run_id?: string;

@@ -1106,8 +1106,8 @@ export function renderStatus(frame: FleetFrame): string {
 // ---- themed overlay renderer ----------------------------------------------
 //
 // Pure text: the theme is injected as two functions, so these helpers run under
-// bun tests with PLAIN_FLEET_THEME and inside pi with the real theme. The
-// extension wraps this text in a pi-tui Box; nothing here imports pi-tui.
+// bun tests with PLAIN_FLEET_THEME and inside Prime with the real theme. The
+// extension wraps this text in a TUI Box; nothing here imports the TUI package.
 
 export interface FleetTheme {
   fg: (key: string, text: string) => string;
@@ -1377,7 +1377,7 @@ export function buildFleetView(
     scrollOffset?: number;
     maxRowWidth?: number;
     /** "frame" draws the unicode border (CLI); "bare" is plain text for callers
-     * that supply their own chrome, like the extension's pi-tui Box. */
+     * that supply their own chrome, like the extension's TUI Box. */
     chrome?: "frame" | "bare";
   } = {},
 ): { text: string; scrollOffset: number; scrollable: boolean } {
@@ -1631,7 +1631,7 @@ export function buildFleetView(
     : "";
   const footer = `${theme.fg("accent", "[q/Esc]")} ${theme.fg("dim", "close")}   ${theme.fg("accent", "[r]")} ${theme.fg("dim", "refresh")}   ${theme.fg("accent", "[a]")} ${theme.fg("dim", showAll ? "attention only" : "show all")}   ${scrollHint}${theme.fg("dim", "live · refreshes every 5s")}`;
   if ((options.chrome ?? "frame") === "bare") {
-    // The caller draws the panel (pi-tui Box); double chrome garbles the TUI.
+    // The caller draws the panel; double chrome garbles the TUI.
     const title = theme.bold(theme.fg("accent", "deck fleet"));
     return {
       text: [title, "", ...body, "", footer].join("\n"),
@@ -2035,7 +2035,7 @@ function workflowCounts(frame: FleetFrame): {
   return { active, waiting };
 }
 
-/** Exactly three width-safe lines for pi's custom footer. */
+/** Exactly three width-safe lines for Prime's custom footer. */
 export function renderFooterLines(
   frame: FleetFrame,
   bits: FooterSessionBits = {},

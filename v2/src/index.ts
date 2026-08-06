@@ -1,10 +1,9 @@
 /**
  * @deck/v2 — the one lib behind both faces.
  *
- * Architecture (report decision, validated by probe): ONE LIB, TWO FACES.
- * The pi extension imports this module directly and the CLI is a thin argv
- * parser over the same exports. Neither face wraps the other, so there is no
- * subprocess hop in the orchestrator's hot path and no duplicated logic.
+ * Architecture: ONE LIB, TWO FACES. Prime extensions import this module
+ * directly and the CLI is a thin argv parser over the same exports, avoiding
+ * subprocess hops and duplicated behavior.
  */
 export * from "./home";
 export * from "./home-sync";

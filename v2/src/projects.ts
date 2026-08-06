@@ -22,7 +22,7 @@ import * as path from "node:path";
 export const PIPELINES = ["lindy-full", "yolo-ship", "ask-then-yolo"] as const;
 export type PipelineId = (typeof PIPELINES)[number];
 
-export const SEAT_ENGINES = ["pi", "prime"] as const;
+export const SEAT_ENGINES = ["prime"] as const;
 export type SeatEngine = (typeof SEAT_ENGINES)[number];
 
 export type ModelSeat = string | { model: string; reasoning?: string };
@@ -52,7 +52,7 @@ export type ProjectProfile = {
 	/** Absolute path to the primary checkout. Never edited; worktrees only. */
 	primary: string;
 	pipeline: PipelineId;
-	/** LLM seat runtime. Omitted legacy profiles fail safely to pi. */
+	/** LLM seat runtime. Omission selects the sole supported Prime engine. */
 	engine?: SeatEngine;
 	/** Merge green work without per-PR captain word. */
 	yolo: boolean;
@@ -210,7 +210,7 @@ export function validateProfiles(parsed: unknown, source: string): ProjectProfil
 			pipeline,
 			yolo: p.yolo,
 			stamp: p.stamp,
-			engine: (p.engine ?? "pi") as SeatEngine,
+			engine: (p.engine ?? "prime") as SeatEngine,
 			...(p.production === undefined ? {} : { production: p.production }),
 			knowledge: knowledge as string[],
 			...(p.doctrine === undefined ? {} : { doctrine: p.doctrine }),

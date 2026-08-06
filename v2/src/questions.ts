@@ -1,9 +1,8 @@
 /**
- * Durable question queue surface shared by plain Deck pi sessions.
+ * Durable question queue surface shared by Deck Prime conversations.
  *
- * The standalone deck-questions entrypoint registers this module only in
- * ~/.deck/.pi. Smithers pipeline seats do not load it, so there is one
- * captain-facing queue rather than a competing question channel per worker.
+ * The conversation profile owns this captain-facing queue; Smithers workflow
+ * seats do not load a competing question surface.
  */
 import { Type } from "typebox";
 import { Box, SelectList, Text } from "@earendil-works/pi-tui";
@@ -14,8 +13,6 @@ import {
 	answer as recordAnswer,
 	ask,
 	formatAge,
-	importLegacyQueue,
-	legacyQueueFile,
 	markDelivered,
 	openQuestions,
 	pendingAnswersFor,
@@ -169,7 +166,7 @@ export function answerMessage(entry: Question): string {
 }
 
 export function registerQuestions(
-	pi: QuestionsExtensionApi,
+	agent: QuestionsExtensionApi,
 	env: Record<string, string | undefined> = process.env,
 	runtime: QuestionsRuntime = defaultRuntime,
 	executor: CommandExecutor = exec as unknown as CommandExecutor,
@@ -194,7 +191,7 @@ export function registerQuestions(
 			// the two lines re-delivers one answer, which is merely noisy, whereas
 			// marking first would drop that answer permanently and silently park
 			// the agent forever - exactly the failure this extension exists to kill.
-			pi.sendMessage(
+			agent.sendMessage(
 				{
 					customType: "deck.captain-answer",
 					content: answerMessage(entry),
@@ -209,7 +206,7 @@ export function registerQuestions(
 		return delivered;
 	};
 
-	pi.registerTool({
+	agent.registerTool({
 		name: "ask_captain",
 		label: "Ask Captain",
 		description:
@@ -222,7 +219,7 @@ export function registerQuestions(
 			"Use ask_captain when a decision needs the captain and the chat message would otherwise be missed; keep working on independent parts instead of waiting.",
 		],
 		// Lengths are bounded at the schema boundary AND again in the store. Every
-		// pi session sharing this queue folds the whole log on every poll, so an
+		// conversation sharing this queue folds the whole log on every poll, so an
 		// unbounded question would degrade sessions that never asked anything.
 		// They are also the practical limits of a question a human reads in a
 		// select dialog.
@@ -249,9 +246,8 @@ export function registerQuestions(
 			recommendation: Type.Optional(
 				Type.String({ description: "What you would do absent an answer", maxLength: 1000 }),
 			),
-			// Plain string, normalized in the store: an enum here would need
-			// pi-ai's StringEnum for Google compatibility, and one severity word is
-			// not worth a second import to resolve at extension load.
+			// Plain string, normalized in the store: an enum here would require a
+			// host-specific schema helper for one severity word.
 			urgency: Type.Optional(Type.String({ description: "low | normal | high (default normal)" })),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -280,7 +276,7 @@ export function registerQuestions(
 		},
 	});
 
-	pi.registerCommand("questions", {
+	agent.registerCommand("questions", {
 		description: "Review and answer all queued agent questions",
 		handler: async (_args, ctx) => {
 			if (!ctx.hasUI) return;
@@ -600,10 +596,10 @@ export function registerQuestions(
 	 * The poll must NOT capture the session_start ctx.
 	 *
 	 * A captured ctx dies with its session: after ctx.newSession(), fork(),
-	 * switchSession() or reload(), pi rejects it as "stale after session
-	 * replacement" and every later poll throws instead of delivering an answer —
-	 * which parks the asking agent forever, the exact failure this extension
-	 * exists to prevent. Only the session id is actually needed, so the poll reads
+	 * switchSession() or reload(), the host rejects it as stale and every later
+	 * poll throws instead of delivering an answer — which parks the asking agent
+	 * forever, the exact failure this extension exists to prevent.
+	 * Only the session id is actually needed, so the poll reads
 	 * the latest one recorded by a live event.
 	 */
 	const startPolling = (): void => {
@@ -619,24 +615,7 @@ export function registerQuestions(
 		}, QUESTIONS_POLL_INTERVAL_MS);
 	};
 
-	pi.on("session_start", (_event, ctx) => {
-		// Before anything reads the queue, pull still-open questions out of the
-		// legacy pi-home queue once. Never compact the live queue here: plain Deck
-		// sessions are concurrent appenders, so startup must remain append-only.
-		//
-		// The import is gated: it renames the legacy file under the PI HOME, which
-		// is live state. It runs only when the caller explicitly points at a pi
-		// home (PI_CONFIG_DIR, tests) or when nothing at all is overridden (a
-		// normal Deck session). A partially-overridden env — a test that redirects
-		// the deck side but not the pi side — must never reach the live ~/.pi.
-		const importSafe =
-			env.PI_CONFIG_DIR !== undefined ||
-			(env.DECK_QUESTIONS_FILE === undefined && process.env.DECK_V2_HOME === undefined);
-		try {
-			if (importSafe) importLegacyQueue(file, legacyQueueFile(env), runtime.now());
-		} catch {
-			// Legacy import is best-effort; the live queue remains usable.
-		}
+	agent.on("session_start", (_event, ctx) => {
 		// More than one questions hook runs at session start; a test or RPC ctx
 		// may not carry a session manager, and hygiene above already ran.
 		if (ctx?.sessionManager === undefined) return;
@@ -652,19 +631,19 @@ export function registerQuestions(
 		startPolling();
 	});
 
-	pi.on("agent_settled", (_event, ctx) => {
+	agent.on("agent_settled", (_event, ctx) => {
 		if (ctx?.sessionManager === undefined) return;
 		latestSessionId = ctx.sessionManager.getSessionId();
 		lastSeenMtimeMs = queueMtimeMs(file);
 		deliverAnswers(ctx, true);
 	});
 
-	pi.on("session_shutdown", () => {
+	agent.on("session_shutdown", () => {
 		if (poll !== undefined) runtime.clearInterval(poll);
 		poll = undefined;
 	});
 }
 
-export default function questionsExtension(pi: QuestionsExtensionApi): void {
-	registerQuestions(pi);
+export default function questionsExtension(agent: QuestionsExtensionApi): void {
+	registerQuestions(agent);
 }

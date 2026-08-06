@@ -321,11 +321,7 @@ export async function startShip(
 				cwd: workspaceCwd,
 				detached: true,
 				stdio: ["ignore", log, log],
-				env: {
-					...process.env,
-					PI_CODING_AGENT_DIR:
-						process.env.PI_CODING_AGENT_DIR ?? path.join(home, ".pi"),
-				},
+				env: { ...process.env },
 			},
 		);
 		await new Promise<void>((resolve, reject) => {

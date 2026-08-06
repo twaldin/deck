@@ -41,9 +41,9 @@ export type SpawnRequest = {
 	model?: string;
 	context?: string;
 	/**
-	 * Native reasoning selector passed to Pi. Use a named effort (`minimal`,
-	 * `low`, `medium`, `high`, `xhigh`, or `max`) or an Anthropic budget as
-	 * `budget:<tokens>`; Pi sends the provider-native value without remapping.
+	 * Native reasoning selector passed to the Prime seat. Use a named effort
+	 * (`minimal`, `low`, `medium`, `high`, `xhigh`, or `max`) or an Anthropic
+	 * budget as `budget:<tokens>`.
 	 */
 	reasoning?: "low" | "medium" | "high" | "xhigh" | "max";
 	thinking?: string;

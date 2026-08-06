@@ -1,5 +1,5 @@
 /**
- * Create or converge a plain pi home.
+ * Create or converge the Deck Prime conversation home.
  *
  * The home is a private runtime directory, never a checkout. Bootstrap installs
  * OptMem when it is absent, copies the public home contract once, and creates
@@ -147,7 +147,7 @@ export function formatBootstrap(result: BootstrapResult): string {
 		lines.push("  already converged");
 	}
 	lines.push("");
-	lines.push("This is a plain pi runtime home, not a code checkout.");
+	lines.push("This is a Prime conversation runtime home, not a code checkout.");
 	return lines.join("\n");
 }
 

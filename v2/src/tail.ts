@@ -58,7 +58,7 @@ function contentLines(content: unknown): TailLine[] {
 	return lines;
 }
 
-/** Format one pi session record without exposing the JSON wire format. */
+/** Format one agent session record without exposing the JSON wire format. */
 export function formatSessionRecord(value: unknown, turn: number): TailLine[] {
 	if (value === null || typeof value !== "object") return [];
 	const record = value as JsonRecord;
@@ -88,7 +88,7 @@ export function formatSessionText(raw: string): string[] {
 			const timestamp = parsed.timestamp;
 			out.push(...formatSessionRecord(parsed, turn).map((item) => ({ ...item, ...(timestamp === undefined ? {} : { timestamp }) })));
 		} catch {
-			// A partial final JSONL write is normal while pi is running.
+			// A partial final JSONL write is normal while the agent is running.
 		}
 	}
 	return out.map(renderTailLine);

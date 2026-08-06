@@ -1,12 +1,6 @@
-/**
- * Installed-shape tests for the four standalone pi extensions.
- *
- * Source entrypoints import ../v2/src/*. Their directory symlinks and the
- * shared v2/src symlink tree must preserve that relative layout without
- * exposing a support module as another pi entrypoint.
- */
+/** Installed-shape tests for Deck's CLI and isolated Smithers workspace. */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -29,6 +23,13 @@ beforeEach(() => {
 	fs.mkdirSync(path.join(workflowsSource, "pr-pipeline", "lib"), { recursive: true });
 	fs.writeFileSync(path.join(workflowsSource, "pr-pipeline", "lib", "models.ts"), "fixture models\n");
 	fs.writeFileSync(path.join(workflowsSource, "pr-pipeline", "lib", "model-policy.ts"), "fixture policy\n");
+	fs.mkdirSync(path.join(workflowsSource, "pr-pipeline", "lib", "engines"), { recursive: true });
+	for (const name of ["prime.ts", "prime-model-policy.ts"]) {
+		fs.copyFileSync(
+			path.join(REPO_V2, "..", "workflows", "pr-pipeline", "lib", "engines", name),
+			path.join(workflowsSource, "pr-pipeline", "lib", "engines", name),
+		);
+	}
 });
 
 afterEach(() => {
@@ -53,148 +54,8 @@ function install(): void {
 	});
 }
 
-const extensionDir = (name: string) => path.join(target, "agent", "extensions", name);
 
 describe("installer layout", () => {
-	test("installs four directory extensions with one entrypoint each", () => {
-		install();
-		for (const name of ["deck-questions", "deck-ship", "deck-recall", "deck-usage"]) {
-			const entry = path.join(extensionDir(name), "index.ts");
-			expect(fs.lstatSync(entry).isSymbolicLink()).toBe(true);
-			expect(fs.realpathSync(entry)).toBe(
-				path.join(REPO_V2, "..", "extensions-pi", `${name}.ts`),
-			);
-			expect(fs.existsSync(path.join(target, "agent", "extensions", `${name}.ts`))).toBe(false);
-		}
-		expect(fs.existsSync(extensionDir("deck-v2"))).toBe(false);
-		expect(fs.realpathSync(path.join(target, "agent", "extensions", "node_modules", "typebox"))).toBe(
-			fs.realpathSync(path.join(REPO_V2, "node_modules", "typebox")),
-		);
-	});
-
-	test("entrypoint imports resolve through the shared v2 source tree", () => {
-		install();
-		const lib = path.join(target, "agent", "extensions", "v2", "src");
-		for (const module of ["questions-store", "workflow-questions", "questions", "ship", "smithers", "workspace", "hydrate", "home", "meta"]) {
-			const installed = path.join(lib, `${module}.ts`);
-			expect(fs.lstatSync(installed).isSymbolicLink()).toBe(true);
-			expect(fs.realpathSync(installed)).toBe(path.join(REPO_V2, "src", `${module}.ts`));
-		}
-		expect(fs.existsSync(path.join(lib, "index.ts"))).toBe(false);
-	});
-
-	test("refuses a foreign shared v2 support directory", () => {
-		const foreign = path.join(target, "agent", "extensions", "v2");
-		fs.mkdirSync(foreign, { recursive: true });
-		fs.writeFileSync(path.join(foreign, "keep.txt"), "not Deck\n");
-		expect(() => install()).toThrow();
-		expect(fs.readFileSync(path.join(foreign, "keep.txt"), "utf8")).toBe("not Deck\n");
-		expect(fs.existsSync(path.join(foreign, "src"))).toBe(false);
-	});
-
-	test("removes a provably owned retired deck-v2 extension", () => {
-		const retired = extensionDir("deck-v2");
-		fs.mkdirSync(path.join(retired, "extension"), { recursive: true });
-		fs.symlinkSync(
-			path.join(REPO_V2, "src", "extension", "index.ts"),
-			path.join(retired, "extension", "index.ts"),
-		);
-		fs.writeFileSync(
-			path.join(retired, "index.ts"),
-			'export { default } from "./extension/index.ts";\n',
-		);
-		install();
-		expect(fs.existsSync(retired)).toBe(false);
-	});
-
-	test("removes a linked retired Deck child extension owned by this checkout", () => {
-		const retired = extensionDir("retired-child");
-		const retiredSource = path.join(REPO_V2, "retired-child-source");
-		for (const file of [
-			"index.ts",
-			"lib/spawn.ts",
-			"lib/agent-registry.ts",
-			"lib/model-registry.ts",
-			"agents/worker.md",
-			"agents/reviewer.md",
-		]) {
-			const entry = path.join(retired, file);
-			fs.mkdirSync(path.dirname(entry), { recursive: true });
-			fs.symlinkSync(path.join(retiredSource, file), entry);
-		}
-		install();
-		expect(fs.existsSync(retired)).toBe(false);
-	});
-
-	test("removes the distinctive copied child extension from earlier Deck releases", () => {
-		const retired = extensionDir("retired-copy");
-		fs.mkdirSync(retired, { recursive: true });
-		fs.writeFileSync(
-			path.join(retired, "index.ts"),
-			[
-				" * Sub" + "agent Tool - Delegate tasks to specialized agents",
-				'import { discoverAgents } from "./agents.ts";',
-				"import { structuredError } from \"./sub" + "agents.ts\";",
-				'import { startWatchdog } from "./watchdog.ts";',
-			].join("\n"),
-		);
-		for (const file of ["agents.ts", "sub" + "agents.ts", "watchdog.ts", "activity.ts"]) {
-			fs.writeFileSync(path.join(retired, file), "retired Deck fixture\n");
-		}
-		install();
-		expect(fs.existsSync(retired)).toBe(false);
-	});
-
-	test("removes the copied-library and linked-agent layout from the latest retired installer", () => {
-		const retired = extensionDir("retired-hybrid");
-		fs.mkdirSync(path.join(retired, "lib"), { recursive: true });
-		fs.writeFileSync(path.join(retired, "index.ts"), 'import { spawnChild } from "./lib/spawn.ts";\n');
-		for (const file of ["spawn.ts", "agent-registry.ts", "model-registry.ts", "model-policy.ts"]) {
-			fs.writeFileSync(path.join(retired, "lib", file), "retired Deck fixture\n");
-		}
-		for (const file of ["agents/worker.md", "agents/reviewer.md", "node_modules/typebox"]) {
-			const entry = path.join(retired, file);
-			fs.mkdirSync(path.dirname(entry), { recursive: true });
-			fs.symlinkSync(path.join(REPO_V2, "retired-hybrid-source", file), entry);
-		}
-		install();
-		expect(fs.existsSync(retired)).toBe(false);
-	});
-
-	test("preserves a foreign copied-library layout with externally owned agent links", () => {
-		const unowned = extensionDir("private-hybrid");
-		fs.mkdirSync(path.join(unowned, "lib"), { recursive: true });
-		fs.writeFileSync(path.join(unowned, "index.ts"), 'import { spawnChild } from "./lib/spawn.ts";\n');
-		for (const file of ["spawn.ts", "agent-registry.ts", "model-registry.ts", "model-policy.ts"]) {
-			fs.writeFileSync(path.join(unowned, "lib", file), "private extension\n");
-		}
-		for (const file of ["agents/worker.md", "agents/reviewer.md", "node_modules/typebox"]) {
-			const entry = path.join(unowned, file);
-			fs.mkdirSync(path.dirname(entry), { recursive: true });
-			fs.symlinkSync(path.join(target, "foreign-extension-source", file), entry);
-		}
-		install();
-		expect(fs.readFileSync(path.join(unowned, "index.ts"), "utf8")).toContain("./lib/spawn.ts");
-	});
-
-	test("preserves an unowned extension with a complete similar layout", () => {
-		const unowned = extensionDir("private-child");
-		for (const file of [
-			"index.ts",
-			"lib/spawn.ts",
-			"lib/agent-registry.ts",
-			"lib/model-registry.ts",
-			"agents/worker.md",
-			"agents/reviewer.md",
-		]) {
-			const entry = path.join(unowned, file);
-			fs.mkdirSync(path.dirname(entry), { recursive: true });
-			fs.writeFileSync(entry, "private extension\n");
-		}
-		install();
-		expect(fs.readFileSync(path.join(unowned, "index.ts"), "utf8")).toBe("private extension\n");
-	});
-
 	test("REGRESSION: installing does not overwrite the repo's own src/index.ts", () => {
 		const before = fs.readFileSync(path.join(REPO_V2, "src", "index.ts"), "utf8");
 		install();
@@ -202,15 +63,12 @@ describe("installer layout", () => {
 		expect(fs.readFileSync(path.join(REPO_V2, "src", "index.ts"), "utf8")).toBe(before);
 	});
 
-	test("reruns converge", () => {
+	test("reruns converge without creating an agent extension home", () => {
 		install();
-		const first = ["deck-questions", "deck-ship", "deck-recall", "deck-usage"].map((name) =>
-			fs.realpathSync(path.join(extensionDir(name), "index.ts"))
-		);
+		const first = fs.realpathSync(path.join(target, "bin", "deck-v2"));
 		install();
-		expect(["deck-questions", "deck-ship", "deck-recall", "deck-usage"].map((name) =>
-			fs.realpathSync(path.join(extensionDir(name), "index.ts"))
-		)).toEqual(first);
+		expect(fs.realpathSync(path.join(target, "bin", "deck-v2"))).toBe(first);
+		expect(fs.existsSync(path.join(target, "agent"))).toBe(false);
 	});
 
 	test("installs the CLI shim", () => {
@@ -229,51 +87,6 @@ describe("installer layout", () => {
 		);
 	});
 
-	test("installs pinned pi without relying on a global Node package", () => {
-		install();
-		const shim = path.join(target, "bin", "pi");
-		const expectedVersion = JSON.parse(
-			fs.readFileSync(
-				path.join(REPO_V2, "node_modules", "@earendil-works", "pi-coding-agent", "package.json"),
-				"utf8",
-			),
-		).version;
-		expect(fs.readFileSync(shim, "utf8")).toContain("deck pi shim");
-		expect(execFileSync(shim, ["--version"], { encoding: "utf8" }).trim()).toBe(expectedVersion);
-	});
-
-	test("refuses a foreign pi shim before installing anything", () => {
-		const home = path.join(target, "user-home");
-		const bin = path.join(home, ".local", "bin");
-		const foreignPi = path.join(bin, "pi");
-		fs.mkdirSync(bin, { recursive: true });
-		const foreignBody =
-			"#!/usr/bin/env bash\n" +
-			"# deck pi shim — pinned; generated by v2/install.sh\n" +
-			`exec bun "${path.join(REPO_V2, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js")}" "$@"\n` +
-			"# foreign customization\n";
-		fs.writeFileSync(foreignPi, foreignBody);
-
-		const result = spawnSync(path.join(REPO_V2, "install.sh"), [], {
-			env: {
-				...process.env,
-				HOME: home,
-				DECK_V2_HOME: path.join(home, ".deck"),
-				INSTALL_TARGET: path.join(target, "agent"),
-				BIN_TARGET: bin,
-			},
-			encoding: "utf8",
-		});
-
-		expect(result.status).not.toBe(0);
-		expect(result.stderr).toContain(`${foreignPi} already exists and is not the Deck pi shim; no changes were made.`);
-		expect(result.stderr).toContain(
-			`BIN_TARGET=${path.join(home, ".local", "deck-bin")} bash ${path.join(REPO_V2, "install.sh")}`,
-		);
-		expect(fs.readFileSync(foreignPi, "utf8")).toBe(foreignBody);
-		expect(fs.existsSync(path.join(target, "agent"))).toBe(false);
-		expect(fs.existsSync(path.join(bin, "deck-v2"))).toBe(false);
-	});
 
 	test("refuses a foreign non-symlink deck on the bin path", () => {
 		const bin = path.join(target, "bin");
@@ -339,33 +152,4 @@ describe("installer layout", () => {
 		expect(fs.existsSync(path.join(link, "keep.txt"))).toBe(true);
 	});
 
-	test("the default install target is the runtime default home (~/.deck/.pi)", () => {
-		// The installer default and deckV2Home() must name the SAME home, or the
-		// extension lands in a pi home no orchestrator session ever starts from.
-		execFileSync(path.join(REPO_V2, "install.sh"), [], {
-			env: {
-				...process.env,
-				HOME: target,
-				DECK_V2_HOME: "",
-				INSTALL_TARGET: "",
-				BIN_TARGET: path.join(target, "bin"),
-				WORKFLOWS_SOURCE: workflowsSource,
-				WORKFLOWS_LINK: path.join(target, "home", "workflows"),
-			},
-			encoding: "utf8",
-			stdio: ["ignore", "pipe", "pipe"],
-		});
-		for (const name of ["deck-questions", "deck-ship", "deck-recall", "deck-usage"]) {
-			expect(fs.existsSync(path.join(target, ".deck", ".pi", "extensions", name, "index.ts"))).toBe(true);
-		}
-	});
-
-	test("refuses a foreign flat entry rather than deleting it", () => {
-		const extensions = path.join(target, "agent", "extensions");
-		fs.mkdirSync(extensions, { recursive: true });
-		fs.writeFileSync(path.join(extensions, "deck-v2.ts"), "// someone else's file\n");
-		expect(() => install()).toThrow();
-		// Still there: we never delete what we cannot prove is ours.
-		expect(fs.existsSync(path.join(extensions, "deck-v2.ts"))).toBe(true);
-	});
 });

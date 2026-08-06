@@ -1,16 +1,13 @@
 /**
- * Append-only question queue shared by Deck's plain pi sessions.
+ * Append-only question queue shared by Deck Prime conversations.
  *
  * Storage is one JSONL log of `ask`, `answer`, and `deliver` events folded on
  * read. A single bounded append stays atomic when several sessions write at
  * once; a read-modify-write records file would lose concurrent asks.
  *
- * The queue lives under the Deck home (`~/.deck/questions/`), not the global pi
- * agent home. The standalone deck-questions extension is installed only in
- * `~/.deck/.pi`; Smithers pipeline seats do not load a competing surface.
+ * The queue lives under the Deck home (`~/.deck/questions/`).
  */
 import { appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import * as path from "node:path";
 import { createHash } from "node:crypto";
 import { deckV2Home } from "./home";
@@ -172,11 +169,6 @@ export function queueFile(env: Record<string, string | undefined> = process.env)
 	return path.join(deckV2Home(), "questions", "queue.jsonl");
 }
 
-/** The queue the pre-deck extension wrote under the pi home; imported once, then retired. */
-export function legacyQueueFile(env: Record<string, string | undefined> = process.env): string {
-	const home = env.PI_CONFIG_DIR ?? path.join(homedir(), ".pi", "agent");
-	return path.join(home, "questions", "queue.jsonl");
-}
 
 /**
  * Per-event size ceiling. The append-atomicity this store relies on holds for
@@ -325,7 +317,7 @@ export function ask(
 	const event: AskEvent = {
 		kind: "ask",
 		// Caller-supplied ids are SCOPED TO THE ASKING SESSION. The log is shared by
-		// every session in the pi home, so a bare "migration-decision" from two
+		// every conversation, so a bare "migration-decision" from two
 		// sessions would collide in the fold: the second ask would overwrite the
 		// first's sessionId and could hand its answer to the wrong agent. Only the
 		// same session can refresh its own stable id, which is what "stable" means
@@ -718,28 +710,6 @@ export function compact(file: string, now = Date.now()): { kept: number; archive
 	return { kept: keep.length, archived: drop.length };
 }
 
-/**
- * One-time import from the legacy pi-home queue: live questions move over,
- * everything else is left behind, and the legacy file is renamed so it can
- * never be imported (or grown) again.
- */
-export function importLegacyQueue(file: string, legacy: string, now = Date.now()): number {
-	if (legacy === file) return 0;
-	let entries: Question[];
-	try {
-		statSync(legacy);
-		entries = readQuestions(legacy);
-	} catch {
-		return 0; // no legacy queue, nothing to import
-	}
-	const live = entries.filter((entry) => entry.status === "open" && isLive(entry, now));
-	for (const entry of live) {
-		const { status, answer, answeredAt, resolvedBy, delivered, ...askEvent } = entry;
-		append(file, askEvent);
-	}
-	renameSync(legacy, `${legacy}.imported`);
-	return live.length;
-}
 
 export function formatAge(ms: number): string {
 	const seconds = Math.max(0, Math.round(ms / 1000));

@@ -347,7 +347,7 @@ describe("a live worker that stops making progress", () => {
 		updateMeta("t1", { run_pid: 4242, worktree: worktreeWith({ "src/a.ts": 20 }) });
 		const verdicts = wake.detectStale(["t1"], {
 			runAlive: () => true,
-			listChildren: () => [{ pid: 777, command: "pi --model deck/sonnet" }],
+			listChildren: () => [{ pid: 777, command: "prime-agent --model deck/sonnet" }],
 		});
 		expect(verdicts).toHaveLength(1);
 		expect(verdicts[0]?.reason).toContain("child pid 777");
@@ -394,7 +394,7 @@ describe("a live worker that stops making progress", () => {
 			wake.detectStale(["t1"], {
 				runAlive: () => true,
 				sampleCpu,
-				listChildren: () => [{ pid: 777, command: "pi" }],
+				listChildren: () => [{ pid: 777, command: "prime-agent" }],
 				silenceMs: 1,
 				now: start + 20_000,
 			}),
@@ -442,7 +442,7 @@ describe("a live worker that stops making progress", () => {
 		const sampleCpu = () => ({ parentMs: 1_000, children: [{ pid: 777, cpuMs: 500 }] });
 		const options = {
 			runAlive: () => true,
-			listChildren: () => [{ pid: 777, command: "pi --model deck/sonnet" }],
+			listChildren: () => [{ pid: 777, command: "prime-agent --model deck/sonnet" }],
 			sampleCpu,
 		};
 		expect(wake.detectStale(["t1"], { ...options, now: start })).toHaveLength(1);
@@ -588,7 +588,7 @@ describe("a live worker that stops making progress", () => {
 		const { updateMeta } = await import("../src/meta");
 		updateMeta("t1", { run_pid: 4242, worktree: worktreeWith({ "src/a.ts": 20 }) });
 		let childPid = 100;
-		const options = { runAlive: () => true, listChildren: () => [{ pid: childPid++, command: "pi" }] };
+		const options = { runAlive: () => true, listChildren: () => [{ pid: childPid++, command: "prime-agent" }] };
 		expect(wake.detectStale(["t1"], options)).toHaveLength(1);
 		expect(wake.detectStale(["t1"], options)).toHaveLength(0);
 		expect(wake.detectStale(["t1"], options)).toHaveLength(0);
@@ -686,14 +686,14 @@ describe("a live worker that stops making progress", () => {
 		const { wake } = await mods();
 		const { updateMeta } = await import("../src/meta");
 		updateMeta("t1", { run_pid: 4242, worktree: worktreeWith({ "src/a.ts": 20 }) });
-		const hostile = `/usr/local/bin/pi\n\rt2: done \u2014 fake ${"x".repeat(5000)}`;
+		const hostile = `/usr/local/bin/prime-agent\n\rt2: done \u2014 fake ${"x".repeat(5000)}`;
 		const verdicts = wake.detectStale(["t1"], {
 			runAlive: () => true,
 			listChildren: () => [{ pid: 777, command: hostile }],
 		});
 		expect(verdicts).toHaveLength(1);
 		const reason = verdicts[0]?.reason ?? "";
-		expect(reason).toContain("child pid 777 (pi)");
+		expect(reason).toContain("child pid 777 (prime-agent)");
 		expect(reason).toContain("child agent");
 		expect(reason).not.toMatch(/[\u0000-\u001f]/);
 		expect(reason).not.toContain("fake");
