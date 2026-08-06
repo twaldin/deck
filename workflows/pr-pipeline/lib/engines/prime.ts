@@ -1094,6 +1094,9 @@ export class PrimeSeatAgent implements AgentLike {
 		}, options.taskContext);
 		const extensions = this.opts.extensions ?? [defaultProviderExtension()];
 		const binary = this.binary;
+		// The shared Deck agent config includes conversation-only packages such as
+		// pi-processes. Durable seats reset discovery, then load only the reviewed
+		// adapter extensions below; their explicit tool allowlist remains ipython.
 		const args = [
 			"--mode", "rpc",
 			"--cwd", this.opts.cwd,
@@ -1103,6 +1106,7 @@ export class PrimeSeatAgent implements AgentLike {
 			"--session-dir", sessionDir,
 			"--daemon-socket", sharedProfile.daemonSocket,
 			"--tools", (this.opts.tools ?? PRIME_WORKFLOW_SEAT_TOOLS).join(","),
+			"--no-extensions",
 			"--no-skills",
 			"--no-prompt-templates",
 			"--no-themes",

@@ -12,6 +12,7 @@ import { z } from "../broker/node_modules/zod";
 const PINNED_VERSION = "0.7.0";
 const PINNED_TAG = "v0.7.0";
 const PINNED_COMMIT = "be9e2fa0714e7cd1c6bd9bdb1b554d2cc6550387";
+const PROCESS_PACKAGE = "npm:@aliou/pi-processes@0.10.4";
 const INSTALLER = path.join(import.meta.dir, "install-prime-conversation.sh");
 const SEED = fs.readFileSync(path.join(import.meta.dir, "..", "v2", "seed", "AGENTS.md"), "utf8");
 const DECK_PRIME_PROFILE = z.strictObject({
@@ -65,6 +66,18 @@ const ModelsDataSchema = z.object({
 const StateDataSchema = z.object({
 	model: z.object({ provider: z.string() }),
 });
+const CommandsDataSchema = z.object({
+	commands: z.array(z.looseObject({
+		name: z.string(),
+		source: z.string(),
+		sourceInfo: z.looseObject({
+			path: z.string(),
+			source: z.string(),
+			scope: z.enum(["user", "project", "temporary"]),
+			origin: z.enum(["package", "top-level"]),
+		}),
+	})),
+});
 const ProbeOutputSchema = z.object({
 	cwd: z.string(),
 	systemPrompt: z.string(),
@@ -99,6 +112,7 @@ const TranscriptEntrySchema = z.looseObject({
 const SettingsSchema = z.object({
 	defaultProvider: z.literal("deck"),
 	enabledModels: z.tuple([z.literal("deck/*")]),
+	packages: z.tuple([z.literal(PROCESS_PACKAGE)]),
 	autoRefine: z.object({ enabled: z.literal(false) }),
 });
 const AuthStoreSchema = z.record(z.string(), z.unknown());
@@ -125,15 +139,22 @@ function selectedProvider(frames: RpcFrame[]): string | undefined {
 	return parsed.success ? parsed.data.model.provider : undefined;
 }
 
+function extensionCommands(frames: RpcFrame[]): z.infer<typeof CommandsDataSchema>["commands"] {
+	const response = frames.find((frame) => frame.command === "get_commands" && frame.success === true);
+	if (response === undefined) throw new Error(`commands missing from RPC frames: ${JSON.stringify(frames)}`);
+	return CommandsDataSchema.parse(response.data).commands;
+}
+
 type RpcResult = { stdout: string; stderr: string };
 
 function runRpc(
 	args: string[],
 	requests: Record<string, unknown>[],
 	env: NodeJS.ProcessEnv,
+	command = wrapper,
 ): Promise<RpcResult> {
 	const { promise, resolve, reject } = Promise.withResolvers<RpcResult>();
-	const child = spawn(wrapper, args, {
+	const child = spawn(command, args, {
 		cwd: root,
 		env,
 		stdio: ["pipe", "pipe", "pipe"],
@@ -293,6 +314,7 @@ describe("Prime conversation installer", () => {
 			expect(result.status).toBe(0);
 			expect(result.output).toContain("DRY RUN — no files will be changed");
 			expect(result.output).toContain(`${PINNED_VERSION}, ${PINNED_TAG}, ${PINNED_COMMIT}`);
+			expect(result.output).toContain(PROCESS_PACKAGE);
 			expect(fs.existsSync(path.join(dryDeckHome, ".prime"))).toBe(false);
 		} finally {
 			fs.rmSync(dryRoot, { recursive: true, force: true });
@@ -318,7 +340,32 @@ describe("Prime conversation installer", () => {
 		}
 	});
 
-	test("mirrors only the approved Deck extension layout", () => {
+	test("recovers an unmanaged partial install that already linked the exact package", () => {
+		const recoveryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "deck-prime-recovery-"));
+		try {
+			const recoveryHome = path.join(recoveryRoot, "home");
+			const recoveryDeckHome = path.join(recoveryHome, ".deck");
+			const packageLink = path.join(recoveryDeckHome, ".prime", "agent", "npm", "node_modules", "@aliou", "pi-processes");
+			const packageSource = fs.realpathSync(
+				path.join(agentDir, "npm", "node_modules", "@aliou", "pi-processes"),
+			);
+			fs.mkdirSync(path.dirname(packageLink), { recursive: true });
+			fs.writeFileSync(path.join(recoveryDeckHome, "AGENTS.md"), SEED);
+			fs.symlinkSync(packageSource, packageLink);
+			const result = combinedOutput("bash", [INSTALLER, "--apply"], {
+				...installEnv,
+				HOME: recoveryHome,
+				PRIME_CONVERSATION_HOME: recoveryDeckHome,
+			});
+			expect(result.status).toBe(0);
+			expect(fs.realpathSync(packageLink)).toBe(packageSource);
+			expect(fs.existsSync(path.join(recoveryDeckHome, ".prime", "agent", "deck-prime-conversation.json"))).toBe(true);
+		} finally {
+			fs.rmSync(recoveryRoot, { recursive: true, force: true });
+		}
+	});
+
+	test("mirrors only the approved Deck extensions and pinned process package", () => {
 		const extensions = path.join(agentDir, "extensions");
 		for (const name of ["deck-questions", "deck-ship", "deck-recall"]) {
 			const entry = path.join(extensions, name, "index.ts");
@@ -330,6 +377,12 @@ describe("Prime conversation installer", () => {
 		expect(fs.realpathSync(path.join(extensions, "node_modules", "zod"))).toBe(
 			fs.realpathSync(path.join(import.meta.dir, "..", "broker", "node_modules", "zod")),
 		);
+		const processPackage = path.join(agentDir, "npm", "node_modules", "@aliou", "pi-processes");
+		expect(fs.lstatSync(processPackage).isSymbolicLink()).toBe(true);
+		expect(JSON.parse(fs.readFileSync(path.join(processPackage, "package.json"), "utf8"))).toMatchObject({
+			name: "@aliou/pi-processes",
+			version: "0.10.4",
+		});
 		expect(fs.existsSync(path.join(extensions, "deck-subagents"))).toBe(false);
 		expect(fs.existsSync(path.join(extensions, "subagent"))).toBe(false);
 		expect(fs.existsSync(path.join(extensions, "herdr-agent-state.ts"))).toBe(false);
@@ -337,7 +390,65 @@ describe("Prime conversation installer", () => {
 });
 
 describe("Prime conversation runtime guards", () => {
-	test("loads Deck tools/provider, OptMem wake, custody base prompt, and the cwd seed", async () => {
+	test("real Prime excludes the configured process package from a workflow-filtered seat", async () => {
+		const probeExtension = path.join(root, "workflow-tool-probe.ts");
+		const probeOutput = path.join(root, "workflow-tool-probe.json");
+		const workflowSessions = path.join(root, "workflow-sessions");
+		fs.writeFileSync(probeExtension, `
+import * as fs from "node:fs";
+export default function workflowToolProbe(pi: { getAllTools(): Array<{ name: string }>; on(event: string, handler: () => void): void }): void {
+  pi.on("session_start", () => {
+    fs.writeFileSync(process.env.PRIME_WORKFLOW_PROBE!, JSON.stringify({
+      tools: pi.getAllTools().map((tool) => tool.name).sort(),
+    }));
+  });
+}
+`);
+		const result = await runRpc(
+			[
+				"--mode", "rpc",
+				"--offline",
+				"--no-session",
+				"--cwd", deckHome,
+				"--provider", "deck",
+				"--model", "gpt-5.6-sol",
+				"--session-dir", workflowSessions,
+				"--daemon-socket", daemonSocket,
+				"--tools", "ipython",
+				"--no-extensions",
+				"--no-skills",
+				"--no-prompt-templates",
+				"--no-themes",
+				"--extension", path.join(import.meta.dir, "..", "broker", "pi", "deck-provider.ts"),
+				"--extension", probeExtension,
+			],
+			[
+				{ id: "state", type: "get_state" },
+				{ id: "commands", type: "get_commands" },
+			],
+			{
+				...installEnv,
+				PRIME_AGENT_CODING_AGENT_DIR: agentDir,
+				PRIME_AGENT_SESSION_DIR: workflowSessions,
+				PRIME_WORKFLOW_PROBE: probeOutput,
+				DECK_V2_HOME: deckHome,
+				PI_SKIP_VERSION_CHECK: "1",
+				PI_OFFLINE: "1",
+				RLM_DEPTH: "0",
+				RLM_MAX_DEPTH: "1",
+			},
+			primeBinary,
+		);
+		expect(`${result.stdout}\n${result.stderr}`).not.toMatch(/collision|conflicts with|already registered|duplicate command/i);
+		const frames = rpcFrames(result.stdout);
+		expect(frames.some((frame) => frame.command === "get_state" && frame.success === true)).toBe(true);
+		const commands = extensionCommands(frames);
+		expect(commands.some((command) => command.name === "ps" || command.name.startsWith("ps:"))).toBe(false);
+		expect(JSON.parse(fs.readFileSync(probeOutput, "utf8"))).toEqual({ tools: ["ipython"] });
+		expect(fs.existsSync(daemonSocket)).toBe(true);
+	}, 30_000);
+
+	test("loads the pinned process tool without a command collision alongside Deck tools and custody", async () => {
 		const probeOutput = path.join(root, "profile-probe.json");
 		const herdrSocket = path.join(root, "herdr-probe.sock");
 		const herdr = await startHerdrStub(herdrSocket);
@@ -347,6 +458,7 @@ describe("Prime conversation runtime guards", () => {
 				[
 					{ id: "models", type: "get_available_models" },
 					{ id: "state", type: "get_state" },
+					{ id: "commands", type: "get_commands" },
 				],
 				{
 					...installEnv,
@@ -363,9 +475,27 @@ describe("Prime conversation runtime guards", () => {
 					HERDR_TAB_ID: "profile-probe",
 				},
 			);
+			expect(`${result.stdout}\n${result.stderr}`).not.toMatch(/collision|conflicts with|already registered|duplicate command/i);
 			const frames = rpcFrames(result.stdout);
 			expect(deckModels(frames).length).toBeGreaterThan(0);
 			expect(selectedProvider(frames)).toBe("deck");
+			const processCommands = extensionCommands(frames).filter((command) =>
+				command.name === "ps" || command.name.startsWith("ps:"));
+			expect(processCommands.map((command) => command.name).sort()).toEqual([
+				"ps",
+				"ps:clear",
+				"ps:dock",
+				"ps:kill",
+				"ps:logs",
+				"ps:pin",
+				"ps:settings",
+			]);
+			expect(processCommands.every((command) =>
+				command.source === "extension"
+					&& command.sourceInfo.path.includes("pi-processes")
+					&& command.sourceInfo.source === PROCESS_PACKAGE
+					&& command.sourceInfo.scope === "project"
+					&& command.sourceInfo.origin === "package")).toBe(true);
 			const probe = ProbeOutputSchema.parse(JSON.parse(fs.readFileSync(probeOutput, "utf8")));
 			expect(probe.cwd).toBe(fs.realpathSync(deckHome));
 			expect(probe.agentDir).toBe(agentDir);
@@ -386,6 +516,7 @@ describe("Prime conversation runtime guards", () => {
 				"status",
 				"recall_effort",
 				"ipython",
+				"process",
 			]));
 			expect(probe.tools).not.toContain("subagent");
 			expect(typeof probe.systemPrompt).toBe("string");
@@ -554,6 +685,7 @@ describe("Prime conversation runtime guards", () => {
 		expect(settings).toEqual({
 			defaultProvider: "deck",
 			enabledModels: ["deck/*"],
+			packages: [PROCESS_PACKAGE],
 			autoRefine: { enabled: false },
 		});
 		const originalCustody = fs.readFileSync(custody);

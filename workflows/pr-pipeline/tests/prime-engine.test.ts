@@ -11,6 +11,7 @@ import { z } from "zod";
 import {
 	buildSeatEnvironment,
 	PrimeSeatAgent,
+	PRIME_WORKFLOW_SEAT_TOOLS,
 	resolveDeckPrimeProfilePaths,
 	PrimeSeatError,
 	type PrimeSeatFailureCode,
@@ -656,7 +657,9 @@ describe("Prime seat adapter fault contract", () => {
 		expect(captured.env.RLM_DEPTH).toBe("0");
 		expect(captured.env.RLM_MAX_DEPTH).toBe("1");
 		const tools = captured.args[captured.args.indexOf("--tools") + 1].split(",");
-		expect(tools).toContain("ipython");
+		expect(tools).toEqual([...PRIME_WORKFLOW_SEAT_TOOLS]);
+		expect(tools).not.toContain("process");
+		expect(captured.args).toContain("--no-extensions");
 		expect(tools.some((tool) => /dispatch|spawn|subagent|task/i.test(tool))).toBe(false);
 	});
 
@@ -702,9 +705,10 @@ describe("Prime seat adapter fault contract", () => {
 		for (const directory of values("--session-dir")) expect(existsSync(directory)).toBe(false);
 	});
 
-	test("workflow and spawn-agent profiles reject dispatch-capable tools and extensions", async () => {
+	test("durable profiles reject process and every other tool or extension outside their allowlists", async () => {
 		const binary = await fakePrime("success");
 		for (const capabilityProfile of ["workflow-seat", "spawn-agent"] as const) {
+			expect(() => agent(binary, { capabilityProfile, tools: ["process"] })).toThrow(/PRIME_CAPABILITY_VIOLATION/);
 			expect(() => agent(binary, { capabilityProfile, tools: ["read", "dispatch"] })).toThrow(/PRIME_CAPABILITY_VIOLATION/);
 			expect(() => agent(binary, { capabilityProfile, extensions: ["/tmp/deck-subagents.ts"] })).toThrow(/PRIME_CAPABILITY_VIOLATION/);
 		}

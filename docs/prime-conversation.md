@@ -48,13 +48,16 @@ cd ~/dev/deck
 
 It is safe to rerun. Apply requires `~/.deck/AGENTS.md` to match the checked-in
 v4 seed exactly and refuses to replace an unowned settings, prompt, wrapper,
-guard, or extension path. It installs only:
+guard, or extension path. It writes only:
 
 - `deck-questions`, `deck-ship`, and `deck-recall` under
   `~/.deck/.prime/agent/extensions/`;
 - `broker/pi/deck-provider.ts`, its adjacent `zod` dependency, and a
   profile-local fail-closed provider guard;
 - the `v2/src` support tree used by those three extensions;
+- the exact package setting `npm:@aliou/pi-processes@0.10.4` and a
+  profile-local link to that exact, already-global package (missing or
+  mismatched versions fail closed);
 - the custody prompt, supplemental harness directory, settings, manifest, and
   entry wrapper.
 
@@ -96,6 +99,24 @@ paths, but Prime does not expose an explicit numeric budget through `--thinking`
 Prime's `registerProvider` API supports only `openai-completions` and
 `anthropic-messages`; `/v1/pi/stream` would require a custom transport.
 
+## Session-scoped process watches
+
+The conversation seat enables the `process` tool for event-driven wake on
+process exit, success, failure, or a stdout/stderr match. Use it for interactive
+CI and PR watching instead of sleep loops or polling.
+
+Processes are SESSION-SCOPED and do NOT survive a daemon restart. Durable
+workflow seats—including PR-pipeline stages, review-gate, and every
+Smithers-launched seat—must use Smithers for durable waiting and must not receive
+this tool. Prime-selected workflow seats enforce that boundary with
+`--no-extensions`, only the adapter-reviewed extensions, and the `ipython`
+tool allowlist. Pi-engine seats, including review-gate, use Pi's separate
+configuration; Deck does not declare this Prime-profile package there.
+
+A child's watcher wakes that CHILD, not its parent. Put the watcher in the seat
+that must react. Deleting or shutting down a child also stops processes managed
+by that child.
+
 ## Shared Deck daemon and custody
 
 The profile uses these Prime paths instead of Deck's existing `.pi` paths:
@@ -112,8 +133,10 @@ path. The captain conversation, workflow seats, spawn agents, and their RLM
 children join this one Deck-scoped daemon so they appear in one Agents View.
 It remains distinct from Prime's default per-UID socket, so non-Deck Prime usage
 cannot join it. Every shared-daemon seat uses `~/.deck/.prime/agent`, including
-its empty native-auth store and Deck-only settings. The wrapper rejects socket,
-cwd, system-prompt, provider, model-scope, extension, external resume, and fork
+its empty native-auth store and Deck-only settings, but resource loading is
+per-seat: only the conversation seat admits its configured process package.
+The conversation wrapper rejects socket, cwd, system-prompt, provider,
+model-scope, extension, external resume, and fork
 overrides. The conversation wrapper also refuses `shutdown`: no conversation
 client owns the shared factory daemon.
 
@@ -255,13 +278,14 @@ cd ~/dev/deck
 bun test ops/prime-conversation.test.ts
 ```
 
-The default suite runs the installer twice, loads the real global Prime binary
-through the sandbox wrapper, inspects the tools, Deck model catalog, selected
-provider, and `deck/*` scope, fires OptMem, captures the base prompt and Deck
-seed, exercises production-workspace refusal, verifies stamp credentials are
-absent, checks Herdr against isolated test sockets, and trips on version or
-package-integrity drift. It neither reads nor writes the live `~/.deck`; the
-sandbox provider token is a dummy and no paid model call occurs.
+The default suite runs the installer twice, starts real Prime `0.7.0` with the
+workflow resource filters, and observes only `ipython`. It then joins the same
+daemon through the conversation wrapper and observes `process` loading without
+a command collision alongside the Deck tools. The suite also checks the Deck
+model catalog, selected provider and `deck/*` scope, OptMem, base prompt and
+Deck seed, production-workspace refusal, credential starvation, Herdr, and
+version/package-integrity tripwires. It never reads or writes live `~/.deck`;
+the sandbox provider token is a dummy and no paid model call occurs.
 
 A real broker completion is an explicit operator check, not part of the default
 suite. It requires an operator-supplied token and may update the live broker's

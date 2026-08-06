@@ -4,6 +4,9 @@ set -euo pipefail
 # Prime version and artifact metadata are loaded from the reviewed Deck patch
 # manifest below. ops/prime-patches.sh is the sole fingerprint verifier.
 PROFILE_ID="deck-prime-conversation-v1"
+PROCESS_PACKAGE_SPEC="npm:@aliou/pi-processes@0.10.4"
+PROCESS_PACKAGE_NAME="@aliou/pi-processes"
+PROCESS_PACKAGE_VERSION="0.10.4"
 
 usage() {
   cat <<'USAGE'
@@ -11,7 +14,7 @@ Usage: ops/install-prime-conversation.sh [--apply]
 
 Without --apply, validate prerequisites and print the planned profile wiring.
 With --apply, wire the pinned, already-global Prime Agent into ~/.deck/.prime.
-The script never installs or updates the global package and never writes ~/.prime.
+The script never installs or updates global packages and never writes ~/.prime.
 USAGE
 }
 
@@ -67,6 +70,7 @@ GUARD_FILE="$EXTENSIONS_DIR/prime-conversation-guard.ts"
 AUTH_FILE="$AGENT_DIR/auth.json"
 MANIFEST_FILE="$AGENT_DIR/deck-prime-conversation.json"
 WRAPPER="$PROFILE_ROOT/bin/prime-conversation"
+PROCESS_PACKAGE_LINK="$AGENT_DIR/npm/node_modules/$PROCESS_PACKAGE_NAME"
 SOCKET_RELATIVE="$(node -e '
 const fs = require("node:fs");
 const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8")).daemonSocketRelative;
@@ -109,6 +113,30 @@ if ! install_verification="$(PRIME_AGENT_BIN="$PRIME_BIN" "$PATCH_VERIFIER" veri
   printf 'error: Prime Agent install-state tripwire failed for %s:\n%s\n' "$PRIME_BIN" "$install_verification" >&2
   exit 1
 fi
+NPM_BIN="$(command -v npm || true)"
+if [[ -z "$NPM_BIN" ]]; then
+  printf 'error: npm is required to resolve the pinned conversation process package\n' >&2
+  exit 1
+fi
+if ! NPM_GLOBAL_ROOT="$("$NPM_BIN" root -g 2>/dev/null)"; then
+  printf 'error: cannot resolve the global npm package root with %s\n' "$NPM_BIN" >&2
+  exit 1
+fi
+PROCESS_PACKAGE_SOURCE="$NPM_GLOBAL_ROOT/$PROCESS_PACKAGE_NAME"
+if ! process_package_identity="$(node -e '
+const manifest = require(process.argv[1]);
+process.stdout.write(`${manifest.name}\t${manifest.version}`);
+' "$PROCESS_PACKAGE_SOURCE/package.json" 2>/dev/null)"; then
+  printf 'error: pinned conversation package is not installed globally: %s\n' "$PROCESS_PACKAGE_SPEC" >&2
+  exit 1
+fi
+IFS=$'\t' read -r process_package_name process_package_version <<<"$process_package_identity"
+if [[ "$process_package_name" != "$PROCESS_PACKAGE_NAME" || "$process_package_version" != "$PROCESS_PACKAGE_VERSION" ]]; then
+  printf 'error: conversation package tripwire: expected %s, got %s@%s from %s\n' \
+    "$PROCESS_PACKAGE_SPEC" "${process_package_name:-<unknown>}" "${process_package_version:-<unknown>}" "$PROCESS_PACKAGE_SOURCE" >&2
+  exit 1
+fi
+
 
 for source in \
   "$EXTENSION_SOURCE/deck-questions.ts" \
@@ -162,6 +190,7 @@ Prime Agent: $PRIME_BIN ($PINNED_VERSION, $PINNED_TAG, $PINNED_COMMIT)
 Deck home:   $DECK_HOME
 Profile:     $AGENT_DIR
 Extensions:  deck-questions, deck-ship, deck-recall, deck-provider
+Package:     $PROCESS_PACKAGE_SPEC
 Custody:     $CUSTODY_FILE (read-only base-prompt supplement)
 Refinement:  $HARNESS_DIR (writable supplemental state)
 Socket:      $SOCKET (isolated from the per-UID default daemon)
@@ -216,6 +245,8 @@ ensure_symlink() {
   mkdir -p "$(dirname "$destination")"
   ln -s "$source" "$destination"
 }
+ensure_symlink "$PROCESS_PACKAGE_SOURCE" "$PROCESS_PACKAGE_LINK"
+
 
 # Reuse the v2 installer's exact extension tree shape without invoking it. The
 # full v2 installer also adds deck-subagents, CLI shims, and a Smithers runtime;
@@ -321,6 +352,7 @@ cat > "$settings_tmp" <<'SETTINGS'
 {
   "defaultProvider": "deck",
   "enabledModels": ["deck/*"],
+  "packages": ["npm:@aliou/pi-processes@0.10.4"],
   "autoRefine": {
     "enabled": false
   }
@@ -406,6 +438,8 @@ printf -v guard_file_q '%q' "$GUARD_FILE"
 printf -v run_dir_q '%q' "$RUN_DIR"
 printf -v sessions_dir_q '%q' "$SESSIONS_DIR"
 printf -v agent_dir_q '%q' "$AGENT_DIR"
+printf -v process_package_source_q '%q' "$PROCESS_PACKAGE_SOURCE"
+printf -v process_package_link_q '%q' "$PROCESS_PACKAGE_LINK"
 wrapper_tmp="$WRAPPER.tmp.$$"
 cat > "$wrapper_tmp" <<EOF
 #!/usr/bin/env bash
@@ -430,6 +464,10 @@ SETTINGS_FILE=$settings_file_q
 AUTH_FILE=$auth_file_q
 SEED_FILE=$seed_file_q
 AGENT_DIR=$agent_dir_q
+PROCESS_PACKAGE_SPEC='$PROCESS_PACKAGE_SPEC'
+PROCESS_PACKAGE_VERSION='$PROCESS_PACKAGE_VERSION'
+PROCESS_PACKAGE_SOURCE=$process_package_source_q
+PROCESS_PACKAGE_LINK=$process_package_link_q
 CUSTODY_SHA256='$custody_sha'
 SETTINGS_SHA256='$settings_sha'
 AUTH_SHA256='$auth_sha'
@@ -457,6 +495,16 @@ fi
 actual_guard_sha="\$(shasum -a 256 "\$GUARD_FILE" 2>/dev/null | cut -d ' ' -f 1)"
 if [[ "\$actual_guard_sha" != "\$GUARD_SHA256" ]]; then
   printf 'error: Prime conversation provider guard failed its launch digest check\n' >&2
+  exit 1
+fi
+if [[ "\$(realpath "\$PROCESS_PACKAGE_LINK" 2>/dev/null || true)" != "\$(realpath "\$PROCESS_PACKAGE_SOURCE" 2>/dev/null || true)" ]]; then
+  printf 'error: Prime conversation package link failed its launch check: %s\n' "\$PROCESS_PACKAGE_SPEC" >&2
+  exit 1
+fi
+if ! actual_process_package_version="\$(node -e 'process.stdout.write(require(process.argv[1]).version)' "\$PROCESS_PACKAGE_LINK/package.json" 2>/dev/null)" ||
+   [[ "\$actual_process_package_version" != "\$PROCESS_PACKAGE_VERSION" ]]; then
+  printf 'error: Prime conversation package version check failed: expected %s, got %s\n' \\
+    "\$PROCESS_PACKAGE_VERSION" "\${actual_process_package_version:-<missing>}" >&2
   exit 1
 fi
 for digest_spec in \
