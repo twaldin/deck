@@ -121,6 +121,16 @@ describe("stack input contract", () => {
 			stack: { existingPrNumbers: [11, 12] },
 		}).success).toBe(false);
 	});
+
+	test("treats Smithers' persisted null effort-mode columns as omitted", () => {
+		expect(inputSchema.safeParse({ ...run, stack: null }).success).toBe(true);
+		expect(inputSchema.safeParse({ ...run, existingPr: 10, stack: null }).success).toBe(true);
+		expect(inputSchema.safeParse({
+			...run,
+			existingPr: null,
+			stack: { existingPrNumbers: [11, 12] },
+		}).success).toBe(true);
+	});
 });
 
 describe("stack topology", () => {

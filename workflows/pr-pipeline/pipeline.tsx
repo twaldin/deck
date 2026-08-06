@@ -309,12 +309,12 @@ export const inputSchema = z.object({
 	 * from gh — it NEVER creates a second PR. Watch/ready/stamp are unchanged:
 	 * the run owns continuous CI/review polling until merge, same as a ship.
 	 */
-	existingPr: z.number().int().positive().optional(),
+	existingPr: z.number().int().positive().nullable().optional(),
 	/**
 	 * Optional ordered stack mode. It is mutually exclusive with `existingPr`;
 	 * `specs` creates a native stack and `existingPrNumbers` adopts one.
 	 */
-	stack: stackInputSchema.optional(),
+	stack: stackInputSchema.nullable().optional(),
 	brief: z.unknown().optional(),
 	/** Default TRUE: real GH writes require explicit dryRun:false. */
 	dryRun: z.boolean().optional(),
@@ -400,7 +400,7 @@ export const inputSchema = z.object({
 		})
 		.optional(),
 }).superRefine((input, ctx) => {
-	if (input.existingPr !== undefined && input.stack !== undefined) {
+	if (input.existingPr != null && input.stack != null) {
 		ctx.addIssue({
 			code: z.ZodIssueCode.custom,
 			path: ["stack"],
@@ -915,16 +915,21 @@ export default smithers((ctx) => {
 	const github = { ...DEFAULT_GITHUB, ...(input.github ?? {}) };
 	const commands = { ...DEFAULT_COMMANDS, ...(input.commands ?? {}) };
 	const declaredBaseBranch = input.baseBranch ?? "main";
+	const existingPr = input.existingPr ?? undefined;
+	// Smithers stores schema fields in SQLite columns. An omitted optional object
+	// is rehydrated as SQL NULL on the execution render, so null means the normal
+	// single-PR mode here; only a declared stack object enables stack behavior.
+	const stackInput = input.stack ?? undefined;
 	const stackCreateSpecs =
-		input.stack !== undefined && "specs" in input.stack
-			? input.stack.specs
+		stackInput !== undefined && "specs" in stackInput
+			? stackInput.specs
 			: undefined;
 	const stackExistingNumbers =
-		input.stack !== undefined && "existingPrNumbers" in input.stack
-			? input.stack.existingPrNumbers
+		stackInput !== undefined && "existingPrNumbers" in stackInput
+			? stackInput.existingPrNumbers
 			: undefined;
-	const stackMode = input.stack !== undefined;
-	const adopt = input.existingPr != null || stackExistingNumbers !== undefined;
+	const stackMode = stackInput !== undefined;
+	const adopt = existingPr !== undefined || stackExistingNumbers !== undefined;
 	// Resolved once per render; yolo=false (stamp behavior) when omitted.
 	const profile: ProjectProfile | null =
 		input.profile === undefined ? null : findProfile(input.profile);
@@ -1208,7 +1213,7 @@ export default smithers((ctx) => {
 			);
 		}
 		const stamp = /^r\d+-stamp$/.test(props.id);
-		const prNumber = pr?.prNumber ?? input.existingPr;
+		const prNumber = pr?.prNumber ?? existingPr;
 		const headSha =
 			typeof props.metadata?.headSha === "string"
 				? props.metadata.headSha
@@ -1324,7 +1329,7 @@ export default smithers((ctx) => {
 								"bypassApprovals=true requires dryRun=true: no real run may self-approve its gates.",
 							);
 						}
-						if (input.existingPr !== undefined && stackMode) {
+						if (existingPr !== undefined && stackMode) {
 							questions.push("existingPr and stack are mutually exclusive; declare one effort shape.");
 						}
 						if (stackCreateSpecs !== undefined) {
@@ -1423,7 +1428,7 @@ export default smithers((ctx) => {
 								return { baseBranch: rootBaseBranch, cars };
 							}
 							if (dryRun) return { baseBranch: declaredBaseBranch };
-							const overview = await fetchPrOverview(ghCtx, input.existingPr as number);
+							const overview = await fetchPrOverview(ghCtx, existingPr as number);
 							const baseBranch = reconcileAdoptBaseBranch(input.baseBranch, overview.baseRefName);
 							await execOrThrow(bunExec, [github.git, "ls-remote", "--exit-code", "--heads", "origin", baseBranch], { cwd: input.worktree });
 							return { baseBranch };
@@ -1439,7 +1444,7 @@ export default smithers((ctx) => {
 					<Task id="implement" output={outputs.implementation} retries={0}>
 						{() => {
 							const numbers = adoptedBase.cars?.map((car) => car.prNumber) ??
-								[input.existingPr as number];
+								[existingPr as number];
 							return {
 								commits: [],
 								summary: `adopted existing ${numbers.length === 1 ? `PR #${numbers[0]}` : `ordered stack ${numbers.map((number) => `#${number}`).join(" → ")}`}: implementation lives on GitHub`,
@@ -1689,7 +1694,7 @@ export default smithers((ctx) => {
 											cars,
 										};
 									}
-									const prNumber = input.existingPr as number;
+									const prNumber = existingPr as number;
 									if (dryRun) {
 										return {
 											prNumber,

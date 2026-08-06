@@ -1104,6 +1104,7 @@ describe("stack graph traversal (bypassApprovals, dry-run only)", () => {
 		...baseInput,
 		branch: "fm/lin-123-child",
 		bypassApprovals: true,
+		existingPr: null,
 		stack: {
 			specs: [
 				{ branch: "fm/lin-123-parent" },
@@ -1153,6 +1154,21 @@ describe("stack graph traversal (bypassApprovals, dry-run only)", () => {
 		]);
 		expect(sim.executed).toContain("stack-sync-prune");
 		expect((sim.outputs.doneRecord as Array<{ prNumbers?: number[] }>)[0]?.prNumbers).toEqual([4242, 4243]);
+	});
+
+	test("persisted null existingPr does not collide with ordered stack adoption", async () => {
+		const { sim, error } = await run({
+			...stackInput,
+			stack: { existingPrNumbers: [7001, 7002] },
+		});
+		expect(error).toBeUndefined();
+		expect(sim.status).toBe("finished");
+		const pushed = (sim.outputs.prRecord as Array<{
+			cars?: Array<{ prNumber: number }>;
+		}>)[0];
+		expect(pushed.cars?.map((car) => car.prNumber)).toEqual([7001, 7002]);
+		expect(sim.executed).toContain("adopt-base");
+		expect(sim.executed).toContain("stack-sync-prune");
 	});
 
 	test("one moved car invalidates the stack at the merge boundary before any enqueue", async () => {
