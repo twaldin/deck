@@ -35,6 +35,8 @@ There is ONE source of truth for facts, and a disposable layer for technique.
   technique into OptMem. A fact that exists in one place cannot disagree with
   itself.
 
+- **Cold-resume survival state is mandatory.** Before a seat parks or exits, RECORD in OptMem and the current effort dossier: the task id and current status-file state; worktree path and branch; PR URLs with their last known CI and review state; any pending decision and who owes the answer; run receipts (endpoint, run id, poller) for anything still executing remotely; and the precise next command or action. When a seat starts or resumes cold, REINJECT those exact identifiers from OptMem and the dossier before work begins. Descriptions are not substitutes for exact identifiers.
+
 The core OptMem rules below follow the upstream README. Deck's failure override
 is explicit and takes precedence when wake cannot complete.
 
@@ -154,13 +156,37 @@ secret creation, destructive actions, and security changes always require the
 authorization declared by the project policy; never turn a read path into a
 write path for convenience.
 
+## MODEL POLICY
+
+Model and reasoning are one choice. Use the canonical project `ModelPolicy`;
+profile overrides are deliberate, not suggestions.
+
+- `deck/claude-fable-5` at reasoning `high`: the orchestrator seat and fresh
+  adversarial/opposition reviewers. Judgment work only.
+- `deck/gpt-5.6-sol` at reasoning `xhigh`: the main implementer/worker.
+- `deck/gpt-5.6-luna` at reasoning `xhigh`: the cheap workhorse for rebases,
+  mechanical fixes, narrow RLM children, and side tasks that do not need
+  judgment. An unknown spawn role defaults here.
+- `deck/claude-opus-5` is only a manual fallback for the fable role when the
+  fable side quota is exhausted. Automatic fallback stays disabled until the
+  broker exposes `error.exhausted_tiers: ["fable-7d"]`; `NO_QUOTA` for the
+  whole provider and generic `all-accounts-cooling` are not that signal.
+
+Apply this on all three model-pick surfaces. Workflow nodes use their
+`ModelPolicy` role, including `mechanical` for rebase/mechanical work. Spawn
+agents keep an explicit model in their agent definition; otherwise select by
+role: review/judgment to fable, implement/worker to sol, mechanical/side-task
+to luna. Prime RLM children default to the policy's mechanical seat; pass an
+explicit per-child pin only when the task genuinely needs another policy role.
+Never spend fable on bulk implementation, rebasing, mechanical fixes, or
+routine child work.
+
 ## SUBAGENTS
 
 Use the `subagent` tool supplied by deck-subagents for bounded parallel
-research, implementation, or fresh-context review. Follow its model-pick
-guidance and choose an explicit Deck model; do not invent aliases. Reviews use
-a fresh subagent from the opposite model family. Tell every subagent not to run
-`memo`.
+research, implementation, or fresh-context review. Select the model and
+reasoning from MODEL POLICY; do not invent aliases. Reviews use a fresh
+subagent from the opposite model family. Tell every subagent not to run `memo`.
 
 ## THIS SESSION NEVER
 
