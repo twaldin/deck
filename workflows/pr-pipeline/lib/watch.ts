@@ -475,6 +475,7 @@ export function reviewersNeedingReRequest(
 	requestedReviewers: string[],
 	lastPushAt: string,
 	selfLogins: string[] = [],
+	currentHead?: string,
 ): string[] {
 	const requested = new Set(requestedReviewers.map((login) => login.toLowerCase()));
 	const self = new Set(selfLogins.map((login) => login.toLowerCase()));
@@ -484,6 +485,16 @@ export function reviewersNeedingReRequest(
 		if (reviewer.isBot || self.has(login)) continue;
 		if (reviewer.lastReviewState === "CHANGES_REQUESTED") {
 			if (reviewer.lastActivityAt < lastPushAt || !requested.has(login)) out.push(reviewer.login);
+			continue;
+		}
+		const staleApproval = reviewer.lastReviewState === "APPROVED"
+			&& (
+				reviewer.headSha !== undefined && currentHead !== undefined
+					? reviewer.headSha !== currentHead
+					: reviewer.lastActivityAt < lastPushAt
+			);
+		if (staleApproval) {
+			if (!requested.has(login)) out.push(reviewer.login);
 			continue;
 		}
 		if (reviewer.lastReviewState !== null || requested.has(login)) continue;
@@ -801,6 +812,7 @@ export function evaluateWatchExit(snapshot: WatchSnapshot, options: WatchExitOpt
 		snapshot.requestedReviewers,
 		snapshot.lastPushAt,
 		options.selfLogins,
+		snapshot.headSha,
 	);
 	const changesRequested = snapshot.reviewers
 		.filter((reviewer) =>
