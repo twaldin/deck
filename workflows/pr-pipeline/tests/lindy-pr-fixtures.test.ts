@@ -111,6 +111,18 @@ describe("sanitized captain corpus", () => {
 		expect(() => assertPublicStructuralFixture(privateStatus)).toThrow("unsafe structural string");
 	});
 
+	test("structural validation rejects unknown keys even when values look synthetic", () => {
+		const fixture = structuredClone(fixtures[0]!) as StructuralFixture & {
+			private?: { id: string };
+			pullRequest?: number;
+		};
+		fixture.private = { id: "case-eng-123" };
+		expect(() => assertPublicStructuralFixture(fixture)).toThrow("unsafe structural key");
+		delete fixture.private;
+		fixture.pullRequest = 1234;
+		expect(() => assertPublicStructuralFixture(fixture)).toThrow("unsafe structural key");
+	});
+
 	test("contains no raw Lindy identifiers, prose, URLs, SHAs, branches, or timestamps", () => {
 		const forbiddenKey = /^(?:body|url|title|login|repository|prNumber|headSha|baseRefName|lastPushAt|workflowName|name)$/i;
 		const forbiddenValue = /https?:|github|lindy|twaldin|\b[0-9a-f]{40}\b|\bLIN-\d+\b|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/i;

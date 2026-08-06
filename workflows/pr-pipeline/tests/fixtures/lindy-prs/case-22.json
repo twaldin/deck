@@ -12,13 +12,13 @@
     "mergeStateStatus": "CLEAN",
     "transientMergeableObservation": "UNKNOWN",
     "reviewDecision": "APPROVED",
-    "behindBy": 284,
+    "behindBy": 285,
     "requiredChecks": {
       "configured": 2,
       "observed": 2
     }
   },
-  "headAgeSeconds": 466420,
+  "headAgeSeconds": 467182,
   "actors": [
     {
       "id": "self",
