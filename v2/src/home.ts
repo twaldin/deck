@@ -162,7 +162,7 @@ export function assertHomeIsNotACheckout(home = deckV2Home()): void {
  * Canonical path for a location that may not exist yet: realpath the deepest
  * existing ancestor, then re-append the missing segments.
  */
-function realpathOrNearest(target: string): string {
+export function realpathOrNearest(target: string): string {
 	const missing: string[] = [];
 	let dir = target;
 	for (;;) {

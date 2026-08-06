@@ -54,11 +54,13 @@ if [ -n "$HOME_PROFILE" ] && command -v gh >/dev/null && gh auth status >/dev/nu
       exit 1
     fi
     mkdir -p "$HOME_REPO"
-    # Preserve live state, data, contract, and local secrets. Copy only profile files.
+    # Preserve host-local authority and runtime state. Copy only portable profile files.
     for item in "$TEMP_HOME/repo"/* "$TEMP_HOME/repo"/.[!.]*; do
       [ -e "$item" ] || continue
       name="$(basename "$item")"
-      case "$name" in .git|.prime|.env|.deck-profile|AGENTS.md|data|state|wt|logs|run|questions|broker) continue ;; esac
+      case "$name" in
+        .git|.pi|.prime|.env|.deck-profile|AGENTS.md|archive|backups|broker|config|data|efforts|intake|logs|questions|repos|run|state|wt|worktrees.json) continue ;;
+      esac
       cp -a "$item" "$HOME_REPO/"
     done
   else

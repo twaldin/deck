@@ -1,7 +1,8 @@
 /**
- * Deck runtime layout (SPEC §0): code in ~/dev/deck, state in ~/.deck (0700).
+ * Deck runtime layout (SPEC §0): code in ~/dev/deck, visible paths in ~/.deck
+ * (0700), host-local authority behind installer-owned ~/.deck-durable links.
  * The broker owns broker/store.db (0600, sole reader — SPEC §6.4) and
- * broker/usage.json; its control socket lives at run/broker.sock.
+ * broker/usage.json; its ephemeral control socket lives at run/broker.sock.
  */
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -20,6 +21,7 @@ export const BROKER_SOCK = path.join(RUN_DIR, "broker.sock");
 export const DEFAULT_GATEWAY_BIND = process.env.DECK_BROKER_BIND ?? "127.0.0.1:8377";
 
 export function ensureDirs(): void {
+	process.umask(0o077);
 	for (const dir of [DECK_HOME, BROKER_DIR, RUN_DIR]) {
 		fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
 		fs.chmodSync(dir, 0o700); // mkdirSync mode is masked by umask; enforce
@@ -30,6 +32,7 @@ export function ensureDirs(): void {
 export function ensureToken(file: string): string {
 	try {
 		const existing = fs.readFileSync(file, "utf8").trim();
+		fs.chmodSync(file, 0o600);
 		if (existing.length > 0) return existing;
 	} catch {
 		// missing — mint below

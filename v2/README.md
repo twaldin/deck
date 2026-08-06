@@ -44,15 +44,18 @@ Run the repository-root `install.sh` for first-time setup and root `update.sh`
 for an existing installation. The internal `v2/install.sh` is called by both;
 it is not a competing onboarding command.
 
-The installed layout is:
+The installed layout keeps disposable runtime wiring in `~/.deck` and
+host-local authority in a sibling root:
 
 ```text
 ~/.deck/AGENTS.md
+~/.deck/{data,state,questions,config,broker,wt,intake} -> ~/.deck-durable/{...}
+~/.deck/worktrees.json -> ~/.deck-durable/worktrees.json
 ~/.deck/.prime/agent/extensions/{deck-questions,deck-ship,deck-recall,deck-usage}/index.ts
 ~/.deck/.prime/agent/extensions/deck-provider.ts
 ~/.deck/.prime/runtime/
 ~/.deck/.prime/sessions/
-~/.deck/state/smithers/
+~/.deck-durable/state/smithers/
 ~/.local/bin/{prime-agent,prime-conversation,deck,deck-v2,smithers}
 ```
 
@@ -60,9 +63,11 @@ The root installer mirrors `../extensions-prime/` plus their `v2/src` support
 tree into the fail-closed Prime profile. `v2/install.sh` itself installs only
 the Deck CLI and isolated Smithers workspace.
 
-`~/.deck` is deliberately a plain runtime directory, never a checkout. A
-checkout would bring its own repository instructions and would allow rebases or
-branch changes to move live state.
+`~/.deck` is deliberately a plain, wipeable runtime directory, never a
+checkout. Bootstrap adopts pre-existing durable entries into
+`~/.deck-durable` and owns the compatibility symlinks. Renaming `~/.deck` and
+re-running the installer therefore reconstructs the profile without discarding
+dossiers, workflow state, questions, broker credentials, or worktrees.
 
 ## Prime credentials and broker-backed seats
 

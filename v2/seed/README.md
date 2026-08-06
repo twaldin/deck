@@ -10,6 +10,7 @@ contributor guide is the root `AGENTS.md`.
 ## Move to a new machine
 
 Clone Deck and run the repository-root `install.sh`; bootstrap installs OptMem
-and creates a new plain runtime home. Then transfer only reviewed private
-configuration and dossiers. Never transfer credentials, Smithers runtime state,
-or a git checkout of `~/.deck`.
+and creates a new plain runtime home plus a new host-local durable root.
+Configure that host deliberately. Never transfer `~/.deck`,
+`~/.deck-durable`, credentials, dossiers, project policy, Smithers state, or
+worktrees from another machine.
