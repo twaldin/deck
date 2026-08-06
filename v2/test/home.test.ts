@@ -137,14 +137,22 @@ describe("bootstrap", () => {
 		expect(second.linked).toHaveLength(0);
 	});
 
-	test("does not clobber a real AGENTS.md the operator wrote", async () => {
+	test("backs up local AGENTS.md drift before restoring the managed seed", async () => {
 		const home = path.join(sandbox, "home");
+		const contract = path.join(home, "AGENTS.md");
 		fs.mkdirSync(home, { recursive: true });
-		fs.writeFileSync(path.join(home, "AGENTS.md"), "# mine\n");
+		fs.writeFileSync(contract, "# mine\n");
 		const { bootstrapHome } = await import("../src/bootstrap");
 		const result = bootstrapHome({ repoV2Dir: REPO_V2, home, optMem: false });
-		expect(fs.readFileSync(path.join(home, "AGENTS.md"), "utf8")).toBe("# mine\n");
-		expect(result.notes.join(" ")).toContain("yours to edit");
+		expect(fs.readFileSync(contract, "utf8")).toBe(fs.readFileSync(path.join(REPO_V2, "seed", "AGENTS.md"), "utf8"));
+		expect(fs.statSync(contract).mode & 0o777).toBe(0o644);
+		const backupRoots = fs.readdirSync(path.join(home, "backups"));
+		expect(backupRoots).toHaveLength(1);
+		const backup = path.join(home, "backups", backupRoots[0]!, "AGENTS.md");
+		expect(fs.readFileSync(backup, "utf8")).toBe("# mine\n");
+		expect(fs.statSync(backup).mode & 0o777).toBe(0o600);
+		expect(result.notes).toContain(`backed up local AGENTS.md to ${backup}`);
+		expect(result.notes).toContain(`updated installer-managed home contract ${contract}`);
 	});
 
 	test("does not recreate the retired markdown memory stores", async () => {

@@ -1,10 +1,9 @@
 /**
  * Create or converge the Deck Prime conversation home.
  *
- * The home is a private runtime directory, never a checkout. Bootstrap installs
- * OptMem when it is absent, copies the public home contract once, and creates
- * the runtime directories used by the factory. Existing operator-owned files
- * are never overwritten.
+ * Bootstrap installs OptMem when it is absent, converges the
+ * installer-managed public home contract (backing up any local drift), and
+ * creates the runtime directories used by the factory.
  */
 import * as fs from "node:fs";
 import { execFileSync } from "node:child_process";
@@ -95,19 +94,50 @@ export function bootstrapHome(options: BootstrapOptions = { repoV2Dir: "" }): Bo
 		}
 	}
 
-	// Copy once. The home owner may refine their local contract; bootstrap never
-	// turns those edits into a repository diff or overwrites them on an update.
+	// AGENTS.md is Deck's public runtime contract, not operator configuration.
+	// Keep one authority: every bootstrap converges it to the repository seed.
+	// Local drift is preserved under backups/ before the atomic replacement.
 	if (options.repoV2Dir.length > 0) {
 		const source = path.join(options.repoV2Dir, "seed", "AGENTS.md");
 		const target = path.join(home, "AGENTS.md");
 		if (!fs.existsSync(source)) {
 			notes.push(`no home contract seed at ${source}`);
-		} else if (fs.existsSync(target)) {
-			notes.push(`${target} already exists; left alone (it is yours to edit)`);
 		} else {
-			fs.copyFileSync(source, target);
-			fs.chmodSync(target, 0o600);
-			created.push(target);
+			const sourceBody = fs.readFileSync(source);
+			let targetStat: fs.Stats | undefined;
+			try {
+				targetStat = fs.lstatSync(target);
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+			}
+			if (targetStat !== undefined && !targetStat.isFile() && !targetStat.isSymbolicLink()) {
+				throw new Error(`installer-managed home contract is not a file or symlink: ${target}`);
+			}
+			const alreadyCurrent =
+				targetStat?.isFile() === true && fs.readFileSync(target).equals(sourceBody);
+			if (alreadyCurrent) {
+				fs.chmodSync(target, 0o644);
+			} else {
+				if (targetStat !== undefined) {
+					const backupRoot = path.join(home, "backups");
+					fs.mkdirSync(backupRoot, { recursive: true, mode: 0o700 });
+					const backupDir = fs.mkdtempSync(path.join(backupRoot, "AGENTS.md.pre-install-"));
+					const backup = path.join(backupDir, "AGENTS.md");
+					fs.copyFileSync(target, backup, fs.constants.COPYFILE_EXCL);
+					fs.chmodSync(backup, 0o600);
+					notes.push(`backed up local AGENTS.md to ${backup}`);
+				}
+				const stageDir = fs.mkdtempSync(path.join(home, ".deck-agents-"));
+				const staged = path.join(stageDir, "AGENTS.md");
+				try {
+					fs.writeFileSync(staged, sourceBody, { mode: 0o644, flag: "wx" });
+					fs.renameSync(staged, target);
+				} finally {
+					fs.rmSync(stageDir, { recursive: true, force: true });
+				}
+				if (targetStat === undefined) created.push(target);
+				else notes.push(`updated installer-managed home contract ${target}`);
+			}
 		}
 	}
 

@@ -33,6 +33,17 @@ jobs:
           DECK_VERIFY_REF: HEAD
         run: ./ops/verify-clean-install.sh
 
+  upgrade-install:
+    name: existing home upgrade
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Converge a previous-generation home in one run
+        env:
+          DECK_VERIFY_REF: HEAD
+        run: ./ops/verify-upgrade-install.sh
+
   v2-tests:
     name: v2 tests
     runs-on: ubuntu-latest
