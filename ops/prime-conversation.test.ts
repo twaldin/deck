@@ -423,7 +423,7 @@ describe("Prime conversation installer", () => {
 		const refused = combinedOutput("bash", [INSTALLER, "--apply"], installEnv);
 		expect(refused.status).toBe(1);
 		expect(refused.output).toContain("existing shared Prime daemon predates this environment boundary");
-		expect(refused.output).toContain("shutdown --force");
+		expect(refused.output).toContain("root installer drains idle seats and restarts the daemon safely");
 
 		const stopped = combinedOutput(
 			primeBinary,
@@ -476,6 +476,86 @@ describe("Prime conversation installer", () => {
 			expect(fs.existsSync(path.join(recoveryDeckHome, ".prime", "agent", "deck-prime-conversation.json"))).toBe(true);
 		} finally {
 			fs.rmSync(recoveryRoot, { recursive: true, force: true });
+		}
+	});
+
+	test("reconciles stale Deck-managed checkout symlinks without removing foreign paths", () => {
+		const extensions = path.join(agentDir, "extensions");
+		const legacyRoot = fs.mkdtempSync(path.join(os.tmpdir(), "deck-legacy-checkout-"));
+		const manifestPath = path.join(agentDir, "deck-prime-conversation.json");
+		const legacyManifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+		const retiredExtensionRoot = `extensions-${String.fromCharCode(112, 105)}`;
+		const staleExtension = path.join(legacyRoot, retiredExtensionRoot, "deck-questions.ts");
+		const extensionLink = path.join(extensions, "deck-questions", "index.ts");
+		const v2Root = path.join(extensions, "v2");
+		const v2Marker = path.join(v2Root, ".deck-v2-lib");
+		const v2Module = fs.readdirSync(path.join(import.meta.dir, "..", "v2", "src"))
+			.find((name) => name.endsWith(".ts") && name !== "index.ts");
+		expect(v2Module).toBeDefined();
+		const v2Link = path.join(v2Root, "src", v2Module!);
+		const staleV2Module = path.join(legacyRoot, "v2", "src", v2Module!);
+			fs.chmodSync(manifestPath, 0o600);
+			fs.writeFileSync(manifestPath, `${JSON.stringify({ ...legacyManifest, deckRepo: legacyRoot }, null, 2)}\n`);
+			fs.chmodSync(manifestPath, 0o444);
+		try {
+			fs.mkdirSync(path.dirname(staleExtension), { recursive: true });
+			fs.writeFileSync(staleExtension, "export default function legacy() {}\n");
+			fs.mkdirSync(path.dirname(staleV2Module), { recursive: true });
+			fs.writeFileSync(staleV2Module, "export const legacy = true;\n");
+			fs.rmSync(extensionLink);
+			fs.symlinkSync(staleExtension, extensionLink);
+			fs.rmSync(v2Link);
+			fs.symlinkSync(staleV2Module, v2Link);
+			fs.writeFileSync(v2Marker, path.join(legacyRoot, "v2"));
+
+			const result = combinedOutput("bash", [INSTALLER, "--apply"], installEnv);
+			expect(result.status).toBe(0);
+			expect(result.output).toContain("reconciling Deck-managed symlink");
+			expect(result.output).toContain("reconciling Deck-managed v2 support root");
+			expect(fs.readlinkSync(extensionLink)).toBe(
+				path.join(import.meta.dir, "..", "extensions-prime", "deck-questions.ts"),
+			);
+			expect(fs.readlinkSync(v2Link)).toBe(path.join(import.meta.dir, "..", "v2", "src", v2Module!));
+			expect(fs.readFileSync(v2Marker, "utf8").trim()).toBe(path.join(import.meta.dir, "..", "v2"));
+		} finally {
+			fs.chmodSync(manifestPath, 0o600);
+			fs.writeFileSync(manifestPath, `${JSON.stringify(legacyManifest, null, 2)}\n`);
+			fs.chmodSync(manifestPath, 0o444);
+			fs.rmSync(legacyRoot, { recursive: true, force: true });
+		}
+	});
+
+	test("preserves a foreign symlink placed at a Deck-managed destination", () => {
+		const extensionLink = path.join(agentDir, "extensions", "deck-questions", "index.ts");
+		const expected = fs.readlinkSync(extensionLink);
+		const foreignRoot = fs.mkdtempSync(path.join(os.tmpdir(), "deck-operator-extension-"));
+		const foreign = path.join(foreignRoot, "operator-extension.ts");
+		fs.writeFileSync(foreign, "export default function operatorExtension() {}\n");
+		fs.rmSync(extensionLink);
+		fs.symlinkSync(foreign, extensionLink);
+		try {
+			const result = combinedOutput("bash", [INSTALLER, "--apply"], installEnv);
+			expect(result.status).toBe(1);
+			expect(result.output).toContain(`preserving unowned symlink ${extensionLink} -> ${foreign}`);
+			expect(fs.readlinkSync(extensionLink)).toBe(foreign);
+			expect(fs.readFileSync(foreign, "utf8")).toContain("operatorExtension");
+		} finally {
+			fs.rmSync(extensionLink, { force: true });
+			fs.symlinkSync(expected, extensionLink);
+			fs.rmSync(foreignRoot, { recursive: true, force: true });
+		}
+	});
+
+	test("reports and preserves user-added auto-discovery entries", () => {
+		const foreign = path.join(agentDir, "extensions", "operator-extension.ts");
+		fs.writeFileSync(foreign, "export default function operatorExtension() {}\n");
+		try {
+			const result = combinedOutput("bash", [INSTALLER, "--apply"], installEnv);
+			expect(result.status).toBe(1);
+			expect(result.output).toContain(`unapproved conversation-profile extension is present: ${foreign}`);
+			expect(fs.readFileSync(foreign, "utf8")).toContain("operatorExtension");
+		} finally {
+			fs.rmSync(foreign, { force: true });
 		}
 	});
 

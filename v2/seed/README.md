@@ -1,8 +1,11 @@
 # Seed files
 
-`AGENTS.md` becomes `~/.deck/AGENTS.md` during bootstrap. It is the public,
-generic contract for Prime conversations; private names and routing stay under
-`~/.deck/config/`. The repository contributor guide is the root `AGENTS.md`.
+`AGENTS.md` becomes the installer-managed `~/.deck/AGENTS.md` during bootstrap.
+Install and update converge it to this public, generic Prime conversation
+contract. If an older home has local edits, bootstrap preserves them under
+`~/.deck/backups/` before replacing the contract. Operator-owned names,
+preferences, and routing stay under `~/.deck/config/`; the repository
+contributor guide is the root `AGENTS.md`.
 
 ## Move to a new machine
 

@@ -155,15 +155,26 @@ if [[ ! -d "$ZOD_SOURCE" ]]; then
   exit 1
 fi
 managed=false
+managed_deck_repo=""
 if [[ -f "$MANIFEST_FILE" ]]; then
-  manifest_owner="$(node -e '
+  if ! managed_deck_repo="$(node -e '
 const fs = require("node:fs");
+const path = require("node:path");
 try {
   const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-  if (value && value.profile === process.argv[2]) process.stdout.write("owned");
+  if (
+    value &&
+    value.profile === process.argv[2] &&
+    typeof value.deckRepo === "string" &&
+    path.isAbsolute(value.deckRepo) &&
+    !/[\r\n]/.test(value.deckRepo)
+  ) {
+    process.stdout.write(value.deckRepo);
+    process.exit(0);
+  }
 } catch {}
-' "$MANIFEST_FILE" "$PROFILE_ID")"
-  if [[ "$manifest_owner" != owned ]]; then
+process.exit(1);
+' "$MANIFEST_FILE" "$PROFILE_ID")"; then
     printf 'error: %s is not a valid %s ownership manifest\n' "$MANIFEST_FILE" "$PROFILE_ID" >&2
     exit 1
   fi
@@ -179,8 +190,10 @@ if [[ "$managed" != true ]]; then
 fi
 
 if [[ ! -f "$DECK_HOME/AGENTS.md" ]] || ! cmp -s "$SEED_SOURCE" "$DECK_HOME/AGENTS.md"; then
-  printf 'error: %s must exactly match the Deck v4 seed %s\n' \
+  printf 'error: installer-managed %s must exactly match the Deck v4 seed %s\n' \
     "$DECK_HOME/AGENTS.md" "$SEED_SOURCE" >&2
+  printf 'Run %q to back up local drift and restore the managed contract.\n' \
+    "$REPO_ROOT/install.sh" >&2
   exit 1
 fi
 
@@ -224,8 +237,8 @@ socket.once("error", () => {
 NODE
 then
   printf 'error: the existing shared Prime daemon predates this environment boundary\n' >&2
-  printf 'stop active Prime seats, run: %q shutdown --force\n' "$PRIME_BIN" >&2
-  printf 'then re-run this installer with --apply\n' >&2
+  printf 'Run %q; the root installer drains idle seats and restarts the daemon safely.\n' \
+    "$REPO_ROOT/install.sh" >&2
   exit 1
 fi
 
@@ -255,19 +268,45 @@ umask 077
 mkdir -p "$AGENT_DIR" "$EXTENSIONS_DIR" "$HARNESS_DIR" "$PROFILE_ROOT/bin" "$RUN_DIR" "$SESSIONS_DIR"
 chmod 700 "$PROFILE_ROOT" "$AGENT_DIR" "$HARNESS_DIR" "$PROFILE_ROOT/bin" "$RUN_DIR" "$SESSIONS_DIR"
 
+deck_repo_owns_target() {
+  local target="$1"
+  local relative_to="$2"
+  [[ "$managed" == true ]] || return 1
+  node - "$managed_deck_repo" "$relative_to" "$target" <<'NODE'
+const path = require("node:path");
+const [repo, relativeTo, target] = process.argv.slice(2);
+const relative = path.relative(path.resolve(repo), path.resolve(relativeTo, target));
+if (
+  relative.length > 0 &&
+  relative !== ".." &&
+  !relative.startsWith(`..${path.sep}`) &&
+  !path.isAbsolute(relative)
+) process.exit(0);
+process.exit(1);
+NODE
+}
+
 
 ensure_symlink() {
   local source="$1"
   local destination="$2"
+  local previous
   if [[ -L "$destination" ]]; then
-    if [[ "$(readlink "$destination")" != "$source" ]]; then
-      printf 'error: %s is a symlink not owned by this Deck checkout\n' "$destination" >&2
-      exit 1
+    previous="$(readlink "$destination")"
+    if [[ "$previous" != "$source" ]]; then
+      if ! deck_repo_owns_target "$previous" "$(dirname "$destination")"; then
+        printf 'error: preserving unowned symlink %s -> %s (expected %s)\n' \
+          "$destination" "$previous" "$source" >&2
+        exit 1
+      fi
+      printf 'reconciling Deck-managed symlink %s: %s -> %s\n' \
+        "$destination" "$previous" "$source"
+      ln -sfn "$source" "$destination"
     fi
     return
   fi
   if [[ -e "$destination" ]]; then
-    printf 'error: refusing to replace non-symlink path %s\n' "$destination" >&2
+    printf 'error: preserving non-symlink path at Deck-managed destination %s\n' "$destination" >&2
     exit 1
   fi
   mkdir -p "$(dirname "$destination")"
@@ -285,10 +324,20 @@ if [[ -e "$LIB_ROOT" || -L "$LIB_ROOT" ]]; then
     exit 1
   fi
   owner=""
+  if [[ -L "$LIB_MARKER" ]]; then
+    printf 'error: preserving symlinked Deck support ownership marker %s\n' "$LIB_MARKER" >&2
+    exit 1
+  fi
   if [[ -f "$LIB_MARKER" ]]; then IFS= read -r owner < "$LIB_MARKER" || true; fi
   if [[ "$owner" != "$REPO_V2" ]]; then
-    printf 'error: %s exists without Deck ownership for %s\n' "$LIB_ROOT" "$REPO_V2" >&2
-    exit 1
+    if ! deck_repo_owns_target "$owner" "$LIB_ROOT"; then
+      printf 'error: preserving unowned Deck support root %s (marker: %s)\n' \
+        "$LIB_ROOT" "${owner:-<missing marker>}" >&2
+      exit 1
+    fi
+    printf 'reconciling Deck-managed v2 support root %s: %s -> %s\n' \
+      "$LIB_ROOT" "$owner" "$REPO_V2"
+    printf '%s\n' "$REPO_V2" > "$LIB_MARKER"
   fi
 else
   mkdir -p "$LIB_ROOT"

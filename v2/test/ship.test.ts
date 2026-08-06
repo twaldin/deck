@@ -585,3 +585,14 @@ describe("spawn enforcement: pipeline is the default ship path", () => {
 		).not.toThrow();
 	});
 });
+
+describe("ship never advertises a direct approval bypass", () => {
+	test("the ship hint points at the Gateway, not `smithers approve`", () => {
+		// Approvals are commit-bound decisions recorded through the Gateway approval
+		// panel. Printing a ready-to-paste `smithers approve --by <name>` taught the
+		// bypass and hardcoded an identity, which also broke de-personalization.
+		const source = fs.readFileSync(path.join(import.meta.dir, "..", "src", "cli.ts"), "utf8");
+		expect(source).not.toContain("smithers approve");
+		expect(source).not.toContain("--by tim");
+	});
+});
