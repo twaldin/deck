@@ -5,7 +5,9 @@ import { join } from "node:path";
 import { renderWorkflow } from "smithers-orchestrator/testing";
 import { askIfAbsent, openQuestions } from "../../../v2/src/questions-store.ts";
 import { reviewCommand, shouldSubmitReview } from "../decision.ts";
-import workflow from "../pipeline.tsx";
+import workflow, { createReviewGateAgent } from "../pipeline.tsx";
+import { PrimeSeatAgent } from "../../pr-pipeline/lib/engines/prime.ts";
+import { DECK_PROVIDER } from "../../pr-pipeline/lib/models.ts";
 import {
   ensureReviewGatePoller,
   LIVE_SMITHERS_WORKSPACE,
@@ -174,7 +176,16 @@ test("polls the captain review-request queue programmatically", () => {
   expect(source).toContain("review-requested:${login}");
   expect(source).toContain("<Poller id={pollerId}");
   expect(source).toContain("const proc = Bun.spawn"); // polling is a programmatic GH call
+  for (const model of ["gpt-5.6-sol", "gpt-5.6-luna"]) {
+    const agent = createReviewGateAgent(model, "/tmp/review-gate", "review-gate-test");
+    expect(agent).toBeInstanceOf(PrimeSeatAgent);
+    expect(agent.cliEngine).toBe("prime");
+    expect(agent.opts.provider).toBe(DECK_PROVIDER);
+    expect(agent.opts.model).toBe(model);
+    expect(agent.opts.rlmChildModel).toBe("deck/gpt-5.6-luna");
+  }
 });
+
 
 test("renders one durable Poller with timer pacing and a bounded continuation recycle", async () => {
   const worktree = mkdtempSync(join(tmpdir(), "review-gate-render-"));
@@ -244,7 +255,7 @@ test("blockers dispatch a fix and rebase is an agent task", () => {
   expect(source).toContain("latest.blockers.length > 0");
   expect(source).toContain("gate-fix-");
   expect(source).toContain("Fix every finding from Sathira's Gate review");
-  expect(source).toContain("rebaseModel");
+  expect(source).toContain("rebase if needed");
   expect(source).toContain("Load the exact skills .agent/skills/sathiras-gate");
 });
 

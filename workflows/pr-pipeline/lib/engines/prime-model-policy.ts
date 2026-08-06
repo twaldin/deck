@@ -61,7 +61,7 @@ export function readPrimeRlmModelPolicy(
  * (defaulted or explicitly pinned) model.
  */
 export function registerPrimeRlmModelPolicy(
-	pi: PrimeExtensionApi,
+	agent: PrimeExtensionApi,
 	env: Record<string, string | undefined> = process.env,
 ): void {
 	const policy = readPrimeRlmModelPolicy(env);
@@ -78,7 +78,7 @@ export function registerPrimeRlmModelPolicy(
 		"    _deck_rlm_module.run = _deck_policy_rlm_run",
 	].join("\n");
 
-	pi.on("tool_call", (event) => {
+	agent.on("tool_call", (event) => {
 		if (event.toolName !== "ipython" || typeof event.input.code !== "string") return;
 		const code = event.input.code;
 		if (code.trimStart().startsWith("%%")) {
@@ -100,7 +100,7 @@ export function registerPrimeRlmModelPolicy(
 		}
 		event.input.code = `${prelude}\n${code}`;
 	});
-	pi.on("before_agent_start", (_event, context) => {
+	agent.on("before_agent_start", (_event, context) => {
 		const depth = context.sessionManager.getHeader()?.rlmDepth ?? 0;
 		if (depth <= 0) return;
 		const model = context.model;
@@ -110,10 +110,10 @@ export function registerPrimeRlmModelPolicy(
 		if (reasoning === undefined) {
 			throw new Error(`Prime RLM child model ${modelRef} has no deliberate reasoning level in ModelPolicy`);
 		}
-		pi.setThinkingLevel(reasoning);
+		agent.setThinkingLevel(reasoning);
 	});
 }
 
-export default function primeRlmModelPolicy(pi: PrimeExtensionApi): void {
-	registerPrimeRlmModelPolicy(pi);
+export default function primeRlmModelPolicy(agent: PrimeExtensionApi): void {
+	registerPrimeRlmModelPolicy(agent);
 }

@@ -1,13 +1,13 @@
 /** @jsxImportSource smithers-orchestrator */
 /** Operator review gate. Agents review and fix, but never approve or merge. */
 /** NEVER run any GitHub approve command. */
-import { Approval, Branch, ContinueAsNew, Loop, Parallel, PiAgent, Poller, Sequence, Task, Timer, Workflow, Worktree, createSmithers } from "smithers-orchestrator";
+import { Approval, Branch, ContinueAsNew, Loop, Parallel, Poller, Sequence, Task, Timer, Workflow, Worktree, createSmithers } from "smithers-orchestrator";
 import { z } from "zod";
 import { fileURLToPath } from "node:url";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { askIfAbsent, openQuestions, queueFile, readQuestionHistory, readQuestions } from "../../v2/src/questions-store.ts";
-import { defaultModelPolicy } from "../pr-pipeline/lib/models.ts";
-import { createHostPiAgent } from "../pr-pipeline/lib/host-pi.ts";
+import { DECK_PROVIDER, defaultModelPolicy, modelReasoningPolicy } from "../pr-pipeline/lib/models.ts";
+import { PrimeSeatAgent } from "../pr-pipeline/lib/engines/prime.ts";
 import { shouldSubmitReview, reviewCommand } from "./decision.ts";
 
 const inputSchema = z.object({
@@ -52,8 +52,17 @@ async function state(cli: string, repo: string, pr: number) {
   const ciGreen = checks.length === 0 || checkStates.every((state: string) => ["SUCCESS", "SKIPPED", "NEUTRAL"].includes(state));
   return { mergeable: v.mergeable === "MERGEABLE" && !["DIRTY", "BEHIND", "UNSTABLE"].includes(mergeStateStatus), ciGreen, ciPending, mergeStateStatus, headSha: String(v.headRefOid ?? ""), summary: `mergeable=${v.mergeable} mergeStateStatus=${mergeStateStatus} checks=${checks.length}` };
 }
-function agent(model: string, tools = true) {
-  return createHostPiAgent(PiAgent, { provider: "deck", model, timeoutMs: 30 * 60_000, thinking: "medium", noSession: true, ...(tools ? { tools: ["read", "grep", "edit", "write", "bash"] } : { noTools: true }) });
+export function createReviewGateAgent(model: string, cwd: string, effortLabel = "review-gate"): PrimeSeatAgent {
+  const policy = defaultModelPolicy();
+  return new PrimeSeatAgent({
+    provider: DECK_PROVIDER,
+    model,
+    cwd,
+    effortLabel,
+    timeoutMs: 30 * 60_000,
+    thinking: modelReasoningPolicy(policy)[`${DECK_PROVIDER}/${model}`] ?? "xhigh",
+    modelPolicy: policy,
+  });
 }
 function reviewComment(pr: Pr, blockers: string[]): string {
   return [`Review found ${blockers.length} blocker(s) on PR #${pr.number}.`, ...blockers.map((item, i) => `${i + 1}. ${item}`), "Fix each blocker, then push the branch.", "— automated review"].join("\n");
@@ -71,7 +80,7 @@ export default smithers((ctx) => {
   const queueQuestions = readQuestionHistory(queueFile());
   const saveJson = (file: string, value: unknown) => { const temp = `${file}.tmp`; writeFileSync(temp, JSON.stringify(value)); renameSync(temp, file); };
   const pollCount = Number(continuation.pollCount ?? 0); const cycle = Number(continuation.cycle ?? 0); const pollerId = `review-requested-${cycle}`; const pollCheckId = `${pollerId}-check`; const completedPolls = ctx.iterationCount(outputs.queue, pollCheckId); const discovered = dryRun && fixtures.requested !== false ? [{ number: fixtures.prNumber ?? 1, url: `https://github.com/${input.repo}/pull/${fixtures.prNumber ?? 1}`, title: fixtures.title ?? "fixture PR", headRefName: `fixture-${fixtures.prNumber ?? 1}`, headRefOid: "fixture-head" }] : [];
-  const latestPoll = ctx.latest(outputs.queue, pollCheckId); const prs = latestPoll?.prs ?? []; const reviewModel = agent("gpt-5.6-sol"); const fixModel = agent("gpt-5.6-luna"); const rebaseModel = agent("gpt-5.6-luna"); void rebaseModel; void defaultModelPolicy();
+  const latestPoll = ctx.latest(outputs.queue, pollCheckId); const prs = latestPoll?.prs ?? []; const reviewModel = createReviewGateAgent("gpt-5.6-sol", input.worktree, `${input.repo}-review-gate`); const fixModel = createReviewGateAgent("gpt-5.6-luna", input.worktree, `${input.repo}-review-gate`);
   // Fix every finding from Sathira's Gate review. The latest.blockers.length > 0 path reports and repairs each round.
   const alreadyQueuedForHead = (pr: Pr) => [...readQuestionHistory(queueFile()), ...readQuestions(queueFile())].some((question) => question.prContext?.prNumber === pr.number && question.prContext?.headSha === pr.headRefOid);
   const pathFor = (p: Pr) => `${input.worktree}/.review-gate-pr-${p.number}`;

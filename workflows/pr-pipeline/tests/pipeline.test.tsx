@@ -25,7 +25,7 @@ import { falloutPrompt, localFixPrompt, localReviewPrompt, reviewersDecisionProm
 import { resolveAdversary } from "../lib/models.ts";
 import { isSchemaEcho, schemaEchoCorrection } from "../lib/schema-echo.ts";
 import type { PipelineOutputFixtures } from "./output-fixtures.ts";
-import { resolveHostPiBinary } from "../lib/host-pi.ts";
+import { PrimeSeatAgent } from "../lib/engines/prime.ts";
 
 const validBrief = {
 	ticket: "LIN-123",
@@ -231,7 +231,7 @@ describe("workflow rendering contracts", () => {
 		expect(overridden.reasoningMechanical).toBe("xhigh");
 	});
 
-	test("profile reasoning reaches the rendered PiAgent seat", async () => {
+	test("profile reasoning reaches the rendered Prime seat", async () => {
 		const rendered = await renderWithProfile({ ...profileBase, models: { ...fullModels, reasoning: "max" } }, undefined, "example/test");
 		expect(rendered.model).toBe("claude-fable-5");
 		expect(rendered.thinking).toBe("max");
@@ -241,24 +241,23 @@ describe("workflow rendering contracts", () => {
 		expect(rendered.seats["implement"]?.model).toBe("claude-fable-5");
 	});
 
-	test("profile engine selects Prime while omitted profiles remain on pi", async () => {
-		const pi = await renderWithProfile({ ...profileBase, models: fullModels }, undefined, "example/test");
-		expect(pi.seats.implement?.engine).toBe("pi");
-		const prime = await renderWithProfile(
-			{ ...profileBase, engine: "prime", models: fullModels },
-			undefined,
-			"example/test",
-		);
-		expect(prime.seats.implement).toMatchObject({
-			engine: "prime",
-			model: "claude-fable-5",
-			thinking: "xhigh",
-		});
+	test("omitted and explicit profile engines both construct Prime seats", async () => {
+		for (const profile of [
+			{ ...profileBase, models: fullModels },
+			{ ...profileBase, engine: "prime" as const, models: fullModels },
+		]) {
+			const rendered = await renderWithProfile(profile, undefined, "example/test");
+			expect(rendered.seats.implement).toMatchObject({
+				engine: "prime",
+				model: "claude-fable-5",
+				thinking: "xhigh",
+			});
+		}
 	});
 
 	test("invalid Prime model policy renders the preflight refusal path without constructing a seat", async () => {
 		const invalid = await renderWithProfile(
-			{ ...profileBase, engine: "prime", models: { ...fullModels, implementer: "deck/not-a-model" } },
+			{ ...profileBase, models: { ...fullModels, implementer: "deck/not-a-model" } },
 			undefined,
 			"example/test",
 		);
@@ -294,14 +293,14 @@ describe("fallout prompt rendering contracts", () => {
 		expect(prompt).not.toContain("[object Object]");
 	});
 
-	test("renders every configured PiAgent seat with its profile reasoning", async () => {
+	test("renders every configured PrimeSeatAgent with its profile reasoning", async () => {
 		const rendered = await renderWorkflow(pipeline, {
 			input: {
 				...baseInput,
 				dryRun: false,
 				wakeDryRun: true,
 				profile: "test",
-				models: { implementer: "deck/claude-fable-5", watcher: "deck/gpt-5.6-luna", fallout: "deck/gpt-5.6-sol", familyOpposition: true, oppositionDefaults: { anthropic: "deck/gpt-5.6-luna" }, reasoning: "high", reasoningReviewer: "xhigh", reasoningWatcher: "low", reasoningFallout: "max" },
+				models: { implementer: "deck/gpt-5.6-sol", watcher: "deck/gpt-5.6-luna", fallout: "deck/gpt-5.6-sol", familyOpposition: true, oppositionDefaults: { openai: "deck/claude-fable-5" }, reasoning: "high", reasoningReviewer: "xhigh", reasoningWatcher: "low", reasoningFallout: "max" },
 			},
 			outputs: {
 				preflight: [{ nodeId: "preflight", ok: true, openQuestions: [], briefDigest: "", resolvedReviewerModel: "deck/claude-fable-5" }],
@@ -329,25 +328,20 @@ describe("fallout prompt rendering contracts", () => {
 		const agentsByNode = new Map(
 			rendered.tasks
 				.filter((task) => task.agent !== undefined)
-				.map((task) => [task.nodeId, task.agent as { opts?: { model?: string; thinking?: string } }]),
+				.map((task) => [task.nodeId, task.agent as PrimeSeatAgent]),
 		);
-		expect(agentsByNode.get("implement")?.opts).toMatchObject({ model: "claude-fable-5", thinking: "high" });
+		expect(agentsByNode.get("implement")?.opts).toMatchObject({ model: "gpt-5.6-sol", thinking: "high" });
 		expect(agentsByNode.get("local-review")?.opts).toMatchObject({ model: "claude-fable-5", thinking: "xhigh" });
 		expect(agentsByNode.get("r0-watch-fix")?.opts).toMatchObject({ model: "gpt-5.6-luna", thinking: "low" });
 		expect(agentsByNode.get("fallout-watch")?.opts).toMatchObject({ model: "gpt-5.6-sol", thinking: "max" });
 		expect(agentsByNode.size).toBeGreaterThanOrEqual(4);
-		// Seat-level reasoning threading is a pipeline concern: prove each seat carries
-		// --provider/--model/--thinking into the pi args. The wire mapping of reasoning_effort
-		// to each provider's native field is broker's own concern, proven in
-		// broker/test/validated-gateway.test.ts — do not import broker src here (CI has no broker deps).
-		const expectedThinking: Record<string, string> = { implement: "high", "local-review": "xhigh", "r0-watch-fix": "low", "fallout-watch": "max" };
-		for (const nodeId of ["implement", "local-review", "r0-watch-fix", "fallout-watch"]) {
-			const agent = agentsByNode.get(nodeId) as { opts: { provider: string; model: string; thinking: string }; buildArgs: (input: { prompt: string; cwd: string; mode: string }) => string[]; buildCommand: (input: { prompt: string; cwd: string }) => Promise<{ command: string }> };
-			const args = agent.buildArgs({ prompt: "broker-seat-probe", cwd: "/tmp/lindy-wt", mode: "text" });
-			expect(agent.opts.provider).toBe("deck");
-			expect(agent.opts.thinking).toBe(expectedThinking[nodeId]);
-			expect(args).toEqual(expect.arrayContaining(["--provider", "deck", "--model", agent.opts.model, "--thinking", agent.opts.thinking]));
-			expect(await agent.buildCommand({ prompt: "host-pi-probe", cwd: "/tmp/lindy-wt" })).toMatchObject({ command: resolveHostPiBinary() });
+		const expectedThinking = { implement: "high", "local-review": "xhigh", "r0-watch-fix": "low", "fallout-watch": "max" } as const;
+		for (const nodeId of ["implement", "local-review", "r0-watch-fix", "fallout-watch"] as const) {
+			const agent = agentsByNode.get(nodeId);
+			expect(agent?.constructor.name, nodeId).toBe(PrimeSeatAgent.name);
+			expect(agent?.cliEngine, nodeId).toBe("prime");
+			expect(agent?.opts.provider, nodeId).toBe("deck");
+			expect(agent?.opts.thinking, nodeId).toBe(expectedThinking[nodeId]);
 		}
 		expect(rendered.toXml()).toContain("RATE_LIMIT_ENABLED flag");
 		expect(rendered.toXml()).toContain('{\\"verdict\\":\\"clean|regression\\"');

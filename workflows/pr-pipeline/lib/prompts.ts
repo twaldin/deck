@@ -200,7 +200,7 @@ function resultContract(example: string): string[] {
 export function reviewersDecisionPrompt(denylist: string[]): string {
 	return [
 		"Choose GitHub reviewer logins for this pull request.",
-		"When given names instead of logins, use the gh-reviewer-lookup skill at ~/.pi/agent/skills/gh-reviewer-lookup.",
+		"When given names instead of logins, use the gh-reviewer-lookup skill in .agent/skills/gh-reviewer-lookup.",
 		"Never emit a denylisted login. The denylist is supplied by pipeline config.",
 		`Configured denylist: ${denylist.join(", ")}`,
 	].join("\n");

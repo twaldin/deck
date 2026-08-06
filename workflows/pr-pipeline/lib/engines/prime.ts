@@ -69,12 +69,9 @@ const SAFE_ENV_KEYS: Record<string, true> = {
 	GIT_AUTHOR_EMAIL: true,
 	GIT_COMMITTER_NAME: true,
 	GIT_COMMITTER_EMAIL: true,
-	DECK_PI_MAX_TOKENS: true,
+	DECK_PRIME_MAX_TOKENS: true,
 	DECK_GATEWAY_ORIGIN: true,
 	DECK_PRIME_DAEMON_SOCKET: true,
-	// Herdr pane identity is injected only after this adapter creates a seat.
-	HERDR_PI_IDLE_DEBOUNCE_MS: true,
-	HERDR_PI_RETRY_GRACE_MS: true,
 };
 const SHARED_DAEMON_INHERITED_ENV_KEYS = [
 	"PATH",
@@ -271,7 +268,7 @@ type ForcedFailure = {
 };
 
 function defaultProviderExtension(): string {
-	return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../../broker/pi/deck-provider.ts");
+	return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../../broker/prime/deck-provider.ts");
 }
 
 function defaultRlmPolicyExtension(): string {
@@ -1239,9 +1236,9 @@ export class PrimeSeatAgent implements AgentLike {
 		}, options.taskContext);
 		const extensions = this.opts.extensions ?? [defaultProviderExtension()];
 		const binary = this.binary;
-		// The shared Deck agent config includes conversation-only packages such as
-		// pi-processes. Durable seats reset discovery, then load only the reviewed
-		// adapter extensions below; their explicit tool allowlist remains ipython.
+		// The shared Deck agent config includes conversation-only packages.
+		// Durable seats reset discovery, then load only the reviewed adapter
+		// extensions below; their explicit tool allowlist remains ipython.
 		const args = [
 			"--mode", "rpc",
 			"--cwd", this.opts.cwd,

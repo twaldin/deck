@@ -217,7 +217,7 @@ describe("standing-rules seat injection", () => {
 			expect(rule).toMatch(/^- \[(?:CHAT SESSION|WORKFLOW SEAT)\]/);
 		}
 		expect(fallback).toContain(
-			"[CHAT SESSION] **Precedence:** the plain pi chat session discharges build,",
+			"[CHAT SESSION] **Precedence:** the Prime conversation discharges build,",
 		);
 		expect(fallback).toContain(
 			"[WORKFLOW SEAT] Execute the delivery middle: implement in a worktree,",

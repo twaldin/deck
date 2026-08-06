@@ -1,71 +1,49 @@
 /**
- * Engine invariant: each project profile selects an explicitly reviewed seat
- * engine. Pi and the pinned Prime adapter are allowed; raw vendor CLI agents
- * remain banned because they bypass the Deck broker and seat safety boundary.
+ * Fail-closed engine invariant for every Deck-authored workflow seat and profile.
  */
 
 import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { describe, expect, test } from "bun:test";
-import { PiAgent } from "smithers-orchestrator";
 
-import { agents, providers } from "../../.smithers/agents.ts";
+import { agents } from "../../.smithers/agents.ts";
 import { PrimeSeatAgent } from "../lib/engines/prime.ts";
-import { assertDeckModel, DECK_AGENT_CATALOG, DECK_PROVIDER } from "../lib/models.ts";
+import { assertDeckModel } from "../lib/models.ts";
 import { SEAT_ENGINES, validateProfiles } from "../lib/profiles.ts";
 
 const workflowsDir = join(import.meta.dir, "..", "..");
+const repoRoot = dirname(workflowsDir);
 const generatedSmithersAgentsDir = join(workflowsDir, ".smithers", "agents");
+const activeExtensions = /\.(?:[cm]?[jt]sx?|sh|md|json|ya?ml|toml)$/;
 
-/** Every .ts/.tsx source in the workspace except generated pack internals. */
-function sourceFiles(dir: string): string[] {
+function activeFiles(dir: string): string[] {
 	const out: string[] = [];
 	for (const entry of readdirSync(dir, { withFileTypes: true })) {
 		const full = join(dir, entry.name);
-		if (entry.name === "node_modules" || entry.name === "executions") continue;
-		// smithers init may recreate local per-engine templates here. They are
-		// external workspace state, not Deck-authored or shipped workflow source.
+		if ([".git", "archive", "claude-playground", "node_modules", "executions"].includes(entry.name)) continue;
 		if (full === generatedSmithersAgentsDir) continue;
-		if (entry.isDirectory()) out.push(...sourceFiles(full));
-		else if (/\.tsx?$/.test(entry.name)) out.push(full);
+		if (entry.isDirectory()) out.push(...activeFiles(full));
+		else if (activeExtensions.test(entry.name) && !entry.name.endsWith(".lock")) out.push(full);
 	}
 	return out;
 }
 
-describe("reviewed seat engine allowlist", () => {
-	test("pack seats use an allowlisted broker-routed engine", () => {
+describe("Prime-only seat engine invariant", () => {
+	test("every shared Smithers seat is a broker-routed PrimeSeatAgent", () => {
 		const seats = Object.entries(agents);
 		expect(seats.length).toBeGreaterThan(0);
 		for (const [seat, pool] of seats) {
 			expect(pool.length, `seat ${seat} has no agents`).toBeGreaterThan(0);
 			for (const agent of pool) {
-				expect("cliEngine" in agent, `seat ${seat} does not expose its engine`).toBe(true);
-				const cliEngine = "cliEngine" in agent ? String(agent.cliEngine) : "";
-				expect(SEAT_ENGINES, `seat ${seat}`).toContain(cliEngine);
-				if (cliEngine === "pi") {
-					const opts = (agent as PiAgent).opts;
-					expect(opts.provider, `seat ${seat}`).toBe(DECK_PROVIDER);
-					expect(DECK_AGENT_CATALOG, `seat ${seat}`).toContain(opts.model ?? "<unset>");
-					expect(opts.apiKey, `seat ${seat}`).toBeUndefined();
-				} else {
-					expect(agent.constructor.name, `seat ${seat}`).toBe(PrimeSeatAgent.name);
-					const opts = (agent as PrimeSeatAgent).opts;
-					assertDeckModel(`${opts.provider}/${opts.model}`);
-				}
+				expect(agent.constructor.name, `seat ${seat}`).toBe(PrimeSeatAgent.name);
+				expect(agent.cliEngine, `seat ${seat}`).toBe("prime");
+				assertDeckModel(`${agent.opts.provider}/${agent.opts.model}`);
 			}
 		}
 	});
 
-	test("every declared provider is a deck pi agent", () => {
-		for (const [name, agent] of Object.entries(providers)) {
-			expect(agent.constructor.name, name).toBe("PiAgent");
-			const piAgent = agent as PiAgent;
-			assertDeckModel(`${piAgent.opts.provider}/${piAgent.opts.model}`);
-		}
-	});
-
-	test("profiles default to pi and reject every engine outside pi or prime", () => {
+	test("profiles default to Prime and reject explicit retired or vendor engines", () => {
 		const base = {
 			id: "engine-test",
 			repo: "example/engine-test",
@@ -76,23 +54,28 @@ describe("reviewed seat engine allowlist", () => {
 			knowledge: [],
 			depsWarm: true,
 		};
-		expect(SEAT_ENGINES).toEqual(["pi", "prime"]);
-		expect(validateProfiles([base], "test")[0]?.engine).toBe("pi");
+		expect(SEAT_ENGINES).toEqual(["prime"]);
+		expect(validateProfiles([base], "test")[0]?.engine).toBe("prime");
 		expect(validateProfiles([{ ...base, engine: "prime" }], "test")[0]?.engine).toBe("prime");
-		expect(() => validateProfiles([{ ...base, engine: "codex" }], "test")).toThrow(
-			/engine must be one of pi \\| prime/,
-		);
-		expect(() => validateProfiles([{ ...base, engine: "claude-code" }], "test")).toThrow(
-			/engine must be one of pi \\| prime/,
-		);
+		for (const engine of ["pi", "codex", "claude-code"]) {
+			expect(() => validateProfiles([{ ...base, engine }], "test"), engine).toThrow();
+		}
+	});
+
+	test("active repository surfaces cannot reintroduce a retired engine path", () => {
+		const banned = /(?:\bPiAgent\b|createHostPiAgent|host-pi|extensions-pi|PI_CODING_AGENT_DIR|PI_CONFIG_DIR|\.deck\/\.pi|engine\s*[:=]\s*["']pi["'])/;
+		const offenders = activeFiles(repoRoot)
+			.filter((file) => file !== import.meta.path)
+			.filter((file) => banned.test(readFileSync(file, "utf8")));
+		expect(offenders.map((file) => file.slice(repoRoot.length + 1))).toEqual([]);
 	});
 
 	test("no workflow source constructs a direct vendor CLI engine agent", () => {
 		const banned = /\b(CodexAgent|ClaudeCodeAgent|OpenCodeAgent|AntigravityAgent)\b/;
-		const offenders = sourceFiles(workflowsDir)
+		const offenders = activeFiles(workflowsDir)
 			.filter((file) => file !== import.meta.path)
 			.filter((file) => banned.test(readFileSync(file, "utf8")));
-		expect(offenders.map((f) => f.slice(workflowsDir.length + 1))).toEqual([]);
+		expect(offenders.map((file) => file.slice(workflowsDir.length + 1))).toEqual([]);
 	});
 
 	test("assertDeckModel rejects non-deck providers and off-catalog models", () => {

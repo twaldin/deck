@@ -31,7 +31,6 @@ import {
 	Approval,
 	Loop,
 	Parallel,
-	PiAgent,
 	Sequence,
 	approvalDecisionSchema,
 	createSmithers,
@@ -91,7 +90,7 @@ import {
 	generatePullRequestDescription,
 	sanitizeDescriptionInput,
 } from "./lib/description.ts";
-import { buildSeatEnvironment, PrimeSeatAgent } from "./lib/engines/prime.ts";
+import { PrimeSeatAgent } from "./lib/engines/prime.ts";
 import {
 	DECK_PROVIDER,
 	defaultModelPolicy,
@@ -102,7 +101,7 @@ import {
 	validateModelPolicy,
 	type ModelPolicy,
 } from "./lib/models.ts";
-import { findProfile, type ModelSeat, type ProjectProfile, type SeatEngine } from "./lib/profiles.ts";
+import { findProfile, type ModelSeat, type ProjectProfile } from "./lib/profiles.ts";
 import {
 	assertProductWorkspace,
 	DEV_WORKSPACE_OVERRIDE,
@@ -138,7 +137,6 @@ import {
 	workflowQuestions,
 	type PrQuestionContext,
 } from "../../v2/src/questions-store.ts";
-import { createHostPiAgent } from "./lib/host-pi.ts";
 
 // ---------------------------------------------------------------------------
 // Defaults (normalized in code, not via zod .default(), to keep semantics
@@ -797,52 +795,27 @@ function seat(ref: ModelSeat): { ref: string; reasoning?: string } {
 }
 
 function makeAgent(
-	engine: SeatEngine,
 	ref: ModelSeat,
 	cwd: string,
 	timeoutMs: number,
 	effortLabel: string,
-	reasoning = "medium",
-	policy?: ModelPolicy,
+	reasoning: ModelPolicy["reasoning"],
+	policy: ModelPolicy,
 ): AgentLike {
 	const selected = seat(ref);
-	const { provider, model } = parseModelRef(selected.ref);
+	const { model } = parseModelRef(selected.ref);
 	const thinking = selected.reasoning ?? reasoning;
-	const rlmChild = policy === undefined
-		? undefined
-		: resolveSeat(policy.mechanical, policy.reasoningMechanical);
-	if (engine === "prime") {
-		return new PrimeSeatAgent({
-			provider: DECK_PROVIDER,
-			model,
-			cwd,
-			effortLabel,
-			timeoutMs,
-			thinking: thinking as never,
-			...(policy === undefined ? {} : { modelPolicy: policy }),
-			...(rlmChild === undefined ? {} : {
-				rlmChildModel: rlmChild.model,
-				rlmReasoningByModel: modelReasoningPolicy(policy!),
-			}),
-		});
-	}
-	// Pi still needs bash for tests and gh, but receives only the explicit
-	// non-credential seat environment. The deterministic publisher alone keeps
-	// push/merge/stamp credentials and authority.
-	//
-	// Preserve the provider-native selector. If an older Smithers type does not
-	// yet include `max`, the compatibility cast is local and does not rewrite the
-	// value sent to Pi. HostPiAgent also preserves all extension options while
-	// replacing Smithers' default `pi` command with the host-selected binary.
-	return createHostPiAgent(PiAgent, {
-		provider,
+	const rlmChild = resolveSeat(policy.mechanical, policy.reasoningMechanical);
+	return new PrimeSeatAgent({
+		provider: DECK_PROVIDER,
 		model,
 		cwd,
+		effortLabel,
 		timeoutMs,
-		thinking: thinking as never,
-		noSession: true,
-		inheritEnv: false,
-		env: buildSeatEnvironment(),
+		thinking: thinking as ModelPolicy["reasoning"],
+		modelPolicy: policy,
+		rlmChildModel: rlmChild.model,
+		rlmReasoningByModel: modelReasoningPolicy(policy),
 	});
 }
 
@@ -962,8 +935,6 @@ export default smithers((ctx) => {
 		);
 	}
 	const yolo = profile !== null && !profileRepoMismatch && profile.yolo;
-	const seatEngine: SeatEngine =
-		profile !== null && !profileRepoMismatch ? profile.engine ?? "pi" : "pi";
 	const watchSetPath =
 		input.watchSetPath ?? `${process.env.HOME ?? "~"}/dev/fm2/data/watch-set.jsonl`;
 
@@ -1181,13 +1152,13 @@ export default smithers((ctx) => {
 	const ticketLabel = input.ticket.replace(/^[^0-9]*/, "") || input.ticket;
 	const effortLabel = `${repoLabel}#${ticketLabel}`;
 	const modelViolationsAtRender = validateModelPolicy(policy);
-	const agents = dryRun || (seatEngine === "prime" && modelViolationsAtRender.length > 0)
+	const agents = dryRun || modelViolationsAtRender.length > 0
 		? null
 		: {
-				implementer: makeAgent(seatEngine, policy.implementer, input.worktree, 45 * 60_000, effortLabel, policy.reasoningImplementer, policy),
-				reviewer: makeAgent(seatEngine, { model: reviewerModel, reasoning: seat(policy.reviewer ?? reviewerModel).reasoning }, input.worktree, 20 * 60_000, effortLabel, policy.reasoningReviewer, policy),
-				watcher: makeAgent(seatEngine, policy.watcher, input.worktree, 30 * 60_000, effortLabel, policy.reasoningWatcher, policy),
-				fallout: makeAgent(seatEngine, policy.fallout, input.worktree, 15 * 60_000, effortLabel, policy.reasoningFallout, policy),
+				implementer: makeAgent(policy.implementer, input.worktree, 45 * 60_000, effortLabel, policy.reasoningImplementer, policy),
+				reviewer: makeAgent({ model: reviewerModel, reasoning: seat(policy.reviewer ?? reviewerModel).reasoning }, input.worktree, 20 * 60_000, effortLabel, policy.reasoningReviewer, policy),
+				watcher: makeAgent(policy.watcher, input.worktree, 30 * 60_000, effortLabel, policy.reasoningWatcher, policy),
+				fallout: makeAgent(policy.fallout, input.worktree, 15 * 60_000, effortLabel, policy.reasoningFallout, policy),
 			};
 
 	// -- approval gate helper (bypass only allowed with dryRun; preflight enforces) --

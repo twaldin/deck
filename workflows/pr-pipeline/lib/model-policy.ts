@@ -1,6 +1,6 @@
 /**
  * Agent model selection: agent-pickable config from the deck catalog
- * (pi harness + deck provider), with FAMILY OPPOSITION as a first-class knob.
+ * (Prime harness + deck provider), with FAMILY OPPOSITION as a first-class knob.
  *
  * Captain ruling: adversarial-review / debate nodes must pick the OPPOSITE
  * model family from the producing node. That is enforced here (resolution +
@@ -8,9 +8,9 @@
  */
 
 /**
- * The only pi provider deck workflows may use. Pi + this provider is deck's
- * single Smithers engine; direct codex / claude-code CLI engines are banned
- * because they use mono-account auth and ambient local CLI config.
+ * The only provider Deck workflow seats may use. Prime + this provider is
+ * Deck's single Smithers engine; direct vendor CLIs are banned because they use
+ * ambient local authentication outside the broker boundary.
  */
 export const DECK_PROVIDER = "deck";
 
@@ -19,7 +19,7 @@ export type ModelSeat = string | { model: string; reasoning?: string };
 function modelRef(seat: ModelSeat): string { return typeof seat === "string" ? seat : seat.model; }
 
 export interface ModelRef {
-	/** pi provider id, e.g. "deck". */
+	/** Prime provider id, e.g. "deck". */
 	provider: string;
 	/** model id within the provider, e.g. "claude-opus-5". */
 	model: string;
@@ -120,7 +120,7 @@ export function assertDeckModel(ref: string): void {
 	const { provider, model } = parseModelRef(ref);
 	if (provider !== DECK_PROVIDER) {
 		throw new Error(
-			`Model "${ref}" must use the ${DECK_PROVIDER} provider (pi harness + deck broker); got provider "${provider}".`,
+			`Model "${ref}" must use the ${DECK_PROVIDER} provider (Prime harness + deck broker); got provider "${provider}".`,
 		);
 	}
 	if (!DECK_AGENT_CATALOG.includes(model)) {

@@ -2,11 +2,11 @@
 
 ## 0. Actor boundary (binding precedence)
 
-- [CHAT SESSION] The plain pi chat session shapes work, invokes the shipment
+- [CHAT SESSION] The Prime conversation shapes work, invokes the shipment
   interface, queues questions, and reports evidence.
 - [WORKFLOW SEAT] Smithers pipeline and orchestrator nodes execute the delivery
   middle after dispatch.
-- [CHAT SESSION] **Precedence:** the plain pi chat session discharges build,
+- [CHAT SESSION] **Precedence:** the Prime conversation discharges build,
   review, and deploy obligations only through `ship`, `adopt`, `status`, and
   queued questions; it never executes the middle.
 - [CHAT SESSION] [WORKFLOW SEAT] A rule bearing both labels applies at both
@@ -129,7 +129,7 @@ prompts; the companion SETUP-CHECKLIST.md is TO-BUILD.
   self-contained briefs (5.6–7KB briefs needed 0–1 steers vs dozens for
   iterative). Never hand-write a wait-for-another-lane clause (cost 3.5
   lane-days once). [~/.deck/data/learnings.md §Dispatching]
-- [WORKFLOW SEAT] Keep long CI/CD polls in the ORCH process (pi-processes) or smithers nodes —
+- [WORKFLOW SEAT] Keep long CI/CD polls in the ORCH process tool or Smithers nodes —
   never in ship-worker sleep loops; workers that poll-and-exit read as dead.
   [~/.deck/data/HANDOFF-2026-07-30.md §3.3]
 - [WORKFLOW SEAT] The orchestrator owns decomposition: split N independent streams yourself and
@@ -227,7 +227,7 @@ prompts; the companion SETUP-CHECKLIST.md is TO-BUILD.
 - [CHAT SESSION] Keep curated current-state files; rewrite and prune, never append forever. A fact
   with no evidence is a guess. [~/.deck/data/learnings.md header; ~/firstmate/data/captain.md]
 - [CHAT SESSION] Put project-intrinsic knowledge in that repo's AGENTS.md; fleet strategy
-  never in a shared repo. pi discovers AGENTS.md in cwd + ancestors — never
+  never in a shared repo. Prime discovers AGENTS.md in cwd + ancestors — never
   commit an operator contract under that name. [~/.deck/data/learnings.md]
 - [CHAT SESSION] Put durable findings in reports under `data/`; put scratch in a
   `claude-playground/` (dies with the worktree). Never mix.
