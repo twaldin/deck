@@ -44,7 +44,7 @@ const INTERNAL_CONTEXT_PATTERNS = [
 	/\b(?:priority\s*#?\s*\d+|Spec\s*[:=]|PR\s*\d+[A-Z]?\s+of|Managed by|Local review nits|review round|round[- ]?\d+|must approve)\b/i,
 	/\b(?:implementation brief|task brief|brief acceptance criteria)\b/i,
 	/(?:^|\n)--\s+[^ \n]+(?:'s)?\s+agent[.!]?\s*$/im,
-	/\b(?:generated|written|authored|prepared)\s+by\s+[^.\n]{0,80}\bagent\b/i,
+	/\b(?:this(?:\s+(?:change|description|pull request|pr(?:\s+body)?|body))?|the\s+(?:description|pull request|pr(?:\s+body)?|body))\s+(?:was\s+)?(?:generated|written|authored|prepared)\s+by\s+[^.\n]{0,80}\bagent\b/i,
 	/(?:^|\n)(?:generated|written|authored|prepared)\s+by\s+[^.\n]{1,80}[.!]?\s*$/im,
 ];
 
