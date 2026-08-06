@@ -359,7 +359,10 @@ exit 2
 
 afterAll(() => {
 	if (primeBinary !== undefined && daemonSocket !== undefined) {
-		spawnSync(primeBinary, ["shutdown", "--force"], {
+		// MUST target the sandbox daemon explicitly. Without --daemon-socket this
+		// hits the shared production daemon and kills the captain's live orch
+		// session — observed on deckbox as "The daemon stopped this agent session".
+		spawnSync(primeBinary, ["shutdown", "--force", "--daemon-socket", daemonSocket], {
 			env: {
 				...installEnv,
 				HERDR_ENV: "0",
@@ -439,7 +442,9 @@ describe("Prime conversation installer", () => {
 
 		const stopped = combinedOutput(
 			primeBinary,
-			["shutdown", "--force"],
+			// Scoped: an unscoped `shutdown --force` reaches the shared production
+			// daemon and terminates live sessions, including the captain's orch.
+			["shutdown", "--force", "--daemon-socket", daemonSocket],
 			installEnv,
 		);
 		expect(stopped.status).toBe(0);
@@ -1237,5 +1242,23 @@ describe("Prime upgrade tripwire", () => {
 		});
 		expect(provenanceRejected.status).toBe(1);
 		expect(provenanceRejected.output).toContain("install-state tripwire");
+	});
+});
+
+describe("daemon shutdowns never reach the live daemon", () => {
+	// An unscoped `prime-agent shutdown --force` in this suite killed the captain's
+	// running orch session on deckbox: the shared production daemon received the
+	// shutdown and reported "The daemon stopped this agent session". Isolating HOME
+	// is not sufficient — the socket must be named explicitly.
+	test("every direct shutdown in this suite names a daemon socket", () => {
+		const source = fs.readFileSync(import.meta.path, "utf8");
+		const directShutdowns = source.match(/\[\s*"shutdown"[^\]]*\]/g) ?? [];
+		expect(directShutdowns.length).toBeGreaterThan(0);
+		for (const call of directShutdowns) {
+			// Wrapper invocations supply --daemon-socket themselves; direct binary
+			// invocations pass --force and must scope the socket.
+			if (!call.includes("--force")) continue;
+			expect(call, call).toContain("--daemon-socket");
+		}
 	});
 });
