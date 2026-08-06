@@ -29,7 +29,7 @@ but bootstrap rejects one inside `~/.deck` and records home/host ownership in a
 | `worktrees.json` | DURABLE | It binds effort, repository, branch, and worktree identities; those relationships cannot be inferred safely. |
 | `wt/` | DURABLE | Worktrees may contain uncommitted or unpushed work. The registry and trees survive together. |
 | `broker/` | DURABLE | OAuth accounts and local capabilities must remain authenticated on this host. Directories are 0700; every regular file, including `store.db` and tokens, is forced to 0600. |
-| `config/` | DURABLE | Project/reviewer policy and host-specific routing are private authority, not installer defaults. |
+| `config/`, `config.json` | DURABLE | Project/reviewer policy, admission limits, and host-specific routing are private authority, not installer defaults. |
 | `efforts/` | DURABLE | Legacy manifests, charters, inboxes, and tails remain effort evidence until explicitly retired. |
 | `archive/`, `backups/`, `repos/` | DURABLE | Recovery copies and potentially local-only checkout work are not assumed reconstructible. |
 | `.env`, `.deck-profile` | DURABLE | Host secrets and profile identity are private host configuration. |

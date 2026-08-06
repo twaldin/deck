@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { randomBytes } from "node:crypto";
 import { dlopen, FFIType, type Library } from "bun:ffi";
@@ -15,6 +16,12 @@ export const WORKTREES_LOCK = `${WORKTREES_STATE}.lock`;
 
 const EMPTY_STATE: WorktreesState = { v: 1, entries: [] };
 const nodeErrorSchema = z.object({ code: z.string() }).passthrough();
+const durableManifestSchema = z.object({
+	version: z.literal(1),
+	home: z.string(),
+	host: z.string(),
+	entries: z.array(z.string()),
+}).passthrough();
 
 function hasNodeErrorCode(error: unknown, code: string): boolean {
 	const parsed = nodeErrorSchema.safeParse(error);
@@ -26,6 +33,38 @@ function ioMessage(error: unknown): string {
 		return error.message;
 	}
 	return String(error);
+}
+
+function worktreesStoragePath(): string {
+	let stat: fs.Stats;
+	try {
+		stat = fs.lstatSync(WORKTREES_STATE);
+	} catch (error) {
+		if (hasNodeErrorCode(error, "ENOENT")) return WORKTREES_STATE;
+		throw new DeckError("E_IO", `cannot inspect ${WORKTREES_STATE}: ${ioMessage(error)}`);
+	}
+	if (!stat.isSymbolicLink()) return WORKTREES_STATE;
+	const target = path.resolve(path.dirname(WORKTREES_STATE), fs.readlinkSync(WORKTREES_STATE));
+	const durableRoot = path.dirname(target);
+	try {
+		const manifest = durableManifestSchema.parse(
+			JSON.parse(fs.readFileSync(path.join(durableRoot, ".deck-durable.json"), "utf8")),
+		);
+		if (
+			target !== path.join(durableRoot, "worktrees.json") ||
+			manifest.home !== path.resolve(DECK_HOME) ||
+			manifest.host !== os.hostname() ||
+			!manifest.entries.includes("worktrees.json")
+		) {
+			throw new Error("ownership does not match this Deck home and host");
+		}
+		return target;
+	} catch (error) {
+		throw new DeckError(
+			"E_IO",
+			`refusing unowned worktree registry link ${WORKTREES_STATE} -> ${fs.readlinkSync(WORKTREES_STATE)}: ${ioMessage(error)}`,
+		);
+	}
 }
 
 export function ensureAllocatorDirs(): void {
@@ -42,11 +81,12 @@ export function ensureAllocatorDirs(): void {
 export function readWorktreesState(): WorktreesState {
 	let text: string;
 	try {
-		text = fs.readFileSync(WORKTREES_STATE, "utf8");
+		text = fs.readFileSync(worktreesStoragePath(), "utf8");
 	} catch (error) {
 		if (hasNodeErrorCode(error, "ENOENT")) {
 			return EMPTY_STATE;
 		}
+		if (error instanceof DeckError) throw error;
 		throw new DeckError("E_IO", `cannot read ${WORKTREES_STATE}: ${ioMessage(error)}`);
 	}
 
@@ -66,14 +106,7 @@ export function writeWorktreesState(state: WorktreesState): void {
 		throw new DeckError("E_IO", `refusing to write invalid worktree state: ${ioMessage(error)}`);
 	}
 
-	let storagePath = WORKTREES_STATE;
-	try {
-		if (fs.lstatSync(WORKTREES_STATE).isSymbolicLink()) {
-			storagePath = path.resolve(path.dirname(WORKTREES_STATE), fs.readlinkSync(WORKTREES_STATE));
-		}
-	} catch (error) {
-		if (!hasNodeErrorCode(error, "ENOENT")) throw error;
-	}
+	const storagePath = worktreesStoragePath();
 	const temporary = `${storagePath}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
 	let descriptor: number | undefined;
 	let directoryDescriptor: number | undefined;
@@ -85,6 +118,7 @@ export function writeWorktreesState(state: WorktreesState): void {
 		descriptor = undefined;
 		fs.renameSync(temporary, storagePath);
 		directoryDescriptor = fs.openSync(path.dirname(storagePath), "r");
+		fs.fsyncSync(directoryDescriptor);
 		fs.closeSync(directoryDescriptor);
 		directoryDescriptor = undefined;
 	} catch (error) {

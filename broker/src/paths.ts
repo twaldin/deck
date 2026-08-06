@@ -30,12 +30,15 @@ export function ensureDirs(): void {
 
 /** Read-or-mint a bearer token file (0600), mirroring omp's token-file pattern. */
 export function ensureToken(file: string): string {
+	let existing: string | undefined;
 	try {
-		const existing = fs.readFileSync(file, "utf8").trim();
+		existing = fs.readFileSync(file, "utf8").trim();
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+	}
+	if (existing !== undefined) {
 		fs.chmodSync(file, 0o600);
 		if (existing.length > 0) return existing;
-	} catch {
-		// missing — mint below
 	}
 	const token = randomBytes(32).toString("base64url");
 	fs.writeFileSync(file, `${token}\n`, { mode: 0o600 });
