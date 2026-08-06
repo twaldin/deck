@@ -35,7 +35,7 @@ There is ONE source of truth for facts, and a disposable layer for technique.
   technique into OptMem. A fact that exists in one place cannot disagree with
   itself.
 
-- **Cold-resume survival state is mandatory.** Before a seat parks or exits, RECORD in OptMem and the current effort dossier: the task id and current status-file state; worktree path and branch; PR URLs with their last known CI and review state; any pending decision and who owes the answer; run receipts (endpoint, run id, poller) for anything still executing remotely; and the precise next command or action. When a seat starts or resumes cold, REINJECT those exact identifiers from OptMem and the dossier before work begins. Descriptions are not substitutes for exact identifiers.
+- **Cold-resume survival state is mandatory, and it is SPLIT by sensitivity.** Before a seat parks or exits, RECORD in the effort dossier: the task id and current status-file state; worktree path and branch; PR URLs with their last known CI and review state; any pending decision and who owes the answer; run receipts (endpoint, run id, poller) for anything still executing remotely; and the precise next command or action. In OptMem record ONLY the effort key needed to find that dossier — never the repo path, private branch name, filenames, reviewers, or incident detail, because OptMem is global and crosses projects. When a seat starts or resumes cold, recover the effort key from OptMem, then REINJECT the exact identifiers from the dossier with `deck.recall(key)` before work begins. Descriptions are not substitutes for exact identifiers.
 
 The core OptMem rules below follow the upstream README. Deck's failure override
 is explicit and takes precedence when wake cannot complete.

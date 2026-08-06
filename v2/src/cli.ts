@@ -29,7 +29,8 @@ import { startShip } from "./ship";
 import { peekSession } from "./spawn";
 import { evaluateTeardown, formatVerdict } from "./teardown";
 import { detectStale, foldBatched, reconcile } from "./wake";
-import { smithersWorkspaceRoot } from "./workspace";
+import { SMITHERS_SPEC } from "./smithers";
+import { smithersWorkspaceCwd, smithersWorkspaceRoot } from "./workspace";
 import { sessionDirForTask, tailSession } from "./tail";
 import {
 	answer as answerQuestion,
@@ -328,6 +329,50 @@ export async function runCli(argv: string[]): Promise<number> {
 				const resolved = resolveEffortReference(reference, listEffortMetas());
 				const hydration = buildHydration(resolved.taskId, resolved.epoch);
 				process.stdout.write(`${JSON.stringify({ ...resolved, hydration }, null, 2)}\n`);
+				return 0;
+			}
+
+			// Read-only Smithers state. This MUST run from the canonical workspace:
+			// Smithers resolves its run database from the working directory, so a
+			// read from an agent's arbitrary cwd silently reports the wrong runs or
+			// none at all. The retired `status` tool pinned this; the code surface
+			// reaches it through here.
+			case "runs":
+			case "why": {
+				const runId = args._[1];
+				if (command === "why" && runId === undefined) throw new Error("why needs a run id");
+				if (runId !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(runId)) {
+					throw new Error(`${command} needs a Smithers run id, not an option or path`);
+				}
+				const smithersArgs = command === "why"
+					? ["why", runId as string]
+					: runId === undefined ? ["ps", "--all"] : ["inspect", runId];
+				// Use the RUNNING bun, not `bunx`: Homebrew's `bunx` shim is a symlink
+				// into a versioned Cellar path that goes stale on upgrade, so it
+				// resolves on PATH but fails to spawn (ENOENT) - which reads exactly
+				// like "no runs" at the call site.
+				const runner = [process.execPath, "x", SMITHERS_SPEC];
+				// posix_spawn reports a missing CWD as ENOENT naming the BINARY, which
+				// sends every reader hunting a broken bun install. Check it here so
+				// the message names the real problem.
+				const workspace = smithersWorkspaceCwd();
+				if (!fs.existsSync(workspace)) {
+					throw new Error(
+						`no Smithers workspace at ${workspace}; run \`deck-v2 bootstrap\` before reading run state`,
+					);
+				}
+				const read = Bun.spawnSync({
+					cmd: [...runner, ...smithersArgs, "--format", "json"],
+					cwd: workspace,
+					stdout: "pipe",
+					stderr: "pipe",
+				});
+				const out = read.stdout.toString().trim();
+				if (!read.success && out === "") {
+					throw new Error(read.stderr.toString().trim() || `smithers ${command} failed`);
+				}
+				if (out === "") throw new Error("Smithers returned no run state");
+				process.stdout.write(`${out}\n`);
 				return 0;
 			}
 
