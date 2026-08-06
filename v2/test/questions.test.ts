@@ -1042,13 +1042,13 @@ describe("questions extension", () => {
 		expect(openQuestions(file)).toHaveLength(0);
 	});
 
-	test("approve question runs the captain's gh approval and resolves only after success", async () => {
+	test("legacy review-gate approval questions fail closed without calling GitHub", async () => {
 		const file = freshFile();
 		const agent = new Harness();
 		const commands: Array<{ command: string; args: string[] }> = [];
 		registerQuestions(agent as any, envFor(file), agent.runtime, async (command, args) => {
 			commands.push({ command, args });
-			return command === "gh" && args[1] === "view" ? { stdout: JSON.stringify({ headRefOid: "head-12", mergeable: "MERGEABLE", mergeStateStatus: "CLEAN", statusCheckRollup: [{ conclusion: "SUCCESS" }] }) } : {};
+			return {};
 		});
 		ask(file, {
 			id: "review-gate-pr-12-head",
@@ -1057,24 +1057,15 @@ describe("questions extension", () => {
 			prContext: { prRepo: "owner/repo", prNumber: 12, headSha: "head-12", prUrl: "https://github.com/owner/repo/pull/12", prTitle: "Fix gate" },
 			options: ["Approve", "Hold"], actions: ["approve", "hold"], sessionId: "s", cwd: "/work/deck",
 		});
-		await agent.commands.get("questions")!.handler("", fakeContext("captain", ["1. Approve"]));
-		expect(commands).toEqual([
-			{ command: "gh", args: ["pr", "view", "12", "--repo", "owner/repo", "--json", "headRefOid,mergeable,mergeStateStatus,statusCheckRollup"] },
-			{ command: "gh", args: ["pr", "review", "12", "--repo", "owner/repo", "--approve"] },
-		]);
-		expect(openQuestions(file)).toHaveLength(0);
+		const captain = fakeContext("captain", ["1. Approve"]);
+		await agent.commands.get("questions")!.handler("", captain);
+		expect(commands).toEqual([]);
+		expect(openQuestions(file)).toHaveLength(1);
+		expect(captain.notices).toContain(
+			"Legacy review-gate approvals cannot be submitted. Re-queue this decision through its Smithers workflow.",
+		);
 	});
 
-	test("approve question refuses a changed PR head", async () => {
-		const file = freshFile();
-		const agent = new Harness();
-		const commands: string[][] = [];
-		registerQuestions(agent as any, envFor(file), agent.runtime, async (_command, args) => { commands.push(args); return { stdout: JSON.stringify({ headRefOid: "new-head" }) }; });
-		ask(file, { id: "review-gate-pr-12-head", question: "Captain approval needed", questionKind: "approve", origin: "review-gate", prContext: { prRepo: "owner/repo", prNumber: 12, headSha: "old-head" }, options: ["Approve", "Hold"], actions: ["approve", "hold"], sessionId: "s", cwd: "/" });
-		await agent.commands.get("questions")!.handler("", fakeContext("captain", ["1. Approve"]));
-		expect(commands).toHaveLength(1);
-		expect(openQuestions(file)).toHaveLength(1);
-	});
 
 	test("Close option closes the reviewed PR", async () => {
 		const file = freshFile();
@@ -1090,17 +1081,6 @@ describe("questions extension", () => {
 		expect(openQuestions(file)).toHaveLength(0);
 	});
 
-	test("approve question stays open when gh rejects the captain approval", async () => {
-		const file = freshFile();
-		const agent = new Harness();
-		registerQuestions(agent as any, envFor(file), agent.runtime, async (command, args) => {
-			if (command === "gh" && args[1] === "view") return { stdout: JSON.stringify({ headRefOid: "head-12", mergeable: "MERGEABLE", mergeStateStatus: "CLEAN", statusCheckRollup: [{ conclusion: "SUCCESS" }] }) };
-			throw new Error("permission denied");
-		});
-		ask(file, { id: "review-gate-pr-12-head", question: "Captain approval needed", questionKind: "approve", origin: "review-gate", prContext: { prRepo: "owner/repo", prNumber: 12, headSha: "head-12" }, options: ["Approve", "Hold"], actions: ["approve", "hold"], sessionId: "s", cwd: "/" });
-		await agent.commands.get("questions")!.handler("", fakeContext("captain", ["1. Approve"]));
-		expect(openQuestions(file)).toHaveLength(1);
-	});
 
 	test("PR context is bounded before it enters the durable queue", () => {
 		const file = freshFile();

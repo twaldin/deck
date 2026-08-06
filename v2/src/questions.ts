@@ -422,7 +422,8 @@ export function registerQuestions(
 				} else if ((action === "stamp" && trustedStamp || action === undefined && trustedStamp && selectedLabel === "Stamp")) {
 					applied = await approveStamp(ctx, entry);
 				} else if ((action === "approve" && trustedReviewGate || action === undefined && trustedReviewGate && entry.questionKind === "approve" && selectedLabel === "Approve")) {
-					applied = await approvePullRequest(ctx, entry);
+					ctx.ui.notify("Legacy review-gate approvals cannot be submitted. Re-queue this decision through its Smithers workflow.", "error");
+					applied = false;
 				} else if ((action === "deny-gate" && (trustedStamp || trustedReviewGate) || action === undefined && trustedStamp && selectedLabel === "Close")) {
 					applied = await closeStamp(ctx, entry);
 				} else if ((action === "close-pr" && trustedReviewGate || action === undefined && trustedReviewGate && entry.questionKind === "agent" && selectedLabel === "Close")) {
@@ -482,39 +483,6 @@ export function registerQuestions(
 		}
 	};
 
-	const approvePullRequest = async (ctx: QuestionsContext, entry: Question): Promise<boolean> => {
-		const pr = entry.prContext;
-		if (pr?.prNumber === undefined || pr.prRepo === undefined || pr.headSha === undefined) {
-			ctx.ui.notify("Approval needs a PR number, repository, and reviewed head.", "error");
-			return false;
-		}
-		try {
-			const current = await executor("gh", ["pr", "view", String(pr.prNumber), "--repo", pr.prRepo, "--json", "headRefOid,mergeable,mergeStateStatus,statusCheckRollup"], { cwd: ctx.cwd, timeout: 15_000 });
-			const currentValue = typeof current === "object" && current !== null && "stdout" in current
-				? JSON.parse(String((current as { stdout: unknown }).stdout))
-				: current;
-			const currentSha = typeof currentValue === "object" && currentValue !== null && "headRefOid" in currentValue
-				? String((currentValue as { headRefOid: unknown }).headRefOid)
-				: "";
-			const checks = typeof currentValue === "object" && currentValue !== null && Array.isArray((currentValue as { statusCheckRollup?: unknown }).statusCheckRollup)
-				? (currentValue as { statusCheckRollup: Array<{ conclusion?: unknown; state?: unknown; status?: unknown }> }).statusCheckRollup
-				: [];
-			const mergeable = typeof currentValue === "object" && currentValue !== null ? String((currentValue as { mergeable?: unknown }).mergeable).toUpperCase() : "UNKNOWN";
-			const mergeState = typeof currentValue === "object" && currentValue !== null ? String((currentValue as { mergeStateStatus?: unknown }).mergeStateStatus).toUpperCase() : "UNKNOWN";
-			const checkStates = checks.map((check) => String(check.conclusion || check.status || check.state).toUpperCase());
-			const safeChecks = checks.length === 0 || checkStates.every((state) => ["SUCCESS", "SKIPPED", "NEUTRAL"].includes(state));
-			const unsafe = mergeable === "UNMERGEABLE" || ["DIRTY", "BEHIND", "UNSTABLE"].includes(mergeState) || !safeChecks;
-			if (currentSha !== pr.headSha || unsafe) {
-				ctx.ui.notify("Approval stopped because the PR head, CI, or merge state changed. Review it again.", "warning");
-				return false;
-			}
-			await executor("gh", ["pr", "review", String(pr.prNumber), "--repo", pr.prRepo, "--approve"], { cwd: ctx.cwd, timeout: 15_000 });
-			return resolve(ctx, entry, "Approve", "answered");
-		} catch (error) {
-			ctx.ui.notify(`Approval was not recorded: ${error instanceof Error ? error.message : "unknown error"}`, "error");
-			return false;
-		}
-	};
 
 	const approveStamp = async (ctx: QuestionsContext, entry: Question): Promise<boolean> => {
 		const pr = entry.prContext;
