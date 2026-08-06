@@ -530,7 +530,7 @@ function parseWorkflowJobs(payload: unknown): WorkflowJobEvidence[] {
 	});
 }
 
-async function resolveRequiredContexts(
+export async function resolveRequiredContexts(
 	ctx: Required<GhContext>,
 	startingBranch: string,
 ): Promise<{ requiredContexts: RequiredStatusContext[]; rulesBranch: string }> {
@@ -539,19 +539,31 @@ async function resolveRequiredContexts(
 	let branch = startingBranch;
 	while (branch !== "" && !visited.has(branch)) {
 		visited.add(branch);
-		const rulesOut = await execOrThrow(ctx.exec, [
+		// The rulesets API is a paid feature on private repos: a private repo on a
+		// free plan answers 403 "Upgrade to GitHub Pro". That is "this repo cannot
+		// have rulesets", not "the read failed" — treating it as an error killed
+		// the watch poll outright. A repo with no readable rulesets simply
+		// declares no required contexts, and the gate falls back to the checks
+		// rollup and the profile's own review policy.
+		const rules = await ctx.exec([
 			ctx.gh,
 			"api",
 			`repos/${ctx.repo}/rules/branches/${encodeURIComponent(branch)}`,
 		]);
-		const requiredContexts = parseRequiredContexts(JSON.parse(rulesOut));
+		if (rules.code !== 0) {
+			if (!/Upgrade to GitHub Pro|HTTP 40[34]/.test(rules.stderr)) {
+				throw new Error(`command failed (${rules.code}): ${ctx.gh} api rules/branches\n${rules.stderr.slice(0, 2000)}`);
+			}
+			return { requiredContexts: [], rulesBranch: branch };
+		}
+		const requiredContexts = parseRequiredContexts(parseToolJson(rules.stdout, "gh"));
 		if (requiredContexts.length > 0) return { requiredContexts, rulesBranch: branch };
 		const parentsOut = await execOrThrow(ctx.exec, [
 			ctx.gh,
 			"api",
 			`repos/${ctx.repo}/pulls?state=open&head=${encodeURIComponent(`${owner}:${branch}`)}&per_page=100`,
 		]);
-		const parents = JSON.parse(parentsOut);
+		const parents = parseToolJson(parentsOut, "gh");
 		if (!Array.isArray(parents)) throw new Error(`GitHub returned invalid parent PR data for ${branch}`);
 		const matching = parents.filter((candidate) =>
 			isRecord(candidate)
@@ -625,7 +637,7 @@ export async function fetchWatchSnapshot(ctx: GhContext, prNumber: number, _self
 		"-f", `name=${name}`,
 		"-F", `number=${prNumber}`,
 	]);
-	const gql = JSON.parse(gqlOut) as Record<string, any>;
+	const gql = parseToolJson(gqlOut, "gh") as Record<string, any>;
 	const pr = gql?.data?.repository?.pullRequest ?? {};
 	const headSha = str(pr.headRefOid);
 	const headRef = str(pr.headRefName);
@@ -651,7 +663,7 @@ export async function fetchWatchSnapshot(ctx: GhContext, prNumber: number, _self
 		fetchPullWorkflowRuns(concreteCtx, headRef),
 		resolveRequiredContexts(concreteCtx, baseRef),
 	]);
-	const requested = parseRequestedReviewers(JSON.parse(requestedOut));
+	const requested = parseRequestedReviewers(parseToolJson(requestedOut, "gh"));
 	const currentRawRuns = workflowRuns.filter((run) =>
 		run.headSha === headSha
 		&& run.pullRequests.some((pull) =>
@@ -676,7 +688,7 @@ export async function fetchWatchSnapshot(ctx: GhContext, prNumber: number, _self
 			"api",
 			`repos/${ctx.repo}/compare/${encodeURIComponent(baseRef)}...${headSha}`,
 		]);
-		const parsedCompare = JSON.parse(compareOut) as Record<string, unknown>;
+		const parsedCompare = parseToolJson<Record<string, unknown>>(compareOut, "gh");
 		const parsedBehindBy = Number(parsedCompare.behind_by ?? 0);
 		if (Number.isFinite(parsedBehindBy)) behindBy = parsedBehindBy;
 	} catch {
@@ -742,7 +754,7 @@ export async function fetchPrApprovalsAndCi(ctx: GhContext, prNumber: number): P
 		"-f", `name=${name}`,
 		"-F", `number=${prNumber}`,
 	]);
-	const gql = JSON.parse(gqlOut) as Record<string, any>;
+	const gql = parseToolJson(gqlOut, "gh") as Record<string, any>;
 	const pr = gql?.data?.repository?.pullRequest ?? {};
 	const headSha = str(pr.headRefOid);
 	const checkRuns = await fetchBranchCheckRuns({ ...ctx, exec }, headSha);
@@ -817,7 +829,7 @@ export async function resolveReviewerLogin(
 	const needle = nameOrLogin.toLowerCase();
 	let commits: unknown;
 	try {
-		commits = JSON.parse(search.stdout);
+		commits = parseToolJson(search.stdout, "gh");
 	} catch {
 		return null;
 	}
