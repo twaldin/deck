@@ -169,11 +169,16 @@ def ship(
     run_id: str | None = None,
     dry_run: bool = False,
     existing_pr: int | None = None,
+    models: dict[str, str] | None = None,
 ) -> str:
     """Start the detached pr-pipeline for a validated effort brief.
 
     The pipeline owns review, PR creation, CI, approval and merge. This returns
     as soon as the run is started; it does not wait, and neither should you.
+
+    `models` assigns seats for THIS run - `{"reviewer": "claude-fable-5"}` -
+    overriding the profile defaults. Choosing which canonical model runs which
+    node is the orchestrator's call; off-catalog ids are rejected at ship time.
     """
     args = [
         "ship",
@@ -201,6 +206,8 @@ def ship(
         args.append("--dry-run")
     if existing_pr is not None:
         args += ["--existing-pr", str(existing_pr)]
+    if models:
+        args += ["--models", ",".join(f"{slot}={model}" for slot, model in models.items())]
     return _run(args, parse=False)
 
 
@@ -272,7 +279,7 @@ def help() -> str:  # noqa: A001 - deliberately shadows builtins in the agent na
   deck.questions()                    open questions
   deck.answer(id, text)               answer a plain question (not workflow approvals)
   deck.recall(ref)                    hydrate an effort: task id, owner/repo#PR, or PR URL
-  deck.ship(ticket, ...)              start the pr-pipeline for a brief
+  deck.ship(ticket, ..., models={...})  start the pr-pipeline; models= assigns seats
   deck.adopt(existing_pr, ...)        adopt an open PR into the same pipeline
   deck.runs([run_id])                 durable Smithers run state (read-only)
   deck.why(run_id)                    why a run is where it is

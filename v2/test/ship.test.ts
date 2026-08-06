@@ -14,7 +14,7 @@ import { registerDeckShip, type DeckShipApi } from "../../extensions-prime/deck-
 import { validateBrief } from "../../workflows/pr-pipeline/lib/brief";
 import { loadProfiles, profilesFile, type ProjectProfile } from "../src/projects";
 import { existingPrFromFlag, runCli } from "../src/cli";
-import { buildPipelineInput, pipelineDir, startShip, type ShipRequest } from "../src/ship";
+import { buildPipelineInput, mergeModelSlots, pipelineDir, startShip, type ShipRequest } from "../src/ship";
 import { assertShipGoesThroughPipeline, shipProfileFor, workerModelFor } from "../src/spawn";
 import { discoverSmithersWorkspaces, smithersWorkspaceCwd, smithersWorkspaceRoot } from "../src/workspace";
 
@@ -158,6 +158,29 @@ describe("worker model wiring", () => {
 		expect(() => workerModelFor({ taskId: "model-test", task: "test", acceptance: ["works"], kind: "scout", project: profile.id })).toThrow(
 			/must use the deck provider/,
 		);
+	});
+
+	// The orchestrator, not the project config, decides which canonical model
+	// runs a given node on a given run.
+	test("a per-run override replaces one profile slot and leaves the rest", () => {
+		const base = { implementer: "deck/gpt-5.6-sol", reviewer: "deck/gpt-5.6-luna" };
+		const merged = mergeModelSlots(base, { reviewer: "deck/claude-opus-5" }) as Record<string, string>;
+		expect(merged.reviewer).toBe("deck/claude-opus-5");
+		expect(merged.implementer).toBe("deck/gpt-5.6-sol");
+	});
+
+	test("a per-run override cannot leave the canonical catalog", () => {
+		expect(() => mergeModelSlots(deckProfile().models, { reviewer: "deck/claude-sonnet-5" })).toThrow(
+			/agent-pickable deck catalog/,
+		);
+		expect(() => mergeModelSlots(deckProfile().models, { reviewer: "openai/gpt-5.6-sol" })).toThrow(
+			/must use the deck provider/,
+		);
+	});
+
+	test("no override leaves the profile untouched", () => {
+		const models = deckProfile().models;
+		expect(mergeModelSlots(models, undefined)).toBe(models);
 	});
 });
 
