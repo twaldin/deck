@@ -258,7 +258,7 @@ describe("exact-head CI evidence", () => {
 		expect(verdict.disposition).toBe("escalate");
 	});
 
-	test("no CI configured is distinct from both success and non-reporting", () => {
+	test("no CI configured escalates explicitly instead of succeeding or waiting forever", () => {
 		const hydrated = rehydrateFixture(fixtures[0]!);
 		const snapshot: WatchSnapshot = {
 			...cleanForApproval(hydrated.watchSnapshot),
@@ -275,7 +275,10 @@ describe("exact-head CI evidence", () => {
 		const ci = classifyCiEvidence(snapshot);
 		expect(ci.classification).toBe("NO_REQUIRED_CHECKS");
 		expect(ci.classification).not.toBe("TERMINAL_SUCCESS");
-		expect(ci.terminalEscalation).toBe(false);
+		expect(ci.terminalEscalation).toBe(true);
+		const verdict = evaluateWatchExit(snapshot, watchOptions(hydrated.selfLogins, []));
+		expect(verdict.disposition).toBe("escalate");
+		expect(verdict.reasons.join(" ")).toContain("human must decide");
 	});
 
 	// Several structural cases contain successful current required contexts plus

@@ -451,7 +451,8 @@ export function classifyCiEvidence(
 		return ciAssessment(
 			"NO_REQUIRED_CHECKS",
 			"not-configured",
-			`No required CI contexts apply to branch ${evidence.rulesBranch}; the empty rollup is classified as no CI configured, not as terminal success.`,
+			`No required CI contexts apply to branch ${evidence.rulesBranch}; the empty rollup is classified as no CI configured, not as terminal success. A human must decide whether this branch may merge without CI.`,
+			true,
 		);
 	}
 	if (evidence.currentHeadAgeSeconds <= evidence.graceSeconds) {
