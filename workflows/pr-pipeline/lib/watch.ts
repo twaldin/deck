@@ -72,7 +72,23 @@ function checkWorkflow(run: CheckRun): string {
 function cancelledCheckIsSuperseded(run: CheckRun, checkRuns: CheckRun[]): boolean {
 	const workflow = checkWorkflow(run);
 	return checkRuns.some((candidate) => {
-		if (candidate === run || checkWorkflow(candidate) !== workflow) return false;
+		if (
+			candidate === run
+			|| candidate.name !== run.name
+			|| checkWorkflow(candidate) !== workflow
+			|| (
+				run.appId !== undefined
+				&& run.appId !== null
+				&& candidate.appId !== undefined
+				&& candidate.appId !== null
+				&& candidate.appId !== run.appId
+			)
+			|| (
+				run.headSha !== undefined
+				&& candidate.headSha !== undefined
+				&& candidate.headSha !== run.headSha
+			)
+		) return false;
 		if (candidate.status !== "completed") return true;
 		if (SUCCESSFUL_CONCLUSIONS[(candidate.conclusion ?? "").toLowerCase()] !== true) return false;
 		if (run.completedAt === undefined || run.completedAt === null) return true;
