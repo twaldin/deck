@@ -136,6 +136,7 @@ import {
 	workflowQuestions,
 	type PrQuestionContext,
 } from "../../v2/src/questions-store.ts";
+import { createHostPiAgent } from "./lib/host-pi.ts";
 
 // ---------------------------------------------------------------------------
 // Defaults (normalized in code, not via zod .default(), to keep semantics
@@ -818,7 +819,12 @@ function makeAgent(
 	// Pi still needs bash for tests and gh, but receives only the explicit
 	// non-credential seat environment. The deterministic publisher alone keeps
 	// push/merge/stamp credentials and authority.
-	return new PiAgent({
+	//
+	// Preserve the provider-native selector. If an older Smithers type does not
+	// yet include `max`, the compatibility cast is local and does not rewrite the
+	// value sent to Pi. HostPiAgent also preserves all extension options while
+	// replacing Smithers' default `pi` command with the host-selected binary.
+	return createHostPiAgent(PiAgent, {
 		provider,
 		model,
 		cwd,

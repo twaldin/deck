@@ -10,6 +10,7 @@ import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { askIfAbsent, openQuestions, queueFile, readQuestionHistory, readQuestions } from "../../v2/src/questions-store.ts";
 import { defaultModelPolicy } from "../pr-pipeline/lib/models.ts";
+import { createHostPiAgent } from "../pr-pipeline/lib/host-pi.ts";
 import { shouldSubmitReview, reviewCommand } from "./decision.ts";
 
 const inputSchema = z.object({
@@ -58,7 +59,7 @@ function agent(model: string, tools = true) {
   const configured = process.env.DECK_SUBAGENT_EXTENSION;
   const bundled = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../subagents/extension/index.ts");
   const extension = configured ?? (fs.existsSync(bundled) ? bundled : undefined);
-  return new PiAgent({ provider: "deck", model, timeoutMs: 30 * 60_000, thinking: "medium", noSession: true, ...(tools ? { tools: ["read", "grep", "edit", "write", "bash"] } : { noTools: true }), ...(extension === undefined ? {} : { extension: [extension] }) });
+  return createHostPiAgent(PiAgent, { provider: "deck", model, timeoutMs: 30 * 60_000, thinking: "medium", noSession: true, ...(tools ? { tools: ["read", "grep", "edit", "write", "bash"] } : { noTools: true }), ...(extension === undefined ? {} : { extension: [extension] }) });
 }
 function reviewComment(pr: Pr, blockers: string[]): string {
   return [`Review found ${blockers.length} blocker(s) on PR #${pr.number}.`, ...blockers.map((item, i) => `${i + 1}. ${item}`), "Fix each blocker, then push the branch.", "— automated review"].join("\n");
