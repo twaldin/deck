@@ -128,6 +128,57 @@ export function reviewSubmissionMarker(
   if (headSha.trim() === "") throw new Error("review submission marker needs the reviewed head");
   return `submitted:${prNumber}:${headSha}:${fingerprint || "clean"}:${verdict}`;
 }
+type ReviewSnapshot = {
+  approvable?: boolean;
+  blockers?: string[];
+  headSha?: string;
+  summary?: string;
+};
+type StateSnapshot = {
+  mergeable?: boolean;
+  ciGreen?: boolean;
+  ciPending?: boolean;
+  mergeStateStatus?: string;
+  headSha?: string;
+  summary?: string;
+};
+
+export function planReviewSubmission(
+  pr: Pr,
+  review: ReviewSnapshot | undefined,
+  approvedState: StateSnapshot | undefined,
+  currentState: StateSnapshot | undefined,
+  fingerprint = "",
+):
+  | { submitted: false; reason: string }
+  | { submitted: true; verdict: ReviewDecisionVerdict; marker: string; body: string } {
+  const approvedHead = approvedState?.headSha ?? "";
+  const currentHead = currentState?.headSha ?? "";
+  if (approvedHead === "" || currentHead !== approvedHead) {
+    return { submitted: false, reason: "PR head changed since the approved review decision" };
+  }
+  if (currentState?.ciPending === true) {
+    return { submitted: false, reason: "CI changed to pending since the approved review decision" };
+  }
+  const approvedBlockers = reviewDecisionBlockers(review, approvedState);
+  const currentBlockers = reviewDecisionBlockers(review, currentState);
+  const approvedVerdict: ReviewDecisionVerdict =
+    approvedBlockers.length === 0 ? "comment" : "request-changes";
+  const verdict: ReviewDecisionVerdict =
+    currentBlockers.length === 0 ? "comment" : "request-changes";
+  if (verdict !== approvedVerdict) {
+    return { submitted: false, reason: "PR state changed since the approved review decision" };
+  }
+  return {
+    submitted: true,
+    verdict,
+    marker: reviewSubmissionMarker(pr.number, currentHead, fingerprint, verdict),
+    body: verdict === "comment"
+      ? cleanComment(pr, review?.summary ?? "clean")
+      : reviewComment(pr, currentBlockers),
+  };
+}
+
 
 
 export function queueReviewGateDecision(file: string, request: {
@@ -220,5 +271,5 @@ export default smithers((ctx) => {
   </Sequence></Loop><Task id={`gate-final-state-${reviewGateKey(pr)}`} output={outputs.state} retries={1} dependsOn={[`gate-review-${reviewGateKey(pr)}`, `gate-state-${reviewGateKey(pr)}`]}>{async () => { const s = dryRun ? { mergeable: (fixtures.blockers ?? []).length === 0, ciGreen: (fixtures.blockers ?? []).length === 0, ciPending: false, mergeStateStatus: "CLEAN", headSha: "fixture-head", summary: "fixture final state" } : await state(cli, input.repo, pr.number); return { ...s, round: rounds, prNumber: pr.number }; }}</Task></Sequence>;
   const pollTask = async () => { const attempt = pollCount + completedPolls; const found = dryRun ? (attempt < (fixtures.pollCount ?? 0) ? [] : discovered) : await requested(cli, input.repo, input.captainLogin); const actionable = found.filter((pr) => pr.headRefOid && !alreadyQueuedForHead(pr)); const row = { poll: attempt, prs: actionable, at: iso(), satisfied: actionable.length > 0 }; saveJson(queuePath, [row]); return row; };
   const reviewPrs = prs.filter((pr) => pr.headRefOid !== undefined && pr.headRefOid !== "" && !alreadyQueuedForHead(pr));
-  return <Workflow name="lindy-review-gate"><Sequence><Poller id={pollerId} check={pollTask} checkOutput={outputs.queue} maxAttempts={polls} intervalMs={pollIntervalMs} backoff="fixed" onTimeout="return-last" /><Parallel maxConcurrency={1}>{reviewPrs.map((pr) => <Worktree key={reviewGateKey(pr)} id={`gate-review-worktree-${reviewGateKey(pr)}`} path={pathFor(pr)} branch={pr.headRefName}><Sequence>{reviewPath(pr)}</Sequence></Worktree>)}</Parallel>{reviewPrs.map((pr) => <Sequence key={reviewGateKey(pr)}><Task id={`captain-question-${reviewGateKey(pr)}`} output={outputs.captainQuestion} retries={1} dependsOn={[`gate-final-state-${reviewGateKey(pr)}`]}>{async () => { const r = ctx.latest(outputs.review, `gate-review-${reviewGateKey(pr)}`); const s = ctx.latest(outputs.state, `gate-final-state-${reviewGateKey(pr)}`) ?? ctx.latest(outputs.state, `gate-state-${reviewGateKey(pr)}`); const blockers = r?.blockers ?? []; const fresh = dryRun ? s : await state(cli, input.repo, pr.number); const current = fresh?.headSha === s?.headSha && fresh?.mergeable === true; const clean = reviewDecisionBlockers(r, fresh).length === 0; const verdict = clean ? "comment" : "request-changes"; const comment = clean ? cleanComment(pr, r?.summary ?? "clean") : reviewComment(pr, reviewDecisionBlockers(r, fresh)); if (pendingState(fresh)) return { queued: false, id: null, prNumber: pr.number, summary: "CI is still running; waiting for a settled result." }; if (s?.headSha === undefined || s.headSha === "") return { queued: false, id: null, prNumber: pr.number, summary: "head SHA unavailable" };    const event = queueReviewGateDecision(queueFile(), { runId: ctx.runId, repo: input.repo, worktree: input.worktree, pr, headSha: s.headSha, originalIssue: fixtures.originalIssue ?? input.brief?.summary ?? input.ticket ?? pr.title, draftBody: comment, evidence: `${r?.summary ?? "review unavailable"}; ${fresh?.summary ?? "state unavailable"}`, reviewSummary: r?.summary ?? comment, mergeStateStatus: fresh?.mergeStateStatus ?? s.mergeStateStatus, ciGreen: fresh?.ciGreen === true, verdict }); return { queued: true, id: event.id, prNumber: pr.number, summary: comment }; }}</Task><Branch if={dryRun || ctx.latest(outputs.captainQuestion, `captain-question-${reviewGateKey(pr)}`)?.queued === true} then={dryRun ? <Task id={`review-approval-gate-${reviewGateKey(pr)}`} output={outputs.reviewApproval}>{() => ({ approved: true, note: "bypassApprovals (dry-run test mode)", decidedBy: "bypass", decidedAt: iso() })}</Task> : <Approval id={`review-approval-gate-${reviewGateKey(pr)}`} output={outputs.reviewApproval} onDeny="continue" request={{ title: `Captain review decision: PR #${pr.number} ${pr.title}`, summary: `URL: ${pr.url}\nThe captain decision is queued with the complete drafted verdict, comment, and evidence.` }} />} else={<Task id={`review-approval-gate-${reviewGateKey(pr)}`} output={outputs.reviewApproval}>{() => ({ approved: false, note: "captain question was not queued", decidedBy: "workflow", decidedAt: iso() })}</Task>} /> <Task id={`submit-review-${reviewGateKey(pr)}`} output={outputs.submit} retries={1} dependsOn={[`review-approval-gate-${reviewGateKey(pr)}`]}>{async () => { const decision = ctx.latest(outputs.reviewApproval, `review-approval-gate-${reviewGateKey(pr)}`); if (!shouldSubmitReview(decision)) return { submitted: false, reason: "captain denied" }; const report = ctx.latest(outputs.report, `gate-report-${reviewGateKey(pr)}`); const blockers = reviewDecisionBlockers(ctx.latest(outputs.review, `gate-review-${reviewGateKey(pr)}`), ctx.latest(outputs.state, `gate-final-state-${reviewGateKey(pr)}`)); const verdict = blockers.length === 0 ? "comment" : "request-changes"; const marker = reviewSubmissionMarker(pr.number, ctx.latest(outputs.state, `gate-final-state-${reviewGateKey(pr)}`)?.headSha ?? "", report?.draftFingerprint ?? "", verdict); if (posted[marker] !== undefined) return { submitted: false, reason: "already submitted", verdict }; const body = blockers.length === 0 ? cleanComment(pr, report?.summary ?? "clean") : report?.draftBody ?? reviewComment(pr, blockers); const args = [...reviewCommand(pr.number, input.repo, blockers.length === 0), "--body", body]; if (!dryRun) { await ghRun(cli, args, input.worktree); posted[marker] = iso(); saveJson(postedPath, posted); } return { submitted: true, verdict }; }}</Task></Sequence>)}<Timer id="review-cycle-delay" duration={`${pollIntervalMs}ms`} /><ContinueAsNew state={{ cycle: cycle + 1, pollCount: pollCount + completedPolls }} /></Sequence></Workflow>;
+  return <Workflow name="lindy-review-gate"><Sequence><Poller id={pollerId} check={pollTask} checkOutput={outputs.queue} maxAttempts={polls} intervalMs={pollIntervalMs} backoff="fixed" onTimeout="return-last" /><Parallel maxConcurrency={1}>{reviewPrs.map((pr) => <Worktree key={reviewGateKey(pr)} id={`gate-review-worktree-${reviewGateKey(pr)}`} path={pathFor(pr)} branch={pr.headRefName}><Sequence>{reviewPath(pr)}</Sequence></Worktree>)}</Parallel>{reviewPrs.map((pr) => <Sequence key={reviewGateKey(pr)}><Task id={`captain-question-${reviewGateKey(pr)}`} output={outputs.captainQuestion} retries={1} dependsOn={[`gate-final-state-${reviewGateKey(pr)}`]}>{async () => { const r = ctx.latest(outputs.review, `gate-review-${reviewGateKey(pr)}`); const s = ctx.latest(outputs.state, `gate-final-state-${reviewGateKey(pr)}`) ?? ctx.latest(outputs.state, `gate-state-${reviewGateKey(pr)}`); const blockers = r?.blockers ?? []; const fresh = dryRun ? s : await state(cli, input.repo, pr.number); const current = fresh?.headSha === s?.headSha && fresh?.mergeable === true; const clean = reviewDecisionBlockers(r, fresh).length === 0; const verdict = clean ? "comment" : "request-changes"; const comment = clean ? cleanComment(pr, r?.summary ?? "clean") : reviewComment(pr, reviewDecisionBlockers(r, fresh)); if (pendingState(fresh)) return { queued: false, id: null, prNumber: pr.number, summary: "CI is still running; waiting for a settled result." }; if (s?.headSha === undefined || s.headSha === "") return { queued: false, id: null, prNumber: pr.number, summary: "head SHA unavailable" };    const event = queueReviewGateDecision(queueFile(), { runId: ctx.runId, repo: input.repo, worktree: input.worktree, pr, headSha: s.headSha, originalIssue: fixtures.originalIssue ?? input.brief?.summary ?? input.ticket ?? pr.title, draftBody: comment, evidence: `${r?.summary ?? "review unavailable"}; ${fresh?.summary ?? "state unavailable"}`, reviewSummary: r?.summary ?? comment, mergeStateStatus: fresh?.mergeStateStatus ?? s.mergeStateStatus, ciGreen: fresh?.ciGreen === true, verdict }); return { queued: true, id: event.id, prNumber: pr.number, summary: comment }; }}</Task><Branch if={dryRun || ctx.latest(outputs.captainQuestion, `captain-question-${reviewGateKey(pr)}`)?.queued === true} then={dryRun ? <Task id={`review-approval-gate-${reviewGateKey(pr)}`} output={outputs.reviewApproval}>{() => ({ approved: true, note: "bypassApprovals (dry-run test mode)", decidedBy: "bypass", decidedAt: iso() })}</Task> : <Approval id={`review-approval-gate-${reviewGateKey(pr)}`} output={outputs.reviewApproval} onDeny="continue" request={{ title: `Captain review decision: PR #${pr.number} ${pr.title}`, summary: `URL: ${pr.url}\nThe captain decision is queued with the complete drafted verdict, comment, and evidence.` }} />} else={<Task id={`review-approval-gate-${reviewGateKey(pr)}`} output={outputs.reviewApproval}>{() => ({ approved: false, note: "captain question was not queued", decidedBy: "workflow", decidedAt: iso() })}</Task>} /> <Task id={`submit-review-${reviewGateKey(pr)}`} output={outputs.submit} retries={1} dependsOn={[`review-approval-gate-${reviewGateKey(pr)}`]}>{async () => { const decision = ctx.latest(outputs.reviewApproval, `review-approval-gate-${reviewGateKey(pr)}`); if (!shouldSubmitReview(decision)) return { submitted: false, reason: "captain denied" }; const report = ctx.latest(outputs.report, `gate-report-${reviewGateKey(pr)}`); const review = ctx.latest(outputs.review, `gate-review-${reviewGateKey(pr)}`); const approvedState = ctx.latest(outputs.state, `gate-final-state-${reviewGateKey(pr)}`); const currentState = dryRun ? approvedState : await state(cli, input.repo, pr.number); const plan = planReviewSubmission(pr, review, approvedState, currentState, report?.draftFingerprint ?? ""); if (!plan.submitted) return plan; if (posted[plan.marker] !== undefined) return { submitted: false, reason: "already submitted", verdict: plan.verdict }; const args = [...reviewCommand(pr.number, input.repo, plan.verdict === "comment"), "--body", plan.body]; if (!dryRun) { await ghRun(cli, args, input.worktree); posted[plan.marker] = iso(); saveJson(postedPath, posted); } return { submitted: true, verdict: plan.verdict }; }}</Task></Sequence>)}<Timer id="review-cycle-delay" duration={`${pollIntervalMs}ms`} /><ContinueAsNew state={{ cycle: cycle + 1, pollCount: pollCount + completedPolls }} /></Sequence></Workflow>;
 });

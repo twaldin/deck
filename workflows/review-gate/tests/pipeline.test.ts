@@ -6,7 +6,7 @@ import { renderWorkflow } from "smithers-orchestrator/testing";
 import { openQuestions } from "../../../v2/src/questions-store.ts";
 import { routeWorkflowQuestionAnswer } from "../../../v2/src/workflow-questions.ts";
 import { reviewCommand, shouldSubmitReview } from "../decision.ts";
-import workflow, { assessCi, createReviewGateAgent, queueReviewGateDecision, reviewDecisionBlockers, reviewSubmissionMarker } from "../pipeline.tsx";
+import workflow, { assessCi, createReviewGateAgent, planReviewSubmission, queueReviewGateDecision, reviewDecisionBlockers, reviewSubmissionMarker } from "../pipeline.tsx";
 import { PrimeSeatAgent } from "../../pr-pipeline/lib/engines/prime.ts";
 import { DECK_PROVIDER } from "../../pr-pipeline/lib/models.ts";
 import {
@@ -359,7 +359,7 @@ test("blockers dispatch a fix and rebase is an agent task", () => {
 });
 
 test("blocker reports draft findings and submit only follows captain approval", () => {
-  expect(source).toContain("reviewCommand(pr.number, input.repo, blockers.length === 0)");
+  expect(source).toContain('reviewCommand(pr.number, input.repo, plan.verdict === "comment")');
   expect(source).toContain('request-changes');
   expect(source).toContain("draftFingerprint");
   expect(source).toContain("draftBody");
@@ -387,7 +387,7 @@ test("clean and exhausted rounds use different captain decisions without self-ap
   expect(source).toContain('Math.min(input.limits?.rounds ?? 3, 3)');
   expect(source).toContain('const clean = request.verdict === "comment"');
   expect(source).toContain('["Acknowledge evidence", "Hold", "Deny gate"]');
-  expect(source).toContain('reviewCommand(pr.number, input.repo, blockers.length === 0)');
+  expect(source).toContain('reviewCommand(pr.number, input.repo, plan.verdict === "comment")');
   expect(source).toContain('shouldSubmitReview(decision)');
 });
 
@@ -412,6 +412,33 @@ test("polling and every requested PR are durable workflow paths", () => {
   expect(source).toContain("maxAttempts={polls}");
   expect(source).toContain("reviewPrs.map((pr) =>");
   expect(source).toContain("pr.url");
+});
+
+test("submission refuses a PR head that changed after human approval", () => {
+  const reviewedPr = {
+    number: 7,
+    url: "https://github.test/owner/repo/pull/7",
+    title: "Reviewed",
+    headRefOid: "head-a",
+  };
+  const review = { approvable: true, blockers: [], headSha: "head-a", summary: "clean" };
+  const approvedState = {
+    mergeable: true,
+    ciGreen: true,
+    ciPending: false,
+    mergeStateStatus: "CLEAN",
+    headSha: "head-a",
+    summary: "clean",
+  };
+  expect(planReviewSubmission(
+    reviewedPr,
+    review,
+    approvedState,
+    { ...approvedState, headSha: "head-b" },
+  )).toEqual({
+    submitted: false,
+    reason: "PR head changed since the approved review decision",
+  });
 });
 
 test("the installed pack does not ship the approval-spamming post-failure workflow", () => {
