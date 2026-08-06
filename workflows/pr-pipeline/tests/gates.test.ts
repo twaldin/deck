@@ -27,6 +27,7 @@ import { watchFixPrompt } from "../lib/prompts.ts";
 import { evaluateReadyForStamp, findHumanApproval } from "../lib/ready.ts";
 import {
 	assessCi,
+	assessMergeSafety,
 	classifyCiEvidence,
 	evaluateWatchExit as evaluateWatchExitRequired,
 	reviewersNeedingReRequest,
@@ -326,7 +327,47 @@ describe("evaluateWatchExit", () => {
 		const verdict = evaluateWatchExit(snapshot({ mergeStateStatus: "BLOCKED", behindBy: 21 }), { selfLogins: ["twaldin"] });
 		expect(verdict.exitOk).toBe(true);
 		expect(verdict.rebaseRequired).toBe(false);
+
 		expect(verdict.reasons.join(" ")).not.toContain("commit(s) behind");
+	});
+	test("merge safety preserves a stamp only while exact-head CI is genuinely pending", () => {
+		const pending = assessMergeSafety(snapshot({
+			checkRuns: [{
+				name: "ci",
+				status: "in_progress",
+				conclusion: null,
+				headSha: "abc123",
+				startedAt: "2026-07-27T10:00:00Z",
+			}],
+		}), "abc123");
+		expect(pending.ok).toBe(false);
+		expect(pending.retryable).toBe(true);
+		expect(["RUNNING", "RUNNER_QUEUED"]).toContain(pending.ciClassification);
+	});
+
+	test("merge safety requires fresh terminal-green CI, current head, and MERGEABLE", () => {
+		expect(assessMergeSafety(snapshot(), "abc123")).toMatchObject({
+			ok: true,
+			retryable: false,
+			ciClassification: "TERMINAL_SUCCESS",
+		});
+		const noCi = assessMergeSafety(snapshot({
+			checkRuns: [],
+			ciEvidence: {
+				requiredContexts: [],
+				rulesBranch: "main",
+				graceSeconds: 150,
+				currentHeadAgeSeconds: 600,
+				currentRuns: [],
+				staleActiveRuns: [],
+				statuses: [],
+			},
+		}), "abc123");
+		expect(noCi.ok).toBe(false);
+		expect(noCi.retryable).toBe(false);
+		expect(noCi.ciClassification).toBe("NO_REQUIRED_CHECKS");
+		expect(assessMergeSafety(snapshot(), "different-head").ok).toBe(false);
+		expect(assessMergeSafety(snapshot({ mergeable: "CONFLICTING" }), "abc123").ok).toBe(false);
 	});
 	test("UNKNOWN GitHub mergeability is stale metadata, not a rebase trigger", () => {
 		const verdict = evaluateWatchExit(snapshot({

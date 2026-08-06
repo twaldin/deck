@@ -248,6 +248,9 @@ export function validateProfiles(parsed: unknown, source: string): ProjectProfil
 		if (p.installCommand !== undefined && typeof p.installCommand !== "string") {
 			throw new Error(`${where} (${p.id}): installCommand must be a string`);
 		}
+		if (p.falloutCommand !== undefined && typeof p.falloutCommand !== "string") {
+			throw new Error(`${where} (${p.id}): falloutCommand must be a string`);
+		}
 		if (p.depsWarm !== undefined && typeof p.depsWarm !== "boolean") {
 			throw new Error(`${where} (${p.id}): depsWarm must be a boolean`);
 		}
@@ -266,6 +269,7 @@ export function validateProfiles(parsed: unknown, source: string): ProjectProfil
 			reviewPolicy,
 			...(p.testCommand === undefined ? {} : { testCommand: p.testCommand }),
 			...(p.installCommand === undefined ? {} : { installCommand: p.installCommand }),
+			...(p.falloutCommand === undefined ? {} : { falloutCommand: p.falloutCommand }),
 			depsWarm: p.depsWarm ?? true
 		};
 	});

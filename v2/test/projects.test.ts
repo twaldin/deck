@@ -134,6 +134,13 @@ describe("config file", () => {
 		expect(profile?.models?.implementer).toBe(models && "implementer" in models ? "deck/claude-fable-5" : undefined);
 	});
 
+	test("preserves a configured post-landing fallout probe and rejects malformed probes", () => {
+		writeConfig([{ ...deckOverride, falloutCommand: "bun run smoke:prod" }]);
+		expect(loadProfiles()[0]?.falloutCommand).toBe("bun run smoke:prod");
+		expect(() => validateProfiles([{ ...deckOverride, falloutCommand: 42 }], "x"))
+			.toThrow(/falloutCommand must be a string/);
+	});
+
 	test("malformed entries are refused with the reason", () => {
 		expect(() => validateProfiles({}, "x")).toThrow(/array/);
 		expect(() => validateProfiles([{ ...deckOverride, primary: "relative" }], "x")).toThrow(
