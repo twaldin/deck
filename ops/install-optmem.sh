@@ -32,6 +32,8 @@ cat <<'EOF'
 
 OptMem is installed and `memo wake` succeeded.
 The upstream installer printed its authoritative `## Memory` block above.
-For a deck home, that block is already present verbatim in v2/seed/AGENTS.md.
+A deck home deliberately does NOT carry that block: the seed is injected every
+turn, and `memo` documents itself on demand. The seed keeps only the startup
+`memo wake` call and Deck's failure override.
 For any other agent home, paste the complete block at the top of AGENTS.md.
 EOF

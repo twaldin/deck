@@ -140,9 +140,9 @@ describe("bootstrap", () => {
 		expect(body).toContain("Run `~/.optmem/memo wake` before any other tool call");
 		expect(body).toContain("Attempt `memo wake` exactly once");
 		expect(body).toContain("DEGRADED MEMORY — OptMem wake failed");
-		expect(body).toContain("Queue one operational-defect question");
-		expect(body).toContain("do not retry, loop, or wait in the background");
-		expect(body).toMatch(/do not claim durable\s+memory, remembered identity, or remembered decisions/);
+		expect(body).toContain("Queue one defect question");
+		expect(body).toContain("do not retry or loop");
+		expect(body).toMatch(/do not claim remembered facts/);
 		expect(body).not.toContain("single point of contact");
 		expect(result.created.length).toBeGreaterThan(0);
 		expect(
@@ -513,23 +513,20 @@ describe("the seeded contract is clean", () => {
 		expect(contract).toStartWith("# Deck home");
 		expect(contract).toContain("## THE FACTORY");
 		expect(contract).toContain("## QUESTIONS DISCIPLINE");
-		expect(contract).toContain("## THIS SESSION NEVER");
-		expect(contract).toContain(
-			"This seat discharges build, review, and deploy obligations only through those\n" +
-				"calls and queued questions",
-		);
 		// Named explicitly: pointing the factory at a repo with human reviewers is
 		// the change most likely to make a seat call a blocked PR "done".
 		expect(contract).toContain("### Repos with human reviewers");
 		expect(contract).toContain("green CI is not delivery evidence");
-		expect(contract).toContain("Prime seats delegate bounded work only through native `rlm()`");
-		expect(contract).toMatch(/RLM depth is one:\s+children are allowed and grandchildren are not/);
-		expect(contract).toMatch(/A bare child uses\s+`deck\/gpt-5\.6-luna` at reasoning `xhigh`/);
+		// Harness-enforced mechanics must NOT be restated here: RLM depth is set by
+		// the wrapper, the bare-child model by the engine's policy, and the model
+		// allowlist by the launch guard. Prose about them is pure token tax.
+		expect(contract).not.toMatch(/RLM depth is one/);
+		expect(contract).not.toMatch(/quota bucket/i);
 		expect(contract).not.toMatch(/\b(?:Lindy|captain|twaldin)\b/i);
 		// The human-reviewer contract, the memory privacy boundary, and the CLI
 		// table are all load-bearing for a production repo, so the budget moved
 		// once, deliberately. Keep it tight: this is injected into every session.
-		expect(Buffer.byteLength(contract, "utf8")).toBeLessThan(15 * 1024);
+		expect(Buffer.byteLength(contract, "utf8")).toBeLessThan(6 * 1024);
 	});
 });
 

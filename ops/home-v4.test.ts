@@ -185,7 +185,8 @@ INSTALL
 		});
 		expect(output).toContain("## Memory");
 		expect(output).toContain("memo wake` succeeded");
-		expect(output).toContain("v2/seed/AGENTS.md");
+		// A deck home no longer carries the vendored block; the installer must say so.
+		expect(output).toContain("deliberately does NOT carry that block");
 		expect(fs.existsSync(path.join(home, ".optmem", "memo"))).toBe(true);
 	});
 
@@ -250,27 +251,19 @@ INSTALL
 describe("home seed", () => {
 	test("is compact and identifies the plain-session boundaries", () => {
 		const seed = fs.readFileSync(path.join(import.meta.dir, "..", "v2", "seed", "AGENTS.md"), "utf8");
-		expect(Buffer.byteLength(seed, "utf8")).toBeLessThan(12 * 1024);
+		// Single source of truth for this budget: keep in lockstep with
+		// v2/test/home.test.ts and ops/verify-clean-install.sh.
+		expect(Buffer.byteLength(seed, "utf8")).toBeLessThan(6 * 1024);
 		expect(seed).toContain("You are a Deck conversation seat");
 		expect(seed).toContain("## MEMORY CONTRACT");
 		expect(seed).toContain("## THE FACTORY");
 		expect(seed).toContain("## QUESTIONS DISCIPLINE");
 		expect(seed).toContain("## PROJECT POLICY");
-		expect(seed).toContain("## DELEGATION");
-		expect(seed).toContain("## THIS SESSION NEVER");
 		expect(seed).not.toContain("single point of contact");
-		const expectedOptMem = fs.readFileSync(path.join(import.meta.dir, "fixtures", "optmem-prompt.txt"), "utf8").trimEnd();
-		const optMemStart = seed.indexOf("## Memory\n");
-		const optMemEnd = seed.indexOf("\n\n### Per-effort depth", optMemStart);
-		expect(optMemStart).toBeGreaterThanOrEqual(0);
-		expect(optMemEnd).toBeGreaterThan(optMemStart);
-		const installedOptMem = seed.slice(optMemStart, optMemEnd);
-		const overrideStart = installedOptMem.indexOf("\n\n### Deck failure override");
-		const overrideEnd = installedOptMem.indexOf("\n\n### While working", overrideStart);
-		expect(overrideStart).toBeGreaterThanOrEqual(0);
-		expect(overrideEnd).toBeGreaterThan(overrideStart);
-		const upstreamOptMem =
-			installedOptMem.slice(0, overrideStart) + installedOptMem.slice(overrideEnd);
-		expect(upstreamOptMem).toBe(expectedOptMem);
+		// The vendored OptMem how-to was removed from the every-turn seed: `memo`
+		// documents itself on demand, so restating it cost tokens every session for
+		// no behavior change. Only the startup call and Deck's failure override stay.
+		expect(seed).toContain("Run `~/.optmem/memo wake` before any other tool call");
+		expect(seed).toContain("### Deck failure override");
 	});
 });

@@ -158,7 +158,7 @@ AGENTS_SIZE="$(wc -c < "$DECK_HOME/AGENTS.md" | tr -d '[:space:]')"
 # once, deliberately, to fit three things a production repo cannot ship without:
 # the human-reviewer contract, the global-memory privacy boundary, and the CLI
 # table. Keep this in lockstep with v2/test/home.test.ts.
-[ "$AGENTS_SIZE" -lt 15360 ] || fail "installed AGENTS.md is $AGENTS_SIZE bytes (must be under 15360)"
+[ "$AGENTS_SIZE" -lt 6144 ] || fail "installed AGENTS.md is $AGENTS_SIZE bytes (must be under 6144)"
 
 REVIEWERS_FILE="$DECK_HOME/config/reviewers.json"
 [ -f "$REVIEWERS_FILE" ] || fail "fresh install is missing private reviewer config"
