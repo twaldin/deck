@@ -97,7 +97,7 @@ describe("home is not a checkout", () => {
 });
 
 describe("bootstrap", () => {
-	test("creates the plain pi home and copies the public contract seed", async () => {
+	test("creates the Deck conversation home and copies the public contract seed", async () => {
 		const home = path.join(sandbox, "home");
 		process.env.DECK_V2_HOME = home;
 		const { bootstrapHome } = await import("../src/bootstrap");
@@ -108,7 +108,7 @@ describe("bootstrap", () => {
 		const contract = path.join(home, "AGENTS.md");
 		expect(fs.lstatSync(contract).isSymbolicLink()).toBe(false);
 		const body = fs.readFileSync(contract, "utf8");
-		expect(body).toContain("You are a plain pi session");
+		expect(body).toContain("You are a Deck conversation seat");
 		expect(body).toContain("Run `~/.optmem/memo wake` before any other tool call");
 		expect(body).toContain("Attempt `memo wake` exactly once");
 		expect(body).toContain("DEGRADED MEMORY — OptMem wake failed");
@@ -206,13 +206,13 @@ describe("prompt isolation in the checkout", () => {
 
 		expect(found.filter((file) => file !== "AGENTS.md")).toEqual(["v2/seed/AGENTS.md"]);
 		const seed = fs.readFileSync(path.join(REPO_V2, "seed", "AGENTS.md"), "utf8");
-		expect(seed).toContain("You are a plain pi session");
+		expect(seed).toContain("You are a Deck conversation seat");
 		expect(seed).not.toContain("single point of contact");
 	});
 });
 
 describe("the seeded contract is clean", () => {
-	test("is a compact, public-safe plain-session contract", async () => {
+	test("is a compact, public-safe conversation-seat contract", async () => {
 		const home = path.join(sandbox, "home");
 		const { bootstrapHome } = await import("../src/bootstrap");
 		bootstrapHome({ repoV2Dir: REPO_V2, home, optMem: false });
@@ -222,9 +222,12 @@ describe("the seeded contract is clean", () => {
 		expect(contract).toContain("## QUESTIONS DISCIPLINE");
 		expect(contract).toContain("## THIS SESSION NEVER");
 		expect(contract).toContain(
-			"this plain pi chat session discharges\n" +
+			"this conversation seat discharges\n" +
 				"them only through `ship`, `adopt`, `status`, and queued questions",
 		);
+		expect(contract).toContain("Prime seats delegate bounded work through native `rlm()` children");
+		expect(contract).toMatch(/RLM depth is one: children are\s+allowed, grandchildren are not/);
+		expect(contract).toMatch(/Bare children use `deck\/gpt-5\.6-luna` at\s+reasoning `xhigh`/);
 		expect(contract).not.toMatch(/\b(?:Lindy|captain|twaldin)\b/i);
 		expect(Buffer.byteLength(contract, "utf8")).toBeLessThan(12 * 1024);
 	});

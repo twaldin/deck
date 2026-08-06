@@ -29,9 +29,8 @@ factory is a set of tools loaded into a plain session.
 | **`deck-questions`** | Durable questions plus the interactive `/questions` queue. |
 | **`deck-ship`** | `ship`, `adopt`, and read-only `status`; dispatches the project PR pipeline rather than implementing delivery in the chat. |
 | **`deck-recall`** | Reads per-effort dossiers so a new session can recover the deeper brief and decision history. |
-| **`deck-subagents`** | Temporary bounded-child tool. It remains installed while the Pi-seat migration is in progress, then retires. |
 | **Smithers** | Persists and resumes the PR pipeline, including implementation, adversarial review, GitHub review/CI, merge policy, and evidence gates. |
-| **Broker** | Optional multi-account model provider for the conversation; required by the current default Smithers and `deck-subagents` model seats. It uses accounts configured by this installation's operator. |
+| **Broker** | Optional multi-account model provider for the conversation; required by the current Smithers model seats. It uses accounts configured by this installation's operator. |
 | **OptMem** | Global append-only identity, decisions, preferences, and lessons. Effort-specific detail stays in dossiers. |
 
 Project and reviewer policy is private machine configuration:
@@ -54,7 +53,14 @@ examples; they are never selected by bootstrap.
   to ship; it is not needed for a standalone conversation
 
 Deck installs its pinned Pi CLI under `~/.local/bin/pi`; a global Pi or Node
-installation is not required.
+installation is not required. If `uv` is absent, the installer downloads
+`uv`/`uvx` 0.11.8 for the host platform, verifies the release's published
+SHA-256, installs both beside the Deck shims, and proves an isolated IPython
+kernel can execute a cell. A kernel bootstrap failure aborts the install.
+
+An existing non-Deck `pi` command is never overwritten. The installer stops
+before downloads or home changes and prints an exact `BIN_TARGET` command for
+installing Deck's shims in a separate directory.
 
 ## Clean install
 
@@ -78,8 +84,8 @@ An environment variable such as `ANTHROPIC_API_KEY` is also supported, but do
 not put API keys in this repository.
 
 The standalone path loads questions, shipping/status, recall, and the seed
-`~/.deck/AGENTS.md`. Calls that start model seats — the current PR pipeline and
-`subagent` — additionally need the Deck broker:
+`~/.deck/AGENTS.md`. Calls that start the current PR-pipeline model seats
+additionally need the Deck broker:
 
 ```sh
 # interactive, once per provider account
@@ -94,7 +100,8 @@ enter and use a plain session with your own Pi credential.
 
 ## Install, update, and optional services
 
-- `./install.sh` is the first-time, clean-clone bootstrap. It installs package
+- `./install.sh` is the first-time, clean-clone bootstrap. It installs or
+  verifies `uv`, proves the isolated IPython tool runtime, installs package
   dependencies, the Deck-scoped Pi extension pack, command shims, the isolated
   Smithers workspace, OptMem, and the plain `~/.deck` home.
 - `./update.sh` refreshes an existing checkout and converges the same installed
@@ -120,8 +127,7 @@ bun workflows/review-gate/launch.ts
 ~/dev/deck/                    code and factory definitions (git checkout)
 ~/.deck/                       private plain-Pi runtime home (not a checkout)
 ~/.deck/AGENTS.md              public seed copied on first bootstrap
-~/.deck/.pi/extensions/        deck-questions, deck-ship, deck-recall,
-                               deck-subagents, and its Deck provider dependency
+~/.deck/.pi/extensions/        deck-questions, deck-ship, and deck-recall
 ~/.deck/state/smithers/        live Smithers workspace and run state
 ~/.deck/efforts/               per-effort dossiers
 ~/.optmem/                     global append-only memory
