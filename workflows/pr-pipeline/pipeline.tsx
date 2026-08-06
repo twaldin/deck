@@ -35,6 +35,7 @@ import {
 	Sequence,
 	approvalDecisionSchema,
 	createSmithers,
+	type AgentLike,
 } from "smithers-orchestrator";
 import { z } from "zod";
 import * as fs from "node:fs";
@@ -86,14 +87,16 @@ import { findLandingCommit } from "./lib/landing.ts";
 import { runMerge } from "./lib/merge.ts";
 import { detectMigrations, MIGRATION_STAGES, migrationEvidenceComplete } from "./lib/migrations.ts";
 import { generatePullRequestDescription, sanitizeDescriptionInput } from "./lib/description.ts";
+import { buildSeatEnvironment, PrimeSeatAgent } from "./lib/engines/prime.ts";
 import {
+	DECK_PROVIDER,
 	defaultModelPolicy,
 	parseModelRef,
 	resolveAdversary,
 	validateModelPolicy,
 	type ModelPolicy,
 } from "./lib/models.ts";
-import { findProfile, type ModelSeat, type ProjectProfile } from "./lib/profiles.ts";
+import { findProfile, type ModelSeat, type ProjectProfile, type SeatEngine } from "./lib/profiles.ts";
 import {
 	assertProductWorkspace,
 	DEV_WORKSPACE_OVERRIDE,
@@ -783,23 +786,34 @@ function seat(ref: ModelSeat): { ref: string; reasoning?: string } {
 	return typeof ref === "string" ? { ref } : { ref: ref.model, reasoning: ref.reasoning };
 }
 
-function makeAgent(ref: ModelSeat, cwd: string, timeoutMs: number, reasoning = "medium"): PiAgent {
+function makeAgent(
+	engine: SeatEngine,
+	ref: ModelSeat,
+	cwd: string,
+	timeoutMs: number,
+	effortLabel: string,
+	reasoning = "medium",
+): AgentLike {
 	const selected = seat(ref);
+	const { provider, model } = parseModelRef(selected.ref);
+	const thinking = selected.reasoning ?? reasoning;
+	if (engine === "prime") {
+		return new PrimeSeatAgent({
+			provider: DECK_PROVIDER,
+			model,
+			cwd,
+			effortLabel,
+			timeoutMs,
+			thinking: thinking as never,
+		});
+	}
 	const configuredExtension = process.env.DECK_SUBAGENT_EXTENSION;
 	const bundledExtension = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../subagents/deck-subagents.ts");
 	const subagentExtension = configuredExtension ?? (fs.existsSync(bundledExtension) ? bundledExtension : undefined);
 	const extension = subagentExtension === undefined ? undefined : [subagentExtension];
-	const { provider, model } = parseModelRef(selected.ref);
-	const thinking = selected.reasoning ?? reasoning;
-	// Preserve the provider-native selector. If an older Smithers type does not
-	// yet include `max`, the compatibility cast is local and does not rewrite the
-	// value sent to Pi.
-
-	// PiAgent's current tool policy is whole-tool allowlisting; the watcher
-	// needs bash for tests and gh, so it cannot deny only `git push`. Until Pi
-	// exposes command-level policies, the prompt forbids push and the workflow
-	// rejects remote-head drift before its deterministic publish node.
-
+	// Pi still needs bash for tests and gh, but receives only the explicit
+	// non-credential seat environment. The deterministic publisher alone keeps
+	// push/merge/stamp credentials and authority.
 	return new PiAgent({
 		provider,
 		model,
@@ -807,6 +821,8 @@ function makeAgent(ref: ModelSeat, cwd: string, timeoutMs: number, reasoning = "
 		timeoutMs,
 		thinking: thinking as never,
 		noSession: true,
+		inheritEnv: false,
+		env: buildSeatEnvironment(),
 		...(extension === undefined ? {} : { extension }),
 	});
 }
@@ -917,6 +933,8 @@ export default smithers((ctx) => {
 		);
 	}
 	const yolo = profile !== null && !profileRepoMismatch && profile.yolo;
+	const seatEngine: SeatEngine =
+		profile !== null && !profileRepoMismatch ? profile.engine ?? "pi" : "pi";
 	const watchSetPath =
 		input.watchSetPath ?? `${process.env.HOME ?? "~"}/dev/fm2/data/watch-set.jsonl`;
 
@@ -1130,13 +1148,17 @@ export default smithers((ctx) => {
 			return "unresolvable";
 		}
 	})();
-	const agents = dryRun
+	const repoLabel = input.repo.split("/").pop() ?? input.repo;
+	const ticketLabel = input.ticket.replace(/^[^0-9]*/, "") || input.ticket;
+	const effortLabel = `${repoLabel}#${ticketLabel}`;
+	const modelViolationsAtRender = validateModelPolicy(policy);
+	const agents = dryRun || (seatEngine === "prime" && modelViolationsAtRender.length > 0)
 		? null
 		: {
-				implementer: makeAgent(policy.implementer, input.worktree, 45 * 60_000, policy.reasoningImplementer),
-				reviewer: makeAgent({ model: reviewerModel, reasoning: seat(policy.reviewer ?? reviewerModel).reasoning }, input.worktree, 20 * 60_000, policy.reasoningReviewer),
-				watcher: makeAgent(policy.watcher, input.worktree, 30 * 60_000, policy.reasoningWatcher),
-				fallout: makeAgent(policy.fallout, input.worktree, 15 * 60_000, policy.reasoningFallout),
+				implementer: makeAgent(seatEngine, policy.implementer, input.worktree, 45 * 60_000, effortLabel, policy.reasoningImplementer),
+				reviewer: makeAgent(seatEngine, { model: reviewerModel, reasoning: seat(policy.reviewer ?? reviewerModel).reasoning }, input.worktree, 20 * 60_000, effortLabel, policy.reasoningReviewer),
+				watcher: makeAgent(seatEngine, policy.watcher, input.worktree, 30 * 60_000, effortLabel, policy.reasoningWatcher),
+				fallout: makeAgent(seatEngine, policy.fallout, input.worktree, 15 * 60_000, effortLabel, policy.reasoningFallout),
 			};
 
 	// -- approval gate helper (bypass only allowed with dryRun; preflight enforces) --
