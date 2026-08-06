@@ -187,7 +187,7 @@ export async function runCli(argv: string[]): Promise<number> {
 					`ship ${result.runId} started (pid ${result.pid}) — profile ${result.profile} (${result.pipeline})${result.dryRun ? " [DRY RUN]" : ""}\n` +
 						`input: ${result.inputPath}\nlog: ${result.logPath}\n` +
 						`watch: (cd ${result.pipelineDir} && smithers ps; smithers why ${result.runId})\n` +
-						`a stamp park resumes from the Gateway approval panel, or with: smithers approve ${result.runId} --node r0-stamp --by "$(git config user.name)"; smithers up pipeline.tsx --run-id ${result.runId} --resume true\n`,
+						`a stamp park resumes from the Gateway approval panel — approvals are recorded there, not applied by hand\n`,
 				);
 				return 0;
 			}
