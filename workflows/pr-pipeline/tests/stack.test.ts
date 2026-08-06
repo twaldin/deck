@@ -330,6 +330,31 @@ describe("native stack creation and maintenance", () => {
 
 	test("uses gh stack rebase --upstack, push, and sync --prune non-interactively", async () => {
 		const { exec, calls } = routedExec({
+			"git branch --show-current": { stdout: "stack/child\n" },
+			"git rev-parse refs/heads/stack/parent": { stdout: "sha-parent\n" },
+			"git rev-parse refs/heads/stack/child": { stdout: "sha-child\n" },
+			"git rev-parse HEAD": { stdout: "sha-child\n" },
+			"git rev-parse --path-format=absolute --git-path rebase-merge": {
+				stdout: "/tmp/deck-stack-test-state/rebase-merge\n",
+			},
+			"git rev-parse --path-format=absolute --git-path rebase-apply": {
+				stdout: "/tmp/deck-stack-test-state/rebase-apply\n",
+			},
+			"git rev-parse --path-format=absolute --git-path gh-stack-rebase-state": {
+				stdout: "/tmp/deck-stack-test-state/gh-stack-rebase-state\n",
+			},
+			"git rev-parse --path-format=absolute --git-path REBASE_HEAD": {
+				stdout: "/tmp/deck-stack-test-state/REBASE_HEAD\n",
+			},
+			"git rev-parse --path-format=absolute --git-path MERGE_MSG": {
+				stdout: "/tmp/deck-stack-test-state/MERGE_MSG\n",
+			},
+			"git rev-parse --path-format=absolute --git-path MERGE_RR": {
+				stdout: "/tmp/deck-stack-test-state/MERGE_RR\n",
+			},
+			"git rev-parse --path-format=absolute --git-path AUTO_MERGE": {
+				stdout: "/tmp/deck-stack-test-state/AUTO_MERGE\n",
+			},
 			"gh stack rebase --upstack stack/parent --remote origin": {},
 			"bash -lc bun test": {},
 			"gh stack push": {},
@@ -338,15 +363,27 @@ describe("native stack creation and maintenance", () => {
 		});
 		const actions = await rebaseStackUpstack(exec, {
 			gh: "gh",
+			git: "git",
 			worktree: "/tmp/wt",
 			rootBaseBranch: "main",
 			branches: ["stack/parent", "stack/child"],
 			fromBranch: "stack/parent",
+			expectedRemoteHeads: {
+				"stack/parent": "sha-parent",
+				"stack/child": "sha-child",
+			},
 			testCommand: "bun test",
 		});
 		expect(actions[0]).toContain("gh stack rebase --upstack");
 		expect(await syncStackPrune(exec, { gh: "gh", worktree: "/tmp/wt" })).toContain("sync --prune");
-		expect(calls.map((argv) => argv.join(" "))).toContain("gh stack sync --prune");
+		expect(
+			calls.some(
+				(argv) =>
+					argv.includes("push") &&
+					argv.includes("--atomic") &&
+					argv.some((arg) => arg.includes("--force-with-lease=refs/heads/stack/child:sha-child")),
+			),
+		).toBe(true);
 	});
 });
 
@@ -420,7 +457,7 @@ describe("stack-wide stamp and merge ordering", () => {
 });
 
 describe("stack child watch state", () => {
-	test("BLOCKED solely because the base is an open parent PR is benign", () => {
+	test("BLOCKED solely by an open parent does not rebase but still waits for approvals", () => {
 		const snapshot: WatchSnapshot = {
 			headSha: "sha-child",
 			lastPushAt: "2026-08-01T00:00:00Z",
@@ -435,6 +472,8 @@ describe("stack child watch state", () => {
 		};
 		const verdict = evaluateWatchExit(snapshot, { selfLogins: [] });
 		expect(verdict.rebaseRequired).toBe(false);
-		expect(verdict.exitOk).toBe(true);
+		expect(verdict.actionable).toBe(false);
+		expect(verdict.disposition).toBe("wait");
+		expect(verdict.exitOk).toBe(false);
 	});
 });
