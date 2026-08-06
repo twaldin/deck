@@ -547,6 +547,10 @@ chmod 400 "$AUTH_FILE"
 rm -rf "$PYTHON_ROOT"
 mkdir -p "$PYTHON_ROOT"
 cp -R "$PYTHON_SOURCE/deck" "$PYTHON_ROOT/deck"
+# `site` imports this automatically because PYTHON_ROOT is on PYTHONPATH. It
+# makes subprocess text mode tolerate non-UTF-8 tool output, which killed four
+# pipeline runs in one batch.
+cp "$PYTHON_SOURCE/sitecustomize.py" "$PYTHON_ROOT/sitecustomize.py"
 chmod -R go-w "$PYTHON_ROOT"
 # IPython runs every file in the profile's startup dir, so the surface is
 # present without an import the agent has to remember.

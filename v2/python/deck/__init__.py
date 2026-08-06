@@ -60,6 +60,11 @@ def _run(args: list[str], *, parse: bool = True) -> Any:
         [_cli(), *args],
         capture_output=True,
         text=True,
+        # Tool output is not guaranteed UTF-8. A single smart quote in a build
+        # log is byte 0x91 and raises UnicodeDecodeError from inside subprocess,
+        # taking down the whole call - observed doing exactly that to four
+        # pipeline runs. An encoding accident must never look like a Deck failure.
+        errors="replace",
         timeout=120,
     )
     if completed.returncode != 0:
