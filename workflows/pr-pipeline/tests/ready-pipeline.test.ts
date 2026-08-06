@@ -13,11 +13,12 @@ describe("ready exhaustion inputs", () => {
 		expect(result.approvedBy).toBe("reviewer");
 	});
 
-	test("a cancelled CI result is not ready even with approval", () => {
+	test("red CI remains visible but does not hide the captain's approval stamp", () => {
 		const result = evaluateReadyForStamp([{ login: "reviewer", state: "APPROVED", submittedAt: "2026-01-01", isBot: false }], "red", {
 			author: "author", excludedApprovers: [],
 		});
-		expect(result.ready).toBe(false);
+		expect(result.ready).toBe(true);
+		expect(result.reasons.join(" ")).toContain("live step-5 watch");
 		expect(pipelineSource).toContain("ctx.latest(outputs.readyPoll, readyNode)?.ready === true");
 	});
 

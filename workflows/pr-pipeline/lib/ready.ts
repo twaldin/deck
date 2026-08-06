@@ -1,10 +1,10 @@
 /**
- * Ready-for-stamp (SOP stage 6): real human approval + CI
- * green-or-WILL-BE-green.
+ * Compatibility helper for the stamp surface.
  *
- * The explicit approval gate does not wait on CI green. Flake reruns and
- * trivial CI fixes are agent work inside the watch loop; only real decisions
- * block on the operator. Hard red still blocks (it is watch-loop work).
+ * The locked pipeline contract makes the captain's stamp available after the
+ * profile-resolved approval loop; CI is surfaced but never gates that stamp.
+ * The yolo compatibility profile still has no captain decision and therefore
+ * waits for terminal CI before its automatic merge.
  */
 
 import type { CiState, ReadyVerdict, ReviewApproval } from "./types.ts";
@@ -62,9 +62,8 @@ export function evaluateReadyForStamp(
 		reasons.push("no real human approval yet (bot/agent reviews and excluded logins never count).");
 	}
 	if (ci === "red") {
-		reasons.push("CI is hard red - that is watch-loop work, not stamp-ready.");
+		reasons.push("CI is hard red; the live step-5 watch must keep fixing it while the captain's stamp remains available.");
 	}
-	// "none" (no checks configured) and "will-be-green" both pass per ruling.
-	const ready = approver !== null && ci !== "red";
+	const ready = approver !== null;
 	return { ready, approvedBy: approver, ci, reasons };
 }

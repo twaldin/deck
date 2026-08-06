@@ -80,6 +80,7 @@ describe("Prime-only seat engine invariant", () => {
 			yolo: true,
 			stamp: false,
 			knowledge: [],
+			reviewPolicy: { requireHuman: false, requiredBots: [] },
 			depsWarm: true,
 		};
 		expect(SEAT_ENGINES).toEqual(["prime"]);

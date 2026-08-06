@@ -77,6 +77,7 @@ const fixtureProfiles: ProjectProfile[] = [
 		yolo: true,
 		stamp: false,
 		knowledge: [],
+		reviewPolicy: { requireHuman: false, requiredBots: [{ login: "coderabbitai[bot]", approvalCheckPattern: "^CodeRabbit" }] },
 		depsWarm: true,
 	},
 	{
@@ -87,6 +88,7 @@ const fixtureProfiles: ProjectProfile[] = [
 		yolo: false,
 		stamp: true,
 		knowledge: [],
+		reviewPolicy: { requireHuman: true, requiredBots: [{ login: "claude[bot]", approvalCheckPattern: "claude.*review" }] },
 		depsWarm: true,
 	},
 	{
@@ -98,6 +100,7 @@ const fixtureProfiles: ProjectProfile[] = [
 		stamp: false,
 		production: true,
 		knowledge: [],
+		reviewPolicy: { requireHuman: false, requiredBots: [] },
 		depsWarm: true,
 	},
 ];
@@ -154,6 +157,7 @@ describe("workflow rendering contracts", () => {
 		yolo: false,
 		stamp: true,
 		knowledge: [],
+		reviewPolicy: { requireHuman: true, requiredBots: [] },
 		depsWarm: true,
 	};
 	const fullModels = seatModels;

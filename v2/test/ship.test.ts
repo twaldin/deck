@@ -28,8 +28,21 @@ beforeEach(() => {
 	delete process.env.DECK_PIPELINE_DIR;
 	fs.mkdirSync(path.dirname(profilesFile(home)), { recursive: true });
 	fs.writeFileSync(profilesFile(home), JSON.stringify([
-		{ id: "example-project", repo: "example-org/example-project", primary: "/opt/example-project", pipeline: "yolo-ship", yolo: true, stamp: false, knowledge: [], depsWarm: true },
-		{ id: "review-project", repo: "example-org/review-project", primary: "/opt/review-project", pipeline: "lindy-full", yolo: false, stamp: true, knowledge: [], depsWarm: true },
+		{
+			id: "example-project", repo: "example-org/example-project", primary: "/opt/example-project", pipeline: "yolo-ship", yolo: true, stamp: false, knowledge: [], depsWarm: true,
+			reviewPolicy: { requireHuman: false, requiredBots: [{ login: "coderabbitai[bot]", approvalCheckPattern: "^CodeRabbit(?:$| /)" }] },
+		},
+		{
+			id: "review-project", repo: "example-org/review-project", primary: "/opt/review-project", pipeline: "lindy-full", yolo: false, stamp: true, knowledge: [], depsWarm: true,
+			reviewPolicy: {
+				requireHuman: true,
+				requiredBots: [{
+					login: "claude[bot]",
+					approvalCommentPattern: "^\\*\\*Claude finished .+ task in .+\\*\\*",
+					approvalCheckPattern: "claude.*review",
+				}],
+			},
+		},
 	]));
 });
 
@@ -193,13 +206,23 @@ describe("buildPipelineInput", () => {
 		expect(validateBrief(none.brief).ok).toBe(true);
 	});
 
-	test("yolo profile with no reviewers records the explicit reviewer skip; lindy never does", () => {
+	test("ship resolves each profile's immutable review policy into pipeline input", () => {
 		const deck = buildPipelineInput(request(), deckProfile());
-		expect((deck.github as { skipReviewerRequest?: boolean })?.skipReviewerRequest).toBe(true);
+		const deckGithub = deck.github;
+		if (deckGithub === null || typeof deckGithub !== "object" || Array.isArray(deckGithub) || !("reviewPolicy" in deckGithub)) throw new Error("missing deck github input");
+		expect(deckGithub.reviewPolicy).toEqual({
+			requireHuman: false,
+			requiredBots: [{ login: "coderabbitai[bot]", approvalCheckPattern: "^CodeRabbit(?:$| /)" }],
+		});
+		expect("skipReviewerRequest" in deckGithub ? deckGithub.skipReviewerRequest : undefined).toBe(true);
 		const withReviewers = buildPipelineInput(request({ reviewers: ["alice"] }), deckProfile());
-		expect(withReviewers.github).toBeUndefined();
+		const withReviewersGithub = withReviewers.github;
+		if (withReviewersGithub === null || typeof withReviewersGithub !== "object" || Array.isArray(withReviewersGithub) || !("reviewPolicy" in withReviewersGithub)) throw new Error("missing reviewer github input");
+		expect(withReviewersGithub.reviewPolicy).toEqual(deckProfile().reviewPolicy);
 		const lindy = buildPipelineInput(request({ profile: "review-project" }), lindyProfile());
-		expect(lindy.github).toBeUndefined();
+		const lindyGithub = lindy.github;
+		if (lindyGithub === null || typeof lindyGithub !== "object" || Array.isArray(lindyGithub) || !("reviewPolicy" in lindyGithub)) throw new Error("missing lindy github input");
+		expect(lindyGithub.reviewPolicy).toEqual(lindyProfile().reviewPolicy);
 	});
 
 	test("real runs get a deploy-evidence command (done is evidence-gated); dry runs do not need one", () => {
@@ -219,9 +242,9 @@ describe("buildPipelineInput", () => {
 		expect(fresh.existingPr).toBeUndefined();
 	});
 
-	test("explicit reviewer skip is passed through even for a stamp profile", () => {
+	test("explicit reviewer skip is passed through with the stamp profile's review policy", () => {
 		const input = buildPipelineInput(request({ profile: "review-project", skipReviewerRequest: true }), lindyProfile());
-		expect(input.github).toEqual({ skipReviewerRequest: true });
+		expect(input.github).toEqual({ skipReviewerRequest: true, reviewPolicy: lindyProfile().reviewPolicy });
 	});
 
 	test("a stamp profile (lindy) never gets the weak git-log deploy default: preflight must fail closed until explicit evidence exists", () => {
@@ -495,6 +518,7 @@ describe("spawn enforcement: pipeline is the default ship path", () => {
 					yolo: true,
 					stamp: false,
 					knowledge: [],
+					reviewPolicy: { requireHuman: false, requiredBots: [] },
 				},
 			]),
 		);
@@ -561,6 +585,7 @@ describe("spawn enforcement: pipeline is the default ship path", () => {
 					yolo: true,
 					stamp: false,
 					knowledge: [],
+					reviewPolicy: { requireHuman: false, requiredBots: [] },
 				},
 			]),
 		);

@@ -8,12 +8,25 @@ import type { PrOverview } from "./adopt.ts";
 import { signedCommentBody } from "./comments.ts";
 import type {
 	CheckRun,
+	CiEvidence,
 	CommentActivity,
+	CommitStatusEvidence,
+	RequiredStatusContext,
 	ReviewApproval,
 	ReviewerActivity,
 	ReviewThread,
 	WatchSnapshot,
+	WorkflowJobEvidence,
+	WorkflowRunEvidence,
 } from "./types.ts";
+
+const ACTIVE_WORKFLOW_STATUSES: Record<string, true> = {
+	in_progress: true,
+	pending: true,
+	queued: true,
+	requested: true,
+	waiting: true,
+};
 
 export interface ExecResult {
 	code: number;
@@ -127,13 +140,25 @@ export function parseCheckRuns(payload: unknown): CheckRun[] {
 	for (const raw of payload.check_runs) {
 		if (!isRecord(raw)) continue;
 		const workflowName = isRecord(raw.check_suite) ? str(raw.check_suite.workflow_name) : "";
+		const suiteId = isRecord(raw.check_suite) ? Number(raw.check_suite.id) : Number.NaN;
+		const appId = isRecord(raw.app) ? Number(raw.app.id) : Number.NaN;
 		const completedAt = raw.completed_at === null ? null : str(raw.completed_at);
+		const startedAt = raw.started_at === null ? null : str(raw.started_at);
+		const detailsUrl = raw.details_url === null ? null : str(raw.details_url);
+		const id = Number(raw.id);
 		runs.push({
+			...(str(raw.head_sha) !== "" ? { headSha: str(raw.head_sha) } : {}),
+			...(Number.isFinite(id) ? { id } : {}),
 			name: str(raw.name),
 			...(workflowName !== "" ? { workflowName } : {}),
 			status: str(raw.status),
 			conclusion: raw.conclusion === null ? null : str(raw.conclusion),
+			...(startedAt !== "" ? { startedAt } : {}),
 			...(completedAt !== "" ? { completedAt } : {}),
+			...(detailsUrl !== "" ? { detailsUrl } : {}),
+			...(Number.isFinite(appId) ? { appId } : {}),
+			...(isRecord(raw.app) && str(raw.app.slug) !== "" ? { appSlug: str(raw.app.slug) } : {}),
+			...(Number.isFinite(suiteId) ? { checkSuiteId: suiteId } : {}),
 		});
 	}
 	return runs;
@@ -151,6 +176,7 @@ export function parseReviews(nodes: unknown): ReviewApproval[] {
 			isBot: isBotAuthor(author),
 			state: str(node.state),
 			submittedAt: str(node.submittedAt),
+			...(isRecord(node.commit) && str(node.commit.oid) !== "" ? { headSha: str(node.commit.oid) } : {}),
 		});
 	}
 	return reviews.filter((review) => review.login !== "");
@@ -170,7 +196,15 @@ export function parseActivity(
 			const author = isRecord(node.author) ? node.author : null;
 			const login = author !== null ? str(author.login) : "";
 			if (login === "") continue;
-			comments.push({ author: login, isBot: isBotAuthor(author), createdAt: str(node.createdAt), body: str(node.body) });
+			comments.push({
+				...(str(node.id) !== "" ? { id: str(node.id) } : {}),
+				...(str(node.url) !== "" ? { url: str(node.url) } : {}),
+				source: "issue_comment",
+				author: login,
+				isBot: isBotAuthor(author),
+				createdAt: str(node.createdAt),
+				body: str(node.body),
+			});
 		}
 	}
 	if (Array.isArray(reviewNodes)) {
@@ -180,9 +214,16 @@ export function parseActivity(
 			const login = author !== null ? str(author.login) : "";
 			if (login === "") continue;
 			const submittedAt = str(node.submittedAt);
-			// Review summaries count as comments too (they can carry asks).
 			if (str(node.body) !== "") {
-				comments.push({ author: login, isBot: isBotAuthor(author), createdAt: submittedAt, body: str(node.body) });
+				comments.push({
+					...(str(node.id) !== "" ? { id: str(node.id) } : {}),
+					...(str(node.url) !== "" ? { url: str(node.url) } : {}),
+					source: "review",
+					author: login,
+					isBot: isBotAuthor(author),
+					createdAt: submittedAt,
+					body: str(node.body),
+				});
 			}
 			const prior = latestByReviewer.get(login.toLowerCase());
 			if (prior === undefined || submittedAt > prior.lastActivityAt) {
@@ -190,12 +231,41 @@ export function parseActivity(
 					login,
 					isBot: isBotAuthor(author),
 					lastActivityAt: submittedAt,
+					...(isRecord(node.commit) && str(node.commit.oid) !== "" ? { headSha: str(node.commit.oid) } : {}),
 					lastReviewState: str(node.state) !== "" ? str(node.state) : null,
 				});
 			}
 		}
 	}
 	return { comments, reviewers: [...latestByReviewer.values()] };
+}
+
+/** Inline review comments are watch triggers too; keep stable thread/REST ids. */
+export function parseThreadComments(nodes: unknown): CommentActivity[] {
+	if (!Array.isArray(nodes)) return [];
+	const comments: CommentActivity[] = [];
+	for (const thread of nodes) {
+		if (!isRecord(thread) || !isRecord(thread.comments) || !Array.isArray(thread.comments.nodes)) continue;
+		for (const node of thread.comments.nodes) {
+			if (!isRecord(node)) continue;
+			const author = isRecord(node.author) ? node.author : null;
+			const login = author !== null ? str(author.login) : "";
+			if (login === "") continue;
+			const databaseId = Number(node.databaseId);
+			comments.push({
+				...(str(node.id) !== "" ? { id: str(node.id) } : {}),
+				...(Number.isFinite(databaseId) ? { databaseId } : {}),
+				...(str(node.url) !== "" ? { url: str(node.url) } : {}),
+				source: "review_comment",
+				threadId: str(thread.id),
+				author: login,
+				isBot: isBotAuthor(author),
+				createdAt: str(node.createdAt),
+				body: str(node.body),
+			});
+		}
+	}
+	return comments;
 }
 
 /** requested_reviewers REST payload -> logins. */
@@ -221,23 +291,27 @@ query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
       headRefOid
+      headRefName
       mergeable
       mergeStateStatus
       baseRefOid
       baseRefName
+      reviewDecision
       commits(last: 1) { nodes { commit { committedDate } } }
-      reviewThreads(first: 100) {
+      reviewThreads(last: 100) {
         nodes {
           id
           isResolved
-          comments(last: 1) { nodes { author { login __typename } } }
+          comments(last: 100) {
+            nodes { id databaseId url createdAt body author { login __typename } }
+          }
         }
       }
-      reviews(first: 100) {
-        nodes { author { login __typename } state submittedAt body }
+      reviews(last: 100) {
+        nodes { id url author { login __typename } state submittedAt body commit { oid } }
       }
-      comments(first: 100) {
-        nodes { author { login __typename } createdAt body }
+      comments(last: 100) {
+        nodes { id url author { login __typename } createdAt body }
       }
     }
   }
@@ -245,12 +319,263 @@ query($owner: String!, $name: String!, $number: Int!) {
 
 export async function fetchBranchCheckRuns(ctx: GhContext, branch: string): Promise<CheckRun[]> {
 	const exec = ctx.exec ?? bunExec;
-	const out = await execOrThrow(exec, [ctx.gh, "api", `repos/${ctx.repo}/commits/${encodeURIComponent(branch)}/check-runs?per_page=100`]);
-	return parseCheckRuns(JSON.parse(out));
+	const endpoint = `repos/${ctx.repo}/commits/${encodeURIComponent(branch)}/check-runs?per_page=100`;
+	const runs: CheckRun[] = [];
+	for (let page = 1; ; page += 1) {
+		const out = await execOrThrow(exec, [
+			ctx.gh,
+			"api",
+			page === 1 ? endpoint : `${endpoint}&page=${page}`,
+		]);
+		const payload: unknown = JSON.parse(out);
+		if (!isRecord(payload) || !Array.isArray(payload.check_runs)) {
+			throw new Error(`GitHub returned invalid check-run page ${page} for ${branch}`);
+		}
+		runs.push(...parseCheckRuns(payload));
+		if (payload.check_runs.length < 100) return runs;
+	}
 }
 
-export async function fetchWatchSnapshot(ctx: GhContext, prNumber: number, selfLogins: string[]): Promise<WatchSnapshot> {
+async function fetchCommitStatuses(ctx: GhContext, headSha: string): Promise<CommitStatusEvidence[]> {
 	const exec = ctx.exec ?? bunExec;
+	const endpoint = `repos/${ctx.repo}/commits/${headSha}/status?per_page=100`;
+	const statuses: CommitStatusEvidence[] = [];
+	for (let page = 1; ; page += 1) {
+		const out = await execOrThrow(exec, [
+			ctx.gh,
+			"api",
+			page === 1 ? endpoint : `${endpoint}&page=${page}`,
+		]);
+		const payload: unknown = JSON.parse(out);
+		if (!isRecord(payload) || !Array.isArray(payload.statuses)) {
+			throw new Error(`GitHub returned invalid commit-status page ${page} for ${headSha}`);
+		}
+		statuses.push(...parseCommitStatuses(payload));
+		if (payload.statuses.length < 100) return statuses;
+	}
+}
+
+async function fetchPullWorkflowRuns(ctx: GhContext, branch: string): Promise<RawWorkflowRun[]> {
+	const exec = ctx.exec ?? bunExec;
+	const endpoint = `repos/${ctx.repo}/actions/runs?branch=${encodeURIComponent(branch)}&event=pull_request&per_page=100`;
+	const runs: RawWorkflowRun[] = [];
+	for (let page = 1; ; page += 1) {
+		const out = await execOrThrow(exec, [
+			ctx.gh,
+			"api",
+			page === 1 ? endpoint : `${endpoint}&page=${page}`,
+		]);
+		const payload: unknown = JSON.parse(out);
+		if (!isRecord(payload) || !Array.isArray(payload.workflow_runs)) {
+			throw new Error(`GitHub returned invalid workflow-run page ${page} for ${branch}`);
+		}
+		runs.push(...parseWorkflowRuns(payload));
+		if (payload.workflow_runs.length < 100) return runs;
+	}
+}
+export function parseRequiredContexts(payload: unknown): RequiredStatusContext[] {
+	const rules = Array.isArray(payload)
+		? payload
+		: isRecord(payload) && Array.isArray(payload.rules)
+			? payload.rules
+			: [];
+	const contexts: RequiredStatusContext[] = [];
+	for (const rule of rules) {
+		if (!isRecord(rule) || str(rule.type) !== "required_status_checks" || !isRecord(rule.parameters)) continue;
+		const checks = Array.isArray(rule.parameters.required_status_checks)
+			? rule.parameters.required_status_checks
+			: [];
+		for (const check of checks) {
+			if (!isRecord(check) || str(check.context) === "") continue;
+			const integrationId = check.integration_id === null || check.integration_id === undefined
+				? null
+				: Number(check.integration_id);
+			contexts.push({
+				context: str(check.context),
+				integrationId: integrationId !== null && Number.isFinite(integrationId)
+					? integrationId
+					: null,
+			});
+		}
+	}
+	return [...new Map(contexts.map((context) => [
+		`${context.context}:${context.integrationId ?? "any"}`,
+		context,
+	])).values()];
+}
+
+export function parseCommitStatuses(payload: unknown): CommitStatusEvidence[] {
+	if (!isRecord(payload) || !Array.isArray(payload.statuses)) return [];
+	return payload.statuses.flatMap((status) => {
+		if (!isRecord(status)) return [];
+		const id = Number(status.id);
+		if (!Number.isFinite(id) || str(status.context) === "") return [];
+		return [{
+			id,
+			context: str(status.context),
+			state: str(status.state),
+			createdAt: str(status.created_at),
+			updatedAt: str(status.updated_at),
+			targetUrl: status.target_url === null ? null : str(status.target_url),
+		}];
+	});
+}
+
+interface RawWorkflowRun {
+	id: number;
+	checkSuiteId: number;
+	headSha: string;
+	status: string;
+	conclusion: string | null;
+	createdAt: string;
+	updatedAt: string;
+	startedAt: string | null;
+	url: string;
+	pullRequests: Array<{ number: number; baseRef: string; headSha: string }>;
+}
+
+function parseWorkflowRuns(payload: unknown): RawWorkflowRun[] {
+	if (!isRecord(payload) || !Array.isArray(payload.workflow_runs)) return [];
+	return payload.workflow_runs.flatMap((run) => {
+		if (!isRecord(run)) return [];
+		const id = Number(run.id);
+		const checkSuiteId = Number(run.check_suite_id);
+		if (!Number.isFinite(id) || !Number.isFinite(checkSuiteId)) return [];
+		const pulls = Array.isArray(run.pull_requests) ? run.pull_requests : [];
+		return [{
+			id,
+			checkSuiteId,
+			headSha: str(run.head_sha),
+			status: str(run.status),
+			conclusion: run.conclusion === null ? null : str(run.conclusion),
+			createdAt: str(run.created_at),
+			updatedAt: str(run.updated_at),
+			startedAt: run.run_started_at === null ? null : str(run.run_started_at),
+			url: str(run.html_url),
+			pullRequests: pulls.flatMap((pull) => {
+				if (!isRecord(pull)) return [];
+				const number = Number(pull.number);
+				const baseRef = isRecord(pull.base) ? str(pull.base.ref) : "";
+				const headSha = isRecord(pull.head) ? str(pull.head.sha) : "";
+				return Number.isFinite(number) ? [{ number, baseRef, headSha }] : [];
+			}),
+		}];
+	});
+}
+
+function parseWorkflowJobs(payload: unknown): WorkflowJobEvidence[] {
+	if (!isRecord(payload) || !Array.isArray(payload.jobs)) return [];
+	return payload.jobs.flatMap((job) => {
+		if (!isRecord(job)) return [];
+		const id = Number(job.id);
+		if (!Number.isFinite(id)) return [];
+		const steps = Array.isArray(job.steps)
+			? job.steps.flatMap((step) => !isRecord(step) ? [] : [{
+					name: str(step.name),
+					status: str(step.status),
+					conclusion: step.conclusion === null ? null : str(step.conclusion),
+				}])
+			: [];
+		return [{
+			id,
+			name: str(job.name),
+			status: str(job.status),
+			conclusion: job.conclusion === null ? null : str(job.conclusion),
+			startedAt: job.started_at === null ? null : str(job.started_at),
+			completedAt: job.completed_at === null ? null : str(job.completed_at),
+			url: str(job.html_url),
+			steps,
+		}];
+	});
+}
+
+async function resolveRequiredContexts(
+	ctx: Required<GhContext>,
+	startingBranch: string,
+): Promise<{ requiredContexts: RequiredStatusContext[]; rulesBranch: string }> {
+	const [owner] = ctx.repo.split("/");
+	const visited = new Set<string>();
+	let branch = startingBranch;
+	while (branch !== "" && !visited.has(branch)) {
+		visited.add(branch);
+		const rulesOut = await execOrThrow(ctx.exec, [
+			ctx.gh,
+			"api",
+			`repos/${ctx.repo}/rules/branches/${encodeURIComponent(branch)}`,
+		]);
+		const requiredContexts = parseRequiredContexts(JSON.parse(rulesOut));
+		if (requiredContexts.length > 0) return { requiredContexts, rulesBranch: branch };
+		const parentsOut = await execOrThrow(ctx.exec, [
+			ctx.gh,
+			"api",
+			`repos/${ctx.repo}/pulls?state=open&head=${encodeURIComponent(`${owner}:${branch}`)}&per_page=100`,
+		]);
+		const parents = JSON.parse(parentsOut);
+		if (!Array.isArray(parents)) throw new Error(`GitHub returned invalid parent PR data for ${branch}`);
+		const matching = parents.filter((candidate) =>
+			isRecord(candidate)
+			&& isRecord(candidate.head)
+			&& str(candidate.head.ref) === branch
+			&& isRecord(candidate.head.repo)
+			&& str(candidate.head.repo.full_name).toLowerCase() === ctx.repo.toLowerCase()
+		);
+		if (matching.length === 0) return { requiredContexts: [], rulesBranch: branch };
+		if (matching.length > 1) throw new Error(`Multiple open PRs use ${branch} as their head`);
+		const parent = matching[0];
+		branch = isRecord(parent) && isRecord(parent.base) ? str(parent.base.ref) : "";
+	}
+	if (branch === "") return { requiredContexts: [], rulesBranch: startingBranch };
+	throw new Error(`PR parent cycle detected at ${branch}`);
+}
+
+async function fetchWorkflowJobs(
+	ctx: Required<GhContext>,
+	runId: number,
+): Promise<WorkflowJobEvidence[]> {
+	const endpoint = `repos/${ctx.repo}/actions/runs/${runId}/jobs?per_page=100`;
+	const jobs: WorkflowJobEvidence[] = [];
+	for (let page = 1; ; page += 1) {
+		const out = await execOrThrow(ctx.exec, [
+			ctx.gh,
+			"api",
+			page === 1 ? endpoint : `${endpoint}&page=${page}`,
+		]);
+		const payload: unknown = JSON.parse(out);
+		if (!isRecord(payload) || !Array.isArray(payload.jobs)) {
+			throw new Error(`GitHub returned invalid workflow-job page ${page} for run ${runId}`);
+		}
+		jobs.push(...parseWorkflowJobs(payload));
+		if (payload.jobs.length < 100) return jobs;
+	}
+}
+
+async function workflowEvidence(
+	ctx: Required<GhContext>,
+	runs: RawWorkflowRun[],
+): Promise<WorkflowRunEvidence[]> {
+	return Promise.all(runs.map(async (run) => {
+		const parsedJobs = await fetchWorkflowJobs(ctx, run.id);
+		const jobs = await Promise.all(parsedJobs.map(async (job) => {
+			if (!["failure", "cancelled", "timed_out"].includes((job.conclusion ?? "").toLowerCase())) return job;
+			try {
+				const log = await execOrThrow(ctx.exec, [
+					ctx.gh,
+					"api",
+					`repos/${ctx.repo}/actions/jobs/${job.id}/logs`,
+				]);
+				return { ...job, logExcerpt: log.slice(-32_000) };
+			} catch {
+				return job;
+			}
+		}));
+		const { pullRequests: _pullRequests, ...evidence } = run;
+		return { ...evidence, jobs };
+	}));
+}
+
+export async function fetchWatchSnapshot(ctx: GhContext, prNumber: number, _selfLogins: string[]): Promise<WatchSnapshot> {
+	const exec = ctx.exec ?? bunExec;
+	const concreteCtx: Required<GhContext> = { ...ctx, exec };
 	const [owner, name] = ctx.repo.split("/");
 	const gqlOut = await execOrThrow(exec, [
 		ctx.gh, "api", "graphql",
@@ -261,46 +586,95 @@ export async function fetchWatchSnapshot(ctx: GhContext, prNumber: number, selfL
 	]);
 	const gql = JSON.parse(gqlOut) as Record<string, any>;
 	const pr = gql?.data?.repository?.pullRequest ?? {};
+	const headSha = str(pr.headRefOid);
+	const headRef = str(pr.headRefName);
+	const baseRef = str(pr.baseRefName);
+	if (headSha === "" || headRef === "" || baseRef === "") {
+		throw new Error(`GitHub returned an incomplete identity for PR #${prNumber}`);
+	}
 
-	const requestedOut = await execOrThrow(exec, [
-		ctx.gh, "api", `repos/${ctx.repo}/pulls/${prNumber}/requested_reviewers`,
+	const [
+		requestedOut,
+		checkRuns,
+		statuses,
+		workflowRuns,
+		requiredResolution,
+	] = await Promise.all([
+		execOrThrow(exec, [
+			ctx.gh,
+			"api",
+			`repos/${ctx.repo}/pulls/${prNumber}/requested_reviewers`,
+		]),
+		fetchBranchCheckRuns(concreteCtx, headSha),
+		fetchCommitStatuses(concreteCtx, headSha),
+		fetchPullWorkflowRuns(concreteCtx, headRef),
+		resolveRequiredContexts(concreteCtx, baseRef),
 	]);
 	const requested = parseRequestedReviewers(JSON.parse(requestedOut));
-
-	const headSha = str(pr.headRefOid);
-	const baseRef = str(pr.baseRefName);
-	let behindBy = 0;
-	if (baseRef !== "" && headSha !== "") {
-		try {
-			const compareOut = await execOrThrow(exec, [ctx.gh, "api", `repos/${ctx.repo}/compare/${baseRef}...${headSha}`]);
-			const parsedCompare = JSON.parse(compareOut) as Record<string, unknown>;
-			const parsedBehindBy = Number(parsedCompare.behind_by ?? 0);
-			if (Number.isFinite(parsedBehindBy)) behindBy = parsedBehindBy;
-		} catch {
-			// Compare is supplementary. A transient 404 during a force-push must
-			// not fail the entire watch poll; mergeability still comes from GraphQL.
-			behindBy = 0;
-		}
-	}
-	const checksOut = await execOrThrow(exec, [
-		ctx.gh, "api", `repos/${ctx.repo}/commits/${headSha}/check-runs?per_page=100`,
+	const currentRawRuns = workflowRuns.filter((run) =>
+		run.headSha === headSha
+		&& run.pullRequests.some((pull) =>
+			pull.number === prNumber
+			&& pull.baseRef === baseRef
+			&& pull.headSha === headSha
+		)
+	);
+	const currentIds = new Set(currentRawRuns.map((run) => run.id));
+	const staleActiveRawRuns = workflowRuns.filter((run) =>
+		!currentIds.has(run.id) && ACTIVE_WORKFLOW_STATUSES[run.status] === true
+	);
+	const [currentRuns, staleActiveRuns] = await Promise.all([
+		workflowEvidence(concreteCtx, currentRawRuns),
+		workflowEvidence(concreteCtx, staleActiveRawRuns),
 	]);
-	const checkRuns = parseCheckRuns(JSON.parse(checksOut));
+
+	let behindBy = 0;
+	try {
+		const compareOut = await execOrThrow(exec, [
+			ctx.gh,
+			"api",
+			`repos/${ctx.repo}/compare/${encodeURIComponent(baseRef)}...${headSha}`,
+		]);
+		const parsedCompare = JSON.parse(compareOut) as Record<string, unknown>;
+		const parsedBehindBy = Number(parsedCompare.behind_by ?? 0);
+		if (Number.isFinite(parsedBehindBy)) behindBy = parsedBehindBy;
+	} catch {
+		// Compare is supplementary. A force-push can briefly make it 404; the
+		// exact-head identity and GitHub mergeability response remain primary.
+		behindBy = 0;
+	}
 
 	const lastPushAt = str(pr?.commits?.nodes?.[0]?.commit?.committedDate);
+	const lastPushMs = Date.parse(lastPushAt);
+	const graceSeconds = 150;
+	const currentHeadAgeSeconds = Number.isFinite(lastPushMs)
+		? Math.max(0, Math.floor((Date.now() - lastPushMs) / 1000))
+		: graceSeconds + 1;
 	const { comments, reviewers } = parseActivity(pr?.reviews?.nodes, pr?.comments?.nodes);
+	const threadComments = parseThreadComments(pr?.reviewThreads?.nodes);
+	const ciEvidence: CiEvidence = {
+		requiredContexts: requiredResolution.requiredContexts,
+		rulesBranch: requiredResolution.rulesBranch,
+		graceSeconds,
+		currentHeadAgeSeconds,
+		currentRuns,
+		staleActiveRuns,
+		statuses,
+	};
 
 	return {
 		headSha,
 		mergeable: pr.mergeable === "MERGEABLE" || pr.mergeable === "CONFLICTING" ? pr.mergeable : "UNKNOWN",
 		mergeStateStatus: str(pr.mergeStateStatus),
-		behindBy: Number.isFinite(behindBy) ? behindBy : 0,
+		behindBy,
 		lastPushAt,
 		threads: parseReviewThreads(pr?.reviewThreads?.nodes),
-		comments,
+		comments: [...comments, ...threadComments],
 		reviewers,
+		reviewDecision: str(pr.reviewDecision) || null,
 		requestedReviewers: requested,
 		checkRuns,
+		ciEvidence,
 	};
 }
 
@@ -330,12 +704,10 @@ export async function fetchPrApprovalsAndCi(ctx: GhContext, prNumber: number): P
 	const gql = JSON.parse(gqlOut) as Record<string, any>;
 	const pr = gql?.data?.repository?.pullRequest ?? {};
 	const headSha = str(pr.headRefOid);
-	const checksOut = await execOrThrow(exec, [
-		ctx.gh, "api", `repos/${ctx.repo}/commits/${headSha}/check-runs?per_page=100`,
-	]);
+	const checkRuns = await fetchBranchCheckRuns({ ...ctx, exec }, headSha);
 	return {
 		approvals: parseReviews(pr?.reviews?.nodes),
-		checkRuns: parseCheckRuns(JSON.parse(checksOut)),
+		checkRuns,
 		headSha,
 	};
 }

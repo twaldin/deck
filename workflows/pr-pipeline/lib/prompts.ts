@@ -8,7 +8,6 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { agentCommentSignature, commentCommand, isSignatureProject, reviewReplyCommand } from "./comments.ts";
 import type { Brief } from "./types.ts";
 import type { StackCarSpec } from "./adopt.ts";
 
@@ -328,68 +327,45 @@ export function watchFixPrompt(args: {
 	project?: string;
 	gh: string;
 	pollJson: string;
+	briefJson?: string;
+	triggerJson?: string;
 	round: number;
 	afterPoll: number;
 }): string {
-	const reviewReplyTemplate = reviewReplyCommand(args.project, args.repo, 0, "YOUR ANSWER").replace(
-		" 0 <<'COMMENT'",
-		" <REVIEW_COMMENT_ID> <<'COMMENT'",
-	);
-	const pollState = JSON.parse(args.pollJson) as { unresolvedThreads?: unknown };
-	const hasUnresolvedThreads =
-		typeof pollState.unresolvedThreads === "number" && pollState.unresolvedThreads > 0;
-	const watchResultContract = hasUnresolvedThreads
-		? [
-				RESULT_OBJECT_RULE,
-				`Shape-only blocker result example (replace angle-bracket fields with observed thread evidence): {"round":${args.round},"afterPoll":${args.afterPoll},"actions":["DECISION-CLASS BLOCKER: thread=<stable thread id or URL> | decision=<missing decision>"],"commits":[],"pushed":false,"reRequested":[],"summary":"A review thread remains unresolved pending an explicit decision."}`,
-				"Reply with ONLY the result object.",
-			]
-		: resultContract(
-				`{"round":${args.round},"afterPoll":${args.afterPoll},"actions":[],"commits":[],"pushed":false,"reRequested":[],"summary":"No action required."}`,
-			);
 	return seatPrompt([
-		"You are the WATCH-LOOP FIXER for an open PR. You own ALL feedback: review threads,",
-		"actionable comments, reviewer re-requests, and CI.",
+		"You are the WATCH-LOOP SEAT for an open PR. A real event woke you; do not poll or invent work.",
 		`Worktree: ${args.worktree} | branch: ${args.branch} | base: ${args.baseBranch} | repo: ${args.repo} | PR #${args.prNumber}.`,
-		`Use the \`${args.gh}\` CLI for every GitHub operation.`,
 		"",
-		"Current machine-checked poll state:",
+		"Original effort brief and decision context (authoritative):",
+		args.briefJson ?? "{}",
+		"",
+		"Specific trigger payloads that woke this seat:",
+		args.triggerJson ?? "[]",
+		"",
+		"Current machine-checked exact-head poll evidence:",
 		args.pollJson,
 		"",
 		RLM_GUIDANCE,
-		"Do, in order:",
-		"1. Never rebase or push. The pipeline owns publication through rebaseAndPush(),",
-		"   its deterministic bounded-ancestry check, tests, and force-with-lease push.",
-		"2. For every unresolved review thread, fix the code if warranted and reply in the thread.",
-		"   Resolve the thread only after a plain commit on THIS branch addresses it, or after explicit",
-		"   reviewer/captain agreement to the no-code disposition is observed in the thread or decision queue.",
-		"   Never infer agreement from silence. Without either condition, leave the thread unresolved and add",
-		"   an actions entry formatted exactly `DECISION-CLASS BLOCKER: thread=<stable thread id or URL> | decision=<missing decision>`;",
-		"   repeat that blocker in summary.",
-		`3. Every unanswered actionable issue comment: pipe the answer to this signing helper, not a raw gh comment command: ${commentCommand(args.project, args.repo, args.prNumber, "YOUR ANSWER")}.`,
-		"   For a review-thread reply, query the thread comments and use the numeric `databaseId` of the",
-		`   review comment being answered in place of <REVIEW_COMMENT_ID>: ${reviewReplyTemplate}.${isSignatureProject(args.project) && agentCommentSignature() !== undefined ? ` The helper adds ${agentCommentSignature()}.` : ""}`,
-		"   Never run the review-reply template with the placeholder or with comment id 0. Use a heredoc or",
-		"   stdin so shell metacharacters stay literal. Use the helper for every issue comment and review",
-		"   reply. Do not add the signature to the PR description.",
-
-
-		"4. Hard-red CI: flake -> rerun; trivial/correctness fix -> commit locally. Product/decision-class",
-		"   failures are NOT yours - describe them in the summary instead of guessing.",
-		"5. Do not re-request reviewers. After the bounded helper publishes local commits,",
-		"   the deterministic pipeline step re-requests only the machine poll state's reviewersToReRequest list.",
-		"6. Return every commit you created as a full 40- or 64-character SHA in commits, oldest first.",
-		"   The publisher rejects HEAD if this persisted list is incomplete or out of order.",
+		"Handle every trigger, in this order:",
+		"1. Failed CI: read the linked real job/check logs first. Fix a genuine diff-related failure and commit locally; rerun only a proven transient failure. Do not guess from a status placeholder.",
+		"   Never change a CI runner platform/image, workflow trigger, or provider configuration as a test fix. If the evidence suggests that policy is wrong, return a DECISION route for that failed_ci trigger; configuration blast radius belongs to the captain.",
+		"2. Human or configured review-bot comments: classify each independently as exactly one of:",
+		"   FIX_NOW — scoped and actionable. Fix it, commit locally, and provide replyBody explaining the fix for the deterministic publisher to post on the thread.",
+		"   NOT_VALID — invalid, stale, already fixed, or inapplicable. Do not change code. Provide replyBody explaining why; the publisher posts it and the workflow tells the captain.",
+		"   DECISION — product/design/API choice or material the captain should argue back on. Do not guess or change code. Provide the concrete question for the captain's queue. This route does not block unrelated work.",
+		"3. Include one route for every human_comment or bot_comment trigger. Each route.triggerId must exactly match its trigger id.",
+		"4. handledTriggerIds contains every trigger id you actually completed or routed. Never mark an unexamined trigger handled.",
+		"5. Return every commit created by this seat as a full 40- or 64-character SHA in commits, oldest first.",
 		"",
-		"HARD RULES: plain commits on the existing PR branch ONLY. Never branch off the PR head,",
-		"never run gh pr create - that creates an accidental child PR.",
-		"Pushes outside rebaseAndPush() are forbidden and will be rejected. Never run git push.",
-		"Never merge anything. Return pushed=false and reRequested=[]; publication is a later pipeline node.",
-		"Never sleep-poll CI or review state. The next persisted Smithers poll owns the wait.",
-		"The JSON Schema is not a response. Never return $schema, type, properties, required, or additionalProperties. Return one filled RESULT object only.",
-		`Result fields: {"round": number, "afterPoll": number, "actions": string[], "commits": string[], "pushed": boolean, "reRequested": string[], "summary": string}.`,
-		"An empty actions array is invalid while any review thread remains without an addressing commit or explicit reviewer/captain agreement.",
-		...watchResultContract,
+		"The deterministic publisher owns rebase, tests, force-with-lease push, signed PR replies, and reviewer re-requests.",
+		"Never rebase, push, approve, stamp, merge, create a branch, or open a PR. Return pushed=false and reRequested=[].",
+		"Never post a raw GitHub comment. Return replyBody; the publisher signs and posts it only after any FIX_NOW commit is safely published.",
+		"Never sleep-poll CI or reviews. The persisted Smithers loop owns all waiting.",
+		"The JSON Schema is not a response. Return one filled result object only.",
+		`Result fields: {"round": number, "afterPoll": number, "actions": string[], "commits": string[], "pushed": false, "reRequested": [], "summary": string, "routes": [{"triggerId": string, "outcome": "FIX_NOW"|"NOT_VALID"|"DECISION", "rationale": string, "replyBody"?: string, "question"?: string}], "handledTriggerIds": string[]}.`,
+		...resultContract(
+			`{"round":${args.round},"afterPoll":${args.afterPoll},"actions":[],"commits":[],"pushed":false,"reRequested":[],"summary":"All supplied triggers classified.","routes":[],"handledTriggerIds":[]}`,
+		),
 		`The result "round" MUST be exactly ${args.round} and "afterPoll" MUST be exactly ${args.afterPoll}.`,
 	]);
 }
