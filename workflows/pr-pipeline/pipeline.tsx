@@ -167,9 +167,9 @@ const DEFAULT_FIXTURES = {
 export const DEFAULT_GITHUB = {
 	gh: "gh",
 	git: "git",
-	selfLogins: ["twaldin"],
-	excludedApprovers: ["ali"],
-	reviewerDenylist: ["mackcooper1408", "spencer-negri", "daniel-covelli", "akshat-lindy"],
+	selfLogins: [] as string[],
+	excludedApprovers: [] as string[],
+	reviewerDenylist: [] as string[],
 	reviewers: [] as string[],
 	/** Explicit opt-out only: reviewers are always requested by default. */
 	skipReviewerRequest: false,
