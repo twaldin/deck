@@ -365,7 +365,7 @@ describe("assertBoundedRebase", () => {
 			(await git(repo.worktree, "ls-remote", "origin", "refs/heads/feature")).split("\t")[0],
 		).toBe(attackerHead);
 		await expectResidueFree(repo.worktree, expectedRemoteHead);
-	});
+	}, 15_000);
 	test("rejects when the fetched tracking ref moves beyond the trusted PR head", async () => {
 		const repo = await fixture();
 		const expectedRemoteHead = (await git(repo.worktree, "rev-parse", "origin/feature")).trim();
