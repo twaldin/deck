@@ -690,20 +690,20 @@ export function assessMergeSafety(
 			reason: `PR ${snapshot.mergeable}/${snapshot.mergeStateStatus} has a merge conflict.`,
 		};
 	}
-	if (snapshot.mergeable === "UNKNOWN") {
-		return {
-			ok: false,
-			retryable: true,
-			ciClassification: "MERGEABILITY_STALE",
-			reason: `GitHub mergeability is still calculating (${snapshot.mergeable}/${snapshot.mergeStateStatus}).`,
-		};
-	}
 	if (ci.classification !== "TERMINAL_SUCCESS" || ci.state !== "green") {
 		return {
 			ok: false,
 			retryable: RETRYABLE_MERGE_CI.has(ci.classification),
 			ciClassification: ci.classification,
 			reason: `Exact-head CI is ${ci.classification} (${ci.reason}); merge requires TERMINAL_SUCCESS.`,
+		};
+	}
+	if (snapshot.mergeable === "UNKNOWN") {
+		return {
+			ok: false,
+			retryable: true,
+			ciClassification: "MERGEABILITY_STALE",
+			reason: `GitHub mergeability is still calculating (${snapshot.mergeable}/${snapshot.mergeStateStatus}).`,
 		};
 	}
 	if (snapshot.mergeable !== "MERGEABLE") {
