@@ -600,6 +600,69 @@ function botApproved(snapshot: WatchSnapshot, bot: WatchReviewPolicy["requiredBo
 	return false;
 }
 
+const RETRYABLE_MERGE_CI = new Set<CiClassification>([
+	"RUNNING",
+	"STARTING",
+	"RUNNER_QUEUED",
+]);
+
+export interface MergeSafetyAssessment {
+	ok: boolean;
+	retryable: boolean;
+	ciClassification: CiClassification;
+	reason: string;
+}
+
+/**
+ * Final merge-boundary truth. Approval/stamp authorization is deliberately
+ * separate: enqueue requires a fresh exact-head terminal-success snapshot and
+ * GitHub's current mergeability signal.
+ */
+export function assessMergeSafety(
+	snapshot: WatchSnapshot,
+	expectedHead: string,
+): MergeSafetyAssessment {
+	const ci = classifyCiEvidence(snapshot);
+	if (snapshot.headSha !== expectedHead) {
+		return {
+			ok: false,
+			retryable: false,
+			ciClassification: ci.classification,
+			reason: `PR head moved from approved ${expectedHead} to ${snapshot.headSha}.`,
+		};
+	}
+	if (needsRebase(snapshot)) {
+		return {
+			ok: false,
+			retryable: false,
+			ciClassification: ci.classification,
+			reason: `PR ${snapshot.mergeable}/${snapshot.mergeStateStatus} has a merge conflict.`,
+		};
+	}
+	if (ci.classification !== "TERMINAL_SUCCESS" || ci.state !== "green") {
+		return {
+			ok: false,
+			retryable: RETRYABLE_MERGE_CI.has(ci.classification),
+			ciClassification: ci.classification,
+			reason: `Exact-head CI is ${ci.classification} (${ci.reason}); merge requires TERMINAL_SUCCESS.`,
+		};
+	}
+	if (snapshot.mergeable !== "MERGEABLE") {
+		return {
+			ok: false,
+			retryable: false,
+			ciClassification: ci.classification,
+			reason: `GitHub mergeability is ${snapshot.mergeable}/${snapshot.mergeStateStatus}, not MERGEABLE.`,
+		};
+	}
+	return {
+		ok: true,
+		retryable: false,
+		ciClassification: ci.classification,
+		reason: "Fresh exact-head CI is TERMINAL_SUCCESS and GitHub reports MERGEABLE.",
+	};
+}
+
 export interface WatchExitOptions {
 	selfLogins: string[];
 	handledTriggerIds?: string[];

@@ -123,7 +123,7 @@ import {
 	watchFixPrompt,
 } from "./lib/prompts.ts";
 import { executeReviewerRequest } from "./lib/reviewers.ts";
-import { evaluateWatchExit, observeHeadAge } from "./lib/watch.ts";
+import { assessMergeSafety, evaluateWatchExit, observeHeadAge } from "./lib/watch.ts";
 import {
 	RebaseDecisionRequired,
 	rebaseAndPushAgentic,
@@ -613,6 +613,7 @@ export const schemas = {
 		expectedHead: z.string(),
 		currentHead: z.string(),
 		ok: z.boolean(),
+		retryable: z.boolean().optional(),
 		diffSummary: z.string(),
 		checkedAt: z.string(),
 		submittedAt: z.string().nullable(),
@@ -1114,9 +1115,14 @@ export default smithers((ctx) => {
 		if (readyPollRows.some((row) => row.round === k && row.poll === -1)) return true;
 		const validity = ctx.latest(outputs.stampValidity, `r${k}-stamp-validity`);
 		if (validity !== undefined && validity.valid === false) return true;
-		// A failed pre-merge head check also ends the round (TOCTOU guard).
+		// A hard pre-merge invalidation ends the round. Pending exact-head CI is
+		// retryable and keeps the already-valid stamp while the durable loop polls.
 		const headCheck = ctx.latest(outputs.mergeHeadCheck, `r${k}-merge-head-check`);
-		if (headCheck !== undefined && headCheck.ok === false) return true;
+		if (
+			headCheck !== undefined
+			&& headCheck.ok === false
+			&& headCheck.retryable !== true
+		) return true;
 		return false;
 	};
 
@@ -1161,14 +1167,18 @@ export default smithers((ctx) => {
 
 	// -- merge authorization -----------------------------------------------------
 	// A round authorizes the receipt node only after its approved stamp has
-	// survived the merge attempt's last-instant head comparison. A mismatch is
-	// persisted as ok=false and ends the round before any MQ command runs.
+	// survived the merge attempt's last-instant head and exact-head CI checks.
+	// Retryable pending CI preserves the stamp; hard drift/failure ends the round.
 	const stampedRound = (() => {
 		for (let k = 0; k <= currentRound && k < limits.stampRounds; k++) {
 			const stamp = ctx.latest(outputs.approvals, `r${k}-stamp`);
 			const validity = ctx.latest(outputs.stampValidity, `r${k}-stamp-validity`);
 			const headCheck = ctx.latest(outputs.mergeHeadCheck, `r${k}-merge-head-check`);
-			if (stamp?.approved === true && validity?.valid === true && headCheck?.ok !== false) {
+			if (
+				stamp?.approved === true
+				&& validity?.valid === true
+				&& (headCheck?.ok !== false || headCheck.retryable === true)
+			) {
 				return {
 					round: k,
 					headSha: validity.stampedHead,
@@ -4014,10 +4024,24 @@ export default smithers((ctx) => {
 					</Task>
 				) : null}
 
-				{/* The round-scoped merge attempt owns both the last-instant stamp
-				    comparison and MQ enqueue. A mismatch persists ok=false so the
-				    next render starts a fresh watch/approval round. */}
-				{stampedRound !== null && stampedRound.headCheck === undefined && pr !== undefined && !migStale ? (
+				{/* The round-scoped merge-safety loop preserves a valid stamp while
+				    exact-head CI is still running. Head drift, red/broken CI, or a
+				    merge conflict persists a hard ok=false and starts a fresh watch
+				    round; only fresh terminal-green truth can enqueue. */}
+				{stampedRound !== null && stampedRound.headCheck?.ok !== true && pr !== undefined && !migStale ? (
+					<Loop
+						id={`r${stampedRound.round}-merge-safety-loop`}
+						until={
+							ctx.latest(outputs.mergeHeadCheck, `r${stampedRound.round}-merge-head-check`)?.ok === true
+							|| (
+								ctx.latest(outputs.mergeHeadCheck, `r${stampedRound.round}-merge-head-check`)?.ok === false
+								&& ctx.latest(outputs.mergeHeadCheck, `r${stampedRound.round}-merge-head-check`)?.retryable !== true
+							)
+						}
+						maxIterations={1_000_000}
+						continueAsNewEvery={100}
+						onMaxReached="return-last"
+					>
 					<Task
 						id={`r${stampedRound.round}-merge-head-check`}
 						output={outputs.mergeHeadCheck}
@@ -4025,6 +4049,13 @@ export default smithers((ctx) => {
 					>
 						{() =>
 							(async () => {
+								const priorMergeSafety = ctx.latest(
+									outputs.mergeHeadCheck,
+									`r${stampedRound.round}-merge-head-check`,
+								);
+								if (!dryRun && priorMergeSafety?.retryable === true) {
+									await sleepSeconds(limits.watchPollSeconds);
+								}
 								if (stackMode) {
 									const stampedCars = stampedRound.cars ?? [];
 									const expectedTop = stampedCars.at(-1);
@@ -4161,6 +4192,37 @@ export default smithers((ctx) => {
 									let nextReceipt: string | null = null;
 									let nextMergePath: "github-merge-queue" | "dry-run" | "already-landed" | null = null;
 									if (nextCar !== undefined) {
+										const freshSnapshot = await fetchWatchSnapshot(
+											ghCtx,
+											nextCar.prNumber,
+											github.selfLogins,
+										);
+										const safety = assessMergeSafety(freshSnapshot, nextCar.headSha);
+										if (!safety.ok) {
+											const cars = final.map(({ car, comparison }) => ({
+												...car,
+												currentHead: comparison.currentHead,
+												ok: car.prNumber === nextCar.prNumber ? false : comparison.ok,
+												submittedAt: null,
+												receipt: null,
+												alreadyLanded: landedNumbers.has(car.prNumber),
+												mergePath: null,
+											}));
+											return {
+												round: stampedRound.round,
+												expectedHead: nextCar.headSha,
+												currentHead: freshSnapshot.headSha,
+												ok: false,
+												retryable: safety.retryable,
+												diffSummary: `PR #${nextCar.prNumber}: ${safety.reason}`,
+												checkedAt: nowIso(),
+												submittedAt: null,
+												receipt: null,
+												alreadyLanded: false,
+												mergePath: null,
+												cars,
+											};
+										}
 										const merge = await runMerge({
 											args: ["--auto", "--squash"],
 											exec: bunExec,
@@ -4311,6 +4373,27 @@ export default smithers((ctx) => {
 											`not approved PR state ${input.branch}@${finalComparison.currentHead}; refusing to enqueue.`,
 									);
 								}
+								const freshSnapshot = await fetchWatchSnapshot(
+									ghCtx,
+									pr.prNumber,
+									github.selfLogins,
+								);
+								const safety = assessMergeSafety(freshSnapshot, finalComparison.currentHead);
+								if (!safety.ok) {
+									return {
+										round: stampedRound.round,
+										...finalComparison,
+										currentHead: freshSnapshot.headSha,
+										ok: false,
+										retryable: safety.retryable,
+										diffSummary: safety.reason,
+										checkedAt: nowIso(),
+										submittedAt: null,
+										receipt: null,
+										alreadyLanded: false,
+										mergePath: null,
+									};
+								}
 
 
 								const merge = await runMerge({
@@ -4332,6 +4415,7 @@ export default smithers((ctx) => {
 							})()
 						}
 					</Task>
+					</Loop>
 				) : null}
 
 				{/* Normalize the successful round-scoped attempt into the stable
