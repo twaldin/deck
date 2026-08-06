@@ -457,6 +457,31 @@ describe("evaluateWatchExit", () => {
 		expect(verdict.disposition).toBe("wait");
 	});
 
+	test("current-head CHANGES_REQUESTED wakes a review-routing seat even without a body", () => {
+		const verdict = evaluateWatchExit(snapshot({
+			comments: [],
+			reviewers: [{
+				login: "reviewer",
+				isBot: false,
+				lastActivityAt: "2026-07-27T11:00:00Z",
+				lastReviewState: "CHANGES_REQUESTED",
+				headSha: "abc123",
+			}],
+		}), { selfLogins: ["twaldin"] });
+		expect(verdict.disposition).toBe("fix");
+		expect(verdict.triggers).toEqual([
+			expect.objectContaining({
+				kind: "human_comment",
+				headSha: "abc123",
+				payload: expect.objectContaining({
+					author: "reviewer",
+					source: "review_state",
+					reviewState: "CHANGES_REQUESTED",
+				}),
+			}),
+		]);
+	});
+
 	test("a re-requested reviewer still needs every profile-resolved approval", () => {
 		const verdict = evaluateWatchExit(
 			snapshot({
@@ -503,6 +528,16 @@ describe("evaluateWatchExit", () => {
 		expect(verdict.humanApprovedBy).toBe("reviewer");
 		expect(verdict.exitOk).toBe(false);
 		expect(verdict.reasons.join(" ")).toContain("aggregate review decision is CHANGES_REQUESTED");
+		expect(verdict.disposition).toBe("fix");
+		expect(verdict.triggers).toEqual([
+			expect.objectContaining({
+				kind: "human_comment",
+				payload: expect.objectContaining({
+					source: "aggregate_review_decision",
+					reviewState: "CHANGES_REQUESTED",
+				}),
+			}),
+		]);
 	});
 
 	test("wake kinds are generic while configured bot identity is profile-resolved", () => {
@@ -924,6 +959,47 @@ describe("evaluateWatchExit", () => {
 				staleActiveRuns: [{ ...activeRun, id: 10, headSha: "obsolete", jobs: [] }],
 			},
 		})).classification).toBe("STALE_RUN_BLOCKED");
+		expect(classifyCiEvidence(snapshot({
+			checkRuns: [],
+			ciEvidence: {
+				...baseEvidence,
+				currentRuns: [{
+					...activeRun,
+					jobs: [{
+						...activeRun.jobs[0]!,
+						status: "in_progress",
+						startedAt: "2026-07-27T10:01:00Z",
+					}],
+				}],
+			},
+		})).classification).toBe("RUNNING");
+		expect(classifyCiEvidence(snapshot({
+			checkRuns: [
+				{
+					id: 77,
+					name: "required / ci",
+					workflowName: "CI",
+					status: "completed",
+					conclusion: "cancelled",
+					completedAt: "2026-07-27T10:03:00Z",
+					headSha: "abc123",
+					appId: 44,
+					checkSuiteId: 22,
+				},
+				{
+					id: 78,
+					name: "optional",
+					workflowName: "CI",
+					status: "completed",
+					conclusion: "success",
+					completedAt: "2026-07-27T10:04:00Z",
+					headSha: "abc123",
+					appId: 55,
+					checkSuiteId: 99,
+				},
+			],
+			ciEvidence: baseEvidence,
+		})).classification).toBe("TERMINAL_FAILURE");
 	});
 });
 

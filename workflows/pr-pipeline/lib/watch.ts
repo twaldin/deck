@@ -236,11 +236,21 @@ export function classifyCiEvidence(
 			.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || b.id - a.id)[0];
 		if (status !== undefined) observedRequired.push({ kind: "status", status });
 	}
-	const failedRequiredChecks = observedRequired.flatMap((observed) =>
-		observed.kind === "check" && failedCheckRuns(snapshot.checkRuns).includes(observed.check)
-			? [observed.check]
-			: []
-	);
+	const failedRequiredChecks = observedRequired.flatMap((observed) => {
+		if (observed.kind !== "check") return [];
+		const check = observed.check;
+		const sameRequiredContext = snapshot.checkRuns.filter((candidate) =>
+			candidate.name === check.name
+			&& candidate.checkSuiteId === check.checkSuiteId
+			&& candidate.appId === check.appId
+			&& (
+				check.headSha === undefined
+				|| candidate.headSha === undefined
+				|| candidate.headSha === check.headSha
+			)
+		);
+		return failedCheckRuns(sameRequiredContext).includes(check) ? [check] : [];
+	});
 	const failedRequiredStatuses = observedRequired.flatMap((observed) =>
 		observed.kind === "status" && ["error", "failure"].includes(observed.status.state.toLowerCase())
 			? [observed.status]
@@ -368,6 +378,15 @@ export function classifyCiEvidence(
 
 	const activeCurrentRuns = evidence.currentRuns.filter((run) => ACTIVE_RUN_STATUSES[run.status] === true);
 	const activeStaleRuns = evidence.staleActiveRuns.filter((run) => ACTIVE_RUN_STATUSES[run.status] === true);
+	const runningJobs = activeCurrentRuns.flatMap((run) => run.jobs)
+		.filter((job) => job.status === "in_progress" && Boolean(job.startedAt));
+	if (runningJobs.length > 0) {
+		return ciAssessment(
+			"RUNNING",
+			"will-be-green",
+			"Real exact-head workflow jobs have started and are running.",
+		);
+	}
 	const queuedJobs = activeCurrentRuns.flatMap((run) => run.jobs)
 		.filter((job) => ["pending", "queued", "waiting"].includes(job.status));
 	if (queuedJobs.length > 0) {
@@ -773,6 +792,48 @@ export function evaluateWatchExit(snapshot: WatchSnapshot, options: WatchExitOpt
 		)
 		.map((reviewer) => reviewer.login);
 	const reviewDecisionBlocks = snapshot.reviewDecision?.toUpperCase() === "CHANGES_REQUESTED";
+	const existingHumanAuthors = new Set(
+		triggers
+			.filter((trigger) => trigger.kind === "human_comment")
+			.map((trigger) => String(trigger.payload.author ?? "").toLowerCase()),
+	);
+	for (const reviewer of snapshot.reviewers) {
+		if (!changesRequested.includes(reviewer.login)) continue;
+		const id = `review-state:${snapshot.headSha}:${reviewer.login.toLowerCase()}:${reviewer.lastActivityAt}:CHANGES_REQUESTED`;
+		if (handled.has(id) || existingHumanAuthors.has(reviewer.login.toLowerCase())) continue;
+		triggers.push({
+			id,
+			kind: "human_comment",
+			headSha: snapshot.headSha,
+			summary: `Human reviewer ${reviewer.login} requested changes on the current head`,
+			payload: {
+				author: reviewer.login,
+				body: "",
+				createdAt: reviewer.lastActivityAt,
+				source: "review_state",
+				reviewState: "CHANGES_REQUESTED",
+				reviewHeadSha: reviewer.headSha ?? null,
+			},
+		});
+	}
+	if (reviewDecisionBlocks && changesRequested.length === 0) {
+		const id = `review-decision:${snapshot.headSha}:CHANGES_REQUESTED`;
+		if (!handled.has(id)) {
+			triggers.push({
+				id,
+				kind: "human_comment",
+				headSha: snapshot.headSha,
+				summary: "GitHub reports aggregate CHANGES_REQUESTED without a visible review body",
+				payload: {
+					author: "unknown-reviewer",
+					body: "",
+					createdAt: snapshot.lastPushAt,
+					source: "aggregate_review_decision",
+					reviewState: "CHANGES_REQUESTED",
+				},
+			});
+		}
+	}
 	const self = new Set(options.selfLogins.map((login) => login.toLowerCase()));
 	const humanApprovedBy = latestApprover(
 		snapshot.reviewers,
