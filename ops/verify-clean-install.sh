@@ -169,9 +169,9 @@ export default function verifyDeckInstall(agent) {
     description: "Report clean-install resources",
     handler: async (_args, ctx) => {
       const tools = agent.getAllTools().map((tool) => tool.name).sort();
-      const contexts = (ctx.getSystemPromptOptions().contextFiles ?? []).map((file) => file.path);
+      const systemPrompt = ctx.getSystemPrompt();
       ctx.ui.notify(`DECK_TOOLS:${tools.join(",")}`, "info");
-      ctx.ui.notify(`DECK_CONTEXT:${contexts.join(",")}`, "info");
+      ctx.ui.notify(`DECK_CONTEXT:${systemPrompt.includes("# Deck home")}`, "info");
     },
   });
 }
@@ -208,8 +208,8 @@ for command in questions quota; do
   esac
 done
 case "$RPC_OUTPUT" in
-  *'DECK_CONTEXT:'*'/AGENTS.md'*) ;;
-  *) fail "fresh Prime conversation did not read the Deck-home AGENTS.md" ;;
+  *'DECK_CONTEXT:true'*) ;;
+  *) fail "fresh Prime conversation did not load the Deck-home AGENTS.md" ;;
 esac
 TOOLS_LINE="$(printf '%s\n' "$RPC_OUTPUT" | sed -n 's/.*\(DECK_TOOLS:[^"]*\).*/\1/p' | sed -n '1p')"
 [ -n "$TOOLS_LINE" ] || fail "fresh Prime conversation did not report loaded tools"
