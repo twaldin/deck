@@ -70,12 +70,40 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.8.0
+      - name: Install pinned uv for Prime's isolated IPython runtime
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.11.8"
+          checksum: "56dd1b66701ecb62fe896abb919444e4b83c5e8645cca953e6ddd496ff8a0feb"
+          enable-cache: "false"
       - name: Install Smithers workspace dependencies
         working-directory: workflows/.smithers
         run: bun install --frozen-lockfile
       - name: Install pipeline dependencies
         working-directory: workflows/pr-pipeline
         run: bun install --frozen-lockfile
+      - name: Install broker dependencies
+        working-directory: broker
+        run: bun install --frozen-lockfile
+      # prime-agent is not published on npm (npm view returns 404); this
+      # reviewed release digest, not a mutable registry tag, is the pin.
+      - name: Install pinned Prime Agent
+        run: |
+          artifact="$RUNNER_TEMP/prime-agent-0.7.0.tgz"
+          curl --fail --show-error --silent --location \
+            https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev/releases/v0.7.0/prime-agent-0.7.0.tgz \
+            --output "$artifact"
+          echo "88b6578518c72cd51a825bc80f28e0fef9a64c67de4a7d6fd7afd7ca1b34da0b  $artifact" |
+            sha256sum --check --strict
+          npm install --global "$artifact"
+          version="$(prime-agent --version)"
+          if [ "$version" != "0.7.0" ]; then
+            echo "Expected prime-agent 0.7.0, got $version" >&2
+            exit 1
+          fi
       - name: Run pipeline tests
         working-directory: workflows/pr-pipeline
         run: bun test

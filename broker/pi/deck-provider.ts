@@ -32,14 +32,21 @@ interface PiExtensionApi {
 }
 import { z } from "zod";
 
-const GATEWAY_ORIGIN = "http://127.0.0.1:8377";
+const DEFAULT_GATEWAY_ORIGIN = "http://127.0.0.1:8377";
+const loopbackGatewayOrigin = z.url().refine((value) => {
+	const origin = new URL(value);
+	return (origin.protocol === "http:" || origin.protocol === "https:")
+		&& (origin.hostname === "127.0.0.1" || origin.hostname === "[::1]");
+}, "Deck gateway origin must use HTTP(S) on an explicit loopback address");
 
 const extensionEnv = z
 	.looseObject({
 		DECK_PI_MAX_TOKENS: z.coerce.number().int().positive().optional(),
+		DECK_GATEWAY_ORIGIN: loopbackGatewayOrigin.optional(),
 		DECK_GATEWAY_API_KEY: z.string().min(1).optional(),
 	})
 	.parse(process.env);
+const GATEWAY_ORIGIN = (extensionEnv.DECK_GATEWAY_ORIGIN ?? DEFAULT_GATEWAY_ORIGIN).replace(/\/+$/, "");
 
 const GATEWAY_API_KEY = extensionEnv.DECK_GATEWAY_API_KEY ?? "!cat ~/.deck/broker/gateway.token";
 
