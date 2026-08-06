@@ -178,14 +178,6 @@ export const DEFAULT_GITHUB = {
 	selfLogins: [] as string[],
 	excludedApprovers: [] as string[],
 	reviewerDenylist: [] as string[],
-	reviewPolicy: {
-		requireHuman: true,
-		requiredBots: [] as Array<{
-			login: string;
-			approvalCommentPattern?: string;
-			approvalCheckPattern?: string;
-		}>,
-	},
 	reviewers: [] as string[],
 	/** Explicit opt-out only: reviewers are always requested by default. */
 	skipReviewerRequest: false,
@@ -416,11 +408,10 @@ export const inputSchema = z.object({
 			excludedApprovers: z.array(z.string()).optional(),
 			reviewerDenylist: z.array(z.string()).optional(),
 			reviewers: z.array(z.string()).optional(),
-			reviewPolicy: reviewPolicySchema.optional(),
+			reviewPolicy: reviewPolicySchema,
 			skipReviewerRequest: z.boolean().optional(),
 			maxReviewers: z.number().int().positive().optional(),
-		})
-		.optional(),
+		}),
 	commands: z
 		.object({
 			deployEvidence: z.string().optional(),
@@ -956,7 +947,7 @@ export default smithers((ctx) => {
 	const bypass = input.bypassApprovals === true;
 	const limits = { ...DEFAULT_LIMITS, ...(input.limits ?? {}) };
 	const fixtures = { ...DEFAULT_FIXTURES, ...(input.fixtures ?? {}) };
-	const github = { ...DEFAULT_GITHUB, ...(input.github ?? {}) };
+	const github = { ...DEFAULT_GITHUB, ...input.github, reviewPolicy: input.github.reviewPolicy };
 	const commands = { ...DEFAULT_COMMANDS, ...(input.commands ?? {}) };
 	const declaredBaseBranch = input.baseBranch ?? "main";
 	const existingPr = input.existingPr ?? undefined;

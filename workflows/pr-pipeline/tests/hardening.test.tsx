@@ -34,6 +34,7 @@ const baseInput = {
 	brief: validBrief,
 	dryRun: false,
 	wakeDryRun: true,
+	github: { reviewPolicy: { requireHuman: false, requiredBots: [] } },
 };
 const originalDeckHome = process.env.DECK_V2_HOME;
 
@@ -202,7 +203,7 @@ function createImplementationRepo(root: string, publishPreexistingCommit: boolea
 
 async function captureImplementationBaseline(input: typeof baseInput & {
 	worktree: string;
-	github: { git: string; gh: string };
+	github: typeof baseInput.github & { git: string; gh: string };
 	watchSetPath: string;
 }) {
 	const preflight = approvalReadyOutputs().preflight;
@@ -219,7 +220,7 @@ async function captureImplementationBaseline(input: typeof baseInput & {
 async function computeImplementationReport(
 	input: typeof baseInput & {
 		worktree: string;
-		github: { git: string; gh: string };
+		github: typeof baseInput.github & { git: string; gh: string };
 		watchSetPath: string;
 	},
 	baseline: { branch: string; headSha: string },
@@ -503,7 +504,7 @@ describe("standing-rules seat injection", () => {
 			},
 		];
 		const rendered = await renderWorkflow(pipeline, {
-			input: { ...baseInput, worktree: dir, github: { git, gh } },
+			input: { ...baseInput, worktree: dir, github: { ...baseInput.github, git, gh } },
 			outputs: {
 				...outputs,
 				watchBaseline: [
@@ -572,7 +573,7 @@ describe("standing-rules seat injection", () => {
 			},
 		];
 		const rendered = await renderWorkflow(pipeline, {
-			input: { ...baseInput, worktree: dir, github: { git, gh } },
+			input: { ...baseInput, worktree: dir, github: { ...baseInput.github, git, gh } },
 			outputs: {
 				...outputs,
 				watchBaseline: [
@@ -618,7 +619,7 @@ describe("standing-rules seat injection", () => {
 		const input = {
 			...baseInput,
 			worktree: fixture.repo,
-			github: { git: "git", gh },
+			github: { ...baseInput.github, git: "git", gh },
 			watchSetPath,
 		};
 		const baseline = await captureImplementationBaseline(input);
@@ -679,7 +680,7 @@ esac
 		const input = {
 			...baseInput,
 			worktree: fixture.repo,
-			github: { git: "git", gh: "gh" },
+			github: { ...baseInput.github, git: "git", gh: "gh" },
 			watchSetPath: path.join(dir, "watch-set.jsonl"),
 		};
 		const baseline = await captureImplementationBaseline(input);
@@ -724,7 +725,7 @@ esac
 		const input = {
 			...baseInput,
 			worktree: fixture.repo,
-			github: { git: "git", gh: "gh" },
+			github: { ...baseInput.github, git: "git", gh: "gh" },
 			watchSetPath: path.join(dir, "watch-set.jsonl"),
 		};
 		const tree = runGit(fixture.repo, "write-tree");
@@ -765,7 +766,7 @@ esac
 		const input = {
 			...baseInput,
 			worktree: fixture.repo,
-			github: { git: "git", gh: "/usr/bin/false" },
+			github: { ...baseInput.github, git: "git", gh: "/usr/bin/false" },
 			watchSetPath: path.join(dir, "watch-set.jsonl"),
 		};
 		const baseline = await captureImplementationBaseline(input);
@@ -821,7 +822,7 @@ esac
 		fs.chmodSync(git, 0o755);
 		fs.chmodSync(gh, 0o755);
 		const rendered = await renderWorkflow(pipeline, {
-			input: { ...baseInput, worktree: dir, github: { git, gh } },
+			input: { ...baseInput, worktree: dir, github: { ...baseInput.github, git, gh } },
 			outputs: approvalReadyOutputs(),
 			workflowPath: path.join(import.meta.dir, "..", "pipeline.tsx"),
 		});
@@ -882,7 +883,7 @@ describe("commit-bound stamp", () => {
 		fs.chmodSync(git, 0o755);
 		fs.chmodSync(gh, 0o755);
 		const rendered = await renderWorkflow(pipeline, {
-			input: { ...baseInput, worktree: dir, github: { git, gh } },
+			input: { ...baseInput, worktree: dir, github: { ...baseInput.github, git, gh } },
 			outputs: {
 				...approvalReadyOutputs(),
 				approvals: [
@@ -954,7 +955,7 @@ describe("commit-bound stamp", () => {
 			],
 		} satisfies PipelineOutputFixtures;
 		const rendered = await renderWorkflow(pipeline, {
-			input: { ...baseInput, worktree: dir, github: { git, gh } },
+			input: { ...baseInput, worktree: dir, github: { ...baseInput.github, git, gh } },
 			outputs,
 			workflowPath: path.join(import.meta.dir, "..", "pipeline.tsx"),
 		});
@@ -970,7 +971,7 @@ describe("commit-bound stamp", () => {
 		expect(fs.readFileSync(log, "utf8")).not.toContain("pr merge");
 
 		const rerendered = await renderWorkflow(pipeline, {
-			input: { ...baseInput, worktree: dir, github: { git, gh } },
+			input: { ...baseInput, worktree: dir, github: { ...baseInput.github, git, gh } },
 			outputs: {
 				...outputs,
 				mergeHeadCheck: [{ nodeId: "r0-merge-head-check", ...invalidation }],
@@ -984,7 +985,7 @@ describe("commit-bound stamp", () => {
 			input: {
 				...baseInput,
 				worktree: dir,
-				github: { git, gh },
+				github: { ...baseInput.github, git, gh },
 				limits: { landingPollSeconds: 0.001 },
 			},
 			outputs: {

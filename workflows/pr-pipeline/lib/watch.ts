@@ -603,7 +603,7 @@ function botApproved(snapshot: WatchSnapshot, bot: WatchReviewPolicy["requiredBo
 export interface WatchExitOptions {
 	selfLogins: string[];
 	handledTriggerIds?: string[];
-	reviewPolicy?: WatchReviewPolicy;
+	reviewPolicy: WatchReviewPolicy;
 	infraRetryAttempts?: Record<string, number>;
 }
 
@@ -611,7 +611,7 @@ export interface WatchExitOptions {
 export function evaluateWatchExit(snapshot: WatchSnapshot, options: WatchExitOptions): WatchExitVerdict {
 	const reasons: string[] = [];
 	const handled = new Set(options.handledTriggerIds ?? []);
-	const reviewPolicy = options.reviewPolicy ?? { requireHuman: true, requiredBots: [] };
+	const reviewPolicy = options.reviewPolicy;
 	const ci = classifyCiEvidence(snapshot);
 	const retryLimit = 3;
 	const infraRetriesExhausted = ci.infraRetryJobs.length > 0

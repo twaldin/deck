@@ -94,6 +94,7 @@ describe("stack input contract", () => {
 		repo: "org/repo",
 		worktree: "/tmp/wt",
 		branch: "stack/child",
+		github: { reviewPolicy: { requireHuman: false, requiredBots: [] } },
 	};
 
 	test("accepts exactly one parent-first create or adopt source", () => {
@@ -470,7 +471,10 @@ describe("stack child watch state", () => {
 			reviewers: [],
 			requestedReviewers: [],
 		};
-		const verdict = evaluateWatchExit(snapshot, { selfLogins: [] });
+		const verdict = evaluateWatchExit(snapshot, {
+			selfLogins: [],
+			reviewPolicy: { requireHuman: true, requiredBots: [] },
+		});
 		expect(verdict.rebaseRequired).toBe(false);
 		expect(verdict.actionable).toBe(false);
 		expect(verdict.disposition).toBe("wait");
