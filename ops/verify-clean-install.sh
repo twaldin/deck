@@ -282,9 +282,13 @@ IDENTITY_WORDS="$(vocab_section identities)"
 VOCAB_WORDS="$(vocab_section vocabulary)"
 [ -n "$IDENTITY_WORDS" ] && [ -n "$VOCAB_WORDS" ] || fail "ops/forbidden-vocabulary.txt is empty or malformed"
 
-# Shipped source and defaults: identities and absolute home paths only.
-PERSONAL_PATTERN="/Users/[^/[:space:]]+|(^|[^[:alnum:]_])($IDENTITY_WORDS)([^[:alnum:]_]|$)"
-if git -C "$CLONE_DIR" grep -nEIi "$PERSONAL_PATTERN" -- "${PERSONAL_SCAN_FILES[@]}"; then
+# Absolute home paths: case-SENSITIVE. `/Users/` is a real macOS path, while
+# `/users/{login}` is an ordinary API route and must not trip this.
+if git -C "$CLONE_DIR" grep -nEI '/Users/[^/[:space:]]+' -- "${PERSONAL_SCAN_FILES[@]}"; then
+  fail "shipped defaults or onboarding surfaces contain absolute home paths"
+fi
+# Identities: case-insensitive, since a name is a name however it is capitalized.
+if git -C "$CLONE_DIR" grep -nEIi "(^|[^[:alnum:]_])($IDENTITY_WORDS)([^[:alnum:]_]|$)" -- "${PERSONAL_SCAN_FILES[@]}"; then
   fail "shipped defaults or onboarding surfaces contain machine-specific identities"
 fi
 
