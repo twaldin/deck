@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 import { z } from "zod";
 import { controlRequest, gatewayPost, hasLiveBroker } from "./harness";
 
@@ -79,8 +80,14 @@ async function readOmpCachedLimits(): Promise<UsageLimit[] | null> {
 	const home = process.env.HOME;
 	if (!home) throw new Error("HOME is required to locate omp's read-only agent database");
 
+	// omp is a separate local tool; its cache simply does not exist on a fresh
+	// machine or in CI. That is an absent cache, not a failure — the caller
+	// already skips on null. Only surface genuine sqlite errors.
+	const databasePath = `${home}/.omp/agent/agent.db`;
+	if (!existsSync(databasePath)) return null;
+
 	const processHandle = Bun.spawn(
-		["sqlite3", "-readonly", `file:${home}/.omp/agent/agent.db?mode=ro`, OMP_CACHE_SQL],
+		["sqlite3", "-readonly", `file:${databasePath}?mode=ro`, OMP_CACHE_SQL],
 		{ stdout: "pipe", stderr: "pipe" },
 	);
 	const [stdout, stderr, exitCode] = await Promise.all([
