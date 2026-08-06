@@ -56,12 +56,17 @@ const DENYLIST = [
 	/\b(?:run|execution)[-_ ]?id[:= ]+?[A-Za-z0-9_-]{6,}\b/i,
 	/\b[0-9a-f]{40}\b/i,
 	/\b(?:Managed by|Local review nits)\b/i,
+	/\b(?:DECISIONS-FOR-[A-Za-z0-9][A-Za-z0-9._-]*\.md|DOCTRINE\s+\d{4}-\d{2}-\d{2}(?:\s+\([^)]+\))?|MEETING\s+FOLD-IN\s+\d{4}-\d{2}-\d{2})/i,
+	/\b[a-z][a-z0-9]*-(?:eval|pipeline|retro|selfloop)-(?:fix|slice|spike|run|rewrite|hardening)-\d+\b/i,
+	/(?:^|[.!?]\s+|\n)[ \t]*[-–—,:;][ \t]*(?=\S)/,
+	/(?:^|[\s:(])[-–—][ \t]*(?=(?:approved|decided|recorded|required|specified|stamped)\b)|\b(?:a|an|the|this|that|these|those)[,;:][ \t]+(?=(?:approved|decided|recorded|required|specified|stamped)\b)/i,
+	/\b[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*(?:[-_]{2,}[A-Za-z0-9_-]*|[-_])\.[A-Za-z0-9]{1,10}\b/,
 ];
 
 /** Assert that sanitized text is safe. Never silently scrub generated output. */
 function clean(value: string): string {
 	const hit = DENYLIST.find((pattern) => pattern.test(value));
-	if (hit !== undefined) throw new Error(`PR description contains internal vocabulary: ${hit}`);
+	if (hit !== undefined) throw new Error(`PR description contains internal vocabulary or malformed text: ${hit}`);
 	return value.trim();
 }
 

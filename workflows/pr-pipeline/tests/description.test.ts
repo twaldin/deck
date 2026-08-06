@@ -32,4 +32,39 @@ describe("pull request description", () => {
 			/internal vocabulary/,
 		);
 	});
+
+	test.each([
+		[
+			"a sentence with a stripped subject",
+			"-decided fallback policy (2026-08-04), recorded at the end of — read that CORRECTION section first; it supersedes the older fix-3 text.",
+		],
+		["a spaced dangling dash", "- decided fallback policy"],
+		["a dangling colon", ": decided fallback policy"],
+		["a stripped subject after prose", "The -decided fallback policy"],
+		["a stripped subject after a clause label", "Fix: - decided fallback policy"],
+		["a stripped subject before an em dash", "The — decided fallback policy"],
+		["a stripped subject before a colon", "The : decided fallback policy"],
+		["a stripped subject before a comma", "The , decided fallback policy"],
+		["a placeholder-shaped filename with an empty segment", "DECISIONS-FOR-.md"],
+		["a dated internal doctrine reference", "DOCTRINE 2026-08-04 (evening)"],
+		["a dated internal meeting reference", "MEETING FOLD-IN 2026-08-04"],
+		["an internal effort codename", "ali-eval-fix-1"],
+	] as const)("fails closed on %s", (_case, leakedText) => {
+		const input = sanitizeDescriptionInput({
+			title: "Fix eval behavior",
+			summary: leakedText,
+			acceptanceCriteria: [],
+		});
+		expect(() => generatePullRequestDescription(input)).toThrow(/internal vocabulary or malformed text/);
+	});
+
+	test("allows public package names that end in a version", () => {
+		expect(
+			generatePullRequestDescription({
+				title: "Upgrade routing",
+				summary: "Upgrade react-router-dom-6 while preserving navigation behavior.",
+				acceptanceCriteria: [],
+			}),
+		).toContain("react-router-dom-6");
+	});
 });
