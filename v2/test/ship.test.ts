@@ -10,7 +10,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ChildProcess, SpawnOptions } from "node:child_process";
-import { registerDeckShip, type DeckShipApi } from "../../extensions-prime/deck-ship";
+
 import { validateBrief } from "../../workflows/pr-pipeline/lib/brief";
 import { loadProfiles, profilesFile, type ProjectProfile } from "../src/projects";
 import { existingPrFromFlag, runCli } from "../src/cli";
@@ -311,38 +311,27 @@ describe("smithers workspace", () => {
 	});
 });
 
-describe("registered _ship entry contract", () => {
+describe("ship entry contract", () => {
+	// Formerly driven through the registered `ship` pi-tool. The tool is gone -
+	// code execution is the only tool - so this exercises the same entry the
+	// `deck.ship()` call and `deck-v2 ship` both reach.
 	test("REGRESSION: a real _ship input survives Smithers persistence and renders the single-PR pipeline", async () => {
 		fs.mkdirSync(smithersWorkspaceCwd(home), { recursive: true });
-		const tools: Array<Parameters<DeckShipApi["registerTool"]>[0]> = [];
-		registerDeckShip({
-			registerTool(tool) {
-				tools.push(tool);
-			},
-		});
-		const ship = tools.find((tool) => tool.name === "ship");
-		if (ship === undefined) throw new Error("deck-ship did not register the ship tool");
 
 		const repoRoot = path.resolve(pipelineDir(), "..", "..");
 		const runId = "ship-entry-contract-pipeline";
-		const result = await ship.execute(
-			"ship-entry-contract",
-			{
-				ticket: "ship-entry-contract",
-				profile: "example-project",
-				worktree: repoRoot,
-				branch: "v4-build",
-				title: "Exercise the ship entry contract",
-				summary: "Pass the registered ship tool input through the real Smithers pipeline entry",
-				acceptance: ["the single-PR workflow renders"],
-				dry_run: true,
-				run_id: runId,
-			},
-			undefined,
-			undefined,
-			{},
-		);
-		const { logPath, pid } = result.details;
+		const result = await startShip({
+			ticket: "ship-entry-contract",
+			profile: "example-project",
+			worktree: repoRoot,
+			branch: "v4-build",
+			title: "Exercise the ship entry contract",
+			summary: "Pass a real ship input through the real Smithers pipeline entry",
+			acceptance: ["the single-PR workflow renders"],
+			dryRun: true,
+			runId,
+		});
+		const { logPath, pid } = result;
 		let terminalObserved = false;
 		let log = "";
 		try {

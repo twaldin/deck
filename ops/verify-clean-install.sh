@@ -61,7 +61,7 @@ env HOME="$SANDBOX_HOME" \
 
 DECK_HOME="$SANDBOX_HOME/.deck"
 PRIME_HOME="$DECK_HOME/.prime"
-for extension in deck-questions deck-ship deck-recall deck-usage; do
+for extension in deck-questions deck-recall deck-usage; do
   [ -f "$PRIME_HOME/agent/extensions/$extension/index.ts" ] ||
     fail "fresh install is missing Prime extension $extension/index.ts"
 done
@@ -217,12 +217,24 @@ case "$RPC_OUTPUT" in
 esac
 TOOLS_LINE="$(printf '%s\n' "$RPC_OUTPUT" | sed -n 's/.*\(DECK_TOOLS:[^"]*\).*/\1/p' | sed -n '1p')"
 [ -n "$TOOLS_LINE" ] || fail "fresh Prime conversation did not report loaded tools"
-for tool in ask_captain list_questions answer_question ship adopt status recall_effort process; do
-  case ",${TOOLS_LINE#DECK_TOOLS:}," in
-    *",$tool,"*) ;;
-    *) fail "fresh Prime conversation did not load tool $tool" ;;
-  esac
-done
+# EXACT, not a denylist: code execution is the only tool. Checking that known
+# retired names are absent would let a NEW pi-tool creep in unnoticed.
+case "${TOOLS_LINE#DECK_TOOLS:}" in
+  "ipython") ;;
+  *) fail "the agent tool surface must be exactly ipython; got: ${TOOLS_LINE#DECK_TOOLS:}" ;;
+esac
+
+# A minimal tool surface is only correct if the code surface replaced it. The
+# kernel gets `deck` through PYTHONPATH, and auto-imports it through IPYTHONDIR,
+# both of which the wrapper must export past `env -i`.
+PROFILE_PY="$DECK_HOME/.prime/python/deck/__init__.py"
+[ -f "$PROFILE_PY" ] || fail "the deck Python surface was not installed at $PROFILE_PY"
+[ -f "$DECK_HOME/.prime/ipython/profile_default/startup/00-deck.py" ] \
+  || fail "the kernel startup file that imports deck was not installed"
+PYTHONPATH="$DECK_HOME/.prime/python" python3 -c 'import deck; assert "deck.ship" in deck.help()' \
+  || fail "the deck Python surface does not import cleanly"
+grep -q 'PYTHONPATH IPYTHONDIR' "$DECK_HOME/.prime/bin/prime-conversation" \
+  || fail "the wrapper does not pass PYTHONPATH/IPYTHONDIR through env -i; the kernel would not see deck"
 
 [ -z "$(git -C "$CLONE_DIR" status --porcelain)" ] || {
   git -C "$CLONE_DIR" status --short >&2

@@ -103,25 +103,43 @@ When delegating with `rlm()`, write: `You are an RLM child. Don't run memo.`
 OptMem holds global identity, decisions, preferences, and durable lessons. It is
 not a specification store. Effort briefs, decisions with rationale, rejected
 alternatives, and checkpoints live in effort dossiers. Before resuming an
-effort, call `recall_effort` with `{ effort: "<task id, PR, owner/repo#PR, or PR URL>" }`.
+effort, call `deck.recall("<task id, PR, owner/repo#PR, or PR URL>")`.
 
 Project-specific doctrine is not global memory. Reference it from the private
 project profile and keep it in its authoritative source.
 
 ## THE FACTORY
 
-The `ship`, `adopt`, and `status` tools are the only shipment interface.
-Product work ships only through `ship`/`adopt`/`status`, which pin the canonical home workspace; never invoke `smithers-orchestrator` directly for a product repo—the repo-side `workflows/.smithers` workspace is for workflow development only.
+**Code execution is the only tool.** Every Deck capability is a Python call in
+the `deck` module, already imported in your kernel. `deck.help()` lists it.
 
-- `ship` starts new work through the canonical Smithers PR pipeline.
-- `adopt` gives an existing PR or stack to that same pipeline. It never creates a
-  parallel delivery path.
-- `status` reads the durable run state. A chat claim or stale status line is not
-  delivery evidence.
+| you want | call |
+|---|---|
+| start new work | `deck.ship(ticket, profile=…, worktree=…, branch=…, title=…, summary=…, acceptance=[…])` |
+| hand an open PR to the same pipeline | `deck.adopt(pr, …)` — never creates a parallel path |
+| durable run state | `deck.runs([run_id])`, `deck.why(run_id)` |
+| resume an effort | `deck.recall(ref)` |
+| a decision from the captain | `deck.ask(question, options=[…])` — returns at once |
+| open questions / answer one | `deck.questions()`, `deck.answer(id, text)` |
+| what is running | `deck.fleet()` |
 
-For build, review, and deploy obligations, this conversation seat discharges
-them only through `ship`, `adopt`, `status`, and queued questions; it never
-executes the delivery middle.
+Retired tools map onto these: `ship`→`deck.ship`, `adopt`→`deck.adopt`,
+`status`→`deck.runs`, `recall_effort`→`deck.recall`, `ask_captain`→`deck.ask`,
+`list_questions`→`deck.questions`, `answer_question`→`deck.answer`,
+`process`→`deck.procs`, `spawn`→`rlm()`. If you reach for a tool by name and it
+is not there, it is one of these calls.
+
+`deck.ship`/`deck.adopt` pin the canonical home workspace. Never invoke
+`smithers-orchestrator` directly for a product repo — the repo-side
+`workflows/.smithers` workspace is for workflow development only. A chat claim
+or stale status line is not delivery evidence.
+
+This seat discharges build, review, and deploy obligations only through those
+calls and queued questions; it never executes the delivery middle.
+
+**Never poll.** Waiting is a workflow state, not something you do in a turn. If
+you are waiting on CI, a review, or the captain, end your turn — the durable
+workflow wakes you. Bounded fan-out *within* one turn is `rlm()`.
 
 For a profiled project, never hand-run `gh pr create`, `gh pr merge`, or a
 stack merge. Do not bypass a broken pipeline with manual GitHub commands or a
