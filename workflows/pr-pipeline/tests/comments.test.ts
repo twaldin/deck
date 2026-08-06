@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { AGENT_COMMENT_SIGNATURE, commentCommand, reviewReplyCommand, signComment } from "../lib/comments.ts";
 import { postComment, postReviewReply, type ExecFn } from "../lib/gh.ts";
-import { generatePullRequestDescription } from "../lib/description.ts";
+import { generatePullRequestDescription, sanitizeDescriptionInput } from "../lib/description.ts";
 
 describe("agent comment signatures", () => {
 	test("adds the signature for a configured signature project", () => {
@@ -49,11 +49,13 @@ describe("agent comment signatures", () => {
 	});
 
 	test("does not sign pull request descriptions", () => {
-		const body = generatePullRequestDescription({
-			title: "Change",
-			summary: "A change",
-			acceptanceCriteria: ["It works"],
-		});
+		const body = generatePullRequestDescription(
+			sanitizeDescriptionInput({
+				title: "fix(deck): Change behavior",
+				summary: "A change",
+				acceptanceCriteria: ["It works"],
+			}),
+		);
 		expect(body).not.toContain(AGENT_COMMENT_SIGNATURE);
 	});
 });
