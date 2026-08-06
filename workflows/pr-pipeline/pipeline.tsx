@@ -10,7 +10,7 @@
  *
  * Stages (stable node ids in brackets):
  *   0 preflight gate            [preflight, preflight-refusal]
- *   1 implement                 [implement]
+ *   1 implement                 [implement-baseline, implement-seat, implement]
  *   2 local adversarial review  [local-review-loop / local-review / local-fix, review-escalation]
  *   3 push + PR (+watch-set)    [push-pr]
  *   3b request reviewers        [request-reviewers]
@@ -414,6 +414,11 @@ export const localReviewSchema = z.object({
 	nits: z.array(z.string()),
 	summary: z.string(),
 });
+
+const implementationSeatSchema = z.object({
+	summary: z.string(),
+	testEvidence: z.string(),
+});
 export const mergePathSchema = z.enum(["github-merge-queue", "dry-run", "already-landed"]);
 
 
@@ -429,10 +434,14 @@ export const schemas = {
 		baseBranch: z.string().min(1),
 		cars: z.array(stackCarRecordSchema).optional(),
 	}),
-	implementation: z.object({
+	implementationBaseline: z.object({
+		branch: z.string().min(1),
+		headSha: z.string().min(1),
+	}),
+	implementationSeat: implementationSeatSchema,
+	implementation: implementationSeatSchema.extend({
 		commits: z.array(z.string()),
-		summary: z.string(),
-		testEvidence: z.string(),
+		baselineHeadSha: z.string().min(1).optional(),
 		stackCars: z.array(z.object({
 			branch: z.string().min(1),
 			commits: z.array(z.string()),
@@ -945,7 +954,10 @@ export default smithers((ctx) => {
 
 	// -- persisted state reads ------------------------------------------------
 	const preflight = ctx.latest(outputs.preflight, "preflight");
+	const implementationBaseline = ctx.latest(outputs.implementationBaseline, "implement-baseline");
+	const implementationSeat = ctx.latest(outputs.implementationSeat, "implement-seat");
 	const implementation = ctx.latest(outputs.implementation, "implement");
+	const implementationContext = implementation ?? implementationSeat;
 	const latestLocalReview = ctx.latest(outputs.localReview, "local-review");
 	const latestLocalFix = ctx.latest(outputs.localFix, "local-fix");
 	const localReviewRows = (ctx.outputs.localReview ?? []) as Array<{
@@ -1195,7 +1207,7 @@ export default smithers((ctx) => {
 			...(prNumber === undefined ? {} : { prNumber }),
 			...(headSha === undefined ? {} : { headSha }),
 			originalIssue: brief?.summary ?? props.title,
-			ourFix: implementation?.summary ?? "The pipeline reached this human decision gate.",
+			ourFix: implementationContext?.summary ?? "The pipeline reached this human decision gate.",
 			whyCorrect: props.summary,
 			workflowDir,
 			workflowFile: "pipeline.tsx",
@@ -1424,7 +1436,7 @@ export default smithers((ctx) => {
 						}}
 					</Task>
 				) : null}
-				{preflight?.ok === true && brief !== null && !adopt ? (
+				{preflight?.ok === true && brief !== null && !adopt && (dryRun || stackCreateSpecs !== undefined) ? (
 					<Task
 						id="implement"
 						output={outputs.implementation}
@@ -1451,15 +1463,110 @@ export default smithers((ctx) => {
 										testEvidence: "dry-run: tests simulated green",
 									};
 								}
-							: stackCreateSpecs !== undefined
-								? stackImplementPrompt(brief, input.worktree, declaredBaseBranch, stackCreateSpecs)
-								: implementPrompt(brief, input.worktree, input.branch)}
+							: stackImplementPrompt(brief, input.worktree, declaredBaseBranch, stackCreateSpecs as StackCarSpec[])}
+					</Task>
+				) : null}
+				{preflight?.ok === true && brief !== null && !adopt && !dryRun && stackCreateSpecs === undefined ? (
+					<Task id="implement-baseline" output={outputs.implementationBaseline} retries={0}>
+						{() => (async () => {
+							const [branch, headSha] = await Promise.all([
+								execOrThrow(
+									bunExec,
+									[github.git, "rev-parse", "--abbrev-ref", "HEAD"],
+									{ cwd: input.worktree },
+								).then((value) => value.trim()),
+								execOrThrow(
+									bunExec,
+									[github.git, "rev-parse", "--verify", "HEAD^{commit}"],
+									{ cwd: input.worktree },
+								).then((value) => value.trim()),
+							]);
+							if (branch !== input.branch) {
+								throw new Error(
+									`[escalate] implementation seat expected branch ${input.branch}, but worktree was on ${branch}; refusing to capture a misleading commit baseline.`,
+								);
+							}
+							return { branch, headSha };
+						})()}
+					</Task>
+				) : null}
+				{implementationBaseline !== undefined && brief !== null && !adopt && !dryRun && stackCreateSpecs === undefined ? (
+					<Task
+						id="implement-seat"
+						output={outputs.implementationSeat}
+						agent={agents?.implementer}
+						retries={1}
+					>
+						{implementPrompt(brief, input.worktree, input.branch)}
+					</Task>
+				) : null}
+				{implementationBaseline !== undefined &&
+				implementationSeat !== undefined &&
+				pushAllowed &&
+				!adopt &&
+				!dryRun &&
+				stackCreateSpecs === undefined ? (
+					<Task id="implement" output={outputs.implementation} retries={0}>
+						{() => (async () => {
+							const [branch, headSha] = await Promise.all([
+								execOrThrow(
+									bunExec,
+									[github.git, "rev-parse", "--abbrev-ref", "HEAD"],
+									{ cwd: input.worktree },
+								).then((value) => value.trim()),
+								execOrThrow(
+									bunExec,
+									[github.git, "rev-parse", "--verify", "HEAD^{commit}"],
+									{ cwd: input.worktree },
+								).then((value) => value.trim()),
+							]);
+							if (branch !== implementationBaseline.branch) {
+								throw new Error(
+									`[escalate] implementation started on ${implementationBaseline.branch}@${implementationBaseline.headSha}, but ended on ${branch}@${headSha}; refusing commit attribution across branches.`,
+								);
+							}
+							if (headSha !== implementationBaseline.headSha) {
+								const ancestor = await bunExec(
+									[
+										github.git,
+										"merge-base",
+										"--is-ancestor",
+										implementationBaseline.headSha,
+										headSha,
+									],
+									{ cwd: input.worktree },
+								);
+								if (ancestor.code !== 0) {
+									throw new Error(
+										`[escalate] implementation baseline ${implementationBaseline.headSha} is not an ancestor of ${headSha}; refusing commit attribution across rewritten history.`,
+									);
+								}
+							}
+							const commitText = await execOrThrow(
+								bunExec,
+								[
+									github.git,
+									"rev-list",
+									"--reverse",
+									`${implementationBaseline.headSha}..${headSha}`,
+								],
+								{ cwd: input.worktree },
+							);
+							return {
+								...implementationSeat,
+								commits: commitText
+									.split("\n")
+									.map((sha) => sha.trim())
+									.filter(Boolean),
+								baselineHeadSha: implementationBaseline.headSha,
+							};
+						})()}
 					</Task>
 				) : null}
 
 				{/* ---------------------------------- stage 2: local adversarial review */}
 				{/* Adopt skips implementation only; local adversarial review remains mandatory. */}
-				{implementation !== undefined && brief !== null ? (
+				{implementationContext !== undefined && brief !== null ? (
 					<Loop
 						id="local-review-loop"
 						until={latestLocalReview?.approved === true || repeatedLocalFinding}
@@ -1950,10 +2057,15 @@ export default smithers((ctx) => {
 									[github.git, "fetch", "origin", baseBranch],
 									{ cwd: input.worktree },
 								);
-								const [publishedLocalHead, actualCommitText] = await Promise.all([
+								const [publishedLocalHead, publicationBaseHead, actualCommitText] = await Promise.all([
 									execOrThrow(bunExec, [github.git, "rev-parse", "HEAD"], {
 										cwd: input.worktree,
 									}).then((value) => value.trim()),
+									execOrThrow(
+										bunExec,
+										[github.git, "rev-parse", "--verify", `origin/${baseBranch}^{commit}`],
+										{ cwd: input.worktree },
+									).then((value) => value.trim()),
 									execOrThrow(
 										bunExec,
 										[
@@ -1983,8 +2095,11 @@ export default smithers((ctx) => {
 									actualCommits.some((sha, index) => sha !== reportedCommits[index])
 								) {
 									throw new Error(
-										`[escalate] implementation reported commits ${JSON.stringify(reportedCommits)}, ` +
-											`but origin/${baseBranch}..HEAD is ${JSON.stringify(actualCommits)}; refusing initial publication.`,
+										`[escalate] initial publication commit attribution mismatch:\n` +
+											`claimed by implementation: ${JSON.stringify(reportedCommits)}\n` +
+											`actually added in origin/${baseBranch}@${publicationBaseHead}..HEAD: ${JSON.stringify(actualCommits)}\n` +
+											`implementation capture base: ${implementation.baselineHeadSha ?? "(not recorded)"}\n` +
+											"refusing initial publication.",
 									);
 								}
 								await execOrThrow(

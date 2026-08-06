@@ -222,7 +222,7 @@ export function implementPrompt(brief: Brief, worktree: string, branch: string):
 		"- Commit your work as one or more plain commits on this branch. DO NOT push.",
 		"- Do not create branches, PRs, or use GitHub merge commands.",
 		"",
-		...resultContract('{"commits":["abc123"],"summary":"Implemented the brief.","testEvidence":"bun test workflows/pr-pipeline/tests/pipeline.test.tsx"}'),
+		...resultContract('{"summary":"Implemented the brief.","testEvidence":"bun test workflows/pr-pipeline/tests/pipeline.test.tsx"}'),
 	]);
 }
 

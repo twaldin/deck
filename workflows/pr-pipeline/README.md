@@ -92,12 +92,20 @@ without `--no-pipeline` (v2/src/spawn.ts `assertShipGoesThroughPipeline`), so a
 bare worker cannot open the PR that skips this graph. Incident: doctrine PR
 #26865 shipped with zero adversarial review through exactly that bare path.
 
+For a new single PR, `implement-baseline` persists the checked-out branch and
+local `HEAD` before `implement-seat` starts. After local review and any
+implementer fixes, the deterministic `implement` node reports
+`<captured-head>..HEAD`; it never trusts an agent-selected Git base or assumes
+that `origin/main` described the worktree when the effort began. `push-pr`
+independently retains the fail-closed `origin/<base>..HEAD` comparison before
+publishing.
+
 ## Stage graph → node ids
 
 | SOP stage | Node id(s) | Kind |
 |---|---|---|
 | 0 preflight gate | `preflight`, `preflight-refusal` | compute; **refuses** with the open-question list |
-| 1 implement | `implement` | agent (implementer model) |
+| 1 implement | `implement-baseline`, `implement-seat`, `implement` | persisted local baseline; agent implementation; deterministic commit report |
 | 2 local adversarial review | `local-review-loop` / `local-review` + `local-fix`, `review-escalation` | agent loop, cross-model, fresh context |
 | 3 push + PR | `push-pr` | compute; creates/adopts one PR or publishes/adopts every ordered stack car; each car is registered in the watch-set |
 | 3b request reviewers | `request-reviewers` | compute; CODEOWNERS + recent-author fallback, verified via `requested_reviewers` |
