@@ -691,6 +691,34 @@ describe("validated gateway outbound requests", () => {
 		expect(forwarded).toEqual([]);
 	});
 
+	test("routes a pi-native full Model object by its provider-qualified identity", async () => {
+		const resolvedIds: string[] = [];
+		const { gateway, forwarded } = await withFakeUpstream({
+			resolveModel: (id: string) => {
+				resolvedIds.push(id);
+				return id === "openai-codex/gpt-5.4"
+					? { id: "gpt-5.4", provider: "openai-codex", api: "openai-codex-responses" } as never
+					: id === "gpt-5.4"
+						? { id: "gpt-5.4", provider: "github-copilot", api: "openai-responses" } as never
+						: undefined;
+			},
+			quotaAccounts: () => [{ credentialId: 1, provider: "openai-codex", authProvider: "openai-codex", blocked: [] }],
+			storage: { pinSessionOAuthAccount: () => true } as never,
+		});
+		const response = await fetch(`${gateway.url}/v1/pi/stream`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: { id: "gpt-5.4", provider: "openai-codex", api: "openai-codex-responses" },
+				context: { messages: [{ role: "user", content: "continue" }] },
+			}),
+		});
+		expect(response.status).toBe(200);
+		await response.json();
+		expect(resolvedIds).toEqual(["openai-codex/gpt-5.4"]);
+		expect(forwarded[0]?.body.modelId).toBe("openai-codex/gpt-5.4");
+	});
+
 	test("strips unknown pi-native provider artifacts and forwards the canonical request", async () => {
 		const { gateway, forwarded } = await withFakeUpstream();
 		const response = await fetch(`${gateway.url}/v1/pi/stream`, {

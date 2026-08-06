@@ -16,6 +16,14 @@ function openAIReasoningSuccess(): string {
 		encrypted_content: "wire-ciphertext",
 		summary: [{ type: "summary_text", text: "wire visible summary" }],
 	};
+	const toolCall = {
+		type: "function_call",
+		id: "fc_stable_wire",
+		call_id: "wire_call",
+		name: "lookup",
+		arguments: JSON.stringify({ query: "safety" }),
+		status: "completed",
+	};
 	const compaction = {
 		type: "compaction",
 		id: "cmp_stable_wire",
@@ -25,15 +33,17 @@ function openAIReasoningSuccess(): string {
 		id: "resp_stable_wire",
 		object: "response",
 		status: "completed",
-		output: [item, compaction],
+		output: [item, toolCall, compaction],
 		usage: { input_tokens: 1, output_tokens: 1, output_tokens_details: { reasoning_tokens: 1 } },
 	};
 	const events = [
 		{ type: "response.created", response },
 		{ type: "response.output_item.added", output_index: 0, item },
 		{ type: "response.output_item.done", output_index: 0, item },
-		{ type: "response.output_item.added", output_index: 1, item: compaction },
-		{ type: "response.output_item.done", output_index: 1, item: compaction },
+		{ type: "response.output_item.added", output_index: 1, item: toolCall },
+		{ type: "response.output_item.done", output_index: 1, item: toolCall },
+		{ type: "response.output_item.added", output_index: 2, item: compaction },
+		{ type: "response.output_item.done", output_index: 2, item: compaction },
 		{ type: "response.completed", response },
 	];
 	return events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join("");
@@ -243,13 +253,23 @@ describe("OpenAI artifact vendor egress", () => {
 			item !== null && typeof item === "object" && "type" in item && item.type === "compaction"
 		);
 		expect(JSON.stringify(compaction)).toContain("wire-compaction");
+		const toolCall = firstBody.output?.find(item =>
+			item !== null && typeof item === "object" && "type" in item && item.type === "function_call"
+		);
+		expect(toolCall).toBeDefined();
 		const second = await fetch(`${gateway.url}/v1/responses`, {
 			method: "POST",
 			headers: { "content-type": "application/json" },
 			body: JSON.stringify({
 				model: "openai-codex/gpt-5.6-sol",
 				prompt_cache_key: "stable-wire-session",
-				input: [reasoning, compaction, { role: "user", content: "second" }],
+				input: [
+					reasoning,
+					toolCall,
+					{ type: "function_call_output", call_id: "wire_call", output: "safe" },
+					compaction,
+					{ role: "user", content: "second" },
+				],
 			}),
 		});
 		expect(second.status).toBe(200);
@@ -259,5 +279,7 @@ describe("OpenAI artifact vendor egress", () => {
 		expect(secondVendorBody).toContain("wire-ciphertext");
 		expect(secondVendorBody).toContain('"type":"reasoning"');
 		expect(secondVendorBody).toContain("wire-compaction");
+		expect(secondVendorBody).toContain("wire_call");
+		expect(secondVendorBody).toContain("lookup");
 	}, 30_000);
 });

@@ -1,5 +1,5 @@
 diff --git a/src/providers/openai-responses-server.ts b/src/providers/openai-responses-server.ts
-index db60dc4665fe441f815127bed5da4d47b3246b6d..e3d5a9a949af4556163260ae7b5dabe3a6667bac 100644
+index db60dc4665fe441f815127bed5da4d47b3246b6d..213cb4d19b05b51488b4f2f3231860d2e49ecbd4 100644
 --- a/src/providers/openai-responses-server.ts
 +++ b/src/providers/openai-responses-server.ts
 @@ -266,15 +266,24 @@ function buildTools(tools: Array<OpenAIResponsesTool | { type: string }> | undef
@@ -50,18 +50,28 @@ index db60dc4665fe441f815127bed5da4d47b3246b6d..e3d5a9a949af4556163260ae7b5dabe3
  /** Flatten a function_call_output array form (text + refusal) into a single string. */
  function flattenFunctionOutputArray(blocks: readonly unknown[]): string {
  	const parts: string[] = [];
-@@ -386,9 +408,7 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
+@@ -383,12 +405,17 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
+ 							id: msg.id,
+ 							phase: msg.phase,
+ 						});
++						const identity = responseModelIdentity(data.model);
  						messages.push({
  							role: "assistant",
  							content: parts,
 -							api: "openai-responses",
 -							provider: "openai",
 -							model: data.model,
-+							...responseModelIdentity(data.model),
++							...identity,
++							providerPayload: {
++								type: "openaiResponsesHistory",
++								provider: identity.provider,
++								dt: true,
++								items: [structuredCloneJSON(item) as unknown as Record<string, unknown>],
++							},
  							usage: {
  								input: 0,
  								output: 0,
-@@ -414,7 +434,14 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
+@@ -414,7 +441,14 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
  					thinkingSignature: JSON.stringify(reasoning),
  					...(reasoning.id ? { itemId: reasoning.id } : {}),
  				};
@@ -77,7 +87,40 @@ index db60dc4665fe441f815127bed5da4d47b3246b6d..e3d5a9a949af4556163260ae7b5dabe3
  				continue;
  			}
  			if (effectiveType === "function_call") {
-@@ -649,13 +676,19 @@ type ComputerCallOutputItem = {
+@@ -436,7 +470,9 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
+ 					arguments: args,
+ 					...(call.id ? { thoughtSignature: call.id } : {}),
+ 				};
+-				ensureAssistantPlaceholder(messages, data.model, now).content.push(toolCall);
++				const assistant = ensureAssistantPlaceholder(messages, data.model, now);
++				assistant.content.push(toolCall);
++				appendNativeHistoryItem(assistant, item);
+ 				continue;
+ 			}
+ 			if (effectiveType === "custom_tool_call") {
+@@ -452,7 +488,9 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
+ 					customWireName: call.name,
+ 					...(call.id ? { thoughtSignature: call.id } : {}),
+ 				};
+-				ensureAssistantPlaceholder(messages, data.model, now).content.push(toolCall);
++				const assistant = ensureAssistantPlaceholder(messages, data.model, now);
++				assistant.content.push(toolCall);
++				appendNativeHistoryItem(assistant, item);
+ 				continue;
+ 			}
+ 			if (effectiveType === "computer_call") {
+@@ -472,7 +510,9 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
+ 						pendingSafetyChecks: call.pending_safety_checks as ComputerSafetyCheck[],
+ 					},
+ 				};
+-				ensureAssistantPlaceholder(messages, data.model, now).content.push(toolCall);
++				const assistant = ensureAssistantPlaceholder(messages, data.model, now);
++				assistant.content.push(toolCall);
++				appendNativeHistoryItem(assistant, item);
+ 				continue;
+ 			}
+ 			if (effectiveType === "function_call_output") {
+@@ -649,13 +689,19 @@ type ComputerCallOutputItem = {
  	pending_safety_checks: ComputerSafetyCheck[];
  	status: "completed" | "in_progress" | "incomplete";
  };
@@ -98,7 +141,7 @@ index db60dc4665fe441f815127bed5da4d47b3246b6d..e3d5a9a949af4556163260ae7b5dabe3
  
  type ResponseStatus = "completed" | "in_progress" | "failed" | "incomplete";
  
-@@ -799,6 +832,13 @@ function buildOutputItems(message: AssistantMessage): OutputItem[] {
+@@ -799,6 +845,13 @@ function buildOutputItems(message: AssistantMessage): OutputItem[] {
  		// RedactedThinking / Image are silently dropped — no direct Responses wire representation.
  	}
  	flushMessage();

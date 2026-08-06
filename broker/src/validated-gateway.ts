@@ -337,19 +337,22 @@ export function startValidatedGateway(
 			if (request.method === "POST" && url.pathname === "/v1/pi/stream") {
 				try {
 					const body = await request.json() as Record<string, unknown>;
+					const objectModel = isObject(body.model) ? body.model : undefined;
 					const rawModel = typeof body.modelId === "string"
 						? body.modelId
 						: typeof body.model === "string"
 							? body.model
-							: isObject(body.model) && typeof body.model.id === "string"
-								? body.model.id
+							: typeof objectModel?.id === "string"
+								? objectModel.id
 								: undefined;
 					if (rawModel === undefined) throw new Error("Missing `modelId` (or `model.id`) field");
+					const objectProvider = typeof objectModel?.provider === "string" ? objectModel.provider : undefined;
+					const qualifiedModel = rawModel.includes("/") || objectProvider === undefined ? rawModel : `${objectProvider}/${rawModel}`;
 					const modelId = rawModel.split("/").at(-1) ?? rawModel;
-					const resolved = options.resolveModel?.(rawModel) ?? options.resolveModel?.(modelId);
+					const resolved = options.resolveModel?.(qualifiedModel);
 					const requested: QuotaModel = {
 						id: modelId,
-						provider: resolved?.provider ?? (modelId.startsWith("claude-") ? "anthropic" : modelId.startsWith("grok-") ? "xai" : "openai-codex"),
+						provider: resolved?.provider ?? objectProvider ?? (modelId.startsWith("claude-") ? "anthropic" : modelId.startsWith("grok-") ? "xai" : "openai-codex"),
 					};
 					const routed = quotaAccounts === undefined
 						? undefined
