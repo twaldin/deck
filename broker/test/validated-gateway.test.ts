@@ -19,7 +19,7 @@ async function withFakeUpstream(options: Partial<FastGatewayOptions> = {}, upstr
 		 port: 0,
 		 fetch: async request => {
 			const path = new URL(request.url).pathname;
-			const body = await request.json() as Record<string, unknown>;
+			const body = request.method === "GET" ? {} : await request.json() as Record<string, unknown>;
 			forwarded.push({ path, body });
 			const response = typeof upstreamResponse === "function"
 				? await upstreamResponse(path, body)
@@ -37,6 +37,29 @@ async function withFakeUpstream(options: Partial<FastGatewayOptions> = {}, upstr
 	return { gateway, forwarded };
 }
 
+
+describe("validated gateway usage monitoring", () => {
+	test("adds the broker's seven-day fast summary to the existing usage response", async () => {
+		const summary = {
+			windowMs: 604_800_000,
+			windowStartedAt: 1,
+			targetFraction: 0.3,
+			fastFraction: 0.25,
+			fastStandardCostUsd: 2.5,
+			totalStandardCostUsd: 10,
+			fastRequests: 1,
+			totalRequests: 4,
+			exceedsTarget: false,
+			multipliers: [2.5],
+		};
+		const { gateway } = await withFakeUpstream({
+			fastUsageMonitor: { summary: () => summary } as never,
+		}, Response.json({ generatedAt: 2, reports: [] }));
+		const response = await fetch(`${gateway.url}/v1/usage`);
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual({ generatedAt: 2, reports: [], fastTier: summary });
+	});
+});
 describe("validated gateway outbound requests", () => {
 	test("forwards codex max without rewriting it to high", async () => {
 		const { gateway, forwarded } = await withFakeUpstream();

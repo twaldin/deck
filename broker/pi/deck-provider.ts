@@ -14,6 +14,7 @@ interface DeckModel {
 	};
 	contextWindow: number;
 	maxTokens: number;
+	supportsFastMode?: boolean;
 	compat?: { supportsReasoningEffort?: boolean };
 }
 
@@ -126,6 +127,7 @@ export const models: DeckModel[] = [
 		cost: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 6.25 },
 		contextWindow: 372_000,
 		maxTokens: maxTokens(128_000),
+		supportsFastMode: true,
 		compat: { supportsReasoningEffort: true },
 	},
 	{
@@ -174,6 +176,7 @@ export const models: DeckModel[] = [
 		cost: { input: 2.5, output: 15, cacheRead: 0.25, cacheWrite: 0 },
 		contextWindow: 272_000,
 		maxTokens: maxTokens(128_000),
+		supportsFastMode: true,
 		compat: { supportsReasoningEffort: true },
 	},
 	{
@@ -198,6 +201,7 @@ export const models: DeckModel[] = [
 		cost: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 },
 		contextWindow: 272_000,
 		maxTokens: maxTokens(128_000),
+		supportsFastMode: true,
 		compat: { supportsReasoningEffort: true },
 	},
 	{
@@ -210,6 +214,7 @@ export const models: DeckModel[] = [
 		cost: { input: 1, output: 6, cacheRead: 0.1, cacheWrite: 1.25 },
 		contextWindow: 372_000,
 		maxTokens: maxTokens(128_000),
+		supportsFastMode: true,
 		compat: { supportsReasoningEffort: true },
 	},
 	{
@@ -222,6 +227,7 @@ export const models: DeckModel[] = [
 		cost: { input: 2.5, output: 15, cacheRead: 0.25, cacheWrite: 3.125 },
 		contextWindow: 372_000,
 		maxTokens: maxTokens(128_000),
+		supportsFastMode: true,
 		compat: { supportsReasoningEffort: true },
 	},
 ];

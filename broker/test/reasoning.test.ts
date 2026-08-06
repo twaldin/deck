@@ -43,6 +43,22 @@ describe("native reasoning passthrough", () => {
 		expect(clampReasoning("xhigh", supportedReasoning("grok-4.5", "xai"))).toBe("high");
 	});
 
+	test("opts only the documented Deck models into Prime Fast capability", () => {
+		let registered: { models: Array<{ id: string; supportsFastMode?: boolean }> } | undefined;
+		registerDeckProvider({ registerProvider: (_name, config) => { registered = config as typeof registered; } });
+		const fastModels = registered?.models
+			.filter(model => model.supportsFastMode)
+			.map(model => model.id)
+			.sort();
+		expect(fastModels).toEqual([
+			"gpt-5.4",
+			"gpt-5.5",
+			"gpt-5.6-luna",
+			"gpt-5.6-sol",
+			"gpt-5.6-terra",
+		]);
+	});
+
 	test("publishes the provider catalog surface", () => {
 		expect(NATIVE_REASONING_LEVELS.openai).toEqual(["low", "medium", "high", "xhigh", "max"]);
 		expect(NATIVE_REASONING_LEVELS.xai).toEqual(["low", "medium", "high"]);

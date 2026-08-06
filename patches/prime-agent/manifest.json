@@ -74,6 +74,25 @@
         "bundleNeedle": "env.MOSH_CONNECTION || env.HERDR_ENV === \"1\""
       },
       "status": "upstream-open"
+    },
+    {
+      "name": "deck-fast-mode-capability",
+      "file": "deck-fast-mode-capability.patch",
+      "sha256": "e10666d72ddcdcad115b3504efc311f59a2ce1f8f87b192f9d0b1daf0f56ef83",
+      "fixes": "Lets explicitly capable custom OpenAI-compatible providers use native Fast mode and serialize the priority service tier.",
+      "upstreamBranch": "fix/custom-provider-fast-mode-capability",
+      "upstreamPrNumber": null,
+      "upstreamPrUrl": null,
+      "sourceCommit": "96ee5bce0af2f30fb07ff8b8bc3bcb6a9a581b32",
+      "baseVersion": "0.7.0",
+      "application": "not-applied",
+      "installedDetection": {
+        "file": "dist/core/model-registry.js",
+        "pristineSha256": "d77c1c6b8cb1af8945139961b64ca30427aa8b98e0f9172e3aed936b2829e939",
+        "patchedSha256": "480032b831c047661238bfeeb4e4a3acfc29c36482808f88bdaeee6d895f23e8",
+        "bundleNeedle": "model.api === \"openai-completions\" && model.supportsFastMode === true"
+      },
+      "status": "local-only"
     }
   ]
 }

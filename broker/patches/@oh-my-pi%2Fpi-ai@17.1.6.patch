@@ -1,3 +1,150 @@
+diff --git a/node_modules/@oh-my-pi/pi-ai/.bun-tag-cefee13a3ece00c2 b/.bun-tag-cefee13a3ece00c2
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/dist/types/auth-storage.d.ts b/dist/types/auth-storage.d.ts
+index 1eb5bd8a5bc18f14c95ac819c5af566fa42f7886..ccb57c8c7bcb46cfb38e69e36d5809d92aa6149c 100644
+--- a/dist/types/auth-storage.d.ts
++++ b/dist/types/auth-storage.d.ts
+@@ -883,7 +883,11 @@ export declare class AuthStorage {
+         sessionId?: string;
+         recordedAt?: number;
+         baseUrl?: string;
++        model?: string;
++        serviceTier?: UsageCostHistoryEntry["serviceTier"];
+     }): boolean;
++    /** Recorded request costs, oldest first. */
++    listUsageCosts(query?: UsageCostHistoryQuery): UsageCostHistoryEntry[];
+     /**
+      * Forward one completed request's usage to the store's observer hook.
+      * Broker-backed stores batch these into per-install reports so the broker
+diff --git a/dist/types/usage.d.ts b/dist/types/usage.d.ts
+index f5a8743f82daf94cc4d0f4cc1bd926830ef94b56..68421a93623224b356dc6adae4d7058746dbc006 100644
+--- a/dist/types/usage.d.ts
++++ b/dist/types/usage.d.ts
+@@ -146,8 +146,12 @@ export interface UsageCostHistoryEntry {
+     provider: Provider;
+     /** Stable credential identity key (account/email/project/secret derived). */
+     accountKey: string;
+-    /** Estimated request cost in USD. */
++    /** Estimated request cost at the model's Standard rate, in USD. */
+     costUsd: number;
++    /** Model that served the request, when recorded by the gateway. */
++    model?: string;
++    /** Effective attributed tier. Only supported ChatGPT Fast requests are priority. */
++    serviceTier?: "default" | "priority";
+ }
+ /** Filter for reading observed request costs. */
+ export interface UsageCostHistoryQuery {
+diff --git a/src/auth-storage.ts b/src/auth-storage.ts
+index 51b9f25ac19c50d380ef3ce6a3ceb20f926d6c12..e096739aa52434796d224b2d7b5dbd2c845de62d 100644
+--- a/src/auth-storage.ts
++++ b/src/auth-storage.ts
+@@ -3184,7 +3184,13 @@ export class AuthStorage {
+ 	recordUsageCost(
+ 		provider: Provider,
+ 		costUsd: number,
+-		options?: { sessionId?: string; recordedAt?: number; baseUrl?: string },
++		options?: {
++			sessionId?: string;
++			recordedAt?: number;
++			baseUrl?: string;
++			model?: string;
++			serviceTier?: UsageCostHistoryEntry["serviceTier"];
++		},
+ 	): boolean {
+ 		if (!Number.isFinite(costUsd) || costUsd <= 0) return false;
+ 		const record = this.#store.recordUsageCosts;
+@@ -3196,6 +3202,8 @@ export class AuthStorage {
+ 			provider,
+ 			accountKey: this.#buildUsageCacheIdentity(credential),
+ 			costUsd,
++			model: options?.model,
++			serviceTier: options?.serviceTier,
+ 		};
+ 		try {
+ 			record.call(this.#store, [entry]);
+@@ -3216,6 +3224,11 @@ export class AuthStorage {
+ 		}
+ 	}
+ 
++	/** Recorded request costs, oldest first. */
++	listUsageCosts(query?: UsageCostHistoryQuery): UsageCostHistoryEntry[] {
++		return this.#store.listUsageCosts?.(query) ?? [];
++	}
++
+ 	/**
+ 	 * Forward one completed request's usage to the store's observer hook.
+ 	 * Broker-backed stores batch these into per-install reports so the broker
+@@ -6781,10 +6794,10 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
+ 			"SELECT recorded_at, provider, account_key, email, account_id, limit_id, label, window_label, used_fraction, status, resets_at FROM usage_history WHERE recorded_at >= ? AND (? IS NULL OR provider = ?) ORDER BY recorded_at ASC",
+ 		);
+ 		this.#insertUsageCostStmt = this.#db.prepare(
+-			"INSERT INTO usage_cost_history (recorded_at, provider, account_key, cost_usd) VALUES (?, ?, ?, ?)",
++			"INSERT INTO usage_cost_history (recorded_at, provider, account_key, cost_usd, model, service_tier) VALUES (?, ?, ?, ?, ?, ?)",
+ 		);
+ 		this.#listUsageCostsStmt = this.#db.prepare(
+-			"SELECT recorded_at, provider, account_key, cost_usd FROM usage_cost_history WHERE recorded_at >= ? AND (? IS NULL OR provider = ?) AND (? IS NULL OR account_key = ?) ORDER BY recorded_at ASC",
++			"SELECT recorded_at, provider, account_key, cost_usd, model, service_tier FROM usage_cost_history WHERE recorded_at >= ? AND (? IS NULL OR provider = ?) AND (? IS NULL OR account_key = ?) ORDER BY recorded_at ASC",
+ 		);
+ 	}
+ 
+@@ -6884,7 +6897,9 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
+ 				recorded_at INTEGER NOT NULL,
+ 				provider TEXT NOT NULL,
+ 				account_key TEXT NOT NULL,
+-				cost_usd REAL NOT NULL
++				cost_usd REAL NOT NULL,
++				model TEXT,
++				service_tier TEXT
+ 			);
+ 			CREATE INDEX IF NOT EXISTS idx_usage_cost_history_lookup ON usage_cost_history(provider, account_key, recorded_at);
+ 			CREATE INDEX IF NOT EXISTS idx_usage_history_recorded ON usage_history(recorded_at);
+@@ -6911,6 +6926,19 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
+ 			CREATE INDEX IF NOT EXISTS idx_client_usage_recorded ON client_usage(recorded_at);
+ 		`);
+ 
++		const usageCostColumns = this.#db.prepare("PRAGMA table_info(usage_cost_history)");
++		try {
++			const columns = usageCostColumns.all() as Array<{ name?: string }>;
++			if (!columns.some(column => column.name === "model")) {
++				this.#db.run("ALTER TABLE usage_cost_history ADD COLUMN model TEXT");
++			}
++			if (!columns.some(column => column.name === "service_tier")) {
++				this.#db.run("ALTER TABLE usage_cost_history ADD COLUMN service_tier TEXT");
++			}
++		} finally {
++			usageCostColumns.finalize();
++		}
++
+ 		if (!this.#authCredentialsTableExists()) {
+ 			this.#createAuthCredentialsTable();
+ 			this.#createAuthCredentialBlocksTable();
+@@ -7686,7 +7714,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
+ 	recordUsageCosts(entries: UsageCostHistoryEntry[]): void {
+ 		try {
+ 			for (const entry of entries) {
+-				this.#insertUsageCostStmt.run(entry.recordedAt, entry.provider, entry.accountKey, entry.costUsd);
++				this.#insertUsageCostStmt.run(entry.recordedAt, entry.provider, entry.accountKey, entry.costUsd, entry.model ?? null, entry.serviceTier ?? null);
+ 			}
+ 		} catch {
+ 			// Cost history is best-effort; never break request persistence.
+@@ -7708,12 +7736,16 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
+ 				provider: string;
+ 				account_key: string;
+ 				cost_usd: number;
++				model: string | null;
++				service_tier: string | null;
+ 			}>;
+ 			return rows.map(row => ({
+ 				recordedAt: row.recorded_at,
+ 				provider: row.provider as Provider,
+ 				accountKey: row.account_key,
+ 				costUsd: row.cost_usd,
++				model: row.model ?? undefined,
++				serviceTier: (row.service_tier ?? undefined) as UsageCostHistoryEntry["serviceTier"],
+ 			}));
+ 		} catch {
+ 			return [];
 diff --git a/src/providers/openai-responses-server.ts b/src/providers/openai-responses-server.ts
 index db60dc4665fe441f815127bed5da4d47b3246b6d..213cb4d19b05b51488b4f2f3231860d2e49ecbd4 100644
 --- a/src/providers/openai-responses-server.ts
@@ -155,3 +302,21 @@ index db60dc4665fe441f815127bed5da4d47b3246b6d..213cb4d19b05b51488b4f2f3231860d2
  	return out;
  }
  
+diff --git a/src/usage.ts b/src/usage.ts
+index b7df7550e033c1802038476976adcba63b0ee928..0e1de1254e62137aa9f4b7752bfa5491ae8e29e8 100644
+--- a/src/usage.ts
++++ b/src/usage.ts
+@@ -173,8 +173,12 @@ export interface UsageCostHistoryEntry {
+ 	provider: Provider;
+ 	/** Stable credential identity key (account/email/project/secret derived). */
+ 	accountKey: string;
+-	/** Estimated request cost in USD. */
++	/** Estimated request cost at the model's Standard rate, in USD. */
+ 	costUsd: number;
++	/** Model that served the request, when recorded by the gateway. */
++	model?: string;
++	/** Effective attributed tier. Only supported ChatGPT Fast requests are priority. */
++	serviceTier?: "default" | "priority";
+ }
+ 
+ /** Filter for reading observed request costs. */

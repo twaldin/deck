@@ -2,7 +2,33 @@
 
 ## Fast mode
 
-Append `:fast` to an OpenAI model, such as `deck/gpt-5.6-luna:fast`. The broker strips the suffix and sends `service_tier: "priority"` to OpenAI. Priority processing has a **2x cost multiplier** over standard processing. Non-OpenAI models with `:fast` are rejected.
+Deck's supported path is the model selector suffix `:fast`, for example
+`deck/gpt-5.6-luna:fast`. The broker strips the suffix after account selection
+and sends `service_tier: "priority"` upstream. Because the tier is a request
+field rather than account state, it survives rotation across every linked
+OpenAI Codex OAuth account. Removing the suffix cleanly returns to Standard.
+
+ChatGPT Fast supports `gpt-5.4` (**2×** Standard credits), `gpt-5.5`
+(**2.5×**), and the GPT-5.6 family (**2.5×**), including Deck's
+`gpt-5.6-luna`, `gpt-5.6-sol`, and `gpt-5.6-terra`. It does not include
+`gpt-5.4-mini` or `gpt-5.3-codex-spark`.
+
+Prime 0.7 owns the `/fast` command, so Deck must not register a second command
+with that name. Prime's current capability check rejects custom providers,
+including Deck, even when their OpenAI-compatible request path can serialize
+the tier. Until that upstream predicate is fixed, use the `:fast` selector.
+
+Deck's supported OpenAI route uses ChatGPT OAuth credentials. A manually seeded
+OpenAI API-key credential would instead use separately billed API Priority
+processing; it would not receive ChatGPT credit accounting. Claude models have
+no fast tier reachable through Deck's current credential and compatibility
+path, so `:fast` on a Claude model is rejected rather than silently ignored.
+
+The broker attributes completed requests in its existing
+`usage_cost_history` table. `/quota` shows the trailing seven-day Fast share,
+weighted by each request's estimated Standard-rate cost, against the configured
+target. Set `DECK_FAST_USAGE_TARGET` to a fraction from `0` to `1` (default
+`0.3`) to change that target.
 
 ## Installed wiring
 

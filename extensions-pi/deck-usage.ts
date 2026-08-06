@@ -40,9 +40,23 @@ type UsageReport = {
 	resetCredits?: { availableCount?: number };
 };
 
+export type FastTierUsage = {
+	windowMs: number;
+	windowStartedAt: number;
+	targetFraction: number;
+	fastFraction: number | null;
+	fastStandardCostUsd: number;
+	totalStandardCostUsd: number;
+	fastRequests: number;
+	totalRequests: number;
+	exceedsTarget: boolean;
+	multipliers: number[];
+};
+
 export type UsageRoster = {
 	generatedAt?: number | string;
 	reports: UsageReport[];
+	fastTier?: FastTierUsage;
 };
 
 type UsageContext = {
@@ -97,18 +111,62 @@ const DEFAULT_RUNTIME: DeckUsageRuntime = {
 	clearTimeout: handle => clearTimeout(handle as never),
 };
 
+function parseFastTier(value: unknown): FastTierUsage | undefined {
+	if (typeof value !== "object" || value === null) return undefined;
+	const candidate = value as Partial<Record<keyof FastTierUsage, unknown>>;
+	const finite = (field: keyof FastTierUsage): number | undefined =>
+		typeof candidate[field] === "number" && Number.isFinite(candidate[field])
+			? candidate[field] as number
+			: undefined;
+	const windowMs = finite("windowMs");
+	const windowStartedAt = finite("windowStartedAt");
+	const targetFraction = finite("targetFraction");
+	const fastFraction = candidate.fastFraction === null ? null : finite("fastFraction");
+	const fastStandardCostUsd = finite("fastStandardCostUsd");
+	const totalStandardCostUsd = finite("totalStandardCostUsd");
+	const fastRequests = finite("fastRequests");
+	const totalRequests = finite("totalRequests");
+	if (
+		windowMs === undefined
+		|| windowStartedAt === undefined
+		|| targetFraction === undefined
+		|| fastFraction === undefined
+		|| fastStandardCostUsd === undefined
+		|| totalStandardCostUsd === undefined
+		|| fastRequests === undefined
+		|| totalRequests === undefined
+		|| typeof candidate.exceedsTarget !== "boolean"
+		|| !Array.isArray(candidate.multipliers)
+		|| !candidate.multipliers.every(multiplier => typeof multiplier === "number" && Number.isFinite(multiplier))
+	) return undefined;
+	return {
+		windowMs,
+		windowStartedAt,
+		targetFraction,
+		fastFraction,
+		fastStandardCostUsd,
+		totalStandardCostUsd,
+		fastRequests,
+		totalRequests,
+		exceedsTarget: candidate.exceedsTarget,
+		multipliers: candidate.multipliers as number[],
+	};
+}
+
 
 function parseRoster(value: unknown): UsageRoster | null {
 	if (typeof value !== "object" || value === null) return null;
-	const candidate = value as { reports?: unknown; generatedAt?: unknown };
+	const candidate = value as { reports?: unknown; generatedAt?: unknown; fastTier?: unknown };
 	if (!Array.isArray(candidate.reports)) return null;
 	const reports = candidate.reports.filter(
 		report => typeof report === "object" && report !== null,
 	) as UsageReport[];
 	const generatedAt = candidate.generatedAt;
+	const fastTier = parseFastTier(candidate.fastTier);
 	return {
 		reports,
 		...(typeof generatedAt === "number" || typeof generatedAt === "string" ? { generatedAt } : {}),
+		...(fastTier === undefined ? {} : { fastTier }),
 	};
 }
 
@@ -290,6 +348,23 @@ export function buildUsageText(
 		theme.bold(theme.fg("accent", "deck usage")),
 		...(generatedAt === null ? [] : [theme.fg("dim", `as of ${new Date(generatedAt).toISOString()} (${formatDuration(now - generatedAt)} ago)`)]),
 	];
+	if (roster.fastTier !== undefined) {
+		const fast = roster.fastTier;
+		const target = `${Math.round(fast.targetFraction * 1_000) / 10}%`;
+		lines.push("", theme.bold("fast tier · trailing 7d"));
+		if (fast.fastFraction === null) {
+			lines.push(`  no attributed completed requests · target ≤${target}`);
+		} else {
+			const share = `${Math.round(fast.fastFraction * 1_000) / 10}%`;
+			const multipliers = fast.multipliers.length === 0
+				? ""
+				: ` · credit rate ${fast.multipliers.map(multiplier => `${formatNumber(multiplier)}×`).join("/")} Standard`;
+			lines.push(
+				`  ${share} of tracked Standard-rate cost (${fast.fastRequests}/${fast.totalRequests} requests) · target ≤${target}${multipliers}`,
+			);
+			if (fast.exceedsTarget) lines.push(`  WARNING: trailing fast share exceeds the ${target} target`);
+		}
+	}
 	if (roster.reports.length === 0) lines.push("", "No broker usage reports.");
 	for (const [index, report] of roster.reports.entries()) {
 		const provider = providerLabel(report.provider ?? "?");

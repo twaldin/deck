@@ -16,6 +16,7 @@ import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import { AuthBrokerRefresher } from "@oh-my-pi/pi-ai/auth-broker";
 import { startControlSocket } from "./control";
 import { buildModelIndex } from "./models";
+import { FastUsageMonitor, parseFastUsageTarget } from "./fast-usage";
 import {
 	BROKER_DIR,
 	BROKER_SOCK,
@@ -48,6 +49,11 @@ async function main(): Promise<void> {
 	const controlCapability = ensureToken(CONTROL_TOKEN_FILE);
 
 	const models = buildModelIndex();
+	const fastUsageMonitor = new FastUsageMonitor(
+		storage,
+		models.resolve,
+		parseFastUsageTarget(process.env.DECK_FAST_USAGE_TARGET),
+	);
 	const gateway = startValidatedGateway({
 		storage,
 		bind: DEFAULT_GATEWAY_BIND,
@@ -55,6 +61,7 @@ async function main(): Promise<void> {
 		version: BROKER_VERSION,
 		resolveModel: models.resolve,
 		listModels: models.list,
+		fastUsageMonitor,
 		quotaAccounts: () => snapshotQuotaAccounts(storage.exportSnapshot(), ids => store.listCredentialBlocks(ids)),
 		quotaPreferences: () => [...models.list()].map(model => ({
 			id: model.id,

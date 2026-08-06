@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { ARTIFACT_REQUEST_ID_HEADER, startFastGateway, type FastGateway, type FastGatewayOptions } from "./fast-gateway";
+import { FastUsageResponseObserver, type FastUsageAttribution, type FastUsageSummary } from "./fast-usage";
 import { DEFAULT_GATEWAY_BIND } from "./paths";
 import { buildModelIndex } from "./models";
 import { clampReasoning, nativeReasoning, supportedReasoning, type ReasoningEffort } from "./reasoning";
@@ -181,6 +182,8 @@ function trackJsonResponseArtifacts(
 	response: Response,
 	resolveProvenance: () => ArtifactProvenance | undefined,
 	registry: ArtifactProvenanceRegistry,
+	observePayload?: (payload: unknown) => void,
+	onComplete?: () => void,
 ): Response {
 	const body = response.body;
 	if (body === null) return response;
@@ -195,13 +198,14 @@ function trackJsonResponseArtifacts(
 				if (done) {
 					if (captureEnabled) {
 						captured += decoder.decode();
-						const provenance = resolveProvenance();
-						if (provenance !== undefined) {
-							try {
-								recordResponseArtifactProvenance(JSON.parse(captured), provenance, registry);
-							} catch {
-								// The client still receives the upstream bytes unchanged.
-							}
+						try {
+							const payload: unknown = JSON.parse(captured);
+							const provenance = resolveProvenance();
+							if (provenance !== undefined) recordResponseArtifactProvenance(payload, provenance, registry);
+							observePayload?.(payload);
+							onComplete?.();
+						} catch {
+							// The client still receives the upstream bytes unchanged.
 						}
 					}
 					reader.releaseLock();
@@ -247,7 +251,11 @@ function concat(a: Uint8Array, b: Uint8Array): Uint8Array {
  * mid-stream failure on those anyway: it strips content-length, always chunks,
  * and ends the chunked body cleanly even when the source stream errors.
  */
-function guardStreamedBody(response: Response, observeFrames?: (frames: Uint8Array) => void): Response {
+function guardStreamedBody(
+	response: Response,
+	observeFrames?: (frames: Uint8Array) => void,
+	onComplete?: () => void,
+): Response {
 	const body = response.body;
 	if (body === null) return response;
 	if (!(response.headers.get("content-type") ?? "").includes("text/event-stream")) return response;
@@ -271,6 +279,7 @@ function guardStreamedBody(response: Response, observeFrames?: (frames: Uint8Arr
 					if (pending.length > 0) controller.enqueue(pending);
 					pending = new Uint8Array(0);
 					reader.releaseLock();
+					onComplete?.();
 					controller.close();
 					return;
 				}
@@ -307,6 +316,28 @@ function guardStreamedBody(response: Response, observeFrames?: (frames: Uint8Arr
 	return new Response(guarded, { status: response.status, statusText: response.statusText, headers: response.headers });
 }
 
+async function attachFastUsageSummary(response: Response, summary: FastUsageSummary): Promise<Response> {
+	const body = await response.text();
+	const headers = new Headers(response.headers);
+	headers.delete("content-length");
+	headers.delete("content-encoding");
+	let output = body;
+	try {
+		const payload: unknown = JSON.parse(body);
+		if (isObject(payload) && Array.isArray(payload.reports)) {
+			headers.set("content-type", "application/json; charset=utf-8");
+			output = JSON.stringify({ ...payload, fastTier: summary });
+		}
+	} catch {
+		// Preserve a non-JSON upstream response byte-for-byte after text decoding.
+	}
+	return new Response(output, {
+		status: response.status,
+		statusText: response.statusText,
+		headers,
+	});
+}
+
 export function startValidatedGateway(
 	options: FastGatewayOptions,
 	startUpstream: StartUpstream = startFastGateway,
@@ -334,6 +365,7 @@ export function startValidatedGateway(
 			let artifactRoute: ArtifactRoute | undefined;
 			let artifactAccountPinned = false;
 			let artifactRequestId: string | undefined;
+			let fastUsageAttribution: FastUsageAttribution | undefined;
 			if (request.method === "POST" && url.pathname === "/v1/pi/stream") {
 				try {
 					const body = await request.json() as Record<string, unknown>;
@@ -349,6 +381,7 @@ export function startValidatedGateway(
 					const objectProvider = typeof objectModel?.provider === "string" ? objectModel.provider : undefined;
 					const qualifiedModel = rawModel.includes("/") || objectProvider === undefined ? rawModel : `${objectProvider}/${rawModel}`;
 					const modelId = rawModel.split("/").at(-1) ?? rawModel;
+					const requestOptions = isObject(body.options) ? body.options : {};
 					const resolved = options.resolveModel?.(qualifiedModel);
 					const requested: QuotaModel = {
 						id: modelId,
@@ -359,7 +392,7 @@ export function startValidatedGateway(
 						: routeModel(requested, quotaAccounts(), options.quotaPreferences?.() ?? [], options.onQuotaEvent);
 					if (routed !== undefined) {
 						const authProvider = routed.account.authProvider ?? routed.model.provider;
-						const rawOptions = isObject(body.options) ? body.options : {};
+						const rawOptions = requestOptions;
 						const sessionId = typeof rawOptions.sessionId === "string"
 							? rawOptions.sessionId
 							: typeof rawOptions.promptCacheKey === "string"
@@ -387,6 +420,18 @@ export function startValidatedGateway(
 							}));
 						}
 					}
+					const effectiveModel = typeof body.modelId === "string" ? body.modelId : qualifiedModel;
+					const effectiveModelParts = effectiveModel.split("/");
+					const effectiveOptions = isObject(body.options) ? body.options : requestOptions;
+					fastUsageAttribution = {
+						provider: artifactRoute?.authProvider ?? effectiveModelParts.at(-2) ?? requested.provider,
+						model: effectiveModelParts.at(-1) ?? effectiveModel,
+						sessionId: artifactRoute?.sessionId
+							?? (typeof effectiveOptions.sessionId === "string" ? effectiveOptions.sessionId : undefined),
+						requestedServiceTier: typeof effectiveOptions.serviceTier === "string"
+							? effectiveOptions.serviceTier
+							: effectiveModel.endsWith(":fast") ? "priority" : undefined,
+					};
 					const route = artifactRoute !== undefined && artifactAccountPinned && upstream.pinRequestCredential !== undefined
 						? artifactRoute
 						: {
@@ -412,7 +457,7 @@ export function startValidatedGateway(
 				}
 			}
 			if (request.method === "POST" && ["/v1/chat/completions", "/v1/messages", "/v1/responses"].includes(url.pathname)) {
-				let body: Record<string, unknown> & { model?: string; reasoning_effort?: string; reasoning?: { effort?: string }; thinking?: { type?: string; budget_tokens?: number }; prompt_cache_key?: string };
+				let body: Record<string, unknown> & { model?: string; service_tier?: string; reasoning_effort?: string; reasoning?: { effort?: string }; thinking?: { type?: string; budget_tokens?: number }; prompt_cache_key?: string };
 				try {
 					body = await request.json() as typeof body;
 					const modelParts = body.model?.split("/") ?? [];
@@ -522,6 +567,18 @@ export function startValidatedGateway(
 						const nativeThinking = nativeReasoning("anthropic", `budget:${body.thinking.budget_tokens ?? ""}`);
 						if ("thinking" in nativeThinking) body.thinking = nativeThinking.thinking;
 					}
+					const usageModelParts = body.model?.split("/") ?? [];
+					const usageModel = usageModelParts.at(-1);
+					if (usageModel !== undefined) {
+						fastUsageAttribution = {
+							provider: artifactRoute?.authProvider
+								?? usageModelParts.at(-2)
+								?? (usageModel.startsWith("claude-") ? "anthropic" : usageModel.startsWith("grok-") ? "xai" : "openai-codex"),
+							model: usageModel,
+							sessionId: artifactRoute?.sessionId ?? body.prompt_cache_key,
+							requestedServiceTier: body.service_tier ?? (usageModel.endsWith(":fast") ? "priority" : undefined),
+						};
+					}
 				} catch (error) {
 					return Response.json({ error: { type: "invalid_request_error", message: error instanceof Error ? error.message : String(error) } }, { status: 400 });
 				}
@@ -566,6 +623,9 @@ export function startValidatedGateway(
 				throw error;
 			}
 			if (artifactRequestId !== undefined) upstream.unpinRequestCredential?.(artifactRequestId);
+			if (request.method === "GET" && url.pathname === "/v1/usage" && response.ok && options.fastUsageMonitor !== undefined) {
+				return attachFastUsageSummary(response, options.fastUsageMonitor.summary());
+			}
 			if (response.status === 429 && quotaAccounts !== undefined && requestBody?.model !== undefined) {
 				const parts = requestBody.model.split("/");
 				const provider = routingProvider(parts.at(-2) ?? (parts.at(-1)?.startsWith("claude-") ? "anthropic" : parts.at(-1)?.startsWith("grok-") ? "xai" : "openai-codex"));
@@ -582,29 +642,47 @@ export function startValidatedGateway(
 				await response.body?.cancel();
 				return Response.json({ error: { code: "NO_QUOTA", type: "quota_exhausted", message: `no quota is available for provider ${requested.provider}`, provider: requested.provider, retry_after_ms: retryAfterMs ?? null } }, { status: 503 });
 			}
-			let observeFrames: ((frames: Uint8Array) => void) | undefined;
-			if (response.ok && artifactRoute !== undefined) {
+			const attributionIsPinned = artifactRoute === undefined
+				|| (artifactAccountPinned && upstream.pinRequestCredential !== undefined);
+			const usageObserver = response.ok
+				&& attributionIsPinned
+				&& fastUsageAttribution !== undefined
+				&& options.fastUsageMonitor !== undefined
+				? new FastUsageResponseObserver(options.fastUsageMonitor, fastUsageAttribution)
+				: undefined;
+			let responseProvenance: ArtifactProvenance | undefined;
+			if (response.ok && artifactRoute !== undefined && attributionIsPinned) {
 				// pinRequestCredential serializes this logical session until the
 				// response body ends and makes every inner auth retry resolve only
 				// the selected OAuth row. The producing account is therefore
 				// immutable rather than inferred from later session state.
-				if (!artifactAccountPinned || upstream.pinRequestCredential === undefined) {
-					return guardStreamedBody(response);
-				}
-				const responseProvenance: ArtifactProvenance = {
+				responseProvenance = {
 					model: artifactRoute.model,
 					credentialId: artifactRoute.credentialId,
 				};
-				const resolveProvenance = (): ArtifactProvenance => responseProvenance;
-				const contentType = response.headers.get("content-type") ?? "";
-				if (contentType.includes("text/event-stream")) {
-					const observer = new SseArtifactProvenanceObserver(resolveProvenance, artifactProvenance);
-					observeFrames = frames => observer.observe(frames);
-				} else if (contentType.includes("json")) {
-					response = trackJsonResponseArtifacts(response, resolveProvenance, artifactProvenance);
-				}
 			}
-			return guardStreamedBody(response, observeFrames);
+			const contentType = response.headers.get("content-type") ?? "";
+			let observeFrames: ((frames: Uint8Array) => void) | undefined;
+			if (contentType.includes("text/event-stream")) {
+				const artifactObserver = responseProvenance === undefined
+					? undefined
+					: new SseArtifactProvenanceObserver(() => responseProvenance, artifactProvenance);
+				if (artifactObserver !== undefined || usageObserver !== undefined) {
+					observeFrames = frames => {
+						artifactObserver?.observe(frames);
+						usageObserver?.observeSseFrames(frames);
+					};
+				}
+			} else if (contentType.includes("json") && (responseProvenance !== undefined || usageObserver !== undefined)) {
+				response = trackJsonResponseArtifacts(
+					response,
+					() => responseProvenance,
+					artifactProvenance,
+					payload => usageObserver?.observe(payload),
+					() => usageObserver?.complete(),
+				);
+			}
+			return guardStreamedBody(response, observeFrames, () => usageObserver?.complete());
 		},
 	});
 	return { url: `http://${hostname}:${server.port}`, close: async () => { server.stop(); await upstream.close(); }, port: server.port, hostname };

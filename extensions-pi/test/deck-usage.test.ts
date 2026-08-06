@@ -208,6 +208,22 @@ const ROSTER: UsageRoster = {
 	],
 };
 
+const FAST_ROSTER: UsageRoster = {
+	...ROSTER,
+	fastTier: {
+		windowMs: 7 * 24 * 60 * 60_000,
+		windowStartedAt: NOW - 7 * 24 * 60 * 60_000,
+		targetFraction: 0.3,
+		fastFraction: 0.35,
+		fastStandardCostUsd: 3.5,
+		totalStandardCostUsd: 10,
+		fastRequests: 2,
+		totalRequests: 5,
+		exceedsTarget: true,
+		multipliers: [2.5],
+	},
+};
+
 describe("deck usage rendering", () => {
 	test("renders the retired six-cell bars at 0%, partial, and 100%", () => {
 		expect(renderUsageBar(0)).toBe("░░░░░░");
@@ -222,11 +238,18 @@ describe("deck usage rendering", () => {
 		expect(output).toContain("acct-bob · codex");
 		expect(output).toContain("7d·fable: 25% free · resets 2026-08-12T12:00:00.000Z (in 7d 0h)");
 	});
+
+	test("shows the trailing fast share, credit rate, configurable target, and warning", () => {
+		const output = buildUsageText(FAST_ROSTER, undefined, NOW);
+		expect(output).toContain("fast tier · trailing 7d");
+		expect(output).toContain("35% of tracked Standard-rate cost (2/5 requests) · target ≤30% · credit rate 2.5× Standard");
+		expect(output).toContain("WARNING: trailing fast share exceeds the 30% target");
+	});
 });
 
 describe("deck usage broker integration", () => {
 	test("registers /quota and paints compact multi-account bars from /v1/usage", async () => {
-		const broker = startStubBroker(() => Response.json(ROSTER));
+		const broker = startStubBroker(() => Response.json(FAST_ROSTER));
 		const extension = fixture(broker.origin);
 		expect(extension.commands.has("quota")).toBe(true);
 		expect(extension.commands.has("usage")).toBe(false);
@@ -242,6 +265,9 @@ describe("deck usage broker integration", () => {
 		await extension.commands.get("quota")!.handler("", extension.ctx);
 		expect(extension.notifications.at(-1)).toContain("alice@example.com · claude");
 		expect(extension.notifications.at(-1)).toContain("2026-08-12T12:00:00.000Z");
+		expect(extension.notifications.at(-1)).toContain("fast tier · trailing 7d");
+		expect(extension.notifications.at(-1)).toContain("credit rate 2.5× Standard");
+		expect(extension.notifications.at(-1)).toContain("WARNING");
 		expect(broker.requests).toHaveLength(1);
 
 		await extension.emit("session_shutdown");

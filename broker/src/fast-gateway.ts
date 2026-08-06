@@ -1,5 +1,6 @@
 import type { Api, AuthStorage, Model } from "@oh-my-pi/pi-ai";
 import { startAuthGateway, type ModelResolver } from "@oh-my-pi/pi-ai/auth-gateway";
+import type { FastUsageMonitor } from "./fast-usage";
 
 const FAST_SUFFIX = ":fast";
 
@@ -132,6 +133,7 @@ export interface FastGatewayOptions {
 	resolveModel: ModelResolver;
 	listModels: () => Iterable<Model<Api>>;
 	storage: AuthStorage;
+	fastUsageMonitor?: FastUsageMonitor;
 	/** Optional upstream override for gateway-level tests. */
 	upstream?: { url: string; close(): Promise<void> };
 }
