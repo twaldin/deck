@@ -1019,6 +1019,133 @@ esac
 		}
 	});
 
+	test("an ejected queue item never re-submits while fresh exact-head CI is pending", async () => {
+		const log = path.join(os.tmpdir(), `deck-requeue-pending-${crypto.randomUUID()}.log`);
+		const { dir } = await renderMergeTask("main", log, false, true);
+		try {
+			const checkedAt = "2026-08-01T00:00:00.000Z";
+			const rendered = await renderWorkflow(pipeline, {
+				input: {
+					...baseInput,
+					worktree: dir,
+					dryRun: false,
+					wakeDryRun: true,
+					limits: { landingPollSeconds: 0.001 },
+					github: {
+						...baseInput.github,
+						git: path.join(dir, "git"),
+						gh: path.join(dir, "gh"),
+					},
+				},
+				outputs: {
+					...mergeTaskOutputs("main"),
+					mergeHeadCheck: [{
+						nodeId: "r0-merge-head-check",
+						round: 0,
+						expectedHead: "abc123",
+						currentHead: "abc123",
+						ok: true,
+						diffSummary: "fresh green at initial enqueue",
+						checkedAt,
+						submittedAt: checkedAt,
+						receipt: "queued",
+						alreadyLanded: false,
+						mergePath: "github-merge-queue",
+					}],
+					mergeReceipt: [{
+						nodeId: "enqueue-merge",
+						round: 0,
+						submittedAt: checkedAt,
+						receipt: "queued",
+						alreadyLanded: false,
+						mergePath: "github-merge-queue",
+					}],
+					queuePoll: [{
+						nodeId: "queue-poll",
+						poll: 0,
+						state: "open",
+						baseBranch: "main",
+						autoMergeRequest: true,
+						ejected: false,
+						reason: "queued",
+					}],
+				} satisfies PipelineOutputFixtures,
+				workflowPath: path.join(import.meta.dir, "..", "pipeline.tsx"),
+			});
+			const queuePoll = rendered.tasks.find((candidate) => candidate.nodeId === "queue-poll");
+			const result = schemas.queuePoll.parse(await queuePoll?.computeFn?.());
+			expect(result).toMatchObject({
+				state: "open",
+				autoMergeRequest: false,
+				requeueRequired: true,
+				hardInvalidation: false,
+			});
+			expect(result.reason).toContain("merge safety pending");
+			const hardInvalidation = {
+				...result,
+				hardInvalidation: true,
+				requeueRequired: false,
+				reason: "merge safety invalidated: exact-head CI is TERMINAL_FAILURE",
+			};
+			const restarted = await renderWorkflow(pipeline, {
+				input: {
+					...baseInput,
+					worktree: dir,
+					dryRun: false,
+					wakeDryRun: true,
+					github: {
+						...baseInput.github,
+						git: path.join(dir, "git"),
+						gh: path.join(dir, "gh"),
+					},
+				},
+				outputs: {
+					...mergeTaskOutputs("main"),
+					reviewerRequest: [{
+						nodeId: "request-reviewers",
+						skipped: false,
+						requested: ["reviewer"],
+						verified: ["reviewer"],
+						source: "test",
+						at: checkedAt,
+						reviewerPrompt: "",
+					}],
+					mergeHeadCheck: [{
+						nodeId: "r0-merge-head-check",
+						round: 0,
+						expectedHead: "abc123",
+						currentHead: "abc123",
+						ok: true,
+						diffSummary: "fresh green at initial enqueue",
+						checkedAt,
+						submittedAt: checkedAt,
+						receipt: "queued",
+						alreadyLanded: false,
+						mergePath: "github-merge-queue",
+					}],
+					mergeReceipt: [{
+						nodeId: "enqueue-merge",
+						round: 0,
+						submittedAt: checkedAt,
+						receipt: "queued",
+						alreadyLanded: false,
+						mergePath: "github-merge-queue",
+					}],
+					queuePoll: [{
+						nodeId: "queue-poll",
+						...hardInvalidation,
+					}],
+				} satisfies PipelineOutputFixtures,
+				workflowPath: path.join(import.meta.dir, "..", "pipeline.tsx"),
+			});
+			expect(restarted.tasks.map((candidate) => candidate.nodeId)).toContain("r1-watch-poll");
+			expect(fs.readFileSync(log, "utf8")).not.toContain("pr merge");
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+			fs.rmSync(log, { force: true });
+		}
+	});
+
 	test("detects an already landed stack PR by its squash commit on its actual base", async () => {
 		const log = path.join(os.tmpdir(), `deck-landing-${crypto.randomUUID()}.log`);
 		const { dir, task } = await renderMergeTask("fm/stack-parent", log, true);
