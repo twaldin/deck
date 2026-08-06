@@ -9,13 +9,13 @@ import { describe, expect, test } from "bun:test";
 
 import { agents } from "../../.smithers/agents.ts";
 import { PrimeSeatAgent } from "../lib/engines/prime.ts";
-import { assertDeckModel } from "../lib/models.ts";
+import { assertDeckModel, defaultModelPolicy } from "../lib/models.ts";
 import { SEAT_ENGINES, validateProfiles } from "../lib/profiles.ts";
 
 const workflowsDir = join(import.meta.dir, "..", "..");
 const repoRoot = dirname(workflowsDir);
 const generatedSmithersAgentsDir = join(workflowsDir, ".smithers", "agents");
-const activeExtensions = /\.(?:[cm]?[jt]sx?|sh|md|json|ya?ml|toml)$/;
+const activeExtensions = /\.(?:[cm]?[jt]sx?|sh|mdx?|json|ya?ml|toml)$/;
 
 function activeFiles(dir: string): string[] {
 	const out: string[] = [];
@@ -41,6 +41,34 @@ describe("Prime-only seat engine invariant", () => {
 				assertDeckModel(`${agent.opts.provider}/${agent.opts.model}`);
 			}
 		}
+	});
+
+	test("each public role maps to its canonical policy seat", () => {
+		// The Prime-only assertion above cannot catch a model-policy inversion:
+		// pointing `implement` at the judgment seat is still a PrimeSeatAgent on a
+		// deck model. Pin the role -> policy mapping so spending the scarce
+		// judgment budget on high-volume work fails loudly instead of silently.
+		const policy = defaultModelPolicy();
+		const judgment = policy.reviewer ?? policy.oppositionDefaults.openai;
+		const expected: Record<string, string | undefined> = {
+			implement: policy.implementer,
+			cheapFast: policy.mechanical,
+			research: policy.mechanical,
+			midTier: policy.mechanical,
+			smartTool: policy.mechanical,
+			validate: judgment,
+			smart: judgment,
+			review: judgment,
+			planning: judgment,
+			orchestrator: judgment,
+		};
+		expect(Object.keys(expected).sort()).toEqual(Object.keys(agents).sort());
+		for (const [role, model] of Object.entries(expected)) {
+			const pool = agents[role as keyof typeof agents];
+			const refs = pool.map((agent) => `${agent.opts.provider}/${agent.opts.model}`);
+			expect(refs, `role ${role}`).toEqual([model]);
+		}
+		expect(policy.implementer, "implementation must not use the judgment seat").not.toBe(judgment);
 	});
 
 	test("profiles default to Prime and reject explicit retired or vendor engines", () => {

@@ -21,7 +21,11 @@ ORIGINAL_PATH="$PATH"
 [ ! -e "$CLONE_DIR" ] || fail "temporary clone already exists: $CLONE_DIR"
 [ ! -e "$SANDBOX_HOME" ] || fail "temporary home already exists: $SANDBOX_HOME"
 cleanup() {
-  rm -rf "$CLONE_DIR" "$SANDBOX_HOME"
+  # uv's cache stores read-only archive entries, so a plain rm -rf cannot remove
+  # the directory. Restore write permission first, and never let teardown decide
+  # the script's exit status — the verification result is what matters.
+  chmod -R u+w "$CLONE_DIR" "$SANDBOX_HOME" 2>/dev/null || true
+  rm -rf "$CLONE_DIR" "$SANDBOX_HOME" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
