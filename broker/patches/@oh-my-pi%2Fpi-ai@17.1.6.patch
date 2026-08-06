@@ -1,0 +1,114 @@
+diff --git a/src/providers/openai-responses-server.ts b/src/providers/openai-responses-server.ts
+index db60dc4665fe441f815127bed5da4d47b3246b6d..e3d5a9a949af4556163260ae7b5dabe3a6667bac 100644
+--- a/src/providers/openai-responses-server.ts
++++ b/src/providers/openai-responses-server.ts
+@@ -266,15 +266,24 @@ function buildTools(tools: Array<OpenAIResponsesTool | { type: string }> | undef
+ 	return out.length > 0 ? out : undefined;
+ }
+ 
++function responseModelIdentity(modelId: string): Pick<AssistantMessage, "api" | "provider" | "model"> {
++	const modelParts = modelId.split("/");
++	const provider = modelParts.length > 1 ? modelParts.at(-2)! : "openai";
++	return {
++		api: provider === "openai-codex" ? "openai-codex-responses" : "openai-responses",
++		provider,
++		model: modelParts.at(-1) ?? modelId,
++	};
++}
++
+ function ensureAssistantPlaceholder(messages: Message[], modelId: string, now: number): AssistantMessage {
+ 	const last = messages[messages.length - 1];
+ 	if (last && last.role === "assistant") return last;
++	const identity = responseModelIdentity(modelId);
+ 	const placeholder: AssistantMessage = {
+ 		role: "assistant",
+ 		content: [],
+-		api: "openai-responses",
+-		provider: "openai",
+-		model: modelId,
++		...identity,
+ 		usage: {
+ 			input: 0,
+ 			output: 0,
+@@ -290,6 +299,19 @@ function ensureAssistantPlaceholder(messages: Message[], modelId: string, now: n
+ 	return placeholder;
+ }
+ 
++function appendNativeHistoryItem(assistant: AssistantMessage, item: unknown): void {
++	const payload = assistant.providerPayload?.type === "openaiResponsesHistory"
++		? assistant.providerPayload
++		: {
++			type: "openaiResponsesHistory" as const,
++			provider: assistant.provider,
++			dt: true,
++			items: [],
++		};
++	payload.items.push(structuredCloneJSON(item) as unknown as Record<string, unknown>);
++	assistant.providerPayload = payload;
++}
++
+ /** Flatten a function_call_output array form (text + refusal) into a single string. */
+ function flattenFunctionOutputArray(blocks: readonly unknown[]): string {
+ 	const parts: string[] = [];
+@@ -386,9 +408,7 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
+ 						messages.push({
+ 							role: "assistant",
+ 							content: parts,
+-							api: "openai-responses",
+-							provider: "openai",
+-							model: data.model,
++							...responseModelIdentity(data.model),
+ 							usage: {
+ 								input: 0,
+ 								output: 0,
+@@ -414,7 +434,14 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
+ 					thinkingSignature: JSON.stringify(reasoning),
+ 					...(reasoning.id ? { itemId: reasoning.id } : {}),
+ 				};
+-				ensureAssistantPlaceholder(messages, data.model, now).content.push(thinking);
++				const assistant = ensureAssistantPlaceholder(messages, data.model, now);
++				assistant.content.push(thinking);
++				appendNativeHistoryItem(assistant, item);
++				continue;
++			}
++			if (effectiveType === "compaction") {
++				const assistant = ensureAssistantPlaceholder(messages, data.model, now);
++				appendNativeHistoryItem(assistant, item);
+ 				continue;
+ 			}
+ 			if (effectiveType === "function_call") {
+@@ -649,13 +676,19 @@ type ComputerCallOutputItem = {
+ 	pending_safety_checks: ComputerSafetyCheck[];
+ 	status: "completed" | "in_progress" | "incomplete";
+ };
++type CompactionOutputItem = {
++	type: "compaction";
++	encrypted_content: string;
++} & Record<string, unknown>;
++
+ 
+ type OutputItem =
+ 	| ReasoningOutputItem
+ 	| MessageOutputItem
+ 	| FunctionCallOutputItem
+ 	| CustomToolCallOutputItem
+-	| ComputerCallOutputItem;
++	| ComputerCallOutputItem
++	| CompactionOutputItem;
+ 
+ type ResponseStatus = "completed" | "in_progress" | "failed" | "incomplete";
+ 
+@@ -799,6 +832,13 @@ function buildOutputItems(message: AssistantMessage): OutputItem[] {
+ 		// RedactedThinking / Image are silently dropped — no direct Responses wire representation.
+ 	}
+ 	flushMessage();
++	if (message.providerPayload?.type === "openaiResponsesHistory") {
++		for (const item of message.providerPayload.items) {
++			if (item.type === "compaction" && typeof item.encrypted_content === "string") {
++				out.push(structuredCloneJSON(item) as CompactionOutputItem);
++			}
++		}
++	}
+ 	return out;
+ }
+ 

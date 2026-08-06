@@ -16,17 +16,24 @@ function openAIReasoningSuccess(): string {
 		encrypted_content: "wire-ciphertext",
 		summary: [{ type: "summary_text", text: "wire visible summary" }],
 	};
+	const compaction = {
+		type: "compaction",
+		id: "cmp_stable_wire",
+		encrypted_content: "wire-compaction",
+	};
 	const response = {
 		id: "resp_stable_wire",
 		object: "response",
 		status: "completed",
-		output: [item],
+		output: [item, compaction],
 		usage: { input_tokens: 1, output_tokens: 1, output_tokens_details: { reasoning_tokens: 1 } },
 	};
 	const events = [
 		{ type: "response.created", response },
 		{ type: "response.output_item.added", output_index: 0, item },
 		{ type: "response.output_item.done", output_index: 0, item },
+		{ type: "response.output_item.added", output_index: 1, item: compaction },
+		{ type: "response.output_item.done", output_index: 1, item: compaction },
 		{ type: "response.completed", response },
 	];
 	return events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join("");
@@ -181,7 +188,7 @@ describe("OpenAI artifact vendor egress", () => {
 		expect(unpinnedGetApiKeyCalls).toBe(0);
 	}, 30_000);
 
-	test("preserves encrypted reasoning end to end for a stable model and credential", async () => {
+	test("preserves encrypted reasoning and compaction end to end for a stable Codex model and credential", async () => {
 		const captured: Array<Record<string, unknown>> = [];
 		const vendor = Bun.serve({
 			hostname: "127.0.0.1",
@@ -193,8 +200,8 @@ describe("OpenAI artifact vendor egress", () => {
 		});
 		resources.push({ close: async () => vendor.stop(true) });
 		const index = buildModelIndex(DEFAULT_ALLOWLIST);
-		const bundled = index.resolve("openai/gpt-5.4");
-		if (bundled === undefined) throw new Error("missing OpenAI Responses transport test model");
+		const bundled = index.resolve("openai-codex/gpt-5.6-sol");
+		if (bundled === undefined) throw new Error("missing Codex Responses transport test model");
 		const model = { ...bundled, baseUrl: `http://127.0.0.1:${vendor.port}/v1` };
 		let activeCredentialId: number | undefined;
 		const gateway = startValidatedGateway({
@@ -212,7 +219,7 @@ describe("OpenAI artifact vendor egress", () => {
 				},
 				listOAuthAccounts: () => [{ position: 0, credentialId: 1, active: activeCredentialId === 1 }],
 			} as never,
-			quotaAccounts: () => [{ credentialId: 1, provider: "openai", authProvider: "openai", blocked: [] }],
+			quotaAccounts: () => [{ credentialId: 1, provider: "openai-codex", authProvider: "openai-codex", blocked: [] }],
 			quotaPreferences: () => [],
 		});
 		resources.push(gateway);
@@ -220,7 +227,7 @@ describe("OpenAI artifact vendor egress", () => {
 			method: "POST",
 			headers: { "content-type": "application/json" },
 			body: JSON.stringify({
-				model: "openai/gpt-5.4",
+				model: "openai-codex/gpt-5.6-sol",
 				prompt_cache_key: "stable-wire-session",
 				input: "first",
 			}),
@@ -232,13 +239,17 @@ describe("OpenAI artifact vendor egress", () => {
 		);
 		expect(JSON.stringify(reasoning)).toContain("wire-ciphertext");
 		expect(reasoning).toBeDefined();
+		const compaction = firstBody.output?.find(item =>
+			item !== null && typeof item === "object" && "type" in item && item.type === "compaction"
+		);
+		expect(JSON.stringify(compaction)).toContain("wire-compaction");
 		const second = await fetch(`${gateway.url}/v1/responses`, {
 			method: "POST",
 			headers: { "content-type": "application/json" },
 			body: JSON.stringify({
-				model: "openai/gpt-5.4",
+				model: "openai-codex/gpt-5.6-sol",
 				prompt_cache_key: "stable-wire-session",
-				input: [reasoning, { role: "user", content: "second" }],
+				input: [reasoning, compaction, { role: "user", content: "second" }],
 			}),
 		});
 		expect(second.status).toBe(200);
@@ -246,7 +257,7 @@ describe("OpenAI artifact vendor egress", () => {
 		expect(captured).toHaveLength(2);
 		const secondVendorBody = JSON.stringify(captured[1]);
 		expect(secondVendorBody).toContain("wire-ciphertext");
-		expect(secondVendorBody).toContain("rs_stable_wire");
 		expect(secondVendorBody).toContain('"type":"reasoning"');
+		expect(secondVendorBody).toContain("wire-compaction");
 	}, 30_000);
 });

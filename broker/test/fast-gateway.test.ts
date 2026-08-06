@@ -45,7 +45,7 @@ describe("fast gateway proxy", () => {
 		});
 
 		expect(response.status).toBe(200);
-		expect(received).toMatchObject({ model: "gpt-5.6-luna", service_tier: "priority" });
+		expect(received).toMatchObject({ model: "openai-codex/gpt-5.6-luna", service_tier: "priority" });
 	});
 
 	test("forwards bodies for unmatched POST routes", async () => {

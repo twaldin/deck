@@ -13,5 +13,8 @@
   "dependencies": {
     "@oh-my-pi/pi-ai": "17.1.6",
     "@oh-my-pi/pi-catalog": "17.1.6"
+  },
+  "patchedDependencies": {
+    "@oh-my-pi/pi-ai@17.1.6": "patches/@oh-my-pi%2Fpi-ai@17.1.6.patch"
   }
 }

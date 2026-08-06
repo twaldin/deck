@@ -384,12 +384,14 @@ export function startValidatedGateway(
 							}));
 						}
 					}
-					const route = artifactRoute ?? {
-						model: modelId,
-						credentialId: -1,
-						authProvider: resolved?.provider ?? "unknown",
-						sessionId: "unknown",
-					};
+					const route = artifactRoute !== undefined && artifactAccountPinned && upstream.pinRequestCredential !== undefined
+						? artifactRoute
+						: {
+							model: artifactRoute?.model ?? modelId,
+							credentialId: -1,
+							authProvider: artifactRoute?.authProvider ?? resolved?.provider ?? "unknown",
+							sessionId: artifactRoute?.sessionId ?? "unknown",
+						};
 					const sanitized = sanitizePiNativeArtifacts(body, route, artifactProvenance, emitArtifactEvent);
 					if (!sanitized.ok) {
 						return Response.json({
@@ -461,12 +463,14 @@ export function startValidatedGateway(
 						}
 					}
 					const safetyModelParts = body.model?.split("/") ?? [];
-					const safetyRoute = artifactRoute ?? {
-						model: safetyModelParts.at(-1) ?? body.model ?? "unknown",
-						credentialId: -1,
-						authProvider: safetyModelParts.at(-2) ?? "unknown",
-						sessionId: typeof body.prompt_cache_key === "string" ? body.prompt_cache_key : "unknown",
-					};
+					const safetyRoute = artifactRoute !== undefined && artifactAccountPinned && upstream.pinRequestCredential !== undefined
+						? artifactRoute
+						: {
+							model: artifactRoute?.model ?? safetyModelParts.at(-1) ?? body.model ?? "unknown",
+							credentialId: -1,
+							authProvider: artifactRoute?.authProvider ?? safetyModelParts.at(-2) ?? "unknown",
+							sessionId: artifactRoute?.sessionId ?? (typeof body.prompt_cache_key === "string" ? body.prompt_cache_key : "unknown"),
+						};
 					if (url.pathname === "/v1/responses") {
 						sanitizeOpenAIEncryptedArtifacts(body, safetyRoute, artifactProvenance, emitArtifactEvent);
 					} else if (url.pathname === "/v1/messages") {

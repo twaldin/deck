@@ -283,6 +283,62 @@ describe("validated gateway outbound requests", () => {
 		expect(forwarded[1]?.body.input).toEqual([artifact, { role: "user", content: "second" }]);
 	});
 
+	test("strips encrypted OpenAI reasoning when the selected credential cannot be pinned", async () => {
+		let pinSucceeds = true;
+		let activeCredentialId: number | undefined;
+		const { gateway, forwarded } = await withFakeUpstream({
+			quotaAccounts: () => [{ credentialId: 1, provider: "openai-codex", authProvider: "openai-codex", blocked: [] }],
+			storage: {
+				pinSessionOAuthAccount: (_provider: string, _sessionId: string, credentialId: number) => {
+					if (!pinSucceeds) return false;
+					activeCredentialId = credentialId;
+					return true;
+				},
+				listOAuthAccounts: () => [{ credentialId: 1, active: activeCredentialId === 1 }],
+			} as never,
+		}, () => Response.json({
+			id: "resp_failed_pin",
+			object: "response",
+			output: [{
+				type: "reasoning",
+				id: "rs_failed_pin",
+				encrypted_content: "encrypted-failed-pin",
+				summary: [{ type: "summary_text", text: "failed pin summary" }],
+			}],
+		}));
+		const artifact = {
+			type: "reasoning",
+			id: "rs_failed_pin",
+			encrypted_content: "encrypted-failed-pin",
+			summary: [{ type: "summary_text", text: "failed pin summary" }],
+		};
+		const first = await fetch(`${gateway.url}/v1/responses`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "openai-codex/gpt-5.6-sol",
+				prompt_cache_key: "failed-pin-session",
+				input: [{ role: "user", content: "first" }],
+			}),
+		});
+		expect(first.status).toBe(200);
+		await first.json();
+		pinSucceeds = false;
+		const second = await fetch(`${gateway.url}/v1/responses`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "openai-codex/gpt-5.6-sol",
+				prompt_cache_key: "failed-pin-session",
+				input: [artifact, { role: "user", content: "second" }],
+			}),
+		});
+		expect(second.status).toBe(200);
+		await second.json();
+		expect(JSON.stringify(forwarded[1]?.body)).not.toContain("encrypted-failed-pin");
+		expect(JSON.stringify(forwarded[1]?.body)).toContain("failed pin summary");
+	});
+
 	test("demotes only foreign prior Anthropic thinking after a quota model fallback", async () => {
 		let fallback = false;
 		let activeCredentialId: number | undefined;

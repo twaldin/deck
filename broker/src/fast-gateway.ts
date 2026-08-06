@@ -4,17 +4,14 @@ import { startAuthGateway, type ModelResolver } from "@oh-my-pi/pi-ai/auth-gatew
 const FAST_SUFFIX = ":fast";
 
 export function parseFastModel(modelId: string, resolveModel: ModelResolver): { modelId: string; serviceTier?: "priority" } {
-	if (!modelId.endsWith(FAST_SUFFIX)) {
-		const resolved = resolveModel(modelId);
-		return { modelId: resolved?.id ?? modelId };
-	}
+	if (!modelId.endsWith(FAST_SUFFIX)) return { modelId };
 	const baseId = modelId.slice(0, -FAST_SUFFIX.length);
 	const resolverId = baseId.startsWith("deck/") ? baseId.slice("deck/".length) : baseId;
 	const model = resolveModel(resolverId);
 	if (!model || !isOpenAIModel(model)) {
 		throw new Error(`:fast is supported only for OpenAI models (received ${JSON.stringify(modelId)})`);
 	}
-	return { modelId: model.id, serviceTier: "priority" };
+	return { modelId: resolverId, serviceTier: "priority" };
 }
 
 function isOpenAIModel(model: Model<Api>): boolean {
