@@ -38,9 +38,6 @@ __all__ = [
     "help",
 ]
 
-SMITHERS_SPEC = "smithers-orchestrator@0.30.0"
-
-
 class DeckError(RuntimeError):
     """A deck-v2 invocation failed. Carries the CLI's stderr verbatim."""
 
@@ -220,24 +217,16 @@ def adopt(existing_pr: int, **kwargs: Any) -> str:
 
 
 def _smithers(args: list[str]) -> Any:
-    completed = subprocess.run(
-        ["bunx", SMITHERS_SPEC, *args, "--format", "json"],
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
-    if completed.returncode != 0:
-        raise DeckError((completed.stderr or completed.stdout or "").strip())
-    out = completed.stdout.strip()
-    try:
-        return json.loads(out)
-    except json.JSONDecodeError:
-        return out
+    # Deliberately routed through deck-v2, NOT a bare `bunx smithers-orchestrator`.
+    # Smithers resolves its run database from the working directory, and the
+    # kernel's cwd is wherever the agent happens to be, so a direct call reads
+    # the wrong runs or none. The CLI pins the canonical workspace.
+    return _run(args)
 
 
 def runs(run_id: str | None = None) -> Any:
     """Read Smithers' durable run state. Never resumes, retries or approves."""
-    return _smithers(["ps", "--all"] if run_id is None else ["inspect", run_id])
+    return _smithers(["runs"] if run_id is None else ["runs", run_id])
 
 
 def why(run_id: str) -> Any:
