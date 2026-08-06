@@ -550,6 +550,19 @@ describe("validated gateway outbound requests", () => {
 		expect(forwarded[0]?.body.model).toBe("openai-codex/gpt-5.5");
 	});
 
+	test("rewrites an OpenAI alias to the credential provider without a model fallback", async () => {
+		const { gateway, forwarded } = await withFakeUpstream({
+			quotaAccounts: () => [{ credentialId: 7, provider: "openai-codex", authProvider: "openai-codex", blocked: [] }],
+			storage: { pinSessionOAuthAccount: () => true } as never,
+		});
+		const response = await fetch(`${gateway.url}/v1/chat/completions`, {
+			method: "POST",
+			body: JSON.stringify({ model: "openai/gpt-5.5", prompt_cache_key: "alias-no-fallback" }),
+		});
+		expect(response.status).toBe(200);
+		expect(forwarded[0]?.body.model).toBe("openai-codex/gpt-5.5");
+	});
+
 	test("converts an upstream 429 to structured 503 with retry conversion", async () => {
 		const { gateway, forwarded } = await withFakeUpstream({ quotaAccounts: () => [{ credentialId: 1, provider: "anthropic", blocked: [] }], storage: {} as never }, new Response("upstream limited", { status: 429, headers: { "retry-after": "7" } }));
 		const response = await fetch(`${gateway.url}/v1/messages`, { method: "POST", body: JSON.stringify({ model: "anthropic/claude-sonnet-5" }) });

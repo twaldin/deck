@@ -19,6 +19,7 @@ type GatewayUpstream = {
 	url: string;
 	close(): Promise<void>;
 	pinRequestCredential?: FastGateway["pinRequestCredential"];
+	unpinRequestCredential?: FastGateway["unpinRequestCredential"];
 };
 type StartUpstream = (options: FastGatewayOptions) => GatewayUpstream;
 interface ArtifactStorageView {
@@ -336,6 +337,7 @@ export function startValidatedGateway(
 			let forwardBody: string | undefined;
 			let artifactRoute: ArtifactRoute | undefined;
 			let artifactAccountPinned = false;
+			let artifactRequestId: string | undefined;
 			if (request.method === "POST" && ["/v1/chat/completions", "/v1/messages", "/v1/responses"].includes(url.pathname)) {
 				let body: Record<string, unknown> & { model?: string; reasoning_effort?: string; reasoning?: { effort?: string }; thinking?: { type?: string; budget_tokens?: number }; prompt_cache_key?: string };
 				try {
@@ -348,7 +350,8 @@ export function startValidatedGateway(
 						const requested: QuotaModel = { id: modelParts.at(-1) ?? body.model, provider };
 						try {
 							const routed = routeModel(requested, quotaAccounts(), options.quotaPreferences?.() ?? [], options.onQuotaEvent);
-							if (routed.fallback !== undefined) body.model = `${routed.model.provider}/${routed.model.id}`;
+							const resolvedProvider = routed.account.authProvider ?? routed.model.provider;
+							body.model = `${resolvedProvider}/${routed.model.id}`;
 							// AuthStorage uses the request session key for sticky OAuth routing.
 							// Pin the selected account before the upstream parses the request.
 							const sessionId = typeof body.prompt_cache_key === "string" ? body.prompt_cache_key : `deck-route:${routed.model.provider}:${routed.model.id}`;
@@ -463,6 +466,7 @@ export function startValidatedGateway(
 					credentialId: artifactRoute.credentialId,
 				});
 				headers.set(ARTIFACT_REQUEST_ID_HEADER, requestId);
+				artifactRequestId = requestId;
 			}
 			let init: RequestInit;
 			if (forwardBody === undefined) {
@@ -473,13 +477,20 @@ export function startValidatedGateway(
 				headers.delete("content-encoding");
 				init = { method: request.method, headers, body: forwardBody };
 			}
-			let response = await forwardWithRetry(
-				target,
-				init,
-				{ replayable: forwardBody !== undefined || idempotent, idempotent },
-				upstreamFetch,
-				ms => Bun.sleep(ms),
-			);
+			let response: Response;
+			try {
+				response = await forwardWithRetry(
+					target,
+					init,
+					{ replayable: forwardBody !== undefined || idempotent, idempotent },
+					upstreamFetch,
+					ms => Bun.sleep(ms),
+				);
+			} catch (error) {
+				if (artifactRequestId !== undefined) upstream.unpinRequestCredential?.(artifactRequestId);
+				throw error;
+			}
+			if (artifactRequestId !== undefined) upstream.unpinRequestCredential?.(artifactRequestId);
 			if (response.status === 429 && quotaAccounts !== undefined && requestBody?.model !== undefined) {
 				const parts = requestBody.model.split("/");
 				const provider = routingProvider(parts.at(-2) ?? (parts.at(-1)?.startsWith("claude-") ? "anthropic" : parts.at(-1)?.startsWith("grok-") ? "xai" : "openai-codex"));

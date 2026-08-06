@@ -36,6 +36,7 @@ export interface FastGateway {
 	 * sibling while producing account-bound artifacts.
 	 */
 	pinRequestCredential(requestId: string, pin: RequestCredentialPin): void;
+	unpinRequestCredential(requestId: string): void;
 }
 
 function pinKey(provider: string, sessionId: string): string {
@@ -203,10 +204,9 @@ export function startFastGateway(opts: FastGatewayOptions): FastGateway {
 		pinRequestCredential(requestId, pin) {
 			requestPins.delete(requestId);
 			requestPins.set(requestId, pin);
-			if (requestPins.size > 4096) {
-				const oldest = requestPins.keys().next().value;
-				if (oldest !== undefined) requestPins.delete(oldest);
-			}
+		},
+		unpinRequestCredential(requestId) {
+			requestPins.delete(requestId);
 		},
 		async close() {
 			server.stop(true);
