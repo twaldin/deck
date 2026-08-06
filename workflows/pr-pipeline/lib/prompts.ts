@@ -176,9 +176,23 @@ export function standingRulesDigest(): string {
 	].join("\n");
 }
 
+/**
+ * The repo's own skills are the operator's encoded procedure for these exact
+ * steps. A seat that reimplements a step from scratch reliably does it worse
+ * and differently every run, so route through the skill when one covers the
+ * work. This sits in the shared prefix deliberately: skill usage applies at
+ * EVERY step, not only reviewer lookup.
+ */
+const SKILL_ROUTING =
+	"SKILLS: before starting a step, check the repo's `.agent/skills/` for a skill that covers it "
+	+ "(adversarial review, CI/review watching, reviewer lookup, and others) and follow that skill's "
+	+ "procedure instead of improvising one. If a skill exists and you do not use it, say why in your result.";
+
 function seatPrompt(lines: string[]): string {
 	return [
 		standingRulesDigest(),
+		"",
+		SKILL_ROUTING,
 		"",
 		...lines,
 		"",
