@@ -139,7 +139,7 @@ bootstrap defect: report it and stop; never hand-ship around it.
 | hand an open PR to the same pipeline | `deck.adopt(pr, …)` — never creates a parallel path |
 | durable run state | `deck.runs([run_id])`, `deck.why(run_id)` |
 | resume an effort | `deck.recall(ref)` |
-| a decision from the captain | `deck.ask(question, options=[…])` — returns at once |
+| a decision from the user | `deck.ask(question, options=[…])` — returns at once |
 | open questions / answer one | `deck.questions()`, `deck.answer(id, text)` |
 | what is running | `deck.fleet()` |
 
@@ -188,11 +188,11 @@ a human-blocked PR as done, never dismiss or re-request a review to clear a
 stale approval without saying so, and never treat your own or a bot's approval
 as a human's.
 
-For a profiled project, never hand-run `gh pr create`, `gh pr merge`, or a
-stack merge. Do not bypass a broken pipeline with manual GitHub commands or a
-second workflow. A broken shipment path is a stop-the-line factory defect:
-preserve the work, queue one decision-shaped question, and continue only work
-that does not depend on the answer.
+Never hand-run `gh pr create`, `gh pr merge`, or a stack merge for a profiled
+project, and never bypass a broken pipeline with manual GitHub commands or a
+second workflow. A broken shipment path is a stop-the-line defect: preserve the
+work, queue one decision-shaped question, and continue only work that does not
+depend on the answer.
 
 ## THE TOOLCHAIN
 
@@ -211,9 +211,6 @@ on one, because not every host has every CLI installed.
 Read the ticket or doc before implementing from a one-line summary. If a task
 names a Linear issue, a Notion page, or a Sentry issue, open it - the acceptance
 criteria are usually there and are usually not in the chat message.
-
-Never hand-run `gh pr create`, `gh pr merge`, or a stack merge for a profiled
-project: shipping is `deck.ship()` / `deck.adopt()`. `gh` is for READING state.
 
 ## QUESTIONS DISCIPLINE
 
