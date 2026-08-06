@@ -359,7 +359,7 @@ test("blockers dispatch a fix and rebase is an agent task", () => {
 });
 
 test("blocker reports draft findings and submit only follows captain approval", () => {
-  expect(source).toContain('reviewCommand(pr.number, input.repo, plan.verdict === "comment")');
+  expect(source).toContain('reviewCommand(pr.number, input.repo, plan.headSha, plan.verdict === "comment")');
   expect(source).toContain('request-changes');
   expect(source).toContain("draftFingerprint");
   expect(source).toContain("draftBody");
@@ -387,16 +387,25 @@ test("clean and exhausted rounds use different captain decisions without self-ap
   expect(source).toContain('Math.min(input.limits?.rounds ?? 3, 3)');
   expect(source).toContain('const clean = request.verdict === "comment"');
   expect(source).toContain('["Acknowledge evidence", "Hold", "Deny gate"]');
-  expect(source).toContain('reviewCommand(pr.number, input.repo, plan.verdict === "comment")');
+  expect(source).toContain('reviewCommand(pr.number, input.repo, plan.headSha, plan.verdict === "comment")');
   expect(source).toContain('shouldSubmitReview(decision)');
 });
 
-test("captain decision is required before exactly one review command", () => {
+test("captain decision is required before one head-bound review command", () => {
   expect(shouldSubmitReview(undefined)).toBe(false);
   expect(shouldSubmitReview({ approved: false })).toBe(false);
   expect(shouldSubmitReview({ approved: true })).toBe(true);
-  expect(reviewCommand(7, "owner/repo", true)).toEqual(["pr", "comment", "7", "--repo", "owner/repo"]);
-  expect(reviewCommand(7, "owner/repo", false)).toEqual(["pr", "review", "7", "--repo", "owner/repo", "--request-changes"]);
+  expect(reviewCommand(7, "owner/repo", "head-a", true)).toEqual([
+    "api", "--method", "POST", "repos/owner/repo/pulls/7/reviews",
+    "-f", "event=COMMENT", "-f", "commit_id=head-a",
+  ]);
+  expect(reviewCommand(7, "owner/repo", "head-a", false)).toEqual([
+    "api", "--method", "POST", "repos/owner/repo/pulls/7/reviews",
+    "-f", "event=REQUEST_CHANGES", "-f", "commit_id=head-a",
+  ]);
+  expect(() => reviewCommand(7, "owner/repo", "", true)).toThrow(
+    "review submission needs the reviewed head",
+  );
   expect(reviewSubmissionMarker(7, "head-a", "", "comment")).toBe(
     "submitted:7:head-a:clean:comment",
   );
@@ -414,7 +423,7 @@ test("polling and every requested PR are durable workflow paths", () => {
   expect(source).toContain("pr.url");
 });
 
-test("submission refuses a PR head that changed after human approval", () => {
+test("submission carries the exact approved head and refuses a changed PR", () => {
   const reviewedPr = {
     number: 7,
     url: "https://github.test/owner/repo/pull/7",
@@ -430,6 +439,10 @@ test("submission refuses a PR head that changed after human approval", () => {
     headSha: "head-a",
     summary: "clean",
   };
+  expect(planReviewSubmission(reviewedPr, review, approvedState, approvedState)).toMatchObject({
+    submitted: true,
+    headSha: "head-a",
+  });
   expect(planReviewSubmission(
     reviewedPr,
     review,
