@@ -6,10 +6,17 @@ import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import { PassThrough } from "node:stream";
 import type { SpawnOptions } from "node:child_process";
-import { createSubagentSpawner, type ChildSpawner, type TimerScheduler, YIELD_MARKER } from "../lib/spawn.ts";
+import {
+	createSubagentSpawner,
+	DEFAULT_SPAWN_SELECTION,
+	type ChildSpawner,
+	type TimerScheduler,
+	YIELD_MARKER,
+} from "../lib/spawn.ts";
 import type { AgentDefinition } from "../lib/agent-registry.ts";
 import { models as providerModels } from "../../broker/pi/deck-provider.ts";
 import { DECK_MODEL_IDS, loadAvailableDeckModels } from "../lib/model-registry.ts";
+import { defaultModelPolicy, resolveSeat } from "../../workflows/pr-pipeline/lib/models.ts";
 
 class FakeChild extends EventEmitter {
 	readonly stdout = new PassThrough();
@@ -104,6 +111,18 @@ function spawnFactory(
 describe("deck subagent primitive", () => {
 	test("keeps the validated catalog in lockstep with deck-provider", () => {
 		expect(providerModels.map((model) => model.id).sort()).toEqual([...DECK_MODEL_IDS].sort() as string[]);
+	});
+
+	test("spawn role defaults stay in lockstep with canonical ModelPolicy", () => {
+		const policy = defaultModelPolicy();
+		const implementer = resolveSeat(policy.implementer, policy.reasoningImplementer);
+		const reviewer = resolveSeat(policy.reviewer!, policy.reasoningReviewer);
+		const mechanical = resolveSeat(policy.mechanical, policy.reasoningMechanical);
+		expect(DEFAULT_SPAWN_SELECTION).toEqual({
+			implementer: { model: implementer.model, thinking: implementer.reasoning },
+			reviewer: { model: reviewer.model, thinking: reviewer.reasoning },
+			mechanical: { model: mechanical.model, thinking: mechanical.reasoning },
+		});
 	});
 
 	test("intersects provider selectors with the authenticated broker pool", async () => {
@@ -240,6 +259,60 @@ describe("deck subagent primitive", () => {
 			expect(result.ok).toBe(false);
 			expect(result.error).toEqual(expect.objectContaining({ kind: "invalid-agent", valid: ["worker"] }));
 			expect(result.summary).toContain("aliases and typo correction are disabled");
+		} finally {
+			await files.cleanup();
+		}
+	});
+
+	test("model-less spawn defaults to luna xhigh and explicit policy models carry their reasoning", async () => {
+		const files = await fixture();
+		try {
+			await writeFile(path.join(files.directory, "agents", "worker.md"), [
+				"---",
+				"name: worker",
+				"description: Model-less side task",
+				"---",
+				"Complete the test task.",
+			].join("\n"));
+			const child = new FakeChild();
+			const calls: Array<{ command: string; args: readonly string[]; options: SpawnOptions }> = [];
+			const spawned = Promise.withResolvers<void>();
+			const run = createSubagentSpawner({
+				agentDirectory: path.join(files.directory, "agents"),
+				loadModels: async () => ["deck/gpt-5.6-luna", "deck/claude-fable-5"],
+				spawnChild: spawnFactory(child, calls, spawned.resolve),
+			});
+			const resultPromise = run({ agent: "worker", task: "Do side work", cwd: files.directory });
+			await spawned.promise;
+			child.stdout.write(`${JSON.stringify({ type: "tool_execution_end", toolName: "deck_subagent_yield", result: { details: { deckSubagentYield: { filesTouched: [], summary: "Done" } } } })}\n`);
+			child.exitCode = 0;
+			child.emit("close", 0, null);
+			expect((await resultPromise).model).toBe("deck/gpt-5.6-luna");
+			const args = calls[0]?.args ?? [];
+			expect(args[args.indexOf("--model") + 1]).toBe("deck/gpt-5.6-luna");
+			expect(args[args.indexOf("--thinking") + 1]).toBe("xhigh");
+
+			const fableChild = new FakeChild();
+			const fableCalls: Array<{ command: string; args: readonly string[]; options: SpawnOptions }> = [];
+			const fableSpawned = Promise.withResolvers<void>();
+			const runFable = createSubagentSpawner({
+				agentDirectory: path.join(files.directory, "agents"),
+				loadModels: async () => ["deck/gpt-5.6-luna", "deck/claude-fable-5"],
+				spawnChild: spawnFactory(fableChild, fableCalls, fableSpawned.resolve),
+			});
+			const fablePromise = runFable({
+				agent: "worker",
+				task: "Review ambiguous work",
+				cwd: files.directory,
+				model: "deck/claude-fable-5",
+			});
+			await fableSpawned.promise;
+			fableChild.stdout.write(`${JSON.stringify({ type: "tool_execution_end", toolName: "deck_subagent_yield", result: { details: { deckSubagentYield: { filesTouched: [], summary: "Reviewed" } } } })}\n`);
+			fableChild.exitCode = 0;
+			fableChild.emit("close", 0, null);
+			expect((await fablePromise).model).toBe("deck/claude-fable-5");
+			const fableArgs = fableCalls[0]?.args ?? [];
+			expect(fableArgs[fableArgs.indexOf("--thinking") + 1]).toBe("high");
 		} finally {
 			await files.cleanup();
 		}

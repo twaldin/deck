@@ -95,8 +95,10 @@ import { buildSeatEnvironment, PrimeSeatAgent } from "./lib/engines/prime.ts";
 import {
 	DECK_PROVIDER,
 	defaultModelPolicy,
+	modelReasoningPolicy,
 	parseModelRef,
 	resolveAdversary,
+	resolveSeat,
 	validateModelPolicy,
 	type ModelPolicy,
 } from "./lib/models.ts";
@@ -326,15 +328,18 @@ export const inputSchema = z.object({
 	bypassApprovals: z.boolean().optional(),
 	models: z
 		.object({
-			implementer: z.union([z.string(), z.object({ model: z.string(), reasoning: z.string().min(1).optional() })]).optional(),
-			reviewer: z.union([z.string(), z.object({ model: z.string(), reasoning: z.string().min(1).optional() })]).optional(),
-			watcher: z.union([z.string(), z.object({ model: z.string(), reasoning: z.string().min(1).optional() })]).optional(),
-			fallout: z.union([z.string(), z.object({ model: z.string(), reasoning: z.string().min(1).optional() })]).optional(),
+			implementer: z.union([z.string(), z.object({ model: z.string(), reasoning: z.enum(["low", "medium", "high", "xhigh", "max"]).optional() })]).optional(),
+			reviewer: z.union([z.string(), z.object({ model: z.string(), reasoning: z.enum(["low", "medium", "high", "xhigh", "max"]).optional() })]).optional(),
+			mechanical: z.union([z.string(), z.object({ model: z.string(), reasoning: z.enum(["low", "medium", "high", "xhigh", "max"]).optional() })]).optional(),
+			judgmentFallback: z.union([z.string(), z.object({ model: z.string(), reasoning: z.enum(["low", "medium", "high", "xhigh", "max"]).optional() })]).optional(),
+			watcher: z.union([z.string(), z.object({ model: z.string(), reasoning: z.enum(["low", "medium", "high", "xhigh", "max"]).optional() })]).optional(),
+			fallout: z.union([z.string(), z.object({ model: z.string(), reasoning: z.enum(["low", "medium", "high", "xhigh", "max"]).optional() })]).optional(),
 			familyOpposition: z.boolean().optional(),
 			oppositionDefaults: z.record(z.string(), z.string()).optional(),
 			reasoning: z.enum(["low", "medium", "high", "xhigh", "max"]).optional(),
 			reasoningImplementer: z.enum(["low", "medium", "high", "xhigh", "max"]).optional(),
 			reasoningReviewer: z.enum(["low", "medium", "high", "xhigh", "max"]).optional(),
+			reasoningMechanical: z.enum(["low", "medium", "high", "xhigh", "max"]).optional(),
 			reasoningWatcher: z.enum(["low", "medium", "high", "xhigh", "max"]).optional(),
 			reasoningFallout: z.enum(["low", "medium", "high", "xhigh", "max"]).optional(),
 		})
@@ -798,10 +803,14 @@ function makeAgent(
 	timeoutMs: number,
 	effortLabel: string,
 	reasoning = "medium",
+	policy?: ModelPolicy,
 ): AgentLike {
 	const selected = seat(ref);
 	const { provider, model } = parseModelRef(selected.ref);
 	const thinking = selected.reasoning ?? reasoning;
+	const rlmChild = policy === undefined
+		? undefined
+		: resolveSeat(policy.mechanical, policy.reasoningMechanical);
 	if (engine === "prime") {
 		return new PrimeSeatAgent({
 			provider: DECK_PROVIDER,
@@ -810,6 +819,11 @@ function makeAgent(
 			effortLabel,
 			timeoutMs,
 			thinking: thinking as never,
+			...(policy === undefined ? {} : { modelPolicy: policy }),
+			...(rlmChild === undefined ? {} : {
+				rlmChildModel: rlmChild.model,
+				rlmReasoningByModel: modelReasoningPolicy(policy!),
+			}),
 		});
 	}
 	const configuredExtension = process.env.DECK_SUBAGENT_EXTENSION;
@@ -848,12 +862,15 @@ export function buildModelPolicy(
 		implementer?: ModelSeat;
 		reviewer?: ModelSeat;
 		watcher?: ModelSeat;
+		mechanical?: ModelSeat;
+		judgmentFallback?: ModelSeat;
 		fallout?: ModelSeat;
 		familyOpposition?: boolean;
 		oppositionDefaults?: Record<string, string>;
 		reasoning?: "low" | "medium" | "high" | "xhigh" | "max";
 		reasoningImplementer?: "low" | "medium" | "high" | "xhigh" | "max";
 		reasoningReviewer?: "low" | "medium" | "high" | "xhigh" | "max";
+		reasoningMechanical?: "low" | "medium" | "high" | "xhigh" | "max";
 		reasoningWatcher?: "low" | "medium" | "high" | "xhigh" | "max";
 		reasoningFallout?: "low" | "medium" | "high" | "xhigh" | "max";
 	} | null | undefined,
@@ -872,14 +889,16 @@ export function buildModelPolicy(
 		...(profileModels ?? {}),
 		...(profileModels !== undefined ? { reviewer: profileModels.reviewer } : {}),
 		...(models ?? {}),
-		...(profileModels?.reasoning !== undefined && profileModels.reasoningImplementer === undefined ? { reasoningImplementer: profileModels.reasoning } : {}),
-		...(profileModels?.reasoning !== undefined && profileModels.reasoningReviewer === undefined ? { reasoningReviewer: profileModels.reasoning } : {}),
-		...(profileModels?.reasoning !== undefined && profileModels.reasoningWatcher === undefined ? { reasoningWatcher: profileModels.reasoning } : {}),
-		...(profileModels?.reasoning !== undefined && profileModels.reasoningFallout === undefined ? { reasoningFallout: profileModels.reasoning } : {}),
+		...(profileModels?.reasoning !== undefined && profileModels.reasoningImplementer === undefined && models?.reasoningImplementer === undefined ? { reasoningImplementer: profileModels.reasoning } : {}),
+		...(profileModels?.reasoning !== undefined && profileModels.reasoningReviewer === undefined && models?.reasoningReviewer === undefined ? { reasoningReviewer: profileModels.reasoning } : {}),
+		...(profileModels?.reasoning !== undefined && profileModels.reasoningWatcher === undefined && models?.reasoningWatcher === undefined ? { reasoningWatcher: profileModels.reasoning } : {}),
+		...(profileModels?.reasoning !== undefined && profileModels.reasoningFallout === undefined && models?.reasoningFallout === undefined ? { reasoningFallout: profileModels.reasoning } : {}),
+		...(profileModels?.reasoning !== undefined && profileModels.reasoningMechanical === undefined && models?.reasoningMechanical === undefined ? { reasoningMechanical: profileModels.reasoning } : {}),
 		...(models?.reasoning !== undefined && models.reasoningImplementer === undefined ? { reasoningImplementer: models.reasoning } : {}),
 		...(models?.reasoning !== undefined && models.reasoningReviewer === undefined ? { reasoningReviewer: models.reasoning } : {}),
 		...(models?.reasoning !== undefined && models.reasoningWatcher === undefined ? { reasoningWatcher: models.reasoning } : {}),
 		...(models?.reasoning !== undefined && models.reasoningFallout === undefined ? { reasoningFallout: models.reasoning } : {}),
+		...(models?.reasoning !== undefined && models.reasoningMechanical === undefined ? { reasoningMechanical: models.reasoning } : {}),
 		oppositionDefaults: {
 			...defaultModelPolicy().oppositionDefaults,
 			...(profileModels?.oppositionDefaults ?? {}),
@@ -1165,10 +1184,10 @@ export default smithers((ctx) => {
 	const agents = dryRun || (seatEngine === "prime" && modelViolationsAtRender.length > 0)
 		? null
 		: {
-				implementer: makeAgent(seatEngine, policy.implementer, input.worktree, 45 * 60_000, effortLabel, policy.reasoningImplementer),
-				reviewer: makeAgent(seatEngine, { model: reviewerModel, reasoning: seat(policy.reviewer ?? reviewerModel).reasoning }, input.worktree, 20 * 60_000, effortLabel, policy.reasoningReviewer),
-				watcher: makeAgent(seatEngine, policy.watcher, input.worktree, 30 * 60_000, effortLabel, policy.reasoningWatcher),
-				fallout: makeAgent(seatEngine, policy.fallout, input.worktree, 15 * 60_000, effortLabel, policy.reasoningFallout),
+				implementer: makeAgent(seatEngine, policy.implementer, input.worktree, 45 * 60_000, effortLabel, policy.reasoningImplementer, policy),
+				reviewer: makeAgent(seatEngine, { model: reviewerModel, reasoning: seat(policy.reviewer ?? reviewerModel).reasoning }, input.worktree, 20 * 60_000, effortLabel, policy.reasoningReviewer, policy),
+				watcher: makeAgent(seatEngine, policy.watcher, input.worktree, 30 * 60_000, effortLabel, policy.reasoningWatcher, policy),
+				fallout: makeAgent(seatEngine, policy.fallout, input.worktree, 15 * 60_000, effortLabel, policy.reasoningFallout, policy),
 			};
 
 	// -- approval gate helper (bypass only allowed with dryRun; preflight enforces) --

@@ -15,6 +15,11 @@ import {
 	PrimeSeatError,
 	type PrimeSeatFailureCode,
 } from "../lib/engines/prime.ts";
+import {
+	registerPrimeRlmModelPolicy,
+	type PrimeExtensionApi,
+	type ToolCallEvent,
+} from "../lib/engines/prime-model-policy.ts";
 
 const roots: string[] = [];
 let herdrServer: Server;
@@ -231,7 +236,7 @@ function persist(answer) {
     fs.mkdirSync(childDir, { recursive: true });
     const childRows = [
       { type: "session", version: 3, id: "child-session", parentSession: rootId, timestamp: new Date().toISOString(), cwd: process.cwd(), rlmDepth: mode === "depth-two-child" ? 2 : 1 },
-      { type: "message", id: "child-answer", parentId: null, timestamp: new Date().toISOString(), message: { role: "assistant", content: [{ type: "text", text: "child" }], provider: "deck", model: "gpt-5.6-terra", usage: { input: 3, output: 2, totalTokens: 5 }, stopReason: "stop" } },
+      { type: "message", id: "child-answer", parentId: null, timestamp: new Date().toISOString(), message: { role: "assistant", content: [{ type: "text", text: "child" }], provider: "deck", model: "gpt-5.6-luna", usage: { input: 3, output: 2, totalTokens: 5 }, stopReason: "stop" } },
     ];
     fs.writeFileSync(path.join(childDir, "child-session.jsonl"), childRows.map(JSON.stringify).join("\\n") + "\\n");
   }
@@ -472,7 +477,7 @@ describe("Prime seat adapter fault contract", () => {
 			label: "lindy#27140 · watch-fix · run-abc",
 		});
 		expect(record.childModels).toEqual([
-			expect.objectContaining({ provider: "deck", model: "gpt-5.6-terra", depth: 1 }),
+			expect.objectContaining({ provider: "deck", model: "gpt-5.6-luna", depth: 1 }),
 		]);
 		expect(record.exitStatus).toEqual({ code: 0, signal: null });
 		expect(record.tokens).toEqual({ input: 15, output: 7, total: 22 });
@@ -703,6 +708,55 @@ describe("Prime seat adapter fault contract", () => {
 			expect(() => agent(binary, { capabilityProfile, tools: ["read", "dispatch"] })).toThrow(/PRIME_CAPABILITY_VIOLATION/);
 			expect(() => agent(binary, { capabilityProfile, extensions: ["/tmp/deck-subagents.ts"] })).toThrow(/PRIME_CAPABILITY_VIOLATION/);
 		}
+	});
+
+	test("spawn-agent omission deliberately selects the mechanical role while workflow omission fails closed", async () => {
+		const binary = await fakePrime("success");
+		const spawned = agent(binary, { capabilityProfile: "spawn-agent", model: undefined });
+		expect(spawned.model).toBe("gpt-5.6-luna");
+		expect(spawned.opts.rlmChildModel).toBe("deck/gpt-5.6-luna");
+		expect(spawned.opts.rlmReasoningByModel["deck/gpt-5.6-luna"]).toBe("xhigh");
+		expect(() => agent(binary, { capabilityProfile: "workflow-seat", model: undefined })).toThrow(
+			/Prime workflow seats require an explicit model/,
+		);
+	});
+
+
+	test("RLM policy injection permits pure future imports and fails closed on first-line executable constructs", () => {
+		let toolCall: ((event: ToolCallEvent) => void) | undefined;
+		const captureApi = {
+			on: (event: string, handler: unknown) => {
+				if (event === "tool_call" && typeof handler === "function") {
+					// The runtime-checked function is the handler registered for this exact event.
+					toolCall = handler as (event: ToolCallEvent) => void;
+				}
+			},
+			setThinkingLevel: () => undefined,
+		} as unknown as PrimeExtensionApi;
+		registerPrimeRlmModelPolicy(captureApi, {
+			DECK_RLM_CHILD_MODEL: "deck/gpt-5.6-luna",
+			DECK_RLM_REASONING_BY_MODEL: JSON.stringify({ "deck/gpt-5.6-luna": "xhigh" }),
+		});
+		const callTool = toolCall;
+		if (typeof callTool !== "function") throw new Error("tool_call handler was not registered");
+		const futureCell: ToolCallEvent = { type: "tool_call", toolName: "ipython", input: { code: "from __future__ import annotations" } };
+		callTool(futureCell);
+		expect(futureCell.input.code).toStartWith("from __future__");
+		expect(() => callTool({
+			type: "tool_call",
+			toolName: "ipython",
+			input: { code: "%%bash\necho ok" },
+		})).toThrow(/cell magics are disabled/);
+		expect(() => callTool({
+			type: "tool_call",
+			toolName: "ipython",
+			input: { code: "from __future__ import annotations\nchild = await rlm.run('task')" },
+		})).toThrow(/future imports in their own/);
+		expect(() => callTool({
+			type: "tool_call",
+			toolName: "ipython",
+			input: { code: "from __future__ import annotations; child = await rlm.run('task')" },
+		})).toThrow(/future imports in their own/);
 	});
 
 	test("headless supervisor creates and cleans a labelled top-level pane in an isolated real Herdr workspace", async () => {

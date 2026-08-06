@@ -222,6 +222,13 @@ describe("workflow rendering contracts", () => {
 		expect(policy.reasoningReviewer).toBe("xhigh");
 		expect(policy.reasoningWatcher).toBe("high");
 		expect(policy.reasoningFallout).toBe("high");
+		expect(policy.reasoningMechanical).toBe("high");
+		const overridden = buildModelPolicy({
+			...profileBase,
+			pipeline: "lindy-full",
+			models: { reasoning: "low" },
+		} as ProjectProfile, false, { reasoningMechanical: "xhigh" });
+		expect(overridden.reasoningMechanical).toBe("xhigh");
 	});
 
 	test("profile reasoning reaches the rendered PiAgent seat", async () => {
@@ -245,7 +252,7 @@ describe("workflow rendering contracts", () => {
 		expect(prime.seats.implement).toMatchObject({
 			engine: "prime",
 			model: "claude-fable-5",
-			thinking: "medium",
+			thinking: "xhigh",
 		});
 	});
 
@@ -260,10 +267,10 @@ describe("workflow rendering contracts", () => {
 
 	test.each([
 		["full profile models", { ...profileBase, models: fullModels }, undefined, "example/test", "claude-fable-5"],
-		["missing profile models", profileBase, undefined, "example/test", "gpt-5.6-luna"],
-		["null profile models", { ...profileBase, models: null }, null, "example/test", "gpt-5.6-luna"],
+		["missing profile models", profileBase, undefined, "example/test", "gpt-5.6-sol"],
+		["null profile models", { ...profileBase, models: null }, null, "example/test", "gpt-5.6-sol"],
 		["partial profile models with input models", { ...profileBase, models: { implementer: "deck/claude-fable-5" } }, { watcher: "deck/gpt-5.6-sol" }, "example/test", "claude-fable-5"],
-		["repo-mismatched profile", { ...profileBase, models: fullModels }, { implementer: "deck/claude-sonnet-5" }, "other/repo", "gpt-5.6-luna"],
+		["repo-mismatched profile", { ...profileBase, models: fullModels }, { implementer: "deck/claude-sonnet-5" }, "other/repo", "gpt-5.6-sol"],
 	] as const)("renders with %s", async (_name, profile, inputModels, repo, expectedImplementer) => {
 		expect((await renderWithProfile(profile, inputModels, repo)).model).toBe(expectedImplementer);
 	});

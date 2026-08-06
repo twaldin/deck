@@ -210,6 +210,11 @@ if [ -d "$WORKFLOWS_SOURCE/.smithers" ]; then
   mkdir -p "$WORKSPACE_ROOT/pr-pipeline/lib"
   rm -f "$WORKSPACE_ROOT/pr-pipeline/lib/models.ts"
   cp -a "$WORKFLOWS_SOURCE/pr-pipeline/lib/models.ts" "$WORKSPACE_ROOT/pr-pipeline/lib/models.ts"
+  # models.ts re-exports Deck's one canonical policy. Preserve that relative
+  # import from state/smithers/pr-pipeline/lib into state/subagents/lib.
+  mkdir -p "$DECK_V2_HOME_DIR/state/subagents/lib"
+  rm -f "$DECK_V2_HOME_DIR/state/subagents/lib/model-policy.ts"
+  cp -a "$REPO_V2/../subagents/lib/model-policy.ts" "$DECK_V2_HOME_DIR/state/subagents/lib/model-policy.ts"
 fi
 # Keep the old link name only for static compatibility. It is never the runtime
 # workspace and no state is written through it.

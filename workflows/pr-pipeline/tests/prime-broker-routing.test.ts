@@ -125,7 +125,7 @@ function completionStream(
 	return new Response(stream, { headers: { "content-type": "text/event-stream" } });
 }
 
-function startCaptureBroker(): CaptureBroker {
+function startCaptureBroker(explicitChildModel?: string): CaptureBroker {
 	const requests: CapturedCompletion[] = [];
 	let rootRequests = 0;
 	const server = Bun.serve({
@@ -146,7 +146,8 @@ function startCaptureBroker(): CaptureBroker {
 
 			rootRequests += 1;
 			if (rootRequests === 1) {
-				const code = "child = await rlm('Complete this broker-routing child task.', name='broker-fidelity-child')\nchild";
+				const modelArgument = explicitChildModel === undefined ? "" : `, model=${JSON.stringify(explicitChildModel)}`;
+				const code = `child = await rlm('Complete this broker-routing child task.', name='broker-fidelity-child'${modelArgument})\nchild`;
 				return completionStream(body.model, {
 					tool_calls: [{
 						index: 0,
@@ -216,14 +217,14 @@ describe("Prime seat broker-only routing and thinking fidelity", () => {
 				}));
 				expect(result.providerMetadata.prime.rootModel).toMatchObject({ provider: "deck", model: "gpt-5.6-sol" });
 				expect(result.providerMetadata.prime.childModels).toContainEqual(
-					expect.objectContaining({ provider: "deck", model: "gpt-5.6-sol", depth: 1 }),
+					expect.objectContaining({ provider: "deck", model: "gpt-5.6-luna", depth: 1 }),
 				);
 
 				const rootRequests = broker.requests.filter((request) => !request.childMarker);
 				const childRequests = broker.requests.filter((request) => request.childMarker);
 				expect(rootRequests.length).toBeGreaterThan(0);
 				expect(childRequests.length).toBeGreaterThan(0);
-				for (const request of [...rootRequests, ...childRequests]) {
+				for (const request of rootRequests) {
 					expect(request.pathname).toBe("/v1/chat/completions");
 					expect(request.headers.authorization).toBe("Bearer capture-server-only-key");
 					expect(request.body.model).toBe("gpt-5.6-sol");
@@ -231,10 +232,40 @@ describe("Prime seat broker-only routing and thinking fidelity", () => {
 					expect(request.body).not.toHaveProperty("reasoning");
 					expect(request.body).not.toHaveProperty("thinking");
 				}
+				for (const request of childRequests) {
+					expect(request.pathname).toBe("/v1/chat/completions");
+					expect(request.headers.authorization).toBe("Bearer capture-server-only-key");
+					expect(request.body.model).toBe("gpt-5.6-luna");
+					expect(request.body.reasoning_effort).toBe("xhigh");
+					expect(request.body).not.toHaveProperty("reasoning");
+					expect(request.body).not.toHaveProperty("thinking");
+				}
 				expect(childRequests.some((request) => JSON.stringify(request.body.messages).includes("[task from parent]"))).toBe(true);
 			} finally {
 				await broker.stop();
 			}
+		}
+	}, 360_000);
+
+	testWithPrime("preserves an explicit per-child model pin and applies that model's policy reasoning", async () => {
+		const broker = startCaptureBroker("deck/claude-fable-5");
+		try {
+			const result = runResultSchema.parse(await new PrimeSeatAgent(primeOptions("xhigh", broker.origin)).generate({
+				prompt: "Spawn the explicitly pinned child, then return the requested JSON result.",
+				outputSchema: z.object({ ok: z.literal(true) }),
+				taskContext: { runId: "broker-explicit-child", nodeId: "prime-seat", iteration: 0, attempt: 0 },
+			}));
+			expect(result.providerMetadata.prime.childModels).toContainEqual(
+				expect.objectContaining({ provider: "deck", model: "claude-fable-5", depth: 1 }),
+			);
+			const childRequests = broker.requests.filter((request) => request.childMarker);
+			expect(childRequests.length).toBeGreaterThan(0);
+			for (const request of childRequests) {
+				expect(request.body.model).toBe("claude-fable-5");
+				expect(request.body.reasoning_effort).toBe("high");
+			}
+		} finally {
+			await broker.stop();
 		}
 	}, 360_000);
 

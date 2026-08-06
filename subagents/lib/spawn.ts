@@ -4,7 +4,13 @@ import { mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { discoverAgents, resolveAgent, type AgentDefinition, AgentRegistryError } from "./agent-registry.ts";
+import {
+	discoverAgents,
+	resolveAgent,
+	type AgentDefinition,
+	type AgentRole,
+	AgentRegistryError,
+} from "./agent-registry.ts";
 import {
 	loadAvailableDeckModels,
 	validateModelName,
@@ -12,6 +18,7 @@ import {
 	type ThinkingLevel,
 	ModelRegistryError,
 } from "./model-registry.ts";
+import { defaultModelPolicy, modelReasoningPolicy, resolveSeat } from "./model-policy.ts";
 
 export const DEFAULT_STALL_TIMEOUT_MS = 5 * 60 * 1_000;
 export const DEFAULT_MAX_RUNTIME_MS = 30 * 60 * 1_000;
@@ -20,6 +27,23 @@ export const YIELD_MARKER = "DECK_SUBAGENT_YIELD ";
 const DEFAULT_KILL_GRACE_MS = 1_000;
 const DEFAULT_CHILD_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"] as const;
 const STDERR_LIMIT_BYTES = 64 * 1024;
+
+const canonicalPolicy = defaultModelPolicy();
+const canonicalImplementer = resolveSeat(canonicalPolicy.implementer, canonicalPolicy.reasoningImplementer);
+const canonicalReviewer = resolveSeat(canonicalPolicy.reviewer!, canonicalPolicy.reasoningReviewer);
+const canonicalMechanical = resolveSeat(canonicalPolicy.mechanical, canonicalPolicy.reasoningMechanical);
+const canonicalReasoningByModel = modelReasoningPolicy(canonicalPolicy);
+
+/** Explicit frontmatter/request values win; this is a projection, not a second policy. */
+export const DEFAULT_SPAWN_SELECTION: Record<AgentRole, { model: string; thinking: ThinkingLevel }> = {
+	implementer: { model: canonicalImplementer.model, thinking: canonicalImplementer.reasoning },
+	reviewer: { model: canonicalReviewer.model, thinking: canonicalReviewer.reasoning },
+	mechanical: { model: canonicalMechanical.model, thinking: canonicalMechanical.reasoning },
+};
+
+export function defaultSpawnSelection(role: AgentRole | undefined): { model: string; thinking: ThinkingLevel } {
+	return DEFAULT_SPAWN_SELECTION[role ?? "mechanical"];
+}
 
 export type SubagentRunStatus = "succeeded" | "failed" | "stalled" | "aborted";
 export type SubagentErrorKind =
@@ -250,22 +274,24 @@ export function createSubagentSpawner(dependencies: SubagentSpawnerDependencies 
 			const valid = error instanceof AgentRegistryError ? error.validAgents : undefined;
 			return resultForFailure(request, cwd, request.model ?? null, startedAtMs, now, "invalid-agent", error instanceof Error ? error.message : String(error), valid);
 		}
-		if (!request.task.trim()) return resultForFailure(request, cwd, request.model ?? agent.model ?? null, startedAtMs, now, "spawn", "Subagent task must not be empty");
+		const roleDefault = defaultSpawnSelection(agent.role);
+		if (!request.task.trim()) return resultForFailure(request, cwd, request.model ?? agent.model ?? roleDefault.model, startedAtMs, now, "spawn", "Subagent task must not be empty");
 
 		let availableModels: string[];
 		try {
 			availableModels = await loadModels();
 		} catch (error) {
-			return resultForFailure(request, cwd, request.model ?? agent.model ?? null, startedAtMs, now, "registry-unavailable", error instanceof Error ? error.message : String(error));
+			return resultForFailure(request, cwd, request.model ?? agent.model ?? roleDefault.model, startedAtMs, now, "registry-unavailable", error instanceof Error ? error.message : String(error));
 		}
-		const requestedModel = request.model ?? agent.model;
-		if (requestedModel === undefined) {
-			return resultForFailure(request, cwd, null, startedAtMs, now, "invalid-model", `Agent ${request.agent} has no default model; choose one explicitly. Valid models: ${availableModels.join(", ")}.`, availableModels);
-		}
+		const requestedModel = request.model ?? agent.model ?? roleDefault.model;
+		const requestedThinking = request.thinking
+			?? (request.model === undefined ? agent.thinking : undefined)
+			?? canonicalReasoningByModel[requestedModel]
+			?? roleDefault.thinking;
 		let model: string;
 		try {
 			model = validateModelName(requestedModel, availableModels);
-			validateThinkingLevel(model, request.thinking);
+			validateThinkingLevel(model, requestedThinking);
 		} catch (error) {
 			const valid = error instanceof ModelRegistryError ? error.validModels : undefined;
 			return resultForFailure(request, cwd, requestedModel, startedAtMs, now, "invalid-model", error instanceof Error ? error.message : String(error), valid);
@@ -318,7 +344,7 @@ export function createSubagentSpawner(dependencies: SubagentSpawnerDependencies 
 					"--append-system-prompt", promptPath,
 					"--model", model,
 				];
-				if (request.thinking !== undefined) args.push("--thinking", request.thinking);
+				args.push("--thinking", requestedThinking);
 				const childTools = agent.tools ?? DEFAULT_CHILD_TOOLS;
 				args.push("--tools", [...new Set([...childTools, "deck_subagent_yield"])].join(","));
 				args.push(request.task);

@@ -48,9 +48,9 @@ const BROKER_MODEL_ID: Record<(typeof DECK_MODEL_IDS)[number], string> = {
 };
 
 export const MODEL_PICK_GUIDANCE = [
-	"Model lanes: use deck/gpt-5.4-mini or deck/claude-haiku-4-5 for cheap, bounded reconnaissance; use deck/gpt-5.6-luna for a fast capable builder; use deck/gpt-5.6-sol, deck/claude-fable-5, or deck/claude-opus-5 for deep ambiguous reasoning.",
-	"For review, pick the opposite family from the author: Claude reviews GPT work; GPT reviews Claude work. deck/grok-4.5 is a third-family tie-breaker.",
-	"Reasoning: GPT 5.3–5.5 supports low..xhigh; GPT 5.6 supports low..max; Claude adaptive models support low..max; Grok supports low..high. Omit thinking to keep Pi's default.",
+	"Canonical roles: orchestration and opposite-family adversarial review use deck/claude-fable-5 at high; main implementation uses deck/gpt-5.6-sol at xhigh; mechanical work, rebases, and ordinary side tasks use deck/gpt-5.6-luna at xhigh.",
+	"Fable is scarce judgment capacity: never spend it on bulk or mechanical work. deck/claude-opus-5 is only a manual fable fallback when its side quota is exhausted, never a standing default.",
+	"An explicit model choice must include its reasoning level. For review, pick the opposite family from the author.",
 	"The :fast suffix is valid only for GPT models and buys lower latency at 2x cost; it is not the cheap lane.",
 ].join(" ");
 

@@ -178,12 +178,13 @@ may select the reviewed `pi` or `prime` engine; omission defaults to Pi and no
 shipped profile currently selects Prime. See `../../docs/prime-seat-adapter.md`
 for Prime safety, canary, metrics, and rollback. Defaults:
 
-| Role | Default |
-|---|---|
-| implementer | `deck/claude-sonnet-5` |
-| reviewer | *derived by family opposition* (→ `deck/gpt-5.6-sol`) |
-| watcher | `deck/gpt-5.6-terra` |
-| fallout | `deck/claude-opus-5` |
+| Role | Default model | Reasoning |
+|---|---|---|
+| implementer | `deck/gpt-5.6-sol` | `xhigh` |
+| reviewer / opposition | `deck/claude-fable-5` | `high` |
+| mechanical (rebases, narrow side work, spawn/RLM default) | `deck/gpt-5.6-luna` | `xhigh` |
+| watcher | `deck/gpt-5.6-luna` | `xhigh` |
+| fallout | `deck/gpt-5.6-sol` | `xhigh` |
 
 **Family opposition is a first-class knob** (`models.familyOpposition`,
 default `true`): adversarial-review/debate nodes pick the OPPOSITE model family
@@ -193,6 +194,14 @@ The catalog (`DECK_AGENT_CATALOG`) mirrors the broker allowlist:
 `claude-opus-5`, `claude-sonnet-5`, `claude-haiku-4-5`, `gpt-5.6-terra`,
 `gpt-5.6-luna`, `gpt-5.6-sol`. Non-catalog or non-`deck/` refs fail preflight
 (`assertDeckModel`, also used by the pack seats in `../.smithers/agents.ts`).
+
+Prime RLM children no longer inherit a root seat's model: bare `rlm(...)`
+defaults deliberately to the policy's `mechanical` seat, while an explicit
+per-call model pin remains authoritative and receives the reasoning paired with
+that model. `judgmentFallback` is `deck/claude-opus-5` and is manual-only. The
+broker does not expose a caller-visible, model-specific quota tier; automatic
+switching must wait for `error.exhausted_tiers: ["fable-7d"]` rather than
+guessing from provider-wide `NO_QUOTA` or generic `all-accounts-cooling`.
 
 ## How a crewmate dispatches a run
 

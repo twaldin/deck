@@ -10,7 +10,16 @@ import { createInterface } from "node:readline";
 import type { AgentLike } from "smithers-orchestrator";
 import primeDeckProfile from "../../../../ops/prime-deck-profile.json" with { type: "json" };
 
-import { DECK_AGENT_CATALOG, DECK_PROVIDER } from "../models.ts";
+import {
+	DECK_AGENT_CATALOG,
+	DECK_PROVIDER,
+	defaultModelPolicy,
+	parseModelRef,
+	modelReasoningPolicy,
+	resolveSeat,
+	validateModelPolicy,
+	type ModelPolicy,
+} from "../models.ts";
 
 export const PRIME_AGENT_VERSION = "0.7.0";
 export const PRIME_AGENT_BINARY = "prime-agent";
@@ -150,7 +159,8 @@ export class PrimeSeatError extends Error {
 
 export type PrimeSeatAgentOptions = {
 	provider: typeof DECK_PROVIDER;
-	model: string;
+	/** Required for workflow seats; spawn-agent seats use the mechanical role when omitted. */
+	model?: string;
 	cwd: string;
 	/** Effort prefix in the Herdr pane label, e.g. "lindy#27140". */
 	effortLabel?: string;
@@ -164,6 +174,11 @@ export type PrimeSeatAgentOptions = {
 	herdrStrict?: boolean;
 	capabilityProfile?: PrimeSeatCapabilityProfile;
 	tools?: readonly string[];
+	/** ModelPolicy override for the spawn default and RLM child selection. */
+	modelPolicy?: ModelPolicy;
+	/** Per-seat RLM override; explicit calls may pin any model in reasoningByModel. */
+	rlmChildModel?: string;
+	rlmReasoningByModel?: Record<string, ModelPolicy["reasoning"]>;
 	/** Model-broker credential only; never a GitHub/publisher credential. */
 	brokerApiKey?: string;
 	timeoutMs: number;
@@ -239,6 +254,11 @@ type ForcedFailure = {
 function defaultProviderExtension(): string {
 	return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../../broker/pi/deck-provider.ts");
 }
+
+function defaultRlmPolicyExtension(): string {
+	return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "prime-model-policy.ts");
+}
+
 
 /**
  * Build the complete environment for an untrusted workflow seat. This is an
@@ -583,6 +603,7 @@ async function attestTranscripts(
 	requested: RpcModel,
 	rpcSessionId: string | undefined,
 	maxDepth: number,
+	childReasoningByModel: Readonly<Record<string, ModelPolicy["reasoning"]>>,
 ): Promise<{
 	rootModel: PrimeModelProvenance;
 	childModels: PrimeModelProvenance[];
@@ -612,6 +633,10 @@ async function attestTranscripts(
 		for (const model of transcript.models) {
 			if (model.provider !== DECK_PROVIDER || !DECK_AGENT_CATALOG.includes(model.model as never)) {
 				throw new Error(`Child session ${transcript.sessionId} routed off-catalog model ${model.provider}/${model.model}`);
+			}
+			const modelRef = `${model.provider}/${model.model}`;
+			if (childReasoningByModel[modelRef] === undefined) {
+				throw new Error(`Child session ${transcript.sessionId} used ${modelRef} without deliberate ModelPolicy reasoning`);
 			}
 			childModels.push({
 				sessionId: transcript.sessionId,
@@ -715,7 +740,11 @@ export class PrimeSeatAgent implements AgentLike {
 	readonly supportsNativeStructuredOutput = false;
 	readonly tools = {};
 	readonly model: string;
-	readonly opts: PrimeSeatAgentOptions;
+	readonly opts: PrimeSeatAgentOptions & {
+		model: string;
+		rlmChildModel: string;
+		rlmReasoningByModel: Record<string, ModelPolicy["reasoning"]>;
+	};
 	private readonly binary: string;
 	private preflightPromise: Promise<void> | undefined;
 	constructor(opts: PrimeSeatAgentOptions) {
@@ -724,6 +753,55 @@ export class PrimeSeatAgent implements AgentLike {
 				status: "failed",
 				code: "PRIME_MODEL_MISMATCH",
 				message: `Prime seats must use provider ${DECK_PROVIDER}`,
+				exitStatus: { code: null, signal: null },
+				wallClockMs: 0,
+				stderr: "",
+			});
+		}
+		const profileName = opts.capabilityProfile ?? "workflow-seat";
+		const modelPolicy = opts.modelPolicy ?? defaultModelPolicy();
+		const policyViolations = validateModelPolicy(modelPolicy);
+		if (policyViolations.length > 0) {
+			throw new PrimeSeatError({
+				status: "failed",
+				code: "PRIME_MODEL_MISMATCH",
+				message: `Invalid ModelPolicy: ${policyViolations.join("; ")}`,
+				exitStatus: { code: null, signal: null },
+				wallClockMs: 0,
+				stderr: "",
+			});
+		}
+		const mechanical = resolveSeat(modelPolicy.mechanical, modelPolicy.reasoningMechanical);
+		const requestedModel = opts.model
+			?? (profileName === "spawn-agent" ? parseModelRef(mechanical.model).model : undefined);
+		if (requestedModel === undefined) {
+			throw new PrimeSeatError({
+				status: "failed",
+				code: "PRIME_MODEL_MISMATCH",
+				message: "Prime workflow seats require an explicit model",
+				exitStatus: { code: null, signal: null },
+				wallClockMs: 0,
+				stderr: "",
+			});
+		}
+		const requestedRlmChild = opts.rlmChildModel ?? mechanical.model;
+		const rlmChildModel = requestedRlmChild.includes("/")
+			? requestedRlmChild
+			: `${DECK_PROVIDER}/${requestedRlmChild}`;
+		const childParts = parseModelRef(rlmChildModel);
+		const rlmReasoningByModel = {
+			...modelReasoningPolicy(modelPolicy),
+			...opts.rlmReasoningByModel,
+		};
+		if (
+			childParts.provider !== DECK_PROVIDER
+			|| !DECK_AGENT_CATALOG.includes(childParts.model as never)
+			|| rlmReasoningByModel[rlmChildModel] === undefined
+		) {
+			throw new PrimeSeatError({
+				status: "failed",
+				code: "PRIME_MODEL_MISMATCH",
+				message: `Prime RLM child model ${rlmChildModel} must be a Deck catalog model with deliberate reasoning`,
 				exitStatus: { code: null, signal: null },
 				wallClockMs: 0,
 				stderr: "",
@@ -741,17 +819,16 @@ export class PrimeSeatAgent implements AgentLike {
 			});
 		}
 		this.binary = configuredBinary ?? PRIME_AGENT_BINARY;
-		if (!DECK_AGENT_CATALOG.includes(opts.model as never)) {
+		if (!DECK_AGENT_CATALOG.includes(requestedModel as never)) {
 			throw new PrimeSeatError({
 				status: "failed",
 				code: "PRIME_MODEL_MISMATCH",
-				message: `Prime seat model ${opts.model} is not in the Deck agent catalog`,
+				message: `Prime seat model ${requestedModel} is not in the Deck agent catalog`,
 				exitStatus: { code: null, signal: null },
 				wallClockMs: 0,
 				stderr: "",
 			});
 		}
-		const profileName = opts.capabilityProfile ?? "workflow-seat";
 		const profile = PRIME_SEAT_CAPABILITY_PROFILES[profileName];
 		const requestedTools = opts.tools ?? profile.tools;
 		const forbiddenTools = requestedTools.filter((tool) => !profile.tools.includes(tool as never));
@@ -766,8 +843,10 @@ export class PrimeSeatAgent implements AgentLike {
 			});
 		}
 		const providerExtension = path.resolve(defaultProviderExtension());
+		const rlmPolicyExtension = path.resolve(defaultRlmPolicyExtension());
+		const reviewedExtensions = [providerExtension, rlmPolicyExtension];
 		const forbiddenExtensions = (opts.extensions ?? []).filter(
-			(extension) => path.resolve(extension) !== providerExtension,
+			(extension) => !reviewedExtensions.includes(path.resolve(extension)),
 		);
 		if (forbiddenExtensions.length > 0) {
 			throw new PrimeSeatError({
@@ -779,9 +858,16 @@ export class PrimeSeatAgent implements AgentLike {
 				stderr: "",
 			});
 		}
-		opts = { ...opts, capabilityProfile: profileName, tools: requestedTools, extensions: [providerExtension] };
-		this.opts = opts;
-		this.model = opts.model;
+		this.opts = {
+			...opts,
+			model: requestedModel,
+			capabilityProfile: profileName,
+			tools: requestedTools,
+			extensions: reviewedExtensions,
+			rlmChildModel,
+			rlmReasoningByModel,
+		};
+		this.model = requestedModel;
 	}
 
 	preflight = async (): Promise<void> => {
@@ -916,6 +1002,8 @@ export class PrimeSeatAgent implements AgentLike {
 		let seatHome: string;
 		try {
 			sourceEnv = buildSeatEnvironment(process.env, this.opts.env);
+			sourceEnv.DECK_RLM_CHILD_MODEL = this.opts.rlmChildModel;
+			sourceEnv.DECK_RLM_REASONING_BY_MODEL = JSON.stringify(this.opts.rlmReasoningByModel);
 			sharedProfile = resolveDeckPrimeProfilePaths(
 				sourceEnv.HOME ?? os.homedir(),
 				sourceEnv.DECK_PRIME_DAEMON_SOCKET,
@@ -1361,7 +1449,13 @@ export class PrimeSeatAgent implements AgentLike {
 			let attestation: Awaited<ReturnType<typeof attestTranscripts>>;
 			try {
 				const profile = PRIME_SEAT_CAPABILITY_PROFILES[this.opts.capabilityProfile ?? "workflow-seat"];
-				attestation = await attestTranscripts(root, rootModel, rpcSessionId, profile.rlmMaxDepth);
+				attestation = await attestTranscripts(
+					root,
+					rootModel,
+					rpcSessionId,
+					profile.rlmMaxDepth,
+					this.opts.rlmReasoningByModel,
+				);
 			} catch (cause) {
 				const message = String(cause);
 				throw new PrimeSeatError({

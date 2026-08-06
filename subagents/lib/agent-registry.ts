@@ -2,10 +2,15 @@ import { readdir, readFile } from "node:fs/promises";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
+export type AgentRole = "implementer" | "reviewer" | "mechanical";
+export type AgentThinking = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+
 export interface AgentDefinition {
 	name: string;
 	description: string;
+	role?: AgentRole;
 	model?: string;
+	thinking?: AgentThinking;
 	tools?: string[];
 	systemPrompt: string;
 	filePath: string;
@@ -41,6 +46,10 @@ export function parseAgentDefinition(filePath: string, source: string): AgentDef
 	const frontmatter = lines.slice(1, end);
 	const name = frontmatterValue(frontmatter, "name");
 	const description = frontmatterValue(frontmatter, "description");
+	const roleValue = frontmatterValue(frontmatter, "role");
+	if (roleValue !== undefined && !["implementer", "reviewer", "mechanical"].includes(roleValue)) {
+		throw new AgentRegistryError(`Agent definition ${filePath} has invalid role ${JSON.stringify(roleValue)}`);
+	}
 	if (!name || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name)) {
 		throw new AgentRegistryError(`Agent definition ${filePath} has an invalid name`);
 	}
@@ -48,10 +57,16 @@ export function parseAgentDefinition(filePath: string, source: string): AgentDef
 	const toolsValue = frontmatterValue(frontmatter, "tools");
 	const tools = toolsValue?.split(",").map((tool) => tool.trim()).filter(Boolean);
 	const model = frontmatterValue(frontmatter, "model");
+	const thinkingValue = frontmatterValue(frontmatter, "thinking");
+	if (thinkingValue !== undefined && !["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(thinkingValue)) {
+		throw new AgentRegistryError(`Agent definition ${filePath} has invalid thinking ${JSON.stringify(thinkingValue)}`);
+	}
 	return {
 		name,
 		description,
+		...(roleValue === undefined ? {} : { role: roleValue as AgentRole }),
 		...(model === undefined ? {} : { model }),
+		...(thinkingValue === undefined ? {} : { thinking: thinkingValue as AgentThinking }),
 		...(tools === undefined ? {} : { tools }),
 		systemPrompt: lines.slice(end + 1).join("\n").trim(),
 		filePath,

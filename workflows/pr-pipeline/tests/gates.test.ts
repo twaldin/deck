@@ -19,6 +19,7 @@ import {
 	DECK_AGENT_CATALOG,
 	defaultModelPolicy,
 	modelFamily,
+	modelReasoningPolicy,
 	parseModelRef,
 	resolveAdversary,
 	validateModelPolicy,
@@ -150,6 +151,23 @@ describe("validateBrief (preflight gate)", () => {
 describe("model policy (deck catalog + family opposition)", () => {
 	test("defaults are valid and cross-family", () => {
 		expect(validateModelPolicy(defaultModelPolicy())).toEqual([]);
+	});
+
+	test("defaults encode the captain's role, model, and reasoning choices", () => {
+		expect(defaultModelPolicy()).toMatchObject({
+			implementer: "deck/gpt-5.6-sol",
+			reviewer: "deck/claude-fable-5",
+			mechanical: "deck/gpt-5.6-luna",
+			judgmentFallback: "deck/claude-opus-5",
+			reasoningImplementer: "xhigh",
+			reasoningReviewer: "high",
+			reasoningMechanical: "xhigh",
+		});
+	});
+
+	test("reasoning map normalizes bare Deck selectors for Prime child pinning", () => {
+		const policy = { ...defaultModelPolicy(), mechanical: "gpt-5.6-luna" };
+		expect(modelReasoningPolicy(policy)["deck/gpt-5.6-luna"]).toBe("xhigh");
 	});
 
 	test("parseModelRef splits provider/model", () => {

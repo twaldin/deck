@@ -30,11 +30,14 @@ export type ModelSeat = string | { model: string; reasoning?: string };
 export type ModelSeats = {
 	implementer?: ModelSeat;
 	reviewer?: ModelSeat;
+	mechanical?: ModelSeat;
+	judgmentFallback?: ModelSeat;
 	watcher?: ModelSeat;
 	fallout?: ModelSeat;
 	reasoning?: "low" | "medium" | "high" | "xhigh" | "max";
 	reasoningImplementer?: "low" | "medium" | "high" | "xhigh" | "max";
 	reasoningReviewer?: "low" | "medium" | "high" | "xhigh" | "max";
+	reasoningMechanical?: "low" | "medium" | "high" | "xhigh" | "max";
 	reasoningWatcher?: "low" | "medium" | "high" | "xhigh" | "max";
 	reasoningFallout?: "low" | "medium" | "high" | "xhigh" | "max";
 	familyOpposition?: boolean;
@@ -150,16 +153,16 @@ export function validateProfiles(parsed: unknown, source: string): ProjectProfil
 				throw new Error(`${where} (${p.id}): models must be an object`);
 			}
 			const m = p.models as Record<string, unknown>;
-			for (const role of ["implementer", "reviewer", "watcher", "fallout"] as const) {
+			for (const role of ["implementer", "reviewer", "mechanical", "judgmentFallback", "watcher", "fallout"] as const) {
 				const seat = m[role];
 				if (seat !== undefined && typeof seat !== "string" && (seat === null || typeof seat !== "object" || Array.isArray(seat))) throw new Error(`${where} (${p.id}): models.${role} must be a model string or { model, reasoning }`);
 				if (seat !== undefined && typeof seat === "object") {
 					const value = seat as Record<string, unknown>;
 					if (typeof value.model !== "string" || value.model.length === 0) throw new Error(`${where} (${p.id}): models.${role}.model must be a non-empty string`);
-					if (value.reasoning !== undefined && (typeof value.reasoning !== "string" || !["minimal", "low", "medium", "high", "xhigh", "max"].includes(value.reasoning))) throw new Error(`${where} (${p.id}): models.${role}.reasoning must be one of minimal, low, medium, high, xhigh, max`);
+					if (value.reasoning !== undefined && (typeof value.reasoning !== "string" || !["low", "medium", "high", "xhigh", "max"].includes(value.reasoning))) throw new Error(`${where} (${p.id}): models.${role}.reasoning must be one of low, medium, high, xhigh, max`);
 				}
 			}
-			for (const seat of ["reasoning", "reasoningImplementer", "reasoningReviewer", "reasoningWatcher", "reasoningFallout"]) {
+			for (const seat of ["reasoning", "reasoningImplementer", "reasoningReviewer", "reasoningMechanical", "reasoningWatcher", "reasoningFallout"]) {
 				if (m[seat] !== undefined && !["low", "medium", "high", "xhigh", "max"].includes(m[seat] as string)) throw new Error(`${where} (${p.id}): models.${seat} must be low, medium, high, xhigh, or max`);
 			}
 			if (m.familyOpposition !== undefined && typeof m.familyOpposition !== "boolean") {
@@ -171,11 +174,14 @@ export function validateProfiles(parsed: unknown, source: string): ProjectProfil
 			models = {
 				...(m.implementer === undefined ? {} : { implementer: m.implementer as ModelSeat }),
 				...(m.reviewer === undefined ? {} : { reviewer: m.reviewer as ModelSeat }),
+				...(m.mechanical === undefined ? {} : { mechanical: m.mechanical as ModelSeat }),
+				...(m.judgmentFallback === undefined ? {} : { judgmentFallback: m.judgmentFallback as ModelSeat }),
 				...(m.watcher === undefined ? {} : { watcher: m.watcher as ModelSeat }),
 				...(m.fallout === undefined ? {} : { fallout: m.fallout as ModelSeat }),
 				...(m.reasoning === undefined ? {} : { reasoning: m.reasoning as ModelSeats["reasoning"] }),
 				...(m.reasoningImplementer === undefined ? {} : { reasoningImplementer: m.reasoningImplementer as ModelSeats["reasoningImplementer"] }),
 				...(m.reasoningReviewer === undefined ? {} : { reasoningReviewer: m.reasoningReviewer as ModelSeats["reasoningReviewer"] }),
+				...(m.reasoningMechanical === undefined ? {} : { reasoningMechanical: m.reasoningMechanical as ModelSeats["reasoningMechanical"] }),
 				...(m.reasoningWatcher === undefined ? {} : { reasoningWatcher: m.reasoningWatcher as ModelSeats["reasoningWatcher"] }),
 				...(m.reasoningFallout === undefined ? {} : { reasoningFallout: m.reasoningFallout as ModelSeats["reasoningFallout"] }),
 				...(m.familyOpposition === undefined ? {} : { familyOpposition: m.familyOpposition as boolean }),

@@ -21,31 +21,31 @@ The pi tool is named `subagent`. It accepts one task per call:
   "agent": "worker",
   "task": "Implement the requested change and verify the changed path.",
   "model": "deck/gpt-5.6-luna",
-  "thinking": "high",
+  "thinking": "xhigh",
   "stallTimeoutMs": 300000,
   "maxRuntimeMs": 1800000
 }
 ```
 
-`model`, `thinking`, and both timeouts are optional. The model defaults to the selected agent's frontmatter only after that default passes the same live broker validation.
+`model`, `thinking`, and both timeouts are optional. An explicit request wins, then explicit agent frontmatter. If neither pins a model, the canonical role default applies: implementer = `deck/gpt-5.6-sol`/`xhigh`, reviewer = `deck/claude-fable-5`/`high`, and mechanical or unknown = `deck/gpt-5.6-luna`/`xhigh`. Every selection passes the same live broker validation before launch.
 
 ## Exact registries
 
 Agent names are exact and case-sensitive. The shipped registry is:
 
-| Agent | Role | Default model |
-| --- | --- | --- |
-| `worker` | Full-capability Claude-family builder | `deck/claude-opus-5` |
-| `worker-gpt` | Full-capability GPT-family builder | `deck/gpt-5.6-terra` |
-| `reviewer` | Read-oriented GPT-family adversarial reviewer | `deck/gpt-5.6-terra` |
-| `reviewer-claude` | Read-oriented Claude-family adversarial reviewer | `deck/claude-opus-5` |
-| `scout` | Cheap read-only reconnaissance | `deck/gpt-5.4-mini` |
+| Agent | Role | Default model | Reasoning |
+| --- | --- | --- | --- |
+| `worker` | Full-capability builder | `deck/gpt-5.6-sol` | `xhigh` |
+| `worker-gpt` | Explicit GPT-family builder | `deck/gpt-5.6-terra` | `xhigh` |
+| `reviewer` | Explicit GPT-family adversarial reviewer | `deck/gpt-5.6-terra` | `xhigh` |
+| `reviewer-claude` | Claude-family adversarial reviewer | `deck/claude-fable-5` | `high` |
+| `scout` | Explicit cheap read-only reconnaissance | `deck/gpt-5.4-mini` | `high` |
 
 There are no `claude`, `codex`, or `gpt` aliases and no fuzzy correction. An unknown name returns `invalid-agent` plus the valid list without launching a child.
 
 Model selectors are the intersection of the checked-in `broker/pi/deck-provider.ts` catalog and the live authenticated broker `/v1/models` response. An unknown or unavailable model returns `invalid-model` or `registry-unavailable` before spawn. `:fast` is accepted only for GPT models; it lowers latency at the broker's 2x cost and is not the cheap lane.
 
-Model guidance is embedded in the tool description and exported as `MODEL_PICK_GUIDANCE` from `lib/model-registry.ts`: use `deck/gpt-5.4-mini` or `deck/claude-haiku-4-5` for cheap bounded work, `deck/gpt-5.6-luna` for a fast capable builder, and `deck/gpt-5.6-sol`, `deck/claude-fable-5`, or `deck/claude-opus-5` for deep ambiguous reasoning. Review with the opposite family from the author; `deck/grok-4.5` is a third-family tie-breaker. The authoritative reasoning-level table remains `broker/pi/README.md`.
+Model guidance is embedded in the tool description and exported as `MODEL_PICK_GUIDANCE` from `lib/model-registry.ts`. Canonical spawn role defaults are exported from `lib/spawn.ts` and a cross-surface test keeps them in lockstep with workflow `defaultModelPolicy()`. Explicit frontmatter remains authoritative for deliberately specialized agents. Reserve fable for opposite-family judgment, use sol for main implementation, and use luna for mechanical work. Opus is a manual fable fallback only, not a standing spawn default. The authoritative reasoning-level table remains `broker/pi/README.md`.
 
 ## Liveness and result contract
 
@@ -84,6 +84,7 @@ const result = await spawnSubagent({
   task: "Review the implementation and return evidence-backed findings.",
   cwd: process.cwd(),
   model: "deck/gpt-5.6-terra",
+  thinking: "xhigh",
 });
 ```
 

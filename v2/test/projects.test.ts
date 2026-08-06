@@ -91,6 +91,26 @@ describe("config file", () => {
 		expect(() => loadProfiles()).toThrow(/oppositionDefaults values/);
 	});
 
+	test("preserves canonical mechanical and manual judgment-fallback model seats", () => {
+		writeConfig([{
+			...deckOverride,
+			models: {
+				mechanical: { model: "deck/gpt-5.6-luna", reasoning: "xhigh" },
+				judgmentFallback: { model: "deck/claude-opus-5", reasoning: "high" },
+				reasoningMechanical: "xhigh",
+			},
+		}]);
+		expect(loadProfiles()[0]?.models).toMatchObject({
+			mechanical: { model: "deck/gpt-5.6-luna", reasoning: "xhigh" },
+			judgmentFallback: { model: "deck/claude-opus-5", reasoning: "high" },
+			reasoningMechanical: "xhigh",
+		});
+		expect(() => validateProfiles([{
+			...deckOverride,
+			models: { mechanical: { model: "deck/gpt-5.6-luna", reasoning: "minimal" } },
+		}], "x")).toThrow(/reasoning must be one of low/);
+	});
+
 	test.each([
 		["missing", undefined],
 		["null", null],

@@ -169,6 +169,7 @@ describe("installer layout", () => {
 		const workspace = path.join(target, "home", "state", "smithers");
 		for (const item of ["package.json", "agents.ts", "bunfig.toml", "preload.ts", "smithers.config.ts", "smithers.toon", "ui/fixture.tsx"]) expect(fs.existsSync(path.join(workspace, ".smithers", item))).toBe(true);
 		expect(fs.readFileSync(path.join(workspace, "pr-pipeline", "lib", "models.ts"), "utf8")).toBe("fixture models\n");
+		expect(fs.readFileSync(path.join(target, "home", "state", "subagents", "lib", "model-policy.ts"), "utf8")).toContain("export interface ModelPolicy");
 		expect(fs.existsSync(path.join(workspace, ".smithers", "node_modules"))).toBe(true);
 	});
 
