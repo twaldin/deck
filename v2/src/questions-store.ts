@@ -208,10 +208,27 @@ export function truncateBytes(text: string, maxBytes: number): string {
 	return out;
 }
 
-/** Milliseconds of the last write, or null when the queue does not exist yet. */
-export function queueMtimeMs(file: string): number | null {
+/**
+ * A change token for the queue file, or null when it does not exist yet.
+ *
+ * This was `statSync(file).mtimeMs` alone, which silently drops a second write
+ * landing inside the same filesystem timestamp tick. Reproduced on Linux
+ * (ext4): an answer written immediately after a poll compared equal, the poll
+ * returned early, and the parked asker was never woken — on the host that runs
+ * unattended, where nobody is watching to notice. macOS hid it because APFS
+ * timestamps advanced between the same two writes.
+ *
+ * Size is folded in because an answer always changes the file length: this
+ * append-only log never rewrites in place. Two writes can share a tick, but
+ * they cannot also share a length.
+ */
+export function queueRevision(file: string): string | null {
 	try {
-		return statSync(file).mtimeMs;
+		const stat = statSync(file);
+		// A string, not arithmetic: mtimeMs is ~1.7e12, so packing it with size
+		// numerically exceeds 2^53 and silently loses the low bits — which are
+		// exactly the bits that distinguish two writes in one tick.
+		return `${stat.mtimeMs}:${stat.size}`;
 	} catch {
 		return null;
 	}

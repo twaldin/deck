@@ -29,7 +29,11 @@ function childScript(source: string): string {
 async function waitForChildren(children: Bun.Subprocess[]): Promise<void> {
 	const exits = await Promise.all(children.map((child) => child.exited));
 	for (let index = 0; index < children.length; index += 1) {
-		const stderr = await new Response(children[index]!.stderr).text();
+		// `stderr` is typed as a number (fd) when not piped, so narrow before
+		// reading it rather than asserting: a child spawned without a pipe would
+		// otherwise fail here instead of reporting its real exit status.
+		const handle = children[index]!.stderr;
+		const stderr = handle instanceof ReadableStream ? await new Response(handle).text() : "";
 		expect(exits[index], stderr).toBe(0);
 	}
 }

@@ -17,7 +17,7 @@ import {
 	openQuestions,
 	pendingAnswersFor,
 	queueFile,
-	queueMtimeMs,
+	queueRevision,
 	readQuestions,
 	readQuestionHistory,
 	type Question,
@@ -175,7 +175,7 @@ export function registerQuestions(
 	let poll: ReturnType<typeof setInterval> | undefined;
 	/** Latest live session id, refreshed by session events (see startPolling). */
 	let latestSessionId: string | undefined;
-	let lastSeenMtimeMs: number | null = null;
+	let lastSeenRevision: string | null = null;
 
 	/** Hands every undelivered answer for this session back to its agent, once. */
 	const deliverAnswers = (
@@ -505,9 +505,9 @@ export function registerQuestions(
 		if (poll !== undefined) return;
 		poll = runtime.setInterval(() => {
 			if (latestSessionId === undefined) return;
-			const mtime = queueMtimeMs(file);
-			if (mtime === lastSeenMtimeMs) return;
-			lastSeenMtimeMs = mtime;
+			const revision = queueRevision(file);
+			if (revision === lastSeenRevision) return;
+			lastSeenRevision = revision;
 			// triggerTurn wakes a parked agent: without it, an agent that queued a
 			// question and stopped would never learn the answer arrived.
 			deliverAnswers({ sessionId: latestSessionId }, true);
@@ -524,7 +524,7 @@ export function registerQuestions(
 		// loses a wake-up: an answer appended between the read and the snapshot
 		// would be baked into the baseline as already-seen, so the poll would not
 		// fire and a parked asker would wait for an unrelated queue write.
-		lastSeenMtimeMs = queueMtimeMs(file);
+		lastSeenRevision = queueRevision(file);
 		// Answers that landed while this session was not running.
 		deliverAnswers(ctx, false);
 		startPolling();
@@ -533,7 +533,7 @@ export function registerQuestions(
 	agent.on("agent_settled", (_event, ctx) => {
 		if (ctx?.sessionManager === undefined) return;
 		latestSessionId = ctx.sessionManager.getSessionId();
-		lastSeenMtimeMs = queueMtimeMs(file);
+		lastSeenRevision = queueRevision(file);
 		deliverAnswers(ctx, true);
 	});
 
