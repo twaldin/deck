@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "upstreamRepository": "PrimeIntellect-ai/prime-agent",
-  "expectedInstallState": "pristine",
+  "expectedInstallState": "patched",
   "base": {
     "version": "0.7.0",
     "tag": "v0.7.0",
@@ -12,12 +12,31 @@
     "cliSha256": "ef097dce87e63c32e49493767763c7147376e6b4522818dd275ca9c32218ad35"
   },
   "patchedArtifact": {
-    "file": "prime-agent-0.7.0-deck-patched.tgz",
-    "sha256": "aeb924d0636438b0ff66a4ea9ceb09e5060e187ef7d5b18ff41ff89631a1bf94",
-    "packageTreeSha256": "0e1bb084890b6b7d8747df0f80b3de893da27ddf797768f6b8fa464505d1b71a",
-    "cliSha256": "f05c4c220517ec401ae00a40287bb3fd61ed27442ee6d8a13a8fc23fd417e975"
+    "file": "prime-agent-0.7.0-deck-nullsafe.tgz",
+    "sha256": "2c1581949b25ea8607e43dba41bd203f456c4fb21000307eeb21371312646e12",
+    "packageTreeSha256": "e211a1a76196e29b52fe654d2dca0664934fe6efcd4769df225cd9605b53f47a",
+    "cliSha256": "ef097dce87e63c32e49493767763c7147376e6b4522818dd275ca9c32218ad35"
   },
   "patches": [
+    {
+      "name": "null-safe-content",
+      "file": "null-safe-content.patch",
+      "sha256": "226d45b301fda220757354b5a2461736357f344799bc9501b503d32fcda47c88",
+      "fixes": "Stops one null assistant content part from crashing the renderer on every resume.",
+      "upstreamBranch": "fix/null-safe-assistant-content",
+      "sourceCommit": "b2cb7954948d4f417f982ca0b13b4d8c44c76d3a",
+      "baseVersion": "0.7.0",
+      "application": "not-applied",
+      "installedDetection": {
+        "file": "dist/bundle/chunk-L3VO7F2S.js",
+        "pristineSha256": "c07144f3e86478cb39fb842550491b56805aa44d21987ca47508a1bb86f6dd2c",
+        "patchedSha256": "3aaf73f82e80ad8e4ecc6dc9a53b9514a6c611854a3a4bb9ff5d1b6f4c9ae841",
+        "bundleNeedle": "content == null"
+      },
+      "status": "local-only",
+      "upstreamPrNumber": null,
+      "upstreamPrUrl": null
+    },
     {
       "name": "rlm-child-compaction",
       "file": "rlm-child-compaction.patch",
@@ -35,7 +54,8 @@
         "patchedSha256": "bec65362a0452b1663fd52b06af75cc7d8adfe46f16e711e6db154c98cc038cf",
         "bundleNeedle": "abortCompletion ??="
       },
-      "status": "upstream-open"
+      "status": "upstream-open",
+      "shippedInArtifact": false
     },
     {
       "name": "preserve-live-workers",
@@ -54,7 +74,8 @@
         "patchedSha256": "7b735c925642530429a74b12767719a746edbaf9f6989d9cc05546455eda4aec",
         "bundleNeedle": "keepRetryingLiveWorker"
       },
-      "status": "upstream-open"
+      "status": "upstream-open",
+      "shippedInArtifact": false
     },
     {
       "name": "herdr-remote-clipboard-wip",
@@ -73,7 +94,8 @@
         "patchedSha256": "b9504605c02e9f5ebb4b23c479e413e0577d3a405ed4816c63b3923707d118d8",
         "bundleNeedle": "env.MOSH_CONNECTION || env.HERDR_ENV === \"1\""
       },
-      "status": "upstream-open"
+      "status": "upstream-open",
+      "shippedInArtifact": false
     },
     {
       "name": "deck-fast-mode-capability",
@@ -92,7 +114,8 @@
         "patchedSha256": "480032b831c047661238bfeeb4e4a3acfc29c36482808f88bdaeee6d895f23e8",
         "bundleNeedle": "model.api === \"openai-completions\" && model.supportsFastMode === true"
       },
-      "status": "local-only"
+      "status": "local-only",
+      "shippedInArtifact": false
     }
   ]
 }

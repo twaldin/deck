@@ -430,14 +430,13 @@ if ! PRIME_AGENT_BIN="$PRIME_AGENT_TARGET" "$REPO/ops/prime-patches.sh" verify >
   mv -f "$artifact_tmp" "$PRIME_ARTIFACT"
   rm -rf "$PRIME_RUNTIME/lib/node_modules/prime-agent" "$PRIME_RUNTIME/bin/prime-agent"
   npm install --global --prefix "$PRIME_RUNTIME" "$PRIME_ARTIFACT"
+  # The manifest expects the patched tree, so a freshly unpacked pristine
+  # install must be brought up to it through the reviewed artifact. `apply`
+  # checks the tarball hashes, overlays it, writes the marker, and verifies.
+  PRIME_PATCH_NPM_PREFIX="$PRIME_RUNTIME" "$REPO/ops/prime-patches.sh" apply ||
+    fail "could not apply the reviewed Prime patch artifact"
 fi
 PRIME_AGENT_BIN="$PRIME_AGENT_TARGET" "$REPO/ops/prime-patches.sh" verify
-# NOTE: the renderer null-guard (patches/prime-agent/null-safe-content.mjs) is
-# deliberately NOT applied here. Mutating the package tree after this point
-# leaves it failing `prime-patches.sh verify`, so the next install with a live
-# daemon aborts at the drain preflight above. Shipping it means rebuilding the
-# reviewed patched tarball and updating manifest.patchedArtifact hashes, which
-# is the sanctioned `apply` path.
 npm install --global --prefix "$PRIME_RUNTIME" "@aliou/pi-processes@0.10.4"
 PROCESS_PACKAGE_SOURCE="$PRIME_RUNTIME/lib/node_modules/@aliou/pi-processes"
 process_identity="$(node -e 'const p=require(process.argv[1]); process.stdout.write(`${p.name}@${p.version}`)' "$PROCESS_PACKAGE_SOURCE/package.json")"
