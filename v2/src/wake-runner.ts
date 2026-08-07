@@ -295,26 +295,41 @@ function activityTime(summary: PrimeSessionSummary): number {
 	return typeof summary.lastActivityAt === "string" ? Date.parse(summary.lastActivityAt) || 0 : 0;
 }
 
-/** Resolve the current orchestrator, never a workflow seat or RLM child. */
+/**
+ * Choose the session a wake should go to, or null when none can receive it.
+ *
+ * Pure so the selection rules are testable without a daemon.
+ */
+export function selectLiveSession(sessions: PrimeSessionSummary[], home: string): string | null {
+	const root = path.resolve(home);
+	const candidates = sessions
+		.filter((session) =>
+			session.runtimeKind === "top-level" &&
+			typeof session.cwd === "string" &&
+			path.resolve(session.cwd) === root &&
+			(typeof session.activeSessionId === "string" || typeof session.id === "string") &&
+			// A daemon-resident session with no attached client accepts the
+			// message and drops it: measured on deckbox, the daemon answered
+			// success, the drainer marked the wake in flight, and the text
+			// appeared in no transcript. Delivery to nobody is worse than no
+			// delivery, because it consumes the obligation. Requiring a client
+			// leaves the wake pending until a real orchestrator is listening.
+			Number(session.attachedClients ?? 0) > 0)
+		.sort((left, right) => {
+			const attached = Number(right.attachedClients ?? 0) - Number(left.attachedClients ?? 0);
+			return attached === 0 ? activityTime(right) - activityTime(left) : attached;
+		});
+	const selected = candidates[0];
+	if (selected === undefined) return null;
+	return typeof selected.activeSessionId === "string" ? selected.activeSessionId : (selected.id as string);
+}
+
 async function findPrimeSession(): Promise<string | null> {
 	try {
 		const response = await requestDaemon({ type: "list" });
 		const sessions = (response.data as { sessions?: unknown } | undefined)?.sessions;
 		if (!Array.isArray(sessions)) return null;
-		const home = path.resolve(deckV2Home());
-		const candidates = (sessions as PrimeSessionSummary[])
-			.filter((session) =>
-				session.runtimeKind === "top-level" &&
-				typeof session.cwd === "string" &&
-				path.resolve(session.cwd) === home &&
-				(typeof session.activeSessionId === "string" || typeof session.id === "string"))
-			.sort((left, right) => {
-				const attached = Number(right.attachedClients ?? 0) - Number(left.attachedClients ?? 0);
-				return attached === 0 ? activityTime(right) - activityTime(left) : attached;
-			});
-		const selected = candidates[0];
-		if (selected === undefined) return null;
-		return typeof selected.activeSessionId === "string" ? selected.activeSessionId : selected.id as string;
+		return selectLiveSession(sessions as PrimeSessionSummary[], deckV2Home());
 	} catch {
 		return null;
 	}

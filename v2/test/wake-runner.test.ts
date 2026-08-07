@@ -6,6 +6,7 @@ import {
 	claimWakeDrain,
 	drainOnce,
 	recordSweep,
+	selectLiveSession,
 	runWakeDrain,
 	staleWatcherCondition,
 	WAKE_DRAIN_LEASE_MS,
@@ -332,5 +333,40 @@ describe("wake drain singleton", () => {
 		const next = claimWakeDrain();
 		expect(next).not.toBeNull();
 		next?.release();
+	});
+});
+
+describe("selectLiveSession", () => {
+	const home = "/home/tim/.deck";
+	const base = { runtimeKind: "top-level" as const, cwd: home };
+
+	test("refuses a session with no attached client", () => {
+		// Measured on deckbox: the daemon accepted a message for a
+		// daemon-resident session with zero clients, answered success, and the
+		// text appeared in no transcript. The drainer marked the wake in flight,
+		// so the obligation was consumed and nobody was ever woken. Delivery to
+		// nobody is worse than no delivery.
+		expect(selectLiveSession([{ ...base, id: "orphan", attachedClients: 0 }], home)).toBeNull();
+		expect(selectLiveSession([{ ...base, id: "orphan" }], home)).toBeNull();
+	});
+
+	test("selects an attached session and prefers the most attached", () => {
+		expect(selectLiveSession([{ ...base, id: "live", attachedClients: 1 }], home)).toBe("live");
+		expect(
+			selectLiveSession(
+				[
+					{ ...base, id: "orphan", attachedClients: 0 },
+					{ ...base, id: "live", attachedClients: 1 },
+				],
+				home,
+			),
+		).toBe("live");
+	});
+
+	test("ignores sessions from another home or runtime kind", () => {
+		expect(selectLiveSession([{ ...base, cwd: "/elsewhere", id: "x", attachedClients: 1 }], home)).toBeNull();
+		expect(
+			selectLiveSession([{ runtimeKind: "child", cwd: home, id: "x", attachedClients: 1 } as never], home),
+		).toBeNull();
 	});
 });
