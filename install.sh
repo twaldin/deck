@@ -301,9 +301,26 @@ if (
 process.stdout.write(path.join(deckHome, relative));
 NODE
 )" || fail "invalid Deck Prime daemon socket contract"
+# Directories holding the tools a seat needs: uv for the kernel, plus the CLIs
+# the agent is prompted to use. Resolved here so both the daemon below and the
+# conversation wrapper start from the same set.
+SEAT_TOOL_DIRS="$HOME/.local/bin:/usr/local/bin"
+if SEAT_UV_BIN="$(command -v uv)"; then
+  SEAT_TOOL_DIRS="$(dirname "$SEAT_UV_BIN"):$SEAT_TOOL_DIRS"
+fi
+if SEAT_BREW_PREFIX="$(brew --prefix 2>/dev/null)"; then
+  SEAT_TOOL_DIRS="$SEAT_BREW_PREFIX/bin:$SEAT_BREW_PREFIX/sbin:$SEAT_TOOL_DIRS"
+fi
+SEAT_TOOL_DIRS="$(printf '%s' "$SEAT_TOOL_DIRS" | awk -v RS=: '!seen[$0]++ && $0 != "" { printf "%s%s", sep, $0; sep=":" }')"
+
+# The daemon spawns every seat's IPython kernel, so its PATH - not the
+# wrapper's - is what the kernel actually inherits. This list omitted the uv
+# directory, so seats reported "uv is required to set up the Python kernel"
+# and had no code execution, no matter what the launcher exported. Measured on
+# a live orchestrator after the wrapper was already correct.
 PRIME_DAEMON_ENV=(
   "HOME=$HOME"
-  "PATH=$NODE_BIN_DIR:$PRIME_RUNTIME/bin:/usr/bin:/bin"
+  "PATH=$NODE_BIN_DIR:$PRIME_RUNTIME/bin:$SEAT_TOOL_DIRS:/usr/bin:/bin"
   "PRIME_AGENT_CODING_AGENT_DIR=$HOME/.deck/.prime/agent"
   "PRIME_AGENT_SESSION_DIR=$HOME/.deck/.prime/sessions"
 )
