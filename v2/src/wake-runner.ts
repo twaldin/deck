@@ -1,0 +1,593 @@
+import { randomUUID } from "node:crypto";
+import * as fs from "node:fs";
+import * as net from "node:net";
+import * as path from "node:path";
+import { deckV2Home, stateDir } from "./home";
+import { readMeta } from "./meta";
+import { applyProjectTierPolicy as projectTierPolicy } from "./observer";
+import { loadProfiles, type ProjectProfile } from "./projects";
+import { produceDueSelfWakes } from "./self-wake";
+import {
+	dueWakes as readDueWakes,
+	foldBatched,
+	formatInterrupt,
+	markInFlight as recordInFlight,
+	reconcile,
+	suppressWakes as recordSuppressed,
+	type WakeCondition,
+	type WakeItem,
+} from "./wake";
+
+export const WAKE_DRAIN_INTERVAL_MS = 30_000;
+export const WAKE_DRAIN_LEASE_MS = WAKE_DRAIN_INTERVAL_MS * 3;
+const PRIME_REQUEST_TIMEOUT_MS = 5_000;
+
+type DueWake = ReturnType<typeof readDueWakes>[number];
+
+type TierPolicy = (
+	items: WakeItem[],
+	owners: ReadonlyMap<string, ProjectProfile | undefined>,
+) => WakeItem[];
+
+export type WakeSend = (
+	content: string,
+	options: { triggerTurn: boolean },
+) => Promise<{ ok: boolean }>;
+
+export interface WakeDrainDependencies {
+	now(): number;
+	hasLiveSession(): boolean | Promise<boolean>;
+	dueWakes(now: number): DueWake[];
+	owners: ReadonlyMap<string, ProjectProfile | undefined>;
+	applyProjectTierPolicy: TierPolicy;
+	send: WakeSend;
+	markInFlight(ids: string[], now: number): void | Promise<void>;
+	suppressWakes(ids: string[], reason: string): void | Promise<void>;
+}
+
+export type DrainResult = {
+	liveSession: boolean;
+	deliveredIds: string[];
+	failedIds: string[];
+	silentIds: string[];
+};
+
+function asWakeItem(entry: DueWake): WakeItem {
+	return {
+		taskId: entry.taskId,
+		tier: entry.tier,
+		event: {
+			verb: entry.verb,
+			key: entry.key,
+			note: entry.note,
+			raw: entry.raw,
+		},
+	};
+}
+
+function withWakeMarker(content: string, ids: string[]): string {
+	return `${content}\n\n[wake:${ids.join(",")}]`;
+}
+
+/**
+ * Deliver the wakes owed at one instant.
+ *
+ * Storage, project policy, session presence, delivery, and time are injected:
+ * the ordering below is the contract, not an accident of one Prime transport.
+ */
+export async function drainOnce(deps: WakeDrainDependencies): Promise<DrainResult> {
+	const now = deps.now();
+	if (!(await deps.hasLiveSession())) {
+		return { liveSession: false, deliveredIds: [], failedIds: [], silentIds: [] };
+	}
+
+	const due = deps.dueWakes(now);
+	const classified = deps.applyProjectTierPolicy(due.map(asWakeItem), deps.owners);
+	if (
+		classified.length !== due.length ||
+		classified.some((item, index) => {
+			const entry = due[index];
+			return entry === undefined || item.taskId !== entry.taskId || item.event.raw !== entry.raw;
+		})
+	) {
+		throw new Error("wake tier policy must preserve outbox entry identity and order");
+	}
+	const owed = due.map((entry, index) => ({ entry, item: classified[index] as WakeItem }));
+	const interrupts = owed.filter(({ item }) => item.tier === "T0");
+	const batched = owed.filter(({ item }) => item.tier === "T1");
+	const silentIds = owed.filter(({ item }) => item.tier === "T2").map(({ entry }) => entry.id);
+	const deliveredIds: string[] = [];
+	const failedIds: string[] = [];
+	if (silentIds.length > 0) {
+		// T2 is a durable policy decision, not consumer acknowledgement. Record
+		// why these entries were withheld so they do not remain due forever.
+		await deps.suppressWakes(silentIds, "classified T2; wake policy forbids delivery");
+	}
+
+	const deliver = async (content: string, ids: string[]): Promise<void> => {
+		let result: { ok: boolean };
+		try {
+			result = await deps.send(withWakeMarker(content, ids), { triggerTurn: true });
+		} catch {
+			failedIds.push(...ids);
+			return;
+		}
+		if (!result.ok) {
+			failedIds.push(...ids);
+			return;
+		}
+		await deps.markInFlight(ids, now);
+		// Sending is not acknowledgement. Acking here would be at-most-once: a
+		// Prime session dying before it records the wake would lose the event.
+		deliveredIds.push(...ids);
+	};
+
+	for (const { entry, item } of interrupts) {
+		await deliver(formatInterrupt(item), [entry.id]);
+	}
+	const folded = foldBatched(batched.map(({ item }) => item));
+	if (folded !== null) await deliver(folded, batched.map(({ entry }) => entry.id));
+
+	return { liveSession: true, deliveredIds, failedIds, silentIds };
+}
+
+function sweepFile(): string {
+	return path.join(stateDir(), ".wake-runner-heartbeat.json");
+}
+
+/** Persist one completed watcher sweep using the wake store's atomic-file discipline. */
+export function recordSweep(now: number): void {
+	if (!Number.isFinite(now)) throw new Error("wake sweep time must be finite");
+	const file = sweepFile();
+	const tmp = `${file}.${process.pid}.${randomUUID()}.tmp`;
+	fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+	try {
+		fs.writeFileSync(tmp, `${JSON.stringify({ lastSweptAt: now })}\n`, { mode: 0o600 });
+		fs.renameSync(tmp, file);
+	} finally {
+		try {
+			fs.unlinkSync(tmp);
+		} catch {
+			// rename consumed it, or the write never created it.
+		}
+	}
+}
+
+function lastSweptAt(): number | null {
+	try {
+		const parsed: unknown = JSON.parse(fs.readFileSync(sweepFile(), "utf8"));
+		if (parsed === null || typeof parsed !== "object") return null;
+		const value = (parsed as { lastSweptAt?: unknown }).lastSweptAt;
+		return typeof value === "number" && Number.isFinite(value) ? value : null;
+	} catch {
+		return null;
+	}
+}
+
+/** A missing heartbeat is stale too: silence cannot be evidence that the watcher is healthy. */
+export function staleWatcherCondition(now: number, maxAgeMs: number): WakeCondition | null {
+	if (!Number.isFinite(now) || !Number.isFinite(maxAgeMs) || maxAgeMs < 0) {
+		throw new Error("watcher staleness needs a finite time and non-negative maximum age");
+	}
+	const sweptAt = lastSweptAt();
+	if (sweptAt !== null && now - sweptAt <= maxAgeMs) return null;
+	return {
+		key: "watcher-stale" as WakeCondition["key"],
+		taskId: "wake-runner",
+		tier: "T0",
+		note: sweptAt === null
+			? "wake drain has never recorded a completed sweep"
+			: `wake drain last completed a sweep at ${new Date(sweptAt).toISOString()}`,
+	};
+}
+
+type DaemonResponse = {
+	type?: string;
+	id?: string;
+	success?: boolean;
+	data?: unknown;
+	error?: unknown;
+};
+
+type PrimeSessionSummary = {
+	id?: unknown;
+	activeSessionId?: unknown;
+	cwd?: unknown;
+	runtimeKind?: unknown;
+	attachedClients?: unknown;
+	lastActivityAt?: unknown;
+};
+
+function daemonSocketPath(): string {
+	return process.env.DECK_PRIME_DAEMON_SOCKET ?? path.join(deckV2Home(), ".prime", "run", "conversation.sock");
+}
+
+function daemonError(response: DaemonResponse): string {
+	if (typeof response.error === "string") return response.error;
+	if (response.error !== null && typeof response.error === "object") {
+		const message = (response.error as { message?: unknown }).message;
+		if (typeof message === "string") return message;
+	}
+	return "Prime daemon rejected the request";
+}
+
+/** One bounded JSONL request. Opening per request avoids leaking a launchd-owned daemon client. */
+function requestDaemon(command: Record<string, unknown>): Promise<DaemonResponse> {
+	const socketPath = daemonSocketPath();
+	if (!fs.existsSync(socketPath)) {
+		return Promise.reject(new Error(`Prime daemon socket is not live: ${socketPath}`));
+	}
+	const id = `deck-wake-${process.pid}-${randomUUID()}`;
+	return new Promise((resolve, reject) => {
+		const socket = net.createConnection(socketPath);
+		let buffer = "";
+		let sent = false;
+		let settled = false;
+		let timeout: ReturnType<typeof setTimeout>;
+
+		const finish = (error?: Error, response?: DaemonResponse): void => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timeout);
+			// Keep the error listener until the socket is closed. A failed connect
+			// can emit again while destroy tears it down; removing the listener
+			// turns the ordinary no-session race into an uncaught process error.
+			socket.destroy();
+			if (error !== undefined) reject(error);
+			else resolve(response ?? {});
+		};
+		timeout = setTimeout(
+			() => finish(new Error(`Prime daemon request timed out: ${socketPath}`)),
+			PRIME_REQUEST_TIMEOUT_MS,
+		);
+
+		socket.on("error", (error) => finish(error));
+		socket.on("close", () => {
+			if (!settled) finish(new Error(`Prime daemon closed before replying: ${socketPath}`));
+		});
+		socket.on("data", (chunk) => {
+			buffer += chunk.toString("utf8");
+			for (;;) {
+				const newline = buffer.indexOf("\n");
+				if (newline < 0) break;
+				const line = buffer.slice(0, newline);
+				buffer = buffer.slice(newline + 1);
+				let message: DaemonResponse;
+				try {
+					message = JSON.parse(line) as DaemonResponse;
+				} catch {
+					continue;
+				}
+				if (message.type === "daemon_hello" && !sent) {
+					sent = true;
+					socket.write(`${JSON.stringify({ ...command, id })}\n`);
+					continue;
+				}
+				if (message.type !== "response" || message.id !== id) continue;
+				if (message.success === true) finish(undefined, message);
+				else finish(new Error(daemonError(message)));
+			}
+		});
+	});
+}
+
+function activityTime(summary: PrimeSessionSummary): number {
+	return typeof summary.lastActivityAt === "string" ? Date.parse(summary.lastActivityAt) || 0 : 0;
+}
+
+/** Resolve the current orchestrator, never a workflow seat or RLM child. */
+async function findPrimeSession(): Promise<string | null> {
+	try {
+		const response = await requestDaemon({ type: "list" });
+		const sessions = (response.data as { sessions?: unknown } | undefined)?.sessions;
+		if (!Array.isArray(sessions)) return null;
+		const home = path.resolve(deckV2Home());
+		const candidates = (sessions as PrimeSessionSummary[])
+			.filter((session) =>
+				session.runtimeKind === "top-level" &&
+				typeof session.cwd === "string" &&
+				path.resolve(session.cwd) === home &&
+				(typeof session.activeSessionId === "string" || typeof session.id === "string"))
+			.sort((left, right) => {
+				const attached = Number(right.attachedClients ?? 0) - Number(left.attachedClients ?? 0);
+				return attached === 0 ? activityTime(right) - activityTime(left) : attached;
+			});
+		const selected = candidates[0];
+		if (selected === undefined) return null;
+		return typeof selected.activeSessionId === "string" ? selected.activeSessionId : selected.id as string;
+	} catch {
+		return null;
+	}
+}
+
+function readInputProfile(runId: string): string | undefined {
+	const shipDir = path.resolve(stateDir(), "ship");
+	const inputFile = path.resolve(shipDir, `${runId}.input.json`);
+	if (path.dirname(inputFile) !== shipDir) return undefined;
+	try {
+		const parsed: unknown = JSON.parse(fs.readFileSync(inputFile, "utf8"));
+		if (parsed === null || typeof parsed !== "object") return undefined;
+		const profile = (parsed as { profile?: unknown }).profile;
+		return typeof profile === "string" ? profile : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/** Resolve task ownership through the durable task -> run -> ship-input join. */
+function projectOwners(): ReadonlyMap<string, ProjectProfile | undefined> {
+	let profiles: ProjectProfile[];
+	try {
+		profiles = loadProfiles();
+	} catch {
+		profiles = [];
+	}
+	const byId = new Map(profiles.map((profile) => [profile.id, profile]));
+	const owners = new Map<string, ProjectProfile | undefined>();
+	let names: string[];
+	try {
+		names = fs.readdirSync(stateDir());
+	} catch {
+		return owners;
+	}
+	for (const name of names) {
+		if (!name.endsWith(".meta")) continue;
+		const taskId = name.slice(0, -".meta".length);
+		if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(taskId)) continue;
+		const runId = readMeta(taskId)?.run_id;
+		const profileId = typeof runId === "string" ? readInputProfile(runId) : undefined;
+		owners.set(taskId, profileId === undefined ? undefined : byId.get(profileId));
+	}
+	return owners;
+}
+
+function productionDependencies(now: number): WakeDrainDependencies {
+	let activeSessionId: string | null = null;
+	return {
+		now: () => now,
+		hasLiveSession: async () => {
+			activeSessionId = await findPrimeSession();
+			return activeSessionId !== null;
+		},
+		dueWakes: readDueWakes,
+		owners: projectOwners(),
+		applyProjectTierPolicy: projectTierPolicy,
+		markInFlight: recordInFlight,
+		suppressWakes: recordSuppressed,
+		send: async (content, options) => {
+			if (activeSessionId === null) return { ok: false };
+			try {
+				if (!options.triggerTurn) {
+					await requestDaemon({
+						type: "append_custom_message",
+						activeSessionId,
+						message: { customType: "deck.wake.v1", content, display: true },
+					});
+					return { ok: true };
+				}
+				// This is the daemon form of sendMessage(..., { deliverAs:
+				// "followUp", triggerTurn: true }) used by questions.ts.
+				await requestDaemon({
+					type: "prompt",
+					activeSessionId,
+					message: content,
+					streamingBehavior: "followUp",
+					queueIfBusy: true,
+					expandPromptTemplates: false,
+					customMessage: { customType: "deck.wake.v1", content, display: true },
+				});
+				return { ok: true };
+			} catch {
+				return { ok: false };
+			}
+		},
+	};
+}
+
+async function drainSweep(): Promise<DrainResult> {
+	const now = Date.now();
+	// Status and declarative self-wakes must reach the outbox before this cycle
+	// snapshots due entries. Reversing these calls adds a full interval of latency.
+	reconcile();
+	produceDueSelfWakes(now);
+	const result = await drainOnce(productionDependencies(now));
+	recordSweep(now);
+	return result;
+}
+
+type DrainSignal = "SIGHUP" | "SIGINT" | "SIGQUIT" | "SIGTERM";
+const DRAIN_SIGNAL_EXIT_CODE: Record<DrainSignal, number> = {
+	SIGHUP: 129,
+	SIGINT: 130,
+	SIGQUIT: 131,
+	SIGTERM: 143,
+};
+
+type WakeDrainLockRecord = {
+	owner: string;
+	pid: number;
+	renewedAt: number;
+	released?: boolean;
+};
+
+export type WakeDrainClaim = {
+	renew(now?: number): boolean;
+	release(now?: number): void;
+};
+
+function wakeDrainLockDir(): string {
+	return path.join(stateDir(), ".wake-drain.lock");
+}
+
+function wakeDrainOwnerFile(): string {
+	return path.join(wakeDrainLockDir(), "owner");
+}
+
+function readWakeDrainLock(): WakeDrainLockRecord | null {
+	try {
+		const parsed: unknown = JSON.parse(fs.readFileSync(wakeDrainOwnerFile(), "utf8"));
+		if (parsed === null || typeof parsed !== "object") return null;
+		const row = parsed as Record<string, unknown>;
+		if (
+			typeof row.owner !== "string" ||
+			typeof row.pid !== "number" ||
+			!Number.isInteger(row.pid) ||
+			typeof row.renewedAt !== "number" ||
+			!Number.isFinite(row.renewedAt)
+		) {
+			return null;
+		}
+		return {
+			owner: row.owner,
+			pid: row.pid,
+			renewedAt: row.renewedAt,
+			...(row.released === true ? { released: true } : {}),
+		};
+	} catch {
+		return null;
+	}
+}
+
+function pidAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === "EPERM";
+	}
+}
+
+/**
+ * Replace only the record owned by this claimant. The owner-specific temp file
+ * moves with the old directory if a lease reclaimer wins, so an evicted holder
+ * cannot overwrite the next claimant's record through the stable lock path.
+ */
+function replaceOwnedWakeDrainLock(owner: string, next: WakeDrainLockRecord): boolean {
+	const current = readWakeDrainLock();
+	if (current?.owner !== owner) return false;
+	const tmp = path.join(wakeDrainLockDir(), `.owner.${owner}.tmp`);
+	try {
+		fs.writeFileSync(tmp, `${JSON.stringify(next)}\n`, { mode: 0o600 });
+		if (readWakeDrainLock()?.owner !== owner) return false;
+		fs.renameSync(tmp, wakeDrainOwnerFile());
+		return true;
+	} catch {
+		return false;
+	} finally {
+		try {
+			fs.unlinkSync(tmp);
+		} catch {
+			// rename consumed it, or lease reclamation moved the directory.
+		}
+	}
+}
+
+function buildWakeDrainClaim(record: WakeDrainLockRecord): WakeDrainClaim {
+	let active = true;
+	return {
+		renew: (now = Date.now()) => {
+			if (!active) return false;
+			const renewed = replaceOwnedWakeDrainLock(record.owner, { ...record, renewedAt: now });
+			if (renewed) record.renewedAt = now;
+			else active = false;
+			return renewed;
+		},
+		release: (now = Date.now()) => {
+			if (!active) return;
+			// Marking released avoids a check-then-rename race where an expired
+			// old holder could accidentally remove a replacement claimant.
+			replaceOwnedWakeDrainLock(record.owner, { ...record, renewedAt: now, released: true });
+			active = false;
+		},
+	};
+}
+
+/**
+ * Claim the one drainer for this Deck home.
+ *
+ * mkdir+rename is the established worktree-lock claim pattern. The added lease
+ * makes proof of recent work authoritative: an expired record is reclaimable
+ * even when its pid was recycled into an unrelated live process.
+ */
+export function claimWakeDrain(now = Date.now(), pid = process.pid): WakeDrainClaim | null {
+	const file = wakeDrainLockDir();
+	const owner = `wake-drain-${pid}-${randomUUID()}`;
+	fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+	for (let attempt = 0; attempt < 8; attempt += 1) {
+		const tmp = `${file}.tmp-${owner}-${attempt}`;
+		const record: WakeDrainLockRecord = { owner, pid, renewedAt: now };
+		try {
+			fs.mkdirSync(tmp, { mode: 0o700 });
+			fs.writeFileSync(path.join(tmp, "owner"), `${JSON.stringify(record)}\n`, { mode: 0o600 });
+			fs.renameSync(tmp, file);
+			return buildWakeDrainClaim(record);
+		} catch (error) {
+			try {
+				fs.rmSync(tmp, { recursive: true, force: true });
+			} catch {
+				// The claim rename consumed it.
+			}
+			const current = readWakeDrainLock();
+			const leaseFresh =
+				current !== null &&
+				current.released !== true &&
+				now - current.renewedAt <= WAKE_DRAIN_LEASE_MS;
+			if (leaseFresh && pidAlive(current.pid)) return null;
+			const stale = `${file}.stale-${pid}-${randomUUID()}`;
+			try {
+				fs.renameSync(file, stale);
+				fs.rmSync(stale, { recursive: true, force: true });
+			} catch {
+				if (attempt === 7) throw error;
+			}
+		}
+	}
+	throw new Error(`could not acquire wake drain lock ${wakeDrainOwnerFile()}`);
+}
+
+/** Run one launchd/systemd sweep, or remain resident for an explicit local watcher. */
+export async function runWakeDrain(options: { once?: boolean; intervalMs?: number } = {}): Promise<void> {
+	const intervalMs = options.intervalMs ?? WAKE_DRAIN_INTERVAL_MS;
+	if (!Number.isFinite(intervalMs) || intervalMs <= 0) throw new Error("wake drain interval must be positive");
+	const claim = claimWakeDrain();
+	if (claim === null) {
+		process.stdout.write(`wake-drain: another live drainer owns ${deckV2Home()}; skipping this sweep\n`);
+		return;
+	}
+
+	let released = false;
+	let renewTimer: ReturnType<typeof setInterval> | undefined;
+	const releaseOnce = (): void => {
+		if (released) return;
+		released = true;
+		clearInterval(renewTimer);
+		claim.release();
+	};
+	renewTimer = setInterval(() => {
+		if (claim.renew()) return;
+		process.stderr.write("wake-drain: exclusive lease was lost; stopping\n");
+		releaseOnce();
+		process.exit(1);
+	}, WAKE_DRAIN_INTERVAL_MS);
+	const signalHandlers = (Object.keys(DRAIN_SIGNAL_EXIT_CODE) as DrainSignal[]).map((signal) => {
+		const handler = (): void => {
+			releaseOnce();
+			process.exit(DRAIN_SIGNAL_EXIT_CODE[signal]);
+		};
+		process.once(signal, handler);
+		return { signal, handler };
+	});
+
+	try {
+		for (;;) {
+			if (!claim.renew()) throw new Error("wake-drain lost its exclusive lease before sweeping");
+			await drainSweep();
+			if (!claim.renew()) throw new Error("wake-drain lost its exclusive lease after sweeping");
+			if (options.once === true) return;
+			await Bun.sleep(intervalMs);
+		}
+	} finally {
+		for (const { signal, handler } of signalHandlers) process.off(signal, handler);
+		releaseOnce();
+	}
+}

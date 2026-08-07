@@ -17,6 +17,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from typing import Any
 
 __all__ = [
@@ -30,6 +31,9 @@ __all__ = [
     "runs",
     "why",
     "wake",
+    "wake_me",
+    "wake_ack",
+    "parked_ok",
     "fleet",
     "procs",
     "effort_status",
@@ -244,6 +248,70 @@ def wake() -> Any:
     return _run(["wake", "--json"])
 
 
+def wake_me(
+    when: str,
+    note: str,
+    tier: str = "T0",
+    *,
+    task: str | None = None,
+) -> dict:
+    """Durably register a self-wake and return immediately.
+
+    `when` is a duration such as ``"30m"`` or a condition such as
+    ``"run:<id>:terminal"``. A task-specific registration covers that effort
+    for :func:`parked_ok`; a duration without ``task`` is only a global nudge.
+    """
+    args = [
+        "wake-register",
+        "--when",
+        when,
+        "--note",
+        note,
+        "--tier",
+        tier,
+        "--json",
+    ]
+    if task is not None:
+        args += ["--task", task]
+    return _run(args)
+
+
+def wake_ack(ids: str | list[str]) -> dict:
+    """Ack delivered wake ids after their work is durably recorded."""
+    if isinstance(ids, str):
+        wake_ids = [ids]
+    elif isinstance(ids, list) and all(isinstance(id, str) for id in ids):
+        wake_ids = ids
+    else:
+        raise TypeError("wake_ack expects one wake id or a list of wake ids")
+    if any(id == "" or "," in id for id in wake_ids):
+        raise ValueError("wake ids must be non-empty and must not contain commas")
+    return _run(["wake-ack", "--ids", ",".join(wake_ids), "--json"])
+
+
+def parked_ok() -> dict:
+    """Return uncovered efforts and terminal-only efforts without a stall guard."""
+    verdict = _run(["wake-parked-ok", "--json"])
+    if (
+        not isinstance(verdict, dict)
+        or not isinstance(verdict.get("uncovered"), list)
+        or not isinstance(verdict.get("noStallGuard"), list)
+    ):
+        raise DeckError("deck-v2 wake-parked-ok returned a malformed verdict")
+    no_stall_guard = verdict["noStallGuard"]
+    if no_stall_guard:
+        task_ids = ", ".join(
+            str(gap.get("taskId", "?")) if isinstance(gap, dict) else "?"
+            for gap in no_stall_guard
+        )
+        print(
+            "Deck warning: terminal-only wake coverage has no stall guard for "
+            f"{task_ids}",
+            file=sys.stderr,
+        )
+    return verdict
+
+
 def fleet() -> Any:
     """The current fleet frame: what the factory is actually running."""
     return _run(["fleet", "--json"])
@@ -278,6 +346,9 @@ def help() -> str:  # noqa: A001 - deliberately shadows builtins in the agent na
   deck.runs([run_id])                 durable Smithers run state (read-only)
   deck.why(run_id)                    why a run is where it is
   deck.wake()                         one reconcile pass
+  deck.wake_me("30m", note, task=id)  durably schedule a self-wake; never sleeps
+  deck.wake_ack(id_or_ids)            ack only after durably recording wake work
+  deck.parked_ok()                    uncovered efforts and terminal-only coverage
   deck.fleet() / deck.procs()         what the factory is running now
   deck.effort_status(task_id)         one effort's events
   deck.send(task_id, message)         queue a message for its next run

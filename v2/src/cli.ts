@@ -28,7 +28,9 @@ import { enqueue, pending } from "./queue";
 import { startShip } from "./ship";
 import { peekSession } from "./spawn";
 import { evaluateTeardown, formatVerdict } from "./teardown";
-import { detectStale, foldBatched, reconcile } from "./wake";
+import { ackWakes, detectStale, foldBatched, reconcile } from "./wake";
+import { parkedVerdict, registerSelfWake } from "./self-wake";
+import { runWakeDrain } from "./wake-runner";
 import { SMITHERS_SPEC } from "./smithers";
 import { smithersWorkspaceCwd, smithersWorkspaceRoot } from "./workspace";
 import { sessionDirForTask, tailSession } from "./tail";
@@ -76,6 +78,11 @@ const USAGE = `deck-v2 — fleet primitives
                                    human-only through the interactive /questions
   fleet [--json] [--statusline] [--project]   the fleet frame; --project mirrors it into herdr
   wake [--json]                    one reconcile pass (T0 now, T1 folded, T2 silent)
+  wake-register --when <condition> --note <text> --tier T0|T1|T2 [--task <id>] [--json]
+                                   durably register an orchestrator self-wake
+  wake-ack --ids <a,b,c> [--json]  consumer ack after durably recording wakes
+  wake-parked-ok [--json]          verify every live effort has a wake condition
+  wake-drain [--once]              drain due wakes; default stays resident
   stale                            runs that vanished without a terminal status
   teardown <id> [--pr N]           evaluate the teardown guard (never destructive)
   reap [--apply]                   remove worktrees the teardown guard clears; dry run by default
@@ -486,6 +493,46 @@ export async function runCli(argv: string[]): Promise<number> {
 				process.stdout.write(
 					`(${result.silent.length} silent, ${result.rescanned.length} rescanned, ${result.malformed.length} malformed)\n`,
 				);
+				return 0;
+			}
+
+			case "wake-drain": {
+				if (args.flags.once !== undefined && args.flags.once !== true) {
+					throw new Error("--once does not take a value");
+				}
+				await runWakeDrain({ once: args.flags.once === true });
+				return 0;
+			}
+
+			case "wake-register": {
+				const taskId = str(args.flags, "task");
+				const registration = registerSelfWake({
+					when: need(args.flags, "when"),
+					note: need(args.flags, "note"),
+					tier: need(args.flags, "tier") as "T0" | "T1" | "T2",
+					...(taskId === undefined ? {} : { taskId }),
+				});
+				if (args.flags.json === true) process.stdout.write(`${JSON.stringify(registration, null, 2)}\n`);
+				else process.stdout.write(`registered ${registration.id}: ${registration.when}\n`);
+				return 0;
+			}
+
+			case "wake-ack": {
+				const ids = [...new Set(need(args.flags, "ids").split(",").map((id) => id.trim()).filter((id) => id !== ""))];
+				ackWakes(ids);
+				if (args.flags.json === true) process.stdout.write(`${JSON.stringify({ acked: ids }, null, 2)}\n`);
+				else process.stdout.write(`acknowledged ${ids.length} wake(s)\n`);
+				return 0;
+			}
+
+			case "wake-parked-ok": {
+				const verdict = parkedVerdict();
+				if (args.flags.json === true) process.stdout.write(`${JSON.stringify(verdict, null, 2)}\n`);
+				else if (verdict.uncovered.length > 0) {
+					process.stdout.write(`uncovered effort(s): ${verdict.uncovered.map((effort) => effort.taskId).join(", ")}\n`);
+				} else if (verdict.noStallGuard.length > 0) {
+					process.stdout.write(`all efforts covered; no stall guard: ${verdict.noStallGuard.map((effort) => effort.taskId).join(", ")}\n`);
+				} else process.stdout.write("all non-terminal efforts have a wake condition and stall guard\n");
 				return 0;
 			}
 

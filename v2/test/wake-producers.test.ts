@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { pendingWakes } from "../src/wake";
 
 let root: string;
 beforeEach(() => {
@@ -18,14 +19,14 @@ describe("wake producers", () => {
 	test("publishes every required condition to the durable outbox", async () => {
 		const { produceWakeConditions } = await import("../src/wake-producers");
 		produceWakeConditions({ taskId: "ticket", maxAdversarial: true, reviewerSilent: true, mainRed: true, migrationBlocked: true, brokerNoQuota: true });
-		const queue = fs.readFileSync(path.join(root, "state", ".wake-queue.jsonl"), "utf8");
+		const queue = JSON.stringify(pendingWakes());
 		for (const key of ["max-adversarial", "reviewer-silent", "main-red", "migration-gate", "broker-no-quota"]) expect(queue).toContain(key);
 	});
 
 	test("publishes a needs-decision condition", async () => {
 		const { produceWakeConditions } = await import("../src/wake-producers");
 		produceWakeConditions({ taskId: "ticket", needsDecision: "Choose the safe path" });
-		const queue = fs.readFileSync(path.join(root, "state", ".wake-queue.jsonl"), "utf8");
+		const queue = JSON.stringify(pendingWakes());
 		expect(queue).toContain("needs-decision");
 	});
 
@@ -36,7 +37,7 @@ describe("wake producers", () => {
 		expect(wakeProducerIntents(workspace)).toEqual([
 			expect.objectContaining({ snapshot: { taskId: "fixture-call-site", needsDecision: "fixture refusal" } }),
 		]);
-		expect(fs.existsSync(path.join(root, "state", ".wake-queue.jsonl"))).toBe(false);
+		expect(pendingWakes()).toHaveLength(0);
 		expect(fs.existsSync(path.join(workspace, "wake-producers.json"))).toBe(false);
 	});
 
@@ -44,7 +45,7 @@ describe("wake producers", () => {
 		const { publishWakeProducer } = await import("../src/wake-producers");
 		const workspace = path.join(root, "state", "smithers");
 		expect(() => publishWakeProducer({ dryRun: false, workspace, snapshot: { taskId: "fixture-call-site", ciFail: true } })).toThrow("refusing real wake publication from a test runner");
-		expect(fs.existsSync(path.join(root, "state", ".wake-queue.jsonl"))).toBe(false);
+		expect(pendingWakes()).toHaveLength(0);
 		expect(fs.existsSync(path.join(workspace, "wake-producers.json"))).toBe(false);
 	});
 
@@ -61,11 +62,7 @@ describe("wake producers", () => {
 			if (savedNodeEnv === undefined) delete process.env.NODE_ENV;
 			else process.env.NODE_ENV = savedNodeEnv;
 		}
-		const events = fs
-			.readFileSync(path.join(root, "state", ".wake-queue.jsonl"), "utf8")
-			.trim()
-			.split("\n")
-			.map((line) => JSON.parse(line) as { verb?: string });
+		const events = pendingWakes();
 		expect(events.filter((event) => event.verb === "ci-fail")).toHaveLength(2);
 	});
 

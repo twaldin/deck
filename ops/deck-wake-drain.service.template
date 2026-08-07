@@ -1,0 +1,9 @@
+# Replace @BUN_BIN@, @DECK_ROOT@, and @DECK_HOME@, save this file and the timer in ~/.config/systemd/user/, then enable with exactly:
+# systemctl --user enable --now deck-wake-drain.timer
+[Unit]
+Description=Drain Deck orchestrator wakes
+
+[Service]
+Type=oneshot
+Environment="DECK_V2_HOME=@DECK_HOME@"
+ExecStart="@BUN_BIN@" "@DECK_ROOT@/v2/bin/deck-v2" wake-drain --once

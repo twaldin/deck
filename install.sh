@@ -540,6 +540,60 @@ PY
 
 chmod +x "$REPO/update.sh" 2>/dev/null || true
 
+# Activate the wake drainer. Without this the whole wake system is dead code:
+# conditions are recorded and nothing ever evaluates them, which is exactly the
+# failure that left a merged PR unverified for a day. Both units run
+# `wake-drain --once` on a timer; the exclusive Deck-home lease, not the
+# scheduler, is what prevents overlap.
+install_wake_drainer() {
+  local bun_bin deck_home log_dir
+  bun_bin="$(command -v bun)" || { printf 'bun not found; skipping wake drainer activation\n'; return 0; }
+  deck_home="$HOME/.deck"
+  log_dir="$deck_home/logs"
+  mkdir -p "$log_dir"
+
+  render() {
+    sed -e "s#@BUN_BIN@#$bun_bin#g" -e "s#@DECK_ROOT@#$REPO#g" \
+        -e "s#@DECK_HOME@#$deck_home#g" -e "s#@LOG_DIR@#$log_dir#g" "$1"
+  }
+
+  case "$(uname -s)" in
+    Darwin)
+      local plist="$HOME/Library/LaunchAgents/ai.deck.wake-drain.plist"
+      mkdir -p "$(dirname "$plist")"
+      render "$REPO/ops/deck-wake-drain.plist.template" > "$plist"
+      plutil -lint "$plist" >/dev/null || fail "rendered wake-drain plist is malformed"
+      # Reload rather than bootstrap: a stale job from a previous install would
+      # otherwise keep running the old path silently.
+      launchctl bootout "gui/$(id -u)/ai.deck.wake-drain" 2>/dev/null || true
+      launchctl bootstrap "gui/$(id -u)" "$plist" ||
+        fail "could not load the wake drainer; the orchestrator would never be woken"
+      printf 'wake drainer loaded (launchd, every 30s)\n'
+      ;;
+    Linux)
+      local unit_dir="$HOME/.config/systemd/user"
+      mkdir -p "$unit_dir"
+      render "$REPO/ops/deck-wake-drain.service.template" > "$unit_dir/deck-wake-drain.service"
+      render "$REPO/ops/deck-wake-drain.timer.template" > "$unit_dir/deck-wake-drain.timer"
+      if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+        systemctl --user daemon-reload
+        systemctl --user enable --now deck-wake-drain.timer ||
+          fail "could not enable the wake drainer timer"
+        printf 'wake drainer enabled (systemd user timer, every 30s)\n'
+      else
+        # A headless box with no user session bus. Say so loudly: a silent skip
+        # here reads exactly like a working install with a quiet factory.
+        printf 'WARNING: systemd user instance unavailable; units written to %s but NOT enabled.\n' "$unit_dir"
+        printf 'WARNING: run `systemctl --user enable --now deck-wake-drain.timer` once a session bus exists.\n'
+      fi
+      ;;
+    *)
+      printf 'unknown platform; wake drainer units not installed\n'
+      ;;
+  esac
+}
+install_wake_drainer
+
 
 cat <<EOF
 

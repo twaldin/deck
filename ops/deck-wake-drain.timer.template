@@ -1,0 +1,14 @@
+# Replace placeholders in the paired service, save both files in ~/.config/systemd/user/, then enable with exactly:
+# systemctl --user enable --now deck-wake-drain.timer
+[Unit]
+Description=Schedule Deck orchestrator wake drains
+
+[Timer]
+OnBootSec=0
+OnUnitActiveSec=30s
+AccuracySec=1s
+Persistent=true
+Unit=deck-wake-drain.service
+
+[Install]
+WantedBy=timers.target

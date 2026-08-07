@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+Replace @BUN_BIN@, @DECK_ROOT@, @DECK_HOME@, and @LOG_DIR@, save as
+~/Library/LaunchAgents/ai.deck.wake-drain.plist, then load it with exactly:
+launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/ai.deck.wake-drain.plist"
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>ai.deck.wake-drain</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>@BUN_BIN@</string>
+		<string>@DECK_ROOT@/v2/bin/deck-v2</string>
+		<string>wake-drain</string>
+		<string>--once</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>DECK_V2_HOME</key>
+		<string>@DECK_HOME@</string>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<!-- launchd does not overlap one loaded job. The exclusive Deck-home lock remains authoritative for manual or duplicate invocations. -->
+	<key>StartInterval</key>
+	<integer>30</integer>
+	<key>ProcessType</key>
+	<string>Background</string>
+	<key>StandardOutPath</key>
+	<string>@LOG_DIR@/wake-drain.log</string>
+	<key>StandardErrorPath</key>
+	<string>@LOG_DIR@/wake-drain.log</string>
+</dict>
+</plist>

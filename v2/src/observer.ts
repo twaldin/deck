@@ -29,10 +29,13 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { appendStatus } from "./events";
-import type { StatusVerb } from "./status";
 import { stateDir } from "./home";
-import { SMITHERS_SPEC } from "./smithers";
 import { readMeta } from "./meta";
+import { findProfile } from "./projects";
+import type { ProjectProfile } from "./projects";
+import { SMITHERS_SPEC } from "./smithers";
+import type { StatusVerb } from "./status";
+import type { WakeItem } from "./wake";
 import { releaseWorktree } from "./worktree-lock";
 
 /** A run as the read-only CLI reports it. */
@@ -79,6 +82,8 @@ export type EmittedEvent = {
 	verb: StatusVerb;
 	note: string;
 	key: string;
+	/** Delivery classification written into the status grammar's key. */
+	statusKey?: "terminal" | "milestone";
 };
 
 /**
@@ -116,13 +121,15 @@ const RUN_TRANSITIONS: Record<string, { verb: StatusVerb; note: string } | undef
 const TERMINAL = new Set(["succeeded", "failed", "cancelled"]);
 
 /**
- * Pipeline milestones are intentionally allow-listed. A healthy node finishing
- * is not, by itself, a wake: only these transitions can change what the
- * orchestrator must do next.
+ * Pipeline milestones are intentionally allow-listed recorded state. A healthy
+ * node finishing is not news by itself, and the `terminal` marker identifies the
+ * smaller subset that delivery policy may wake on. Everything else is stamped
+ * `milestone` so informational churn stays silent structurally, not by note text.
  */
 export const PIPELINE_MILESTONES: Record<string, {
 	transition: string;
 	entering?: boolean;
+	terminal?: boolean;
 	note: (node: ObservedNode) => string;
 }> = {
 	"push-pr": {
@@ -135,6 +142,7 @@ export const PIPELINE_MILESTONES: Record<string, {
 	},
 	"landing-poll": {
 		transition: "landed",
+		terminal: true,
 		note: (node) => `PR landed${formatMilestoneValue(node.output, ["sha", "landedSha"])}`,
 	},
 
@@ -148,6 +156,31 @@ export const PIPELINE_MILESTONES: Record<string, {
 		note: () => "fallout checks complete",
 	},
 };
+
+/**
+ * Apply the owning project's terminal-delivery policy after wake classification.
+ *
+ * The owner map is resolved by the runner and keyed by task id. Keeping I/O out
+ * of this function makes unknown ownership an explicit fail-quiet case rather
+ * than an accidental config or filesystem dependency.
+ */
+export function applyProjectTierPolicy(
+	items: WakeItem[],
+	owners: ReadonlyMap<string, ProjectProfile | undefined>,
+): WakeItem[] {
+	return items.map((item) => {
+		const { verb, key } = item.event;
+		let tier = item.tier;
+		if (verb === "failed" || verb === "blocked" || verb === "needs-decision") {
+			tier = "T0";
+		} else if (key === "milestone") {
+			tier = "T2";
+		} else if (key === "terminal") {
+			tier = owners.get(item.taskId)?.wakeOnTerminal === true ? "T1" : "T2";
+		}
+		return tier === item.tier ? item : { ...item, tier };
+	});
+}
 
 function formatMilestoneValue(output: unknown, fields: string[]): string {
 	if (typeof output !== "object" || output === null) return "";
@@ -272,11 +305,13 @@ export function planEvents(
 		if (seen.has(key)) continue;
 		events.push({
 			taskId,
-			// Milestones are T1 fold events. Failed nodes remain T0 via `failed`.
 			verb: node.status === "failed" ? "failed" : "resolved",
 			note: node.status === "failed"
 				? `step ${node.nodeId} failed and is being retried`
 				: milestone!.note(node),
+			...(node.status === "failed"
+				? {}
+				: { statusKey: milestone!.terminal === true ? "terminal" as const : "milestone" as const }),
 			key,
 		});
 	}
@@ -305,6 +340,7 @@ export function planEvents(
 				verb: transition.verb,
 				note,
 				key,
+				...(TERMINAL.has(run.status) ? { statusKey: "terminal" as const } : {}),
 			});
 		}
 	}
@@ -312,15 +348,6 @@ export function planEvents(
 	return events;
 }
 
-/**
- * Commit planned events: append each status line, then record its key.
- *
- * Order matters and is the deliberate choice of the safer failure. Appending
- * before recording means a crash between the two re-announces one event on
- * restart; recording first would mean a crash loses it forever. A duplicate
- * `done:` costs the orchestrator one wasted look. A lost `failed:` means nobody
- * ever hears that the work broke.
- */
 function approvalTransition(step: string | null): { verb: StatusVerb; note: string } {
 	const gate = (step ?? "").toLowerCase();
 	if (gate.includes("review-escalation")) {
@@ -335,11 +362,35 @@ function approvalTransition(step: string | null): { verb: StatusVerb; note: stri
 	};
 }
 
+export function wakeOnTerminalForRun(runId: string): boolean {
+	const shipDir = path.resolve(stateDir(), "ship");
+	const inputPath = path.resolve(shipDir, `${runId}.input.json`);
+	if (inputPath === shipDir || !inputPath.startsWith(`${shipDir}${path.sep}`)) return false;
+	let input: { profile?: unknown };
+	try {
+		input = JSON.parse(fs.readFileSync(inputPath, "utf8")) as { profile?: unknown };
+	} catch {
+		// A run without deck's durable ship input cannot be tied to a project
+		// safely. Guessing from a worktree path risks waking the wrong fleet.
+		return false;
+	}
+	return typeof input.profile === "string" && findProfile(input.profile)?.wakeOnTerminal === true;
+}
+
+/**
+ * Commit planned events: append each status line, then record its key.
+ *
+ * Order matters and is the deliberate choice of the safer failure. Appending
+ * before recording means a crash between the two re-announces one event on
+ * restart; recording first would mean a crash loses it forever. A duplicate
+ * `done:` costs the orchestrator one wasted look. A lost `failed:` means nobody
+ * ever hears that the work broke.
+ */
 export function commitEvents(taskId: string, events: EmittedEvent[], ledger: ObserverLedger): void {
 	if (events.length === 0) return;
 	const emitted = [...ledger.emitted];
 	for (const event of events) {
-		appendStatus(taskId, event.verb, event.note);
+		appendStatus(taskId, event.verb, event.note, event.statusKey === undefined ? {} : { key: event.statusKey });
 		emitted.push(event.key);
 		writeLedger(taskId, { emitted });
 	}

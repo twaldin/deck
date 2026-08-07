@@ -71,6 +71,8 @@ export type ProjectProfile = {
 	stamp: boolean;
 	/** Product repos may run only in the canonical home Smithers workspace. */
 	production?: boolean;
+	/** Deliver batchable terminal wakes. Omission keeps terminal state silent. */
+	wakeOnTerminal?: boolean;
 	/** Absolute paths a brief must carry (mandatory reading). */
 	knowledge: string[];
 	/** Project-specific doctrine prose, inlined verbatim into briefs. */
@@ -152,6 +154,9 @@ export function validateProfiles(parsed: unknown, source: string): ProjectProfil
 		}
 		if (p.production !== undefined && typeof p.production !== "boolean") {
 			throw new Error(`${where} (${p.id}): production must be a boolean`);
+		}
+		if (p.wakeOnTerminal !== undefined && typeof p.wakeOnTerminal !== "boolean") {
+			throw new Error(`${where} (${p.id}): wakeOnTerminal must be a boolean`);
 		}
 		const knowledge = p.knowledge ?? [];
 		if (!Array.isArray(knowledge) || knowledge.some((k) => typeof k !== "string")) {
@@ -272,6 +277,7 @@ export function validateProfiles(parsed: unknown, source: string): ProjectProfil
 			stamp: p.stamp,
 			engine: (p.engine ?? "prime") as SeatEngine,
 			...(p.production === undefined ? {} : { production: p.production }),
+			...(p.wakeOnTerminal === undefined ? {} : { wakeOnTerminal: p.wakeOnTerminal }),
 			knowledge: knowledge as string[],
 			...(p.doctrine === undefined ? {} : { doctrine: p.doctrine }),
 			...(models === undefined ? {} : { models }),

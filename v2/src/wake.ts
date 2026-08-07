@@ -20,6 +20,7 @@
  * event is LATE, never LOST.
  */
 import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {
@@ -80,31 +81,165 @@ const STALE_SKIP_VERBS = new Set<StatusVerb>([
 
 /** Durable, edge-triggered conditions that do not have a .status producer. */
 export type WakeCondition = {
-	key: "max-adversarial" | "reviewer-silent" | "main-red" | "migration-gate" | "broker-no-quota" | "needs-decision" | "ci-fail" | "actionable-comment" | "decision-ask";
+	key:
+		| "max-adversarial"
+		| "reviewer-silent"
+		| "main-red"
+		| "migration-gate"
+		| "broker-no-quota"
+		| "needs-decision"
+		| "ci-fail"
+		| "actionable-comment"
+		| "decision-ask"
+		| "agent-requested"
+		| "watcher-stale"
+		| "run-terminal";
 	taskId: string;
 	note: string;
-	/** T0 is used for failures and gates; reviewer silence is batched. */
+	/** T0 is used for failures and gates; reviewer silence and terminal runs are batched. */
 	tier?: WakeTier;
 };
+
+type BaselineLockOwner = { owner: string; pid: number };
+
+const BASELINE_LOCK_WAIT = new Int32Array(new SharedArrayBuffer(4));
+const BASELINE_LOCK_TIMEOUT_MS = 30_000;
+
+function readBaselineLock(file: string): BaselineLockOwner | null {
+	try {
+		const row = JSON.parse(fs.readFileSync(path.join(file, "owner"), "utf8")) as { owner?: unknown; pid?: unknown };
+		return typeof row.owner === "string" && typeof row.pid === "number" ? { owner: row.owner, pid: row.pid } : null;
+	} catch {
+		return null;
+	}
+}
+
+function pidAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * The per-wake store removed the queue's shared read-modify-write, but the
+ * baseline is still one shared mutable file. Its lock is claimed by atomically
+ * renaming a prepared directory, and a dead owner's pid makes a crash stale
+ * rather than turning edge detection into a permanent fleet-wide wedge.
+ */
+function withBaselineLock<T>(operation: () => T): T {
+	const file = `${wakeFiles().baseline}.lock`;
+	const owner = `wake-baseline:${process.pid}:${randomUUID()}`;
+	const deadline = performance.now() + BASELINE_LOCK_TIMEOUT_MS;
+	for (;;) {
+		const tmp = `${file}.tmp-${process.pid}-${randomUUID()}`;
+		try {
+			fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+			fs.mkdirSync(tmp, { mode: 0o700 });
+			fs.writeFileSync(path.join(tmp, "owner"), `${JSON.stringify({ owner, pid: process.pid })}\n`, { mode: 0o600 });
+			fs.renameSync(tmp, file);
+			break;
+		} catch (error) {
+			try {
+				fs.rmSync(tmp, { recursive: true, force: true });
+			} catch {
+				// The atomic rename consumed it.
+			}
+			const current = readBaselineLock(file);
+			if (current === null) {
+				if (!fs.existsSync(file)) continue;
+				if (performance.now() >= deadline) throw new Error(`cannot inspect wake baseline lock ${file}: ${String(error)}`);
+				Atomics.wait(BASELINE_LOCK_WAIT, 0, 0, 1);
+				continue;
+			}
+			if (performance.now() >= deadline) throw new Error(`timed out waiting for wake baseline lock held by ${current.owner}`);
+			if (!pidAlive(current.pid)) {
+				const stale = `${file}.stale-${process.pid}-${randomUUID()}`;
+				try {
+					if (readBaselineLock(file)?.owner === current.owner) {
+						fs.renameSync(file, stale);
+						fs.rmSync(stale, { recursive: true, force: true });
+					}
+				} catch {
+					// Another waiter reclaimed it first.
+				}
+				continue;
+			}
+			Atomics.wait(BASELINE_LOCK_WAIT, 0, 0, 5);
+		}
+	}
+
+	try {
+		return operation();
+	} finally {
+		if (readBaselineLock(file)?.owner === owner) {
+			const released = `${file}.release-${process.pid}-${randomUUID()}`;
+			try {
+				fs.renameSync(file, released);
+				fs.rmSync(released, { recursive: true, force: true });
+			} catch {
+				// The lock was already reclaimed after an owner crash.
+			}
+		}
+	}
+}
 
 /** Record external workflow conditions in the same durable outbox as status events. */
 export function enqueueWakeConditions(conditions: WakeCondition[]): void {
 	const items: WakeItem[] = conditions.map((condition) => ({
 		taskId: condition.taskId,
-		tier: condition.tier ?? (condition.key === "reviewer-silent" ? "T1" : "T0"),
+		tier: condition.tier ?? (condition.key === "reviewer-silent" || condition.key === "run-terminal" ? "T1" : "T0"),
 		event: { verb: condition.key, key: condition.key, note: condition.note, raw: `${condition.key}:${condition.note}` },
 	}));
 	if (items.length === 0) return;
 	// Conditions use the same baseline, so a persistent gate creates one wake.
-	const baseline = loadBaseline();
-	const fresh = items.filter((item) => {
-		const previous = baseline[`${item.taskId}:${item.event.key}`];
-		if (previous?.lastRaw === item.event.raw) return false;
-		baseline[`${item.taskId}:${item.event.key}`] = { lastTier: item.tier, lastRaw: item.event.raw, count: (previous?.count ?? 0) + 1 };
-		return true;
+	// The lock spans the whole read-modify-write; locking only the write lets
+	// concurrent clear/enqueue cycles restore each other's stale snapshots.
+	mutateBaseline((baseline) => {
+		const fresh = items.filter((item) => {
+			const previous = baseline[`${item.taskId}:${item.event.key}`];
+			if (previous?.lastRaw === item.event.raw) return false;
+			baseline[`${item.taskId}:${item.event.key}`] = {
+				lastTier: item.tier,
+				lastRaw: item.event.raw,
+				count: (previous?.count ?? 0) + 1,
+			};
+			return true;
+		});
+		// Queue first: a crash may duplicate the edge, but can never record an
+		// edge baseline for a wake that was not durably stored.
+		enqueue(fresh);
 	});
-	saveBaseline(baseline);
-	enqueue(fresh);
+}
+
+/**
+ * Promote a durable one-shot registration without consulting the edge baseline.
+ * The caller's stable registration id makes retry overwrite-free and idempotent;
+ * a conflicting payload under the same id is a data-integrity error, not a wake
+ * to silently coalesce.
+ */
+export function enqueueWakeOnce(id: string, condition: WakeCondition): void {
+	const entry: OutboxEntry = {
+		id: `wake-once-${id}`,
+		taskId: condition.taskId,
+		key: condition.key,
+		tier: condition.tier ?? (condition.key === "reviewer-silent" || condition.key === "run-terminal" ? "T1" : "T0"),
+		raw: `${condition.key}:${condition.note}`,
+		note: condition.note,
+		verb: condition.key,
+	};
+	withOutboxMutationLock(() => {
+		const target = outboxEntryPath(entry.id);
+		if (target === null) throw new Error(`unsafe one-shot wake id ${JSON.stringify(id)}`);
+		const existing = readOutboxEntry(target);
+		if (existing !== null) {
+			if (sameStoredWake(existing, entry)) return;
+			throw new Error(`one-shot wake id ${JSON.stringify(id)} already names a different wake`);
+		}
+		writeOutboxEntry(entry);
+	});
 }
 
 function loadBaseline(): Baseline {
@@ -117,7 +252,7 @@ function loadBaseline(): Baseline {
 	}
 }
 
-function saveBaseline(baseline: Baseline): void {
+function saveBaselineUnlocked(baseline: Baseline): void {
 	const file = wakeFiles().baseline;
 	const tmp = `${file}.${process.pid}.tmp`;
 	fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
@@ -125,11 +260,20 @@ function saveBaseline(baseline: Baseline): void {
 	fs.renameSync(tmp, file);
 }
 
+function mutateBaseline<T>(operation: (baseline: Baseline) => T): T {
+	return withBaselineLock(() => {
+		const baseline = loadBaseline();
+		const result = operation(baseline);
+		saveBaselineUnlocked(baseline);
+		return result;
+	});
+}
+
 /** Clear resolved external conditions so a later recurrence is a new edge. */
 export function clearWakeConditions(taskId: string, keys: WakeCondition["key"][]): void {
-	const baseline = loadBaseline();
-	for (const key of keys) delete baseline[`${taskId}:${key}`];
-	saveBaseline(baseline);
+	mutateBaseline((baseline) => {
+		for (const key of keys) delete baseline[`${taskId}:${key}`];
+	});
 }
 
 /** Tasks deck owns. An fm2-owned task is skipped during the parallel run. */
@@ -160,9 +304,14 @@ export function deckOwnedTasks(): string[] {
  * from durable state either way.
  */
 export function reconcile(taskIds?: string[]): ReconcileResult {
+	const settled = mutateBaseline((baseline) => reconcileLocked(taskIds, baseline));
+	saveCursors(settled.cursors);
+	return settled.result;
+}
+
+function reconcileLocked(taskIds: string[] | undefined, baseline: Baseline): { result: ReconcileResult; cursors: CursorStore } {
 	const ids = taskIds ?? deckOwnedTasks();
 	const cursors = loadCursors();
-	const baseline = loadBaseline();
 	const result: ReconcileResult = {
 		interrupt: [],
 		batched: [],
@@ -220,15 +369,13 @@ export function reconcile(taskIds?: string[]): ReconcileResult {
 
 	consumeIntake(cursors, baseline, result);
 
-	saveCursors(cursors);
-	saveBaseline(baseline);
-	// The cursor has now advanced, so these events will never be re-read from the
-	// status files. Persist them BEFORE returning: the caller may fail to inject,
-	// or crash between reconcile and delivery, and a dropped `blocked:` is the
-	// worst failure this system has. The outbox is what makes delivery
-	// at-least-once instead of at-most-once.
+	// Persist the wake before either edge-detection record. A crash after enqueue
+	// but before the cursor advances deliberately favors one duplicate over one
+	// lost wake; mutateBaseline saves the baseline before this result reaches
+	// saveCursors, so a rescan absorbs that duplicate without erasing the durable
+	// obligation.
 	enqueue([...result.interrupt, ...result.batched]);
-	return result;
+	return { result, cursors };
 }
 
 /**
@@ -328,10 +475,21 @@ function consumeIntake(cursors: CursorStore, baseline: Baseline, result: Reconci
  * the delivery happens in a different process step that can fail. Splitting them
  * is the difference between "we saw it" and "the orchestrator was told".
  */
-type OutboxEntry = { id: string; taskId: string; tier: WakeTier; raw: string; note: string; verb: string };
+export type OutboxEntry = {
+	id: string;
+	taskId: string;
+	key: string;
+	tier: WakeTier;
+	raw: string;
+	note: string;
+	verb: string;
+	deliveredAt?: number;
+};
 
 /**
- * Monotonic counter for outbox ids.
+ * A sequence is useful for ordering entries minted in one process, but it is
+ * not identity on its own. Every process starts at zero, so the pid and random
+ * component are what make concurrent producers globally unique.
  *
  * The id used to be `${taskId}:${raw}`, which is identical for two identical
  * status lines — and a worker blocked twice for the same reason writes exactly
@@ -342,61 +500,364 @@ type OutboxEntry = { id: string; taskId: string; tier: WakeTier; raw: string; no
  */
 let outboxSeq = 0;
 
-function outboxPath(): string {
-	return wakeFiles().queue;
+function outboxDir(): string {
+	return `${wakeFiles().queue}.d`;
+}
+
+const OUTBOX_ID_RE = /^[A-Za-z0-9:._-]+$/;
+
+function outboxEntryPath(id: string): string | null {
+	if (!OUTBOX_ID_RE.test(id)) return null;
+	return path.join(outboxDir(), `${id}.json`);
+}
+
+function nextOutboxId(): string {
+	return `wake-${Date.now().toString(36)}-${process.pid.toString(36)}-${(outboxSeq++).toString(36)}-${randomUUID()}`;
+}
+
+function parseOutboxEntry(value: unknown): OutboxEntry | null {
+	if (value === null || typeof value !== "object") return null;
+	const entry = value as Record<string, unknown>;
+	if (
+		typeof entry.id !== "string" ||
+		!OUTBOX_ID_RE.test(entry.id) ||
+		typeof entry.taskId !== "string" ||
+		(entry.tier !== "T0" && entry.tier !== "T1" && entry.tier !== "T2") ||
+		typeof entry.raw !== "string" ||
+		typeof entry.note !== "string" ||
+		typeof entry.verb !== "string" ||
+		(entry.key !== undefined && typeof entry.key !== "string") ||
+		(entry.deliveredAt !== undefined && (typeof entry.deliveredAt !== "number" || !Number.isFinite(entry.deliveredAt)))
+	) {
+		return null;
+	}
+	return {
+		id: entry.id,
+		taskId: entry.taskId,
+		tier: entry.tier,
+		raw: entry.raw,
+		note: entry.note,
+		verb: entry.verb,
+		key: entry.key ?? "default",
+		...(entry.deliveredAt === undefined ? {} : { deliveredAt: entry.deliveredAt }),
+	};
+}
+
+function readOutboxEntry(file: string): OutboxEntry | null {
+	try {
+		const parsed: unknown = JSON.parse(fs.readFileSync(file, "utf8"));
+		return parseOutboxEntry(parsed);
+	} catch {
+		// Atomic writers never expose a torn target, but a crash, manual edit, or
+		// older writer can still leave one. One bad wake must not poison the queue.
+		return null;
+	}
+}
+
+function writeOutboxEntry(entry: OutboxEntry): void {
+	const target = outboxEntryPath(entry.id);
+	if (target === null) throw new Error(`unsafe wake id ${JSON.stringify(entry.id)}`);
+	fs.mkdirSync(outboxDir(), { recursive: true, mode: 0o700 });
+	const tmp = path.join(outboxDir(), `.${entry.id}.${process.pid}.${randomUUID()}.tmp`);
+	try {
+		fs.writeFileSync(tmp, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
+		fs.renameSync(tmp, target);
+	} finally {
+		try {
+			fs.unlinkSync(tmp);
+		} catch {
+			// rename consumed it, or the write never created it.
+		}
+	}
+}
+const OUTBOX_LOCK_WAIT = new Int32Array(new SharedArrayBuffer(4));
+const OUTBOX_LOCK_TIMEOUT_MS = 30_000;
+
+/**
+ * In-flight marking replaces an entry while acknowledgement removes it. They
+ * must serialize per store, or a marker that read just before an ack can rename
+ * its temporary file afterward and resurrect a durably consumed wake.
+ */
+function withOutboxMutationLock<T>(operation: () => T): T {
+	fs.mkdirSync(outboxDir(), { recursive: true, mode: 0o700 });
+	const lock = path.join(outboxDir(), ".mutation.lock");
+	const token = `${process.pid}:${randomUUID()}`;
+	const deadline = performance.now() + OUTBOX_LOCK_TIMEOUT_MS;
+	for (;;) {
+		try {
+			fs.writeFileSync(lock, token, { flag: "wx", mode: 0o600 });
+			break;
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			if (code !== "EEXIST") throw error;
+			if (performance.now() >= deadline) throw new Error(`timed out waiting for wake outbox mutation lock ${lock}`);
+
+			let owner: string;
+			let stale = false;
+			try {
+				owner = fs.readFileSync(lock, "utf8");
+				const ownerPid = Number.parseInt(owner.split(":", 1)[0] ?? "", 10);
+				if (Number.isSafeInteger(ownerPid) && ownerPid > 0) {
+					stale = !pidAlive(ownerPid);
+				} else {
+					stale = Date.now() - fs.statSync(lock).mtimeMs >= OUTBOX_LOCK_TIMEOUT_MS;
+				}
+			} catch (readError) {
+				const readCode = (readError as NodeJS.ErrnoException).code;
+				if (readCode === "ENOENT") continue;
+				throw new Error(`cannot inspect wake outbox mutation lock ${lock}: ${String(readError)}`);
+			}
+			if (stale) {
+				try {
+					// Another waiter may have recovered the stale owner and a live
+					// process may already hold the pathname. Never unlink a token
+					// other than the dead one this waiter actually observed.
+					if (fs.readFileSync(lock, "utf8") === owner) fs.unlinkSync(lock);
+				} catch (recoveryError) {
+					const recoveryCode = (recoveryError as NodeJS.ErrnoException).code;
+					if (recoveryCode !== "ENOENT") throw recoveryError;
+				}
+				continue;
+			}
+			Atomics.wait(OUTBOX_LOCK_WAIT, 0, 0, 5);
+		}
+	}
+
+	try {
+		return operation();
+	} finally {
+		try {
+			if (fs.readFileSync(lock, "utf8") === token) fs.unlinkSync(lock);
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			if (code !== "ENOENT") throw error;
+		}
+	}
+}
+
+function sameStoredWake(left: OutboxEntry, right: OutboxEntry): boolean {
+	return (
+		left.id === right.id &&
+		left.taskId === right.taskId &&
+		left.tier === right.tier &&
+		left.raw === right.raw &&
+		left.note === right.note &&
+		left.key === right.key &&
+		left.verb === right.verb
+	);
+}
+
+/**
+ * The legacy pathname is atomically claimed before it is read. An old producer
+ * that opens the append log during cutover therefore creates a new legacy file
+ * for the next read instead of landing between this read and unlink.
+ *
+ * Writes are idempotent, and the claimed source is removed only after every
+ * valid line has an atomic target. Malformed remnants are quarantined rather
+ * than reprocessed: otherwise acking a valid migrated sibling would only make
+ * the next read resurrect it from the retained legacy file.
+ *
+ * Duplicate legacy ids are reminted deterministically. Collisions were possible
+ * across producer processes, and treating them as one would repeat the exact
+ * loss this migration exists to eliminate.
+ */
+function migrateLegacyOutboxUnlocked(): void {
+	const legacy = wakeFiles().queue;
+	const claimed = `${legacy}.migrating`;
+	let raw: string;
+	try {
+		if (!fs.existsSync(claimed)) fs.renameSync(legacy, claimed);
+		if (!fs.statSync(claimed).isFile()) return;
+		raw = fs.readFileSync(claimed, "utf8");
+	} catch {
+		return;
+	}
+
+	const corrupt: string[] = [];
+	const seen = new Map<string, number>();
+	const lines = raw.split("\n");
+	for (let index = 0; index < lines.length; index += 1) {
+		const line = lines[index];
+		if (line === undefined || line.trim().length === 0) continue;
+		let entry: OutboxEntry;
+		try {
+			const parsed: unknown = JSON.parse(line);
+			const normalized = parseOutboxEntry(parsed);
+			if (normalized === null) {
+				corrupt.push(line);
+				continue;
+			}
+			entry = normalized;
+		} catch {
+			// Preserve a torn line for diagnosis without letting it replay valid
+			// siblings forever.
+			corrupt.push(line);
+			continue;
+		}
+
+		const occurrence = seen.get(entry.id) ?? 0;
+		seen.set(entry.id, occurrence + 1);
+		let candidate = occurrence === 0 ? entry.id : `${entry.id}:legacy-${index.toString(36)}`;
+		for (let collision = 0; ; collision += 1) {
+			const migrated = candidate === entry.id ? entry : { ...entry, id: candidate };
+			const target = outboxEntryPath(candidate);
+			if (target === null) {
+				corrupt.push(line);
+				break;
+			}
+			const existing = readOutboxEntry(target);
+			if (existing === null) {
+				writeOutboxEntry(migrated);
+				break;
+			}
+			if (sameStoredWake(existing, migrated)) break;
+			candidate = `${entry.id}:legacy-${index.toString(36)}-${collision.toString(36)}`;
+		}
+	}
+
+	if (corrupt.length > 0) fs.appendFileSync(`${legacy}.corrupt`, `${corrupt.join("\n")}\n`, { mode: 0o600 });
+	try {
+		fs.unlinkSync(claimed);
+	} catch (error) {
+		const code = (error as NodeJS.ErrnoException).code;
+		if (code !== "ENOENT") throw error;
+	}
+}
+
+function migrateLegacyOutbox(): void {
+	const legacy = wakeFiles().queue;
+	if (!fs.existsSync(legacy) && !fs.existsSync(`${legacy}.migrating`)) return;
+	withOutboxMutationLock(migrateLegacyOutboxUnlocked);
 }
 
 function enqueue(items: WakeItem[]): void {
-	if (items.length === 0) return;
-	const lines = items.map((item) =>
-		JSON.stringify({
-			id: `${item.taskId}:${Date.now().toString(36)}:${(outboxSeq++).toString(36)}`,
+	for (const item of items) {
+		writeOutboxEntry({
+			id: nextOutboxId(),
 			taskId: item.taskId,
 			tier: item.tier,
 			raw: item.event.raw,
 			note: item.event.note,
+			key: item.event.key,
 			verb: item.event.verb,
-		} satisfies OutboxEntry),
-	);
-	fs.mkdirSync(path.dirname(outboxPath()), { recursive: true });
-	// Append-only, one JSON object per line: a torn final line loses at most the
-	// newest entry and is skipped on read, rather than corrupting the file.
-	fs.appendFileSync(outboxPath(), `${lines.join("\n")}\n`, { mode: 0o600 });
+		});
+	}
+}
+
+function outboxTimestamp(entry: OutboxEntry, fallback: number): number {
+	const current = /^wake-(?!once-)([0-9a-z]+)-/.exec(entry.id);
+	if (current !== null) {
+		const timestamp = Number.parseInt(current[1]!, 36);
+		if (Number.isFinite(timestamp)) return timestamp;
+	}
+	const legacy = /^[a-z0-9-]+:([0-9a-z]+):/.exec(entry.id);
+	if (legacy !== null) {
+		const timestamp = Number.parseInt(legacy[1]!, 36);
+		if (Number.isFinite(timestamp)) return timestamp;
+	}
+	return fallback;
 }
 
 /** Everything still owed to the orchestrator, oldest first. */
 export function pendingWakes(): OutboxEntry[] {
-	let raw: string;
+	migrateLegacyOutbox();
+	const entries: Array<{ entry: OutboxEntry; queuedAt: number }> = [];
+	let files: fs.Dirent[];
 	try {
-		raw = fs.readFileSync(outboxPath(), "utf8");
+		files = fs.readdirSync(outboxDir(), { withFileTypes: true });
 	} catch {
 		return [];
 	}
-	const entries: OutboxEntry[] = [];
-	for (const line of raw.split("\n")) {
-		if (line.trim().length === 0) continue;
+	for (const file of files) {
+		if (!file.isFile() || !file.name.endsWith(".json")) continue;
+		const target = path.join(outboxDir(), file.name);
+		const entry = readOutboxEntry(target);
+		if (entry === null || file.name !== `${entry.id}.json`) continue;
+		let fallback = 0;
 		try {
-			entries.push(JSON.parse(line) as OutboxEntry);
+			fallback = fs.statSync(target).mtimeMs;
 		} catch {
-			// A torn tail line from a crash mid-append. Skipping it is correct:
-			// the event is still in the status file's history for a rescan.
+			continue;
 		}
+		entries.push({ entry, queuedAt: outboxTimestamp(entry, fallback) });
 	}
-	return entries;
+	entries.sort((left, right) => left.queuedAt - right.queuedAt || left.entry.id.localeCompare(right.entry.id));
+	return entries.map(({ entry }) => entry);
 }
 
 /**
- * Acknowledge delivery. Only called after the send is known to have happened.
- * Anything not acknowledged stays owed and is redelivered next cycle.
+ * Entries that have never been sent, or whose in-flight lease has expired.
+ * Stable ids make a redelivery safe for a consumer that already recorded it.
+ */
+export function dueWakes(now = Date.now(), redeliverAfterMs = 120_000): OutboxEntry[] {
+	return pendingWakes().filter((entry) => entry.deliveredAt === undefined || now - entry.deliveredAt >= redeliverAfterMs);
+}
+
+/** Mark sent entries in-flight without acknowledging the durable obligation. */
+export function markInFlight(ids: string[], now = Date.now()): void {
+	migrateLegacyOutbox();
+	withOutboxMutationLock(() => {
+		for (const id of new Set(ids)) {
+			const target = outboxEntryPath(id);
+			if (target === null) continue;
+			const entry = readOutboxEntry(target);
+			if (entry === null || entry.id !== id) continue;
+			writeOutboxEntry({ ...entry, deliveredAt: now });
+		}
+	});
+}
+
+/**
+ * Acknowledge only after the CONSUMER durably records the wake. Acking when the
+ * send happens is at-most-once delivery: if the session dies mid-delivery, the
+ * wake and its work are both lost.
  */
 export function ackWakes(ids: string[]): void {
-	if (ids.length === 0) return;
-	const done = new Set(ids);
-	const remaining = pendingWakes().filter((entry) => !done.has(entry.id));
-	const target = outboxPath();
-	const tmp = `${target}.tmp`;
-	fs.writeFileSync(tmp, remaining.map((entry) => JSON.stringify(entry)).join("\n") + (remaining.length > 0 ? "\n" : ""), { mode: 0o600 });
-	fs.renameSync(tmp, target);
+	migrateLegacyOutbox();
+	withOutboxMutationLock(() => {
+		for (const id of new Set(ids)) {
+			const target = outboxEntryPath(id);
+			if (target === null) continue;
+			try {
+				fs.unlinkSync(target);
+			} catch (error) {
+				const code = (error as NodeJS.ErrnoException).code;
+				if (code !== "ENOENT") throw error;
+			}
+		}
+	});
+}
+
+/**
+ * Remove wakes that policy says must never be delivered. This is not an ack:
+ * the suppression ledger keeps "consumer saw it" distinguishable from "policy
+ * withheld it", so a missing wake remains explainable after the fact.
+ */
+export function suppressWakes(ids: string[], reason: string): void {
+	migrateLegacyOutbox();
+	withOutboxMutationLock(() => {
+		for (const id of new Set(ids)) {
+			const target = outboxEntryPath(id);
+			if (target === null) continue;
+			const entry = readOutboxEntry(target);
+			if (entry === null || entry.id !== id) continue;
+			const log = path.join(path.dirname(wakeFiles().queue), ".wake-suppressed.jsonl");
+			// Evidence first, removal second. A crash between them leaves a
+			// recoverable duplicate and a reason; the opposite order silently
+			// destroys both the obligation and the explanation.
+			fs.appendFileSync(
+				log,
+				`${JSON.stringify({ id: entry.id, taskId: entry.taskId, verb: entry.verb, reason, timestamp: Date.now() })}\n`,
+				{ mode: 0o600 },
+			);
+			try {
+				fs.unlinkSync(target);
+			} catch (error) {
+				const code = (error as NodeJS.ErrnoException).code;
+				if (code !== "ENOENT") throw error;
+			}
+		}
+	});
 }
 
 /**
