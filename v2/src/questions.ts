@@ -5,7 +5,6 @@
  * seats do not load a competing question surface.
  */
 import { Type } from "typebox";
-import { Box, SelectList, Text } from "@earendil-works/pi-tui";
 import { pipelineDir } from "./ship";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -235,50 +234,15 @@ export function registerQuestions(
 					...CONTROLS,
 				];
 				const title = `(${index + 1}/${open.length}) ${describe(entry, runtime.now())}`;
-				const picked = ctx.ui.custom === undefined
-					? await ctx.ui.select(title, choices)
-					: await ctx.ui.custom<string | undefined>((tui, rawTheme, _keybindings, done) => {
-						const theme = rawTheme as { fg?: (name: string, value: string) => string };
-						const selectTheme = {
-							selectedPrefix: (value: string) => theme.fg?.("accent", value) ?? value,
-							selectedText: (value: string) => theme.fg?.("accent", value) ?? value,
-							description: (value: string) => theme.fg?.("muted", value) ?? value,
-							scrollInfo: (value: string) => theme.fg?.("dim", value) ?? value,
-							noMatch: (value: string) => theme.fg?.("warning", value) ?? value,
-						};
-						const list = new SelectList(
-							choices.map((value) => ({ value, label: value })),
-							Math.min(choices.length, Math.max(1, (tui.terminal?.rows ?? 40) - 10)),
-							selectTheme,
-						);
-						list.onSelect = (item) => done(item.value);
-						list.onCancel = () => done(undefined);
-						const box = new Box(1, 1);
-						box.addChild(new Text(title, 0, 0));
-						box.addChild(list);
-						return {
-							render: (width: number) => box.render(width),
-							invalidate: () => box.invalidate(),
-							handleInput: (data: string) => {
-								// Preserve the selector's vi navigation in the custom component.
-								// SelectList handles the configured arrows; these aliases are
-								// translated to the same terminal sequences.
-								// The built-in selector accepts both the configured confirm key and a
-								// literal newline from pasted or line-oriented terminal input.
-								// Keep that compatibility in the overlay component.
-								const normalized = data === "\n" ? "enter" : data;
-								if (normalized === "enter") {
-									done(list.getSelectedItem()?.value);
-									return;
-								}
-								// Keep the built-in selector's tool-expansion binding from
-								// becoming an accidental selection or answer.
-								if (data === "\u000f") return;
-								list.handleInput(data === "j" ? "\u001b[B" : data === "k" ? "\u001b[A" : data);
-								tui.requestRender();
-							},
-						};
-					}, { overlay: true, overlayOptions: { maxHeight: "90%" } });
+				// Always use the host's own selector. The previous custom-overlay
+				// path built the component from this module's bundled pi-tui
+				// classes, and a host whose TUI runtime is a different pi-tui
+				// version rendered nothing and resolved undefined - the review
+				// loop exited immediately and reported "Resolved 0 of N"
+				// (observed live on the prime host). ctx.ui.select is the
+				// documented cross-host contract; component identity stays with
+				// the host.
+				const picked = await ctx.ui.select(title, choices);
 				if (picked === undefined) break;
 				const choice = choices.indexOf(picked);
 				if (choice < 0) break;

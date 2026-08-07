@@ -841,17 +841,20 @@ describe("questions extension", () => {
 		}
 	});
 
-	test("/questions custom overlay confirms newline without scrollback rerenders", async () => {
+	test("/questions uses the host selector even when ui.custom exists", async () => {
+		// A custom overlay built from this module's bundled pi-tui classes
+		// renders nothing on a host with a different pi-tui version, resolving
+		// undefined and exiting the loop with "Resolved 0 of N" (observed live
+		// on the prime host). The host's own select is the portable contract.
 		const file = freshFile();
 		const agent = new Harness();
 		registerQuestions(agent as any, envFor(file), agent.runtime);
 		ask(file, { question: "Choose", options: ["yes", "no"], sessionId: "session-a", cwd: "/tmp" });
-		const captain = fakeContext("session-captain", [], undefined, ["x", "\n"]);
+		const captain = fakeContext("session-captain", ["1. yes"], undefined, ["x", "\n"]);
 		await agent.commands.get("questions")!.handler("", captain);
 		expect(openQuestions(file)).toHaveLength(0);
-		// The harness counts the component's real render calls. Navigation asks
-		// the TUI to repaint, but must not synchronously render scrollback itself.
-		expect(captain.customRenders.count).toBe(1);
+		// The overlay path must not run at all.
+		expect(captain.customRenders.count).toBe(0);
 	});
 
 	test("/questions answers with a listed option and delivers to the asker", async () => {
