@@ -24,6 +24,7 @@ import { deckV2Home, stateDir } from "./home";
 import { readMeta, updateMeta } from "./meta";
 import { findProfile, type ProjectProfile } from "./projects";
 import { SMITHERS_SPEC } from "./smithers";
+import { detachedSpawnEnv } from "./spawn-env";
 import { smithersWorkspaceCwd, uiWarn, warnOnShadowWorkspace } from "./workspace";
 import { assertDeckModel } from "../../workflows/pr-pipeline/lib/model-policy";
 import { claimWorktree, updateWorktreePid } from "./worktree-lock";
@@ -369,7 +370,7 @@ export async function startShip(
 				cwd: workspaceCwd,
 				detached: true,
 				stdio: ["ignore", log, log],
-				env: { ...process.env },
+				env: detachedSpawnEnv(),
 			},
 		);
 		await new Promise<void>((resolve, reject) => {
