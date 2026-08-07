@@ -490,10 +490,24 @@ export function registerDeckUsage(
 		async handler(_args, ctx) {
 			const roster = await client.read();
 			const message = buildUsageText(roster, asTheme(ctx.ui?.theme), runtime.now());
-			try {
-				ctx.ui?.notify?.(message, "info");
-			} catch {
-				// Command presentation is best-effort in non-TUI hosts.
+			// Hosts render notify() as a one-line status (observed on prime), so a
+			// multi-line report silently loses every line but the last. Prefer the
+			// host select dialog as a scrollable read-only viewer; keep notify for
+			// hosts without dialogs. No pi-tui components: component identity must
+			// stay with the host (version-skewed classes render nothing).
+			const select = ctx.ui?.select;
+			if (typeof select === "function") {
+				try {
+					await select.call(ctx.ui, "Broker quota", [...message.split("\n"), "Close"]);
+				} catch {
+					ctx.ui?.notify?.(message, "info");
+				}
+			} else {
+				try {
+					ctx.ui?.notify?.(message, "info");
+				} catch {
+					// Command presentation is best-effort in non-TUI hosts.
+				}
 			}
 			setStatus(ctx, renderUsageStatus(roster, asTheme(ctx.ui?.theme)));
 		},
