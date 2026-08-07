@@ -13,7 +13,7 @@
   },
   "patchedArtifact": {
     "file": "prime-agent-0.7.0-deck-nullsafe.tgz",
-    "sha256": "2c1581949b25ea8607e43dba41bd203f456c4fb21000307eeb21371312646e12",
+    "sha256": "035b0af12e37b3cc62b9646407e900e87141c6a5066d8fe69af24984e96c297d",
     "packageTreeSha256": "e211a1a76196e29b52fe654d2dca0664934fe6efcd4769df225cd9605b53f47a",
     "cliSha256": "ef097dce87e63c32e49493767763c7147376e6b4522818dd275ca9c32218ad35"
   },
