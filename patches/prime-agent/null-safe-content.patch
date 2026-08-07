@@ -1,0 +1,41 @@
+--- /var/folders/3b/9kjwhxp50j36ftjmfm3f1lm80000gn/T/tmp.xNBvulndpG/package/dist/bundle/chunk-L3VO7F2S.js
++++ /var/folders/3b/9kjwhxp50j36ftjmfm3f1lm80000gn/T/tmp.cU99zhiD10/package/dist/bundle/chunk-L3VO7F2S.js
+@@ -33938,6 +33938,7 @@
+     const parts = [];
+     for (let i = 0; i < message.content.length; i++) {
+       const content = message.content[i];
++      if (content == null) { parts.push(`${i}:null`); continue; }
+       if (content.type === "text") {
+         parts.push(`${i}:text:${content.text.trim() ? 1 : 0}`);
+       } else if (content.type === "thinking") {
+@@ -33962,6 +33963,7 @@
+         continue;
+       }
+       const content = message.content[i];
++      if (content == null) { continue; }
+       const text = content.type === "text" ? content.text.trim() : content.type === "thinking" ? content.thinking.trim() : "";
+       if (this.lastBlockTexts.get(i) !== text) {
+         markdown.setText(text);
+@@ -33973,19 +33975,20 @@
+     this.contentContainer.clear();
+     this.blockMarkdowns.clear();
+     this.lastBlockTexts.clear();
+-    const hasVisibleContent = message.content.some((c) => c.type === "text" && c.text.trim() || c.type === "thinking" && c.thinking.trim());
++    const hasVisibleContent = message.content.some((c) => c == null ? false : c.type === "text" && c.text.trim() || c.type === "thinking" && c.thinking.trim());
+     if (hasVisibleContent) {
+       this.contentContainer.addChild(new Spacer(1));
+     }
+     for (let i = 0; i < message.content.length; i++) {
+       const content = message.content[i];
++      if (content == null) { continue; }
+       if (content.type === "text" && content.text.trim()) {
+         const markdown = new Markdown(content.text.trim(), 1, 0, this.markdownTheme);
+         this.blockMarkdowns.set(i, markdown);
+         this.lastBlockTexts.set(i, content.text.trim());
+         this.contentContainer.addChild(markdown);
+       } else if (content.type === "thinking" && content.thinking.trim()) {
+-        const hasVisibleContentAfter = message.content.slice(i + 1).some((c) => c.type === "text" && c.text.trim() || c.type === "thinking" && c.thinking.trim());
++        const hasVisibleContentAfter = message.content.slice(i + 1).some((c) => c == null ? false : c.type === "text" && c.text.trim() || c.type === "thinking" && c.thinking.trim());
+         if (this.hideThinkingBlock) {
+           this.contentContainer.addChild(new Text(theme.italic(theme.fg("thinkingText", this.hiddenThinkingLabel)), 1, 0));
+           if (hasVisibleContentAfter) {
