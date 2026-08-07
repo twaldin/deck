@@ -484,6 +484,8 @@ export type OutboxEntry = {
 	note: string;
 	verb: string;
 	deliveredAt?: number;
+	/** How many times this wake has been sent. Drives redelivery backoff. */
+	deliveries?: number;
 };
 
 /**
@@ -527,7 +529,8 @@ function parseOutboxEntry(value: unknown): OutboxEntry | null {
 		typeof entry.note !== "string" ||
 		typeof entry.verb !== "string" ||
 		(entry.key !== undefined && typeof entry.key !== "string") ||
-		(entry.deliveredAt !== undefined && (typeof entry.deliveredAt !== "number" || !Number.isFinite(entry.deliveredAt)))
+		(entry.deliveredAt !== undefined && (typeof entry.deliveredAt !== "number" || !Number.isFinite(entry.deliveredAt))) ||
+		(entry.deliveries !== undefined && (typeof entry.deliveries !== "number" || !Number.isFinite(entry.deliveries)))
 	) {
 		return null;
 	}
@@ -540,6 +543,7 @@ function parseOutboxEntry(value: unknown): OutboxEntry | null {
 		verb: entry.verb,
 		key: entry.key ?? "default",
 		...(entry.deliveredAt === undefined ? {} : { deliveredAt: entry.deliveredAt }),
+		...(entry.deliveries === undefined ? {} : { deliveries: entry.deliveries }),
 	};
 }
 
@@ -786,11 +790,31 @@ export function pendingWakes(): OutboxEntry[] {
 }
 
 /**
- * Entries that have never been sent, or whose in-flight lease has expired.
- * Stable ids make a redelivery safe for a consumer that already recorded it.
+ * Wakes owed right now: never delivered, or in flight past their backoff.
+ *
+ * A wake is NEVER retired for going unacknowledged. Dropping one after N tries
+ * would turn durable at-least-once into best effort, and the work it names
+ * would vanish silently — the precise failure this subsystem exists to
+ * prevent. Everything unacked stays owed and stays injectable at session start.
+ *
+ * Noise is bounded by BACKOFF instead. Measured against a live orchestrator:
+ * 13 unacked wakes re-arrived every two minutes forever, because a session
+ * started before the ack contract existed could not acknowledge anything. With
+ * backoff the same wake is still owed, but its retries space out rather than
+ * pinning the orchestrator's attention.
  */
-export function dueWakes(now = Date.now(), redeliverAfterMs = 120_000): OutboxEntry[] {
-	return pendingWakes().filter((entry) => entry.deliveredAt === undefined || now - entry.deliveredAt >= redeliverAfterMs);
+export function dueWakes(
+	now = Date.now(),
+	redeliverAfterMs = 120_000,
+	maxBackoffMs = 3_600_000,
+): OutboxEntry[] {
+	return pendingWakes().filter((entry) => {
+		if (entry.deliveredAt === undefined) return true;
+		const attempts = entry.deliveries ?? 1;
+		// Doubling, capped: 2m, 4m, 8m ... then hourly for as long as it is owed.
+		const wait = Math.min(redeliverAfterMs * 2 ** (attempts - 1), maxBackoffMs);
+		return now - entry.deliveredAt >= wait;
+	});
 }
 
 /** Mark sent entries in-flight without acknowledging the durable obligation. */
@@ -802,7 +826,11 @@ export function markInFlight(ids: string[], now = Date.now()): void {
 			if (target === null) continue;
 			const entry = readOutboxEntry(target);
 			if (entry === null || entry.id !== id) continue;
-			writeOutboxEntry({ ...entry, deliveredAt: now });
+			// Count deliveries so redelivery can be bounded. Unbounded retry was
+			// measured against a live orchestrator: 13 wakes were delivered and
+			// never acknowledged, so every one of them re-arrived every two
+			// minutes indefinitely. At-least-once must not mean forever.
+			writeOutboxEntry({ ...entry, deliveredAt: now, deliveries: (entry.deliveries ?? 0) + 1 });
 		}
 	});
 }

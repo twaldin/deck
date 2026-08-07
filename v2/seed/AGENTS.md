@@ -70,55 +70,33 @@ on the answer.
 
 ### Wake contract
 
-**You will be woken.** T0 arrives as one message per event. T1 is actionable
-but arrives as one folded batch. T2 never arrives. A quiet period proves
-nothing about outstanding work; check `deck.runs()` before treating the factory
-as empty.
+**You will be woken.** T0 is one message per event; T1 arrives as one folded
+batch; T2 never arrives. Silence proves nothing — check `deck.runs()` before
+treating the factory as empty.
 
-Every wake ends with one marker: `[wake:<id>]`, or `[wake:<id>,<id>]` when a
-folded batch carries multiple wakes. Parse every id from that trailing marker.
-First write each wake and its precise next action durably to the effort dossier.
-Only after that write succeeds call `deck.wake_ack(ids)`, passing the one id or
-the list. The call is idempotent; unknown or already-acked ids are no-ops.
-Unacknowledged wakes are redelivered by design. Acknowledging on send would lose
-the work whenever a session dies between delivery and its durable record.
+Every wake ends with `[wake:<id>]`, or several ids when folded. Write each wake
+and its next action to the effort dossier FIRST, then call `deck.wake_ack(ids)`.
+It is idempotent. Unacked wakes are redelivered with backoff, by design: acking
+on receipt alone would lose the work if the session died before recording it.
 
-**Never wait.** One-shot status reads are ordinary. Sleep-and-retry loops,
-background pollers, and babysitting CI or a review are not: they die with the
-process. Use a declarative wake instead; it survives orchestrator process death.
-Bounded fan-out inside one turn is `rlm()`.
-
-Use `deck.wake_me(when, note, tier)` before parking when no existing wake covers
-the next check. Set `when` to a duration such as `"30m"` or an owned condition
-such as `"run:<id>:terminal"`. Make `note` self-contained: name the receipt,
-current state, and precise next action. A run condition resolves its effort; for
-a timed wake, pass the effort as `task=`. A global timed nudge does not satisfy
-the parking rule.
-
-Use T1 for a routine resumption; reserve T0 for a failure, block, or decision.
-Never use T2 for a wake you need to receive.
-
-- Long CI: `deck.wake_me("run:<id>:terminal", "Run <id>'s <name> check is still
-  running; inspect its final state and resume shipment or diagnose.", "T1")`.
-- Teammate review: `deck.wake_me("30m", "PR <url> awaits <reviewer>; act on
-  approval or feedback.", "T1", task="<task-id>")`.
-- Flaky dependency: `deck.wake_me("15m", "<dependency> failed <probe>; repeat it
-  with evidence <receipt>, then escalate if it fails again.", "T1",
-  task="<task-id>")`.
+**Never wait.** Sleep loops, pollers, and babysitting CI die with the process.
+Use `deck.wake_me(when, note, tier)`, which survives orchestrator death.
+`when` is a duration (`"30m"`) or a condition (`"run:<id>:terminal"`). Make
+`note` self-contained: receipt, state, next action. Pass `task=` for a timed
+wake — an untasked nudge covers nothing. T1 for routine resumption, T0 for a
+failure, block, or decision. Bounded fan-out inside one turn is `rlm()`.
 
 Before ending a turn with in-flight work, call `deck.parked_ok()` and inspect
-both `{ uncovered, noStallGuard }` lists. An `uncovered` entry is a hard failure:
-that effort has no wake path. Do not park; register an `agent-requested` wake for
-each `taskId`, then check again. A `noStallGuard` entry means the effort wakes
-when it finishes but can hang silently. Report and act on every entry; add a
-per-effort duration wake whenever the work could plausibly stall. Only empty
-lists are hang-safe. Idleness while work is outstanding is a process failure,
-not a rest state.
+`{ uncovered, noStallGuard }`. `uncovered` is a hard failure — that effort has
+no wake path; register one per taskId and re-check. `noStallGuard` means it
+wakes when it finishes but can hang silently; add a duration wake if it could
+stall. Only empty lists are hang-safe. Idleness with work outstanding is a
+process failure, not a rest state.
 
-Where a stamp is required, first drive the PR to mergeable, green, and approved;
-then raise the stamp question. A stamp survives a rebase and dies on any new
+Where a stamp is required, drive the PR to mergeable, green, and approved, then
+raise the stamp question. A stamp survives a rebase and dies on any new
 non-rebase commit. On a `wakeOnTerminal` project with no stamp gate, merged work
-emits a T1 wake; when it arrives, dispatch the next item.
+emits a T1 wake; dispatch the next item when it arrives.
 
 ### Repos with human reviewers
 

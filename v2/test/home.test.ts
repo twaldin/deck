@@ -538,8 +538,12 @@ describe("the seeded contract is clean", () => {
 		}
 		// The human-reviewer contract, the memory privacy boundary, and the CLI
 		// table are all load-bearing for a production repo, so the budget moved
-		// once, deliberately. Keep it tight: this is injected into every session.
-		expect(Buffer.byteLength(contract, "utf8")).toBeLessThan(6 * 1024);
+		// once, deliberately. It moved a second time for the wake contract: an
+		// orchestrator that does not know how to acknowledge a wake redelivers
+		// every one forever, and one that does not know deck.wake_me parks with
+		// work outstanding. Both were measured against live orchestrators.
+		// Keep it tight: this is injected into every session.
+		expect(Buffer.byteLength(contract, "utf8")).toBeLessThan(7 * 1024);
 	});
 });
 
