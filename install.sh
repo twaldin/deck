@@ -477,7 +477,14 @@ fi
 # Prime conversation entrypoint and inbox.
 mkdir -p "$HOME/.deck/data/inbox"
 ENTER="$HOME/.deck/enter.sh"
-printf '#!/usr/bin/env bash\nexport PATH=%q"$HOME/.bun/bin:$PATH"\n' "$BIN_TARGET:" > "$ENTER"
+# The IPython kernel bootstraps through `uv`, and `prime-conversation` forwards
+# only the caller's PATH. A pane whose shell lacks the uv directory therefore
+# produces a seat with NO code execution at all: no memo wake, no deck import,
+# no file reads - it can only report that it is broken. Observed on a real
+# orchestrator start. Pin the resolved uv directory so the seat never depends
+# on how its terminal happened to be launched.
+UV_BIN_DIR="$(dirname "$(command -v uv)")"
+printf '#!/usr/bin/env bash\nexport PATH=%q%q"$HOME/.bun/bin:$PATH"\n' "$BIN_TARGET:" "$UV_BIN_DIR:" > "$ENTER"
 cat >> "$ENTER" <<'EOF'
 # Home secrets (LINEAR_API_KEY, …). chmod 600. Never commit.
 if [ -f "$HOME/.deck/.env" ]; then
