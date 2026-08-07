@@ -74,11 +74,29 @@ WRAPPER="$PROFILE_ROOT/bin/prime-conversation"
 # The agent surface is code, not tools: the kernel imports `deck` from here.
 PYTHON_ROOT="$PROFILE_ROOT/python"
 IPYTHON_ROOT="$PROFILE_ROOT/ipython"
-# Resolved here, baked into the wrapper below. The kernel cannot start without
-# it, so failing loudly at install time beats a seat that starts and can run
-# nothing.
-UV_BIN_DIR="$(dirname "$(command -v uv)")" ||
+# The seat inherits only the PATH of whatever shell launched it, so a terminal
+# started without these directories produces an agent that cannot run the CLIs
+# it is prompted to use - gh, pup, linear, ntn, lavish-axi - and, because the
+# IPython kernel bootstraps through uv, cannot execute code at all. Observed on
+# a real orchestrator start from a Herdr pane with no Homebrew on PATH.
+#
+# Resolve the real directories at install time and bake them into the wrapper.
+UV_BIN="$(command -v uv)" ||
   { printf 'error: uv is required for the IPython kernel but was not found\n' >&2; exit 1; }
+SEAT_PATH_DIRS="$(dirname "$UV_BIN")"
+if BREW_PREFIX="$(brew --prefix 2>/dev/null)"; then
+  SEAT_PATH_DIRS="$BREW_PREFIX/bin:$BREW_PREFIX/sbin:$SEAT_PATH_DIRS"
+fi
+if NODE_BIN="$(command -v node)"; then
+  # Globally installed npm CLIs live beside the REAL node, not beside a shim
+  # that forwards to it, so resolve symlinks before taking the directory.
+  SEAT_PATH_DIRS="$SEAT_PATH_DIRS:$(dirname "$(readlink -f "$NODE_BIN" 2>/dev/null || echo "$NODE_BIN")")"
+  SEAT_PATH_DIRS="$SEAT_PATH_DIRS:$(dirname "$NODE_BIN")"
+fi
+SEAT_PATH_DIRS="$SEAT_PATH_DIRS:$HOME/.local/bin"
+# Deduplicate, preserving first occurrence: a repeated entry is harmless but
+# makes the baked line unreadable when someone is debugging a missing tool.
+SEAT_PATH_DIRS="$(printf '%s' "$SEAT_PATH_DIRS" | awk -v RS=: '!seen[$0]++ && $0 != "" { printf "%s%s", sep, $0; sep=":" }')"
 PROCESS_PACKAGE_LINK="$AGENT_DIR/npm/node_modules/$PROCESS_PACKAGE_NAME"
 SOCKET_RELATIVE="$(node -e '
 const fs = require("node:fs");
@@ -918,8 +936,9 @@ export DECK_CLI="\${DECK_CLI:-\$(command -v deck-v2 || true)}"
 # produces a seat with NO code execution at all - no memo wake, no deck import,
 # no file reads - and the agent can only report that it is broken. Observed on
 # a real orchestrator start from a Herdr pane. Pin the directory resolved at
-# install time so the seat never depends on how its terminal was launched.
-export PATH="$UV_BIN_DIR:\$PATH"
+# install time so the seat never depends on how its terminal was launched,
+# and so every CLI the agent is prompted to use actually resolves.
+export PATH="$SEAT_PATH_DIRS:\$PATH"
 prime_env=()
 for name in PATH HOME SHELL TMPDIR TMP TEMP LANG LC_ALL LC_CTYPE TERM COLORTERM NO_COLOR FORCE_COLOR USER LOGNAME TZ \
   GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL \
