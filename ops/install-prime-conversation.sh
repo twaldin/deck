@@ -975,7 +975,7 @@ provider_denied=" ANTHROPIC_API_KEY OPENAI_API_KEY OPENROUTER_API_KEY GEMINI_API
 if [[ -f "\$DECK_HOME/.env" ]]; then
   # grep -E, not sed BRE: macOS sed has no \\? and the match fails silently,
   # which would deny an opt-in key while looking like it worked.
-  forward_opt_in=" \$(grep -E '^[[:space:]]*(export )?DECK_SEAT_FORWARD_KEYS=' "\$DECK_HOME/.env" | head -1 | cut -d= -f2- | tr -d '\\042\\047' | tr ',' ' ') "
+  forward_opt_in=" \$({ grep -E '^[[:space:]]*(export )?DECK_SEAT_FORWARD_KEYS=' "\$DECK_HOME/.env" || true; } | head -1 | cut -d= -f2- | tr -d '\\042\\047' | tr ',' ' ') "
   while IFS= read -r secret_line || [[ -n "\$secret_line" ]]; do
     secret_line="\${secret_line#"\${secret_line%%[![:space:]]*}"}"
     [[ -z "\$secret_line" || "\$secret_line" == '#'* ]] && continue
