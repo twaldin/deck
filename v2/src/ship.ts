@@ -266,7 +266,6 @@ export type ShipResult = {
 	logPath: string;
 	pipelineDir: string;
 };
-
 /**
  * Start the pipeline run, detached. The run is durable Smithers state: inspect
  * it with `smithers ps|why|inspect <runId>` from the live workspace; an
@@ -317,6 +316,18 @@ export async function startShip(
 		request.runId ??
 		`${request.ticket.toLowerCase().replace(/[^a-z0-9-]+/g, "-")}-pipeline`;
 	let releaseWorktreeLock: (() => void) | undefined;
+	// Refuse a worktree that is not on disk, at dispatch, once.
+	//
+	// The caller supplies this path. When it is wrong the run still starts, dies
+	// in preflight, and every retry emits another `needs-decision` wake - so one
+	// typo becomes an unbounded stream of interruptions at the orchestrator.
+	// Observed live: a path missing its `wt/` segment produced exactly that.
+	if (!fs.existsSync(request.worktree)) {
+		throw new Error(
+			`worktree does not exist on disk: ${request.worktree}\n` +
+				"Deck worktrees live under $DECK_V2_HOME/wt/<task>; allocate it before shipping.",
+		);
+	}
 	const input = buildPipelineInput(request, profile, loadReviewersConfig(home));
 	// Keep the task-to-workflow join durable when the caller already created a
 	// deck task with the ticket id. Smithers ps does not expose a unique worktree.

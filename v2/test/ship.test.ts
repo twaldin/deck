@@ -61,7 +61,8 @@ const lindyProfile = () => seeds().find((p) => p.id === "review-project") as Pro
 const request = (overrides: Partial<ShipRequest> = {}): ShipRequest => ({
 	ticket: "deck-42",
 	profile: "example-project",
-	worktree: "/tmp/wt",
+	// A dispatch refuses a worktree that is not on disk, so the fixture is real.
+	worktree: (fs.mkdirSync("/tmp/wt", { recursive: true }), "/tmp/wt"),
 	branch: "deck/x",
 	title: "A change",
 	summary: "Does a thing",
