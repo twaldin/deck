@@ -158,10 +158,26 @@ export async function drainOnce(deps: WakeDrainDependencies): Promise<DrainResul
 	// The overflow is NOT dropped and NOT suppressed: it stays owed, is not
 	// marked in flight, and is delivered on later cycles. Oldest first, so a
 	// backlog drains in order instead of starving.
-	const admitted = interrupts.slice(0, MAX_INTERRUPTS_PER_CYCLE);
-	const deferred = interrupts.length - admitted.length;
-	for (const { entry, item } of admitted) {
-		await deliver(formatInterrupt(item), [entry.id]);
+	// T0s owed at the same instant that carry the SAME fact about several
+	// tasks (same condition key, same note - a broker outage seen by every
+	// watching run) deliver as ONE message, so a shared condition costs one
+	// interruption instead of one per task. Distinct facts stay separate
+	// messages: each is owed its own turn.
+	const groups = new Map<string, { entries: string[]; items: WakeItem[] }>();
+	for (const { entry, item } of interrupts) {
+		const fact = `${item.event.key}\u0000${item.event.note}`;
+		const group = groups.get(fact) ?? { entries: [], items: [] };
+		group.entries.push(entry.id);
+		group.items.push(item);
+		groups.set(fact, group);
+	}
+	const admitted = [...groups.values()].slice(0, MAX_INTERRUPTS_PER_CYCLE);
+	const deferred = groups.size - admitted.length;
+	for (const group of admitted) {
+		const content = group.items.length === 1
+			? formatInterrupt(group.items[0] as WakeItem)
+			: group.items.map((item) => formatInterrupt(item)).join("\n");
+		await deliver(content, group.entries);
 	}
 	// The overflow notice is a rendering concern, never a stored wake: it must
 	// not enter the id list, or markInFlight would stamp an id that has no file.
@@ -173,7 +189,7 @@ export async function drainOnce(deps: WakeDrainDependencies): Promise<DrainResul
 			event: {
 				verb: "resolved",
 				key: "wake-overflow",
-				note: `${deferred} more urgent wake(s) still owed; delivered next cycle`,
+				note: `${deferred} more urgent wake group(s) still owed; delivered next cycle`,
 				raw: `wake-overflow:${deferred}`,
 			},
 		});

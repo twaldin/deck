@@ -186,11 +186,28 @@ function withBaselineLock<T>(operation: () => T): T {
 	}
 }
 
+/**
+ * Default delivery tier for a producer condition.
+ *
+ * T0 is reserved for conditions where the captain or orchestrator owes an
+ * action on THIS task right now (a decision, a gate, a red main). Fleet-wide
+ * resource states are T1: with several runs watching the same broker, a quota
+ * outage produced one T0 interrupt per run - three separate mid-turn
+ * interruptions carrying the same fact (observed live). The T1 fold delivers
+ * them as one batched message at the next turn boundary; steering, not
+ * queue-jumping.
+ */
+export function defaultConditionTier(key: WakeCondition["key"]): "T0" | "T1" {
+	if (key === "reviewer-silent" || key === "run-terminal") return "T1";
+	if (key === "broker-no-quota") return "T1";
+	return "T0";
+}
+
 /** Record external workflow conditions in the same durable outbox as status events. */
 export function enqueueWakeConditions(conditions: WakeCondition[]): void {
 	const items: WakeItem[] = conditions.map((condition) => ({
 		taskId: condition.taskId,
-		tier: condition.tier ?? (condition.key === "reviewer-silent" || condition.key === "run-terminal" ? "T1" : "T0"),
+		tier: condition.tier ?? defaultConditionTier(condition.key),
 		event: { verb: condition.key, key: condition.key, note: condition.note, raw: `${condition.key}:${condition.note}` },
 	}));
 	if (items.length === 0) return;
@@ -225,7 +242,7 @@ export function enqueueWakeOnce(id: string, condition: WakeCondition): void {
 		id: `wake-once-${id}`,
 		taskId: condition.taskId,
 		key: condition.key,
-		tier: condition.tier ?? (condition.key === "reviewer-silent" || condition.key === "run-terminal" ? "T1" : "T0"),
+		tier: condition.tier ?? defaultConditionTier(condition.key),
 		raw: `${condition.key}:${condition.note}`,
 		note: condition.note,
 		verb: condition.key,

@@ -120,6 +120,24 @@ describe("drainOnce", () => {
 		expect(result.deliveredIds).toEqual(["urgent-a", "urgent-b"]);
 	});
 
+	test("same-fact T0s across tasks fold into one interrupt", async () => {
+		// Three runs watching one broker each produced a broker-no-quota wake;
+		// the captain got three separate mid-turn interruptions carrying the
+		// same fact (observed live 2026-08-08). Same key + same note = one
+		// message covering every task, retiring every entry.
+		const outage = (id: string) => wake(id, "T0", { key: "broker-no-quota", verb: "broker-no-quota", note: "broker has no available quota" });
+		const { deps, sent, retired } = harness([outage("q-a"), outage("q-b"), outage("q-c"), wake("other", "T0", { verb: "failed" })]);
+
+		const result = await drainOnce(deps);
+
+		expect(sent).toHaveLength(2);
+		expect(sent[0]?.content).toContain("task-q-a");
+		expect(sent[0]?.content).toContain("task-q-c");
+		expect(sent[0]?.content).toContain("[wake:q-a,q-b,q-c]");
+		expect(retired).toEqual(["q-a", "q-b", "q-c", "other"]);
+		expect(result.deliveredIds).toEqual(["q-a", "q-b", "q-c", "other"]);
+	});
+
 	test("a rejected send keeps the wake owed instead of retiring it", async () => {
 		// The daemon answers {success:false} for a prompt it will not accept. That
 		// resolves, so awaiting the request is not proof of delivery; retiring on
@@ -161,7 +179,7 @@ describe("drainOnce", () => {
 		// there are too many messages must not itself be another interrupt.
 		expect(sent).toHaveLength(6);
 		expect(result.deliveredIds).toEqual(["urgent-0", "urgent-1", "urgent-2", "urgent-3", "urgent-4"]);
-		expect(sent[5]?.content).toContain("4 more urgent wake(s) still owed");
+		expect(sent[5]?.content).toContain("4 more urgent wake group(s) still owed");
 
 		// The overflow is deferred, never dropped: not marked in flight, not
 		// suppressed, and carrying no id into the marker, so it is redelivered.
