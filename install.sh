@@ -320,9 +320,20 @@ SEAT_TOOL_DIRS="$(printf '%s' "$SEAT_TOOL_DIRS" | awk -v RS=: '!seen[$0]++ && $0
 # a live orchestrator after the wrapper was already correct.
 PRIME_DAEMON_ENV=(
   "HOME=$HOME"
-  "PATH=$NODE_BIN_DIR:$PRIME_RUNTIME/bin:$SEAT_TOOL_DIRS:/usr/bin:/bin"
+  # Managed dirs first so the kernel always finds uv and the deck CLIs, then
+  # the caller's own PATH: a hand-written list kept losing tools, and each
+  # hole cost total capability (no uv meant no code execution at all).
+  "PATH=$NODE_BIN_DIR:$PRIME_RUNTIME/bin:$SEAT_TOOL_DIRS:$PATH"
   "PRIME_AGENT_CODING_AGENT_DIR=$HOME/.deck/.prime/agent"
   "PRIME_AGENT_SESSION_DIR=$HOME/.deck/.prime/sessions"
+  # The kernel is spawned by the daemon, so the code surface reaches the agent
+  # only if it is here too. Exporting it from the launcher is not enough:
+  # observed as `ModuleNotFoundError: No module named 'deck'` in a live seat
+  # that had otherwise started cleanly, leaving the orchestrator with no
+  # factory access at all.
+  "PYTHONPATH=$HOME/.deck/.prime/python"
+  "IPYTHONDIR=$HOME/.deck/.prime/ipython"
+  "DECK_V2_HOME=$HOME/.deck"
 )
 for allowed_name in TMPDIR TMP TEMP DECK_GATEWAY_ORIGIN DECK_PRIME_MAX_TOKENS; do
   if [ -n "${!allowed_name+x}" ]; then
