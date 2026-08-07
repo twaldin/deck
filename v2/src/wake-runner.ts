@@ -70,6 +70,15 @@ function withWakeMarker(content: string, ids: string[]): string {
 }
 
 /**
+ * Most T0 interrupts one cycle may deliver.
+ *
+ * Each becomes its own message, so this is a hard bound on how much of the
+ * orchestrator's context a single sweep can consume. Overflow stays owed and
+ * arrives on later cycles; nothing is discarded.
+ */
+const MAX_INTERRUPTS_PER_CYCLE = 5;
+
+/**
  * Deliver the wakes owed at one instant.
  *
  * Storage, project policy, session presence, delivery, and time are injected:
@@ -122,10 +131,36 @@ export async function drainOnce(deps: WakeDrainDependencies): Promise<DrainResul
 		deliveredIds.push(...ids);
 	};
 
-	for (const { entry, item } of interrupts) {
+	// Cap interrupts per cycle. Measured on deckbox at first activation: 90 T0
+	// entries were owed at once, and delivering one message each would have
+	// buried the orchestrator's context under stale history the moment it
+	// started — the exact "wakes nuked the context" failure that caused an
+	// earlier wake attempt to be abandoned.
+	//
+	// The overflow is NOT dropped and NOT suppressed: it stays owed, is not
+	// marked in flight, and is delivered on later cycles. Oldest first, so a
+	// backlog drains in order instead of starving.
+	const admitted = interrupts.slice(0, MAX_INTERRUPTS_PER_CYCLE);
+	const deferred = interrupts.length - admitted.length;
+	for (const { entry, item } of admitted) {
 		await deliver(formatInterrupt(item), [entry.id]);
 	}
-	const folded = foldBatched(batched.map(({ item }) => item));
+	// The overflow notice is a rendering concern, never a stored wake: it must
+	// not enter the id list, or markInFlight would stamp an id that has no file.
+	const foldedItems = batched.map(({ item }) => item);
+	if (deferred > 0) {
+		foldedItems.push({
+			taskId: "wake",
+			tier: "T1",
+			event: {
+				verb: "resolved",
+				key: "wake-overflow",
+				note: `${deferred} more urgent wake(s) still owed; delivered next cycle`,
+				raw: `wake-overflow:${deferred}`,
+			},
+		});
+	}
+	const folded = foldBatched(foldedItems);
 	if (folded !== null) await deliver(folded, batched.map(({ entry }) => entry.id));
 
 	return { liveSession: true, deliveredIds, failedIds, silentIds };

@@ -111,6 +111,30 @@ describe("drainOnce", () => {
 		expect(result.deliveredIds).toEqual(["urgent-a", "urgent-b"]);
 	});
 
+	test("caps interrupts per cycle and keeps the overflow owed", async () => {
+		// Measured on deckbox at first activation: 90 T0 entries were owed at
+		// once. One message each would bury the orchestrator's context the moment
+		// it starts, which is why an earlier wake attempt was abandoned.
+		const many = Array.from({ length: 9 }, (_, index) => wake(`urgent-${index}`, "T0"));
+		const { deps, sent, marked } = harness(many);
+
+		const result = await drainOnce(deps);
+
+		// Five interrupts, plus ONE folded notice about the rest. A warning that
+		// there are too many messages must not itself be another interrupt.
+		expect(sent).toHaveLength(6);
+		expect(result.deliveredIds).toEqual(["urgent-0", "urgent-1", "urgent-2", "urgent-3", "urgent-4"]);
+		expect(sent[5]?.content).toContain("4 more urgent wake(s) still owed");
+
+		// The overflow is deferred, never dropped: not marked in flight, not
+		// suppressed, and carrying no id into the marker, so it is redelivered.
+		const markedIds = marked.flatMap((call) => call.ids);
+		expect(markedIds).not.toContain("urgent-5");
+		expect(markedIds).not.toContain("urgent-8");
+		expect(sent[5]?.content).not.toContain("urgent-5");
+		expect(result.silentIds).toEqual([]);
+	});
+
 	test("folds every due T1 event into exactly one message with every id", async () => {
 		const wakes = [
 			wake("batch-a1", "T1", { taskId: "task-a", note: "first" }),
