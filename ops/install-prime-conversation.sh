@@ -951,6 +951,51 @@ for name in PATH HOME SHELL TMPDIR TMP TEMP LANG LC_ALL LC_CTYPE TERM COLORTERM 
     prime_env+=("\$name=\${!name}")
   fi
 done
+
+# Home secrets reach the seat, because the agent runs processes that need real
+# API keys (OPENROUTER_API_KEY and friends). Finding a CLI is not the same as
+# being able to use it.
+#
+# PARSED, NEVER SOURCED. \`. file\` would execute whatever is in it as shell,
+# with this wrapper's privileges, every launch - a config file becomes remote
+# code execution the moment anything can append to it. Reading KEY=VALUE lines
+# gives the same keys with none of that. Values are taken literally, so no
+# \$expansion or command substitution can fire.
+#
+# LLM provider keys are DENIED by default. The seat is launched
+# \`--offline --provider deck\`, so its own turns always bill through the broker,
+# but a raw provider key sitting in the environment is one config slip away
+# from a child process - or a future flag - spending directly against it. The
+# failure is silent and expensive, so the default is deny.
+#
+# To hand a specific key to child processes (monoagent needs OPENROUTER_API_KEY,
+# for example), name it in DECK_SEAT_FORWARD_KEYS in the same file:
+#   DECK_SEAT_FORWARD_KEYS=OPENROUTER_API_KEY
+provider_denied=" ANTHROPIC_API_KEY OPENAI_API_KEY OPENROUTER_API_KEY GEMINI_API_KEY GOOGLE_API_KEY GOOGLE_GENERATIVE_AI_API_KEY XAI_API_KEY GROQ_API_KEY MISTRAL_API_KEY DEEPSEEK_API_KEY TOGETHER_API_KEY FIREWORKS_API_KEY AZURE_OPENAI_API_KEY "
+if [[ -f "\$DECK_HOME/.env" ]]; then
+  # grep -E, not sed BRE: macOS sed has no \\? and the match fails silently,
+  # which would deny an opt-in key while looking like it worked.
+  forward_opt_in=" \$(grep -E '^[[:space:]]*(export )?DECK_SEAT_FORWARD_KEYS=' "\$DECK_HOME/.env" | head -1 | cut -d= -f2- | tr -d '\\042\\047' | tr ',' ' ') "
+  while IFS= read -r secret_line || [[ -n "\$secret_line" ]]; do
+    secret_line="\${secret_line#"\${secret_line%%[![:space:]]*}"}"
+    [[ -z "\$secret_line" || "\$secret_line" == '#'* ]] && continue
+    secret_line="\${secret_line#export }"
+    [[ "\$secret_line" == *=* ]] || continue
+    secret_key="\${secret_line%%=*}"
+    secret_value="\${secret_line#*=}"
+    [[ "\$secret_key" =~ ^[A-Za-z_][A-Za-z0-9_]*\$ ]] || continue
+    if [[ "\$provider_denied" == *" \$secret_key "* && "\$forward_opt_in" != *" \$secret_key "* ]]; then
+      continue
+    fi
+    # Strip one layer of matching quotes, the way a shell would have.
+    if [[ \${#secret_value} -ge 2 && "\$secret_value" == '"'*'"' ]]; then
+      secret_value="\${secret_value:1:\${#secret_value}-2}"
+    elif [[ \${#secret_value} -ge 2 && "\$secret_value" == "'"*"'" ]]; then
+      secret_value="\${secret_value:1:\${#secret_value}-2}"
+    fi
+    prime_env+=("\$secret_key=\$secret_value")
+  done < "\$DECK_HOME/.env"
+fi
 cd "\$DECK_HOME"
 if [[ "\${1:-}" == --version ]]; then
   exec env -i "\${prime_env[@]}" "\$PRIME_AGENT_BIN" --version
