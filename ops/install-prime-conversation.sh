@@ -93,7 +93,7 @@ if NODE_BIN="$(command -v node)"; then
   SEAT_PATH_DIRS="$SEAT_PATH_DIRS:$(dirname "$(readlink -f "$NODE_BIN" 2>/dev/null || echo "$NODE_BIN")")"
   SEAT_PATH_DIRS="$SEAT_PATH_DIRS:$(dirname "$NODE_BIN")"
 fi
-SEAT_PATH_DIRS="$SEAT_PATH_DIRS:$HOME/.local/bin"
+SEAT_PATH_DIRS="$SEAT_PATH_DIRS:$HOME/.local/bin:/usr/local/bin"
 # Deduplicate, preserving first occurrence: a repeated entry is harmless but
 # makes the baked line unreadable when someone is debugging a missing tool.
 SEAT_PATH_DIRS="$(printf '%s' "$SEAT_PATH_DIRS" | awk -v RS=: '!seen[$0]++ && $0 != "" { printf "%s%s", sep, $0; sep=":" }')"
@@ -939,6 +939,7 @@ export DECK_CLI="\${DECK_CLI:-\$(command -v deck-v2 || true)}"
 # install time so the seat never depends on how its terminal was launched,
 # and so every CLI the agent is prompted to use actually resolves.
 export PATH="$SEAT_PATH_DIRS:\$PATH"
+
 prime_env=()
 for name in PATH HOME SHELL TMPDIR TMP TEMP LANG LC_ALL LC_CTYPE TERM COLORTERM NO_COLOR FORCE_COLOR USER LOGNAME TZ \
   GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL \
