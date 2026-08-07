@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
-import * as net from "node:net";
+import { pathToFileURL } from "node:url";
 import * as path from "node:path";
 import { deckV2Home, stateDir } from "./home";
 import { readMeta } from "./meta";
@@ -246,64 +246,49 @@ function daemonError(response: DaemonResponse): string {
 	return "Prime daemon rejected the request";
 }
 
-/** One bounded JSONL request. Opening per request avoids leaking a launchd-owned daemon client. */
-function requestDaemon(command: Record<string, unknown>): Promise<DaemonResponse> {
+/**
+ * One bounded daemon request, through Prime's own client.
+ *
+ * A hand-rolled JSONL socket was tried first and every command came back
+ * `Daemon commands require protocol 7 or newer`, so no session was ever found
+ * and no wake could ever be delivered — while the drainer looked perfectly
+ * healthy, sweeping on schedule and reporting nothing owed. Measured on
+ * deckbox against a live orchestrator.
+ *
+ * The daemon negotiates a protocol and schema in its hello, so the only safe
+ * client is the one shipped with the runtime it is talking to. It moves in
+ * lockstep with the daemon; a copy here would silently rot at the next bump.
+ */
+async function requestDaemon(command: Record<string, unknown>): Promise<DaemonResponse> {
 	const socketPath = daemonSocketPath();
 	if (!fs.existsSync(socketPath)) {
-		return Promise.reject(new Error(`Prime daemon socket is not live: ${socketPath}`));
+		throw new Error(`Prime daemon socket is not live: ${socketPath}`);
 	}
-	const id = `deck-wake-${process.pid}-${randomUUID()}`;
-	return new Promise((resolve, reject) => {
-		const socket = net.createConnection(socketPath);
-		let buffer = "";
-		let sent = false;
-		let settled = false;
-		let timeout: ReturnType<typeof setTimeout>;
-
-		const finish = (error?: Error, response?: DaemonResponse): void => {
-			if (settled) return;
-			settled = true;
-			clearTimeout(timeout);
-			// Keep the error listener until the socket is closed. A failed connect
-			// can emit again while destroy tears it down; removing the listener
-			// turns the ordinary no-session race into an uncaught process error.
-			socket.destroy();
-			if (error !== undefined) reject(error);
-			else resolve(response ?? {});
+	const clientModule = path.join(
+		deckV2Home(),
+		".prime/runtime/lib/node_modules/prime-agent/dist/modes/daemon/daemon-client.js",
+	);
+	if (!fs.existsSync(clientModule)) {
+		throw new Error(`managed Prime runtime has no daemon client: ${clientModule}`);
+	}
+	const { DaemonClient } = (await import(pathToFileURL(clientModule).href)) as {
+		DaemonClient: new (socket: string) => {
+			connect(): Promise<unknown>;
+			waitForHello(): Promise<unknown>;
+			request(command: Record<string, unknown>, timeoutMs?: number): Promise<DaemonResponse>;
+			close(): void;
 		};
-		timeout = setTimeout(
-			() => finish(new Error(`Prime daemon request timed out: ${socketPath}`)),
-			PRIME_REQUEST_TIMEOUT_MS,
-		);
-
-		socket.on("error", (error) => finish(error));
-		socket.on("close", () => {
-			if (!settled) finish(new Error(`Prime daemon closed before replying: ${socketPath}`));
-		});
-		socket.on("data", (chunk) => {
-			buffer += chunk.toString("utf8");
-			for (;;) {
-				const newline = buffer.indexOf("\n");
-				if (newline < 0) break;
-				const line = buffer.slice(0, newline);
-				buffer = buffer.slice(newline + 1);
-				let message: DaemonResponse;
-				try {
-					message = JSON.parse(line) as DaemonResponse;
-				} catch {
-					continue;
-				}
-				if (message.type === "daemon_hello" && !sent) {
-					sent = true;
-					socket.write(`${JSON.stringify({ ...command, id })}\n`);
-					continue;
-				}
-				if (message.type !== "response" || message.id !== id) continue;
-				if (message.success === true) finish(undefined, message);
-				else finish(new Error(daemonError(message)));
-			}
-		});
-	});
+	};
+	const client = new DaemonClient(socketPath);
+	try {
+		await client.connect();
+		await client.waitForHello();
+		return await client.request(command, PRIME_REQUEST_TIMEOUT_MS);
+	} finally {
+		// Always close: a launchd- or systemd-owned sweep that leaks a client
+		// accumulates daemon connections every 30 seconds, forever.
+		client.close();
+	}
 }
 
 function activityTime(summary: PrimeSessionSummary): number {
