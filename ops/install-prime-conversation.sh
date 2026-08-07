@@ -74,6 +74,11 @@ WRAPPER="$PROFILE_ROOT/bin/prime-conversation"
 # The agent surface is code, not tools: the kernel imports `deck` from here.
 PYTHON_ROOT="$PROFILE_ROOT/python"
 IPYTHON_ROOT="$PROFILE_ROOT/ipython"
+# Resolved here, baked into the wrapper below. The kernel cannot start without
+# it, so failing loudly at install time beats a seat that starts and can run
+# nothing.
+UV_BIN_DIR="$(dirname "$(command -v uv)")" ||
+  { printf 'error: uv is required for the IPython kernel but was not found\n' >&2; exit 1; }
 PROCESS_PACKAGE_LINK="$AGENT_DIR/npm/node_modules/$PROCESS_PACKAGE_NAME"
 SOCKET_RELATIVE="$(node -e '
 const fs = require("node:fs");
@@ -908,6 +913,13 @@ export RLM_MAX_DEPTH="\${PRIME_CONVERSATION_RLM_MAX_DEPTH:-1}"
 export PYTHONPATH='$PYTHON_ROOT'
 export IPYTHONDIR='$IPYTHON_ROOT'
 export DECK_CLI="\${DECK_CLI:-\$(command -v deck-v2 || true)}"
+# The IPython kernel bootstraps through \`uv\`, and this wrapper forwards only
+# the caller's PATH. A terminal launched without the uv directory therefore
+# produces a seat with NO code execution at all - no memo wake, no deck import,
+# no file reads - and the agent can only report that it is broken. Observed on
+# a real orchestrator start from a Herdr pane. Pin the directory resolved at
+# install time so the seat never depends on how its terminal was launched.
+export PATH="$UV_BIN_DIR:\$PATH"
 prime_env=()
 for name in PATH HOME SHELL TMPDIR TMP TEMP LANG LC_ALL LC_CTYPE TERM COLORTERM NO_COLOR FORCE_COLOR USER LOGNAME TZ \
   GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL \
