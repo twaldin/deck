@@ -432,6 +432,11 @@ if ! PRIME_AGENT_BIN="$PRIME_AGENT_TARGET" "$REPO/ops/prime-patches.sh" verify >
   npm install --global --prefix "$PRIME_RUNTIME" "$PRIME_ARTIFACT"
 fi
 PRIME_AGENT_BIN="$PRIME_AGENT_TARGET" "$REPO/ops/prime-patches.sh" verify
+# Render-side null guard for assistant content parts. A single null element in
+# message.content otherwise throws in AssistantMessageComponent and, because the
+# transcript replays on resume, kills the session on every reopen. Idempotent.
+node "$REPO/patches/prime-agent/null-safe-content.mjs" "$PRIME_RUNTIME/lib/node_modules/prime-agent" ||
+  fail "prime-agent null-safe content patch did not apply"
 npm install --global --prefix "$PRIME_RUNTIME" "@aliou/pi-processes@0.10.4"
 PROCESS_PACKAGE_SOURCE="$PRIME_RUNTIME/lib/node_modules/@aliou/pi-processes"
 process_identity="$(node -e 'const p=require(process.argv[1]); process.stdout.write(`${p.name}@${p.version}`)' "$PROCESS_PACKAGE_SOURCE/package.json")"
