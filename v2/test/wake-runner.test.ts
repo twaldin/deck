@@ -15,6 +15,7 @@ import {
 import {
 	dueWakes,
 	enqueueWakeConditions,
+	ackWakes,
 	markInFlight,
 	pendingWakes,
 	type WakeItem,
@@ -55,10 +56,12 @@ function harness(
 	sent: Sent[];
 	marked: Array<{ ids: string[]; now: number }>;
 	suppressed: Array<{ ids: string[]; reason: string }>;
+	retired: string[];
 } {
 	const sent: Sent[] = [];
 	const marked: Array<{ ids: string[]; now: number }> = [];
 	const suppressed: Array<{ ids: string[]; reason: string }> = [];
+	const retired: string[] = [];
 	return {
 		deps: {
 			now: () => NOW,
@@ -73,6 +76,9 @@ function harness(
 			markInFlight: (ids, now) => {
 				marked.push({ ids, now });
 			},
+			retire: (ids) => {
+				retired.push(...ids);
+			},
 			suppressWakes: (ids, reason) => {
 				suppressed.push({ ids, reason });
 			},
@@ -80,6 +86,7 @@ function harness(
 		sent,
 		marked,
 		suppressed,
+		retired,
 	};
 }
 
@@ -97,7 +104,7 @@ describe("drainOnce", () => {
 	test("delivers every T0 event as its own interrupt", async () => {
 		const first = wake("urgent-a", "T0");
 		const second = wake("urgent-b", "T0", { verb: "failed" });
-		const { deps, sent, marked } = harness([first, second]);
+		const { deps, sent, retired } = harness([first, second]);
 
 		const result = await drainOnce(deps);
 
@@ -105,11 +112,38 @@ describe("drainOnce", () => {
 		expect(sent[0]?.content).toBe("task-urgent-a: blocked — note urgent-a\n\n[wake:urgent-a]");
 		expect(sent[1]?.content).toBe("task-urgent-b: failed — note urgent-b\n\n[wake:urgent-b]");
 		expect(sent.every((message) => message.options.triggerTurn)).toBe(true);
-		expect(marked).toEqual([
-			{ ids: ["urgent-a"], now: NOW },
-			{ ids: ["urgent-b"], now: NOW },
-		]);
+		// Receipt is the acknowledgement: a delivered wake is retired here, not
+		// left owed until the orchestrator calls wake_ack.
+		expect(retired).toEqual(["urgent-a", "urgent-b"]);
 		expect(result.deliveredIds).toEqual(["urgent-a", "urgent-b"]);
+	});
+
+	test("a rejected send keeps the wake owed instead of retiring it", async () => {
+		// The daemon answers {success:false} for a prompt it will not accept. That
+		// resolves, so awaiting the request is not proof of delivery; retiring on
+		// it would drop the event with nobody informed.
+		const { deps, retired } = harness([wake("urgent-a", "T0")], {
+			send: async () => ({ ok: false }),
+		});
+
+		const result = await drainOnce(deps);
+
+		expect(retired).toEqual([]);
+		expect(result.deliveredIds).toEqual([]);
+		expect(result.failedIds).toEqual(["urgent-a"]);
+	});
+
+	test("a send that throws keeps the wake owed", async () => {
+		const { deps, retired } = harness([wake("urgent-a", "T0")], {
+			send: async () => {
+				throw new Error("socket closed mid-delivery");
+			},
+		});
+
+		const result = await drainOnce(deps);
+
+		expect(retired).toEqual([]);
+		expect(result.failedIds).toEqual(["urgent-a"]);
 	});
 
 	test("caps interrupts per cycle and keeps the overflow owed", async () => {
@@ -142,7 +176,7 @@ describe("drainOnce", () => {
 			wake("batch-a2", "T1", { taskId: "task-a", note: "second" }),
 			wake("batch-b", "T1", { taskId: "task-b", verb: "resolved" }),
 		];
-		const { deps, sent, marked } = harness(wakes);
+		const { deps, sent, retired } = harness(wakes);
 
 		await drainOnce(deps);
 
@@ -151,7 +185,9 @@ describe("drainOnce", () => {
 		expect(sent[0]?.content).toContain("task-a: done — second (+1 earlier)");
 		expect(sent[0]?.content).toContain("task-b: resolved — note batch-b");
 		expect(sent[0]?.content.endsWith("[wake:batch-a1,batch-a2,batch-b]")).toBe(true);
-		expect(marked).toEqual([{ ids: ["batch-a1", "batch-a2", "batch-b"], now: NOW }]);
+		// A folded batch carries several ids in one message, so all of them retire
+		// on that single receipt.
+		expect(retired).toEqual(["batch-a1", "batch-a2", "batch-b"]);
 	});
 
 	test("never delivers T2 entries", async () => {
@@ -184,7 +220,7 @@ describe("drainOnce", () => {
 		expect(marked).toEqual([]);
 	});
 
-	test("marks a successful delivery in-flight without acknowledging it", async () => {
+	test("a delivered wake is retired from the real queue and never comes back", async () => {
 		enqueueWakeConditions([{
 			key: "needs-decision",
 			taskId: "durable-wake",
@@ -206,14 +242,18 @@ describe("drainOnce", () => {
 				return { ok: true };
 			},
 			markInFlight,
+			retire: (ids) => {
+				ackWakes(ids);
+			},
 			suppressWakes: () => {},
 		});
 
-		const after = pendingWakes();
-		expect(after).toHaveLength(1);
-		expect(after[0]?.id).toBe(before[0]?.id);
-		expect(after[0]?.deliveredAt).toBe(NOW);
 		expect(sent[0]?.content.endsWith(`[wake:${before[0]?.id}]`)).toBe(true);
+		// Delivery is the end of the entry's life. It used to stay owed with a
+		// deliveredAt marker and return on a timer until the orchestrator acked,
+		// which is how one effort interrupted a live session every two minutes.
+		expect(pendingWakes()).toHaveLength(0);
+		expect(dueWakes(NOW + 86_400_000)).toHaveLength(0);
 	});
 
 	test("does not read, send, or mutate the queue without a live session", async () => {
@@ -242,6 +282,9 @@ describe("drainOnce", () => {
 				return { ok: true };
 			},
 			markInFlight: () => {
+				marks += 1;
+			},
+			retire: () => {
 				marks += 1;
 			},
 			suppressWakes: () => {},

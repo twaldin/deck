@@ -11,6 +11,7 @@ import {
 	dueWakes as readDueWakes,
 	foldBatched,
 	formatInterrupt,
+	ackWakes as retireDelivered,
 	markInFlight as recordInFlight,
 	reconcile,
 	suppressWakes as recordSuppressed,
@@ -42,6 +43,8 @@ export interface WakeDrainDependencies {
 	applyProjectTierPolicy: TierPolicy;
 	send: WakeSend;
 	markInFlight(ids: string[], now: number): void | Promise<void>;
+	/** Retire delivered ids permanently: receipt is the ack. See deliver(). */
+	retire(ids: string[]): void | Promise<void>;
 	suppressWakes(ids: string[], reason: string): void | Promise<void>;
 }
 
@@ -125,9 +128,21 @@ export async function drainOnce(deps: WakeDrainDependencies): Promise<DrainResul
 			failedIds.push(...ids);
 			return;
 		}
-		await deps.markInFlight(ids, now);
-		// Sending is not acknowledgement. Acking here would be at-most-once: a
-		// Prime session dying before it records the wake would lose the event.
+		// Landing in the session IS the acknowledgement. The send resolves only
+		// after Prime accepts the follow-up, and a wake is only ever sent to a
+		// session with an attached client, so a resolved send means a live
+		// orchestrator holds the event.
+		//
+		// The wake used to stay owed until the agent called wake_ack. That put a
+		// per-wake tool call between the orchestrator and its work, and when the
+		// ack silently did nothing the same event was redelivered on a timer -
+		// observed live as one effort interrupting the orchestrator every two
+		// minutes. A notification that must be dismissed is a task; this is not
+		// meant to be one.
+		//
+		// A failed send retains the entry, so nothing is dropped in the case the
+		// old design actually protected against.
+		await deps.retire(ids);
 		deliveredIds.push(...ids);
 	};
 
@@ -388,21 +403,30 @@ function productionDependencies(now: number): WakeDrainDependencies {
 		owners: projectOwners(),
 		applyProjectTierPolicy: projectTierPolicy,
 		markInFlight: recordInFlight,
+		retire: (ids) => {
+			retireDelivered(ids);
+		},
 		suppressWakes: recordSuppressed,
 		send: async (content, options) => {
 			if (activeSessionId === null) return { ok: false };
+			// A resolved request is not a delivered message: the daemon answers
+			// `{success:false, error}` for a rejected prompt. Treating that as
+			// delivery would retire the wake and lose the event silently, so the
+			// response has to be inspected rather than merely awaited.
+			const accepted = (response: DaemonResponse): { ok: boolean } => ({
+				ok: response.success !== false,
+			});
 			try {
 				if (!options.triggerTurn) {
-					await requestDaemon({
+					return accepted(await requestDaemon({
 						type: "append_custom_message",
 						activeSessionId,
 						message: { customType: "deck.wake.v1", content, display: true },
-					});
-					return { ok: true };
+					}));
 				}
 				// This is the daemon form of sendMessage(..., { deliverAs:
 				// "followUp", triggerTurn: true }) used by questions.ts.
-				await requestDaemon({
+				return accepted(await requestDaemon({
 					type: "prompt",
 					activeSessionId,
 					message: content,
@@ -410,8 +434,7 @@ function productionDependencies(now: number): WakeDrainDependencies {
 					queueIfBusy: true,
 					expandPromptTemplates: false,
 					customMessage: { customType: "deck.wake.v1", content, display: true },
-				});
-				return { ok: true };
+				}));
 			} catch {
 				return { ok: false };
 			}

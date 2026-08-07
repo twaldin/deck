@@ -835,25 +835,47 @@ export function markInFlight(ids: string[], now = Date.now()): void {
 	});
 }
 
+/** What an ack actually did, per id. `missing` is not an error: a repeated ack
+ * is harmless. It is reported because "acked" that deleted nothing is the
+ * signature of a home or binary mismatch, and that failure is otherwise
+ * invisible - the caller sees success and the wake returns on the retry. */
+export type AckReport = {
+	/** Ids whose outbox entry existed and is now gone. */
+	deleted: string[];
+	/** Ids with no entry here: already acked, or acked against another home. */
+	missing: string[];
+	/** Ids rejected by the id grammar. */
+	invalid: string[];
+	/** The outbox the ack was applied to, so a mismatch is legible. */
+	outbox: string;
+};
+
 /**
  * Acknowledge only after the CONSUMER durably records the wake. Acking when the
  * send happens is at-most-once delivery: if the session dies mid-delivery, the
  * wake and its work are both lost.
  */
-export function ackWakes(ids: string[]): void {
+export function ackWakes(ids: string[]): AckReport {
 	migrateLegacyOutbox();
+	const report: AckReport = { deleted: [], missing: [], invalid: [], outbox: outboxDir() };
 	withOutboxMutationLock(() => {
 		for (const id of new Set(ids)) {
 			const target = outboxEntryPath(id);
-			if (target === null) continue;
+			if (target === null) {
+				report.invalid.push(id);
+				continue;
+			}
 			try {
 				fs.unlinkSync(target);
+				report.deleted.push(id);
 			} catch (error) {
 				const code = (error as NodeJS.ErrnoException).code;
 				if (code !== "ENOENT") throw error;
+				report.missing.push(id);
 			}
 		}
 	});
+	return report;
 }
 
 /**

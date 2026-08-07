@@ -519,9 +519,18 @@ export async function runCli(argv: string[]): Promise<number> {
 
 			case "wake-ack": {
 				const ids = [...new Set(need(args.flags, "ids").split(",").map((id) => id.trim()).filter((id) => id !== ""))];
-				ackWakes(ids);
-				if (args.flags.json === true) process.stdout.write(`${JSON.stringify({ acked: ids }, null, 2)}\n`);
-				else process.stdout.write(`acknowledged ${ids.length} wake(s)\n`);
+				// Report what the ack DID, never the ids it was handed. Echoing the
+				// input reports success for an ack that deleted nothing, which is the
+				// signature of a home or binary mismatch - and the wake then returns
+				// on the retry with the caller believing it was already handled.
+				const report = ackWakes(ids);
+				if (args.flags.json === true) process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+				else {
+					process.stdout.write(`acknowledged ${report.deleted.length} wake(s)`);
+					if (report.missing.length > 0) process.stdout.write(`; ${report.missing.length} already gone`);
+					if (report.invalid.length > 0) process.stdout.write(`; ${report.invalid.length} malformed`);
+					process.stdout.write("\n");
+				}
 				return 0;
 			}
 

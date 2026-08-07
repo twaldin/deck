@@ -300,9 +300,12 @@ describe("the deck code surface", () => {
 			liveDeckEnv(home),
 		);
 		expect(status).toBe(0);
+		// The report must describe the filesystem, not the caller's arguments: an
+		// ack that deleted nothing has to be distinguishable from one that worked,
+		// or a home/binary mismatch reports success while the wake keeps coming.
 		expect(JSON.parse(out)).toEqual({
-			first: { acked: ["wake-test"] },
-			again: { acked: ["wake-test", "wake-unknown"] },
+			first: { deleted: ["wake-test"], missing: [], invalid: [], outbox },
+			again: { deleted: [], missing: ["wake-test", "wake-unknown"], invalid: [], outbox },
 		});
 		expect(fs.existsSync(path.join(outbox, "wake-test.json"))).toBe(false);
 	});

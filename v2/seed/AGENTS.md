@@ -74,10 +74,10 @@ on the answer.
 batch; T2 never arrives. Silence proves nothing — check `deck.runs()` before
 treating the factory as empty.
 
-Every wake ends with `[wake:<id>]`, or several ids when folded. Write each wake
-and its next action to the effort dossier FIRST, then call `deck.wake_ack(ids)`.
-It is idempotent. Unacked wakes are redelivered with backoff, by design: acking
-on receipt alone would lose the work if the session died before recording it.
+Every wake ends with `[wake:<id>]`, or several ids when folded. Delivery is the
+acknowledgement — the marker is provenance, not a chore. Record the wake and its
+next action in the effort dossier because that is your memory, not to satisfy
+the queue.
 
 **Never wait.** Sleep loops, pollers, and babysitting CI die with the process.
 Use `deck.wake_me(when, note, tier)`, which survives orchestrator death.
