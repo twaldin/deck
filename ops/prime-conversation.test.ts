@@ -10,9 +10,14 @@ import type { ProjectProfile } from "../workflows/pr-pipeline/lib/profiles";
 import { z } from "../broker/node_modules/zod";
 import { DURABLE_LINK_NAMES, bootstrapHome } from "../v2/src/bootstrap";
 
-const PINNED_VERSION = "0.7.0";
-const PINNED_TAG = "v0.7.0";
-const PINNED_COMMIT = "be9e2fa0714e7cd1c6bd9bdb1b554d2cc6550387";
+// Read from the reviewed manifest: the installer derives its pins there too, so
+// a version bump cannot leave the suite asserting a version nothing installs.
+const PRIME_MANIFEST = JSON.parse(
+	fs.readFileSync(path.join(import.meta.dir, "..", "patches", "prime-agent", "manifest.json"), "utf8"),
+) as { base: { version: string; tag: string; commit: string } };
+const PINNED_VERSION = PRIME_MANIFEST.base.version;
+const PINNED_TAG = PRIME_MANIFEST.base.tag;
+const PINNED_COMMIT = PRIME_MANIFEST.base.commit;
 const PROCESS_PACKAGE = "npm:@aliou/pi-processes@0.10.4";
 const INSTALLER = path.join(import.meta.dir, "install-prime-conversation.sh");
 const SEED = fs.readFileSync(path.join(import.meta.dir, "..", "v2", "seed", "AGENTS.md"), "utf8");
@@ -1240,7 +1245,10 @@ describe("Prime upgrade tripwire", () => {
 		});
 
 		const bumped = path.join(root, "prime-agent-bumped");
-		fs.writeFileSync(bumped, "#!/bin/sh\nprintf '0.7.1\\n' >&2\n", { mode: 0o700 });
+		// A version that is deliberately not the pin, derived so a bump cannot make
+		// this fake accidentally match and silently stop testing the tripwire.
+		const unpinnedVersion = `${PINNED_VERSION}-not-the-pin`;
+		fs.writeFileSync(bumped, `#!/bin/sh\nprintf '${unpinnedVersion}\\n' >&2\n`, { mode: 0o700 });
 		const rejected = combinedOutput("bash", [INSTALLER], {
 			...installEnv,
 			PRIME_CONVERSATION_HOME: path.join(root, "bumped-home"),
@@ -1248,11 +1256,11 @@ describe("Prime upgrade tripwire", () => {
 		});
 		expect(rejected.status).toBe(1);
 		expect(rejected.output).toContain("Prime Agent upgrade tripwire");
-		expect(rejected.output).toContain("expected 0.7.0");
+		expect(rejected.output).toContain(`expected ${PINNED_VERSION}`);
 		expect(fs.existsSync(path.join(root, "bumped-home"))).toBe(false);
 
 		const impersonator = path.join(root, "prime-agent-impersonator");
-		fs.writeFileSync(impersonator, "#!/bin/sh\nprintf '0.7.0\\n'\n", { mode: 0o700 });
+		fs.writeFileSync(impersonator, `#!/bin/sh\nprintf '${PINNED_VERSION}\\n'\n`, { mode: 0o700 });
 		const provenanceRejected = combinedOutput("bash", [INSTALLER], {
 			...installEnv,
 			PRIME_CONVERSATION_HOME: path.join(root, "impersonator-home"),

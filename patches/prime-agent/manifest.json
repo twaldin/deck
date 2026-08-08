@@ -3,19 +3,19 @@
   "upstreamRepository": "PrimeIntellect-ai/prime-agent",
   "expectedInstallState": "patched",
   "base": {
-    "version": "0.7.0",
-    "tag": "v0.7.0",
-    "commit": "be9e2fa0714e7cd1c6bd9bdb1b554d2cc6550387",
-    "artifactUrl": "https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev/releases/v0.7.0/prime-agent-0.7.0.tgz",
-    "artifactSha256": "88b6578518c72cd51a825bc80f28e0fef9a64c67de4a7d6fd7afd7ca1b34da0b",
-    "pristinePackageTreeSha256": "0b0213cfac4ce942ea2b7dd579beb193101167125c324712ed46206b52ab4004",
-    "cliSha256": "ef097dce87e63c32e49493767763c7147376e6b4522818dd275ca9c32218ad35"
+    "version": "0.7.1",
+    "tag": "v0.7.1",
+    "commit": "95afd319a78ae017a41241d50b013d656a0685ce",
+    "artifactUrl": "https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev/releases/v0.7.1/prime-agent-0.7.1.tgz",
+    "artifactSha256": "d68612c83239caafab72cc76c55ac572bfd07a059ea8fbd2a3ddbe1f2b55dcdb",
+    "pristinePackageTreeSha256": "80064b4120728d7143723bb0d17dff076d9abd855e344dadf4d07143e3f93905",
+    "cliSha256": "16e2324a4e3aa13305c437168d44d7395bab317e292218a52d1c61a7ebdf0993"
   },
   "patchedArtifact": {
-    "file": "prime-agent-0.7.0-deck-blessed.tgz",
-    "sha256": "67bb50d26802c384742e5cb35e434d917834e70c0d62253c18bdb74ad81a4b26",
-    "packageTreeSha256": "46078c301b7b4a52f5835e27bdd95c90e779da01b3831b5f0231e99d25d59913",
-    "cliSha256": "ef097dce87e63c32e49493767763c7147376e6b4522818dd275ca9c32218ad35"
+    "file": "prime-agent-0.7.1-deck-blessed.tgz",
+    "sha256": "b8e35612d00e0e598ba0f3cd6255cca506b33b325cf1cb40f515c005422dd8f9",
+    "packageTreeSha256": "3131e3faf4b6d8bbe7720ed4b4450f28e7d9bbbc5f305df3fcd35d0075bd4fc2",
+    "cliSha256": "16e2324a4e3aa13305c437168d44d7395bab317e292218a52d1c61a7ebdf0993"
   },
   "patches": [
     {
@@ -25,7 +25,7 @@
       "fixes": "Stops one null assistant content part from crashing the renderer on every resume.",
       "upstreamBranch": "fix/null-safe-assistant-content",
       "sourceCommit": "b2cb7954948d4f417f982ca0b13b4d8c44c76d3a",
-      "baseVersion": "0.7.0",
+      "baseVersion": "0.7.1",
       "application": "not-applied",
       "installedDetection": {
         "file": "dist/bundle/chunk-L3VO7F2S.js",
@@ -46,7 +46,7 @@
       "upstreamPrUrl": "https://github.com/PrimeIntellect-ai/prime-agent/pull/677",
       "upstreamBranch": "fix/rlm-child-compaction-terminal-notice",
       "sourceCommit": "de041d0e7638a797027860e6da58159862708a28",
-      "baseVersion": "0.7.0",
+      "baseVersion": "0.7.1",
       "application": "not-applied",
       "installedDetection": {
         "file": "dist/core/agent-session.js",
@@ -66,7 +66,7 @@
       "upstreamPrUrl": "https://github.com/PrimeIntellect-ai/prime-agent/pull/675",
       "upstreamBranch": "fix/preserve-live-workers-during-recovery",
       "sourceCommit": "03721182018ea62f71298ff5b7525b472eb55c44",
-      "baseVersion": "0.7.0",
+      "baseVersion": "0.7.1",
       "application": "not-applied",
       "installedDetection": {
         "file": "dist/modes/daemon/daemon-supervisor.js",
@@ -86,7 +86,7 @@
       "upstreamPrUrl": "https://github.com/PrimeIntellect-ai/prime-agent/pull/682",
       "upstreamBranch": "fix/herdr-remote-clipboard",
       "sourceCommit": "fcd4a446d69405cf76801374ac2f6b6d26b0ef2c",
-      "baseVersion": "0.7.0",
+      "baseVersion": "0.7.1",
       "application": "not-applied",
       "installedDetection": {
         "file": "dist/utils/clipboard.js",
@@ -106,7 +106,7 @@
       "upstreamPrNumber": null,
       "upstreamPrUrl": null,
       "sourceCommit": "96ee5bce0af2f30fb07ff8b8bc3bcb6a9a581b32",
-      "baseVersion": "0.7.0",
+      "baseVersion": "0.7.1",
       "application": "not-applied",
       "installedDetection": {
         "file": "dist/core/model-registry.js",
@@ -120,16 +120,16 @@
     {
       "name": "session-input-pump-resume",
       "file": "session-input-pump-resume.patch",
-      "sha256": "8cb8c128b98ade25c85220dfe85f16a0db28cd1f1a573b61cfcaa4533fb525e9",
+      "sha256": "ab5f05e98cdcfb6998d6af5c7c8535c25728fbdf873a810711035825806942fd",
       "fixes": "Resumes a suspended session input pump on programmatic turn admission, and retries a deferred heartbeat at the next tick. Without it, queued agent messages, heartbeats and wake prompts starve at idle - seen live as input being dequeued at random.",
       "upstreamBranch": "fix/session-input-pump-resume",
-      "sourceCommit": "1c23cf76e6fc5de2cc3a9fe29973cec8724b7db5",
-      "baseVersion": "0.7.0",
+      "sourceCommit": "95afd319a78ae017a41241d50b013d656a0685ce",
+      "baseVersion": "0.7.1",
       "application": "not-applied",
       "installedDetection": {
         "file": "dist/core/agent-session.js",
         "pristineSha256": "db56597bdfc8a0213c61d4f05b20f8381a1a5e26bbddead957c4fa3e0d861449",
-        "patchedSha256": "b963287716e69298f0f11605cfd632196404e545b2869ac5d1d5a406b2d3559b",
+        "patchedSha256": "450a07b09a6b3a89f52153457a6359cf016adf307df22f78b1f233c99ec520d7",
         "bundleNeedle": "!options2.restore && options2.wake !== false && action.payload.kind === \"turn\""
       },
       "status": "local-only",

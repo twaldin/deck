@@ -16,7 +16,7 @@ Environment overrides:
   PRIME_PATCH_NPM_PREFIX     npm prefix containing the target install (all commands)
 
 status reports the installed patch fingerprint and checks upstream PR state with gh.
-apply replaces a pristine 0.7.0 install with the reviewed patched tarball.
+apply replaces a pristine install of the pinned base version with the reviewed patched tarball.
 verify exits non-zero unless the installed package matches the manifest fingerprint.
 bless re-vendors the installed tree as the reviewed artifact, for when the
   orchestrator has patched its own runtime and you want to keep that fix.
@@ -468,29 +468,44 @@ apply_command() {
 # whatever is on disk right now as the reviewed artifact, so the next install
 # reproduces it instead of the tripwire refusing to launch.
 bless_command() {
-  local root tree_sha cli_sha artifact_file artifact_path artifact_sha staging
+  local root tree_sha cli_sha artifact_file artifact_path artifact_sha staging attempt
   root="$(resolve_install_root)" || fail "prime-agent install not found"
   [[ -f "$root/package.json" ]] || fail "prime-agent install not found"
 
-  staging="$(mktemp -d)"
-  mkdir -p "$staging/package"
-  # Exactly the entries package_tree_sha fingerprints: no node_modules, no marker.
-  for name in dist docs examples skills postinstall.cjs CHANGELOG.md README.md package.json; do
-    [[ -e "$root/$name" ]] || fail "install is missing $name"
-    cp -R "$root/$name" "$staging/package/$name"
-  done
-  find "$staging/package" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
-  find "$staging/package" -name "*.pyc" -delete 2>/dev/null || true
-
   artifact_file="prime-agent-$BASE_VERSION-deck-blessed.tgz"
   artifact_path="$PATCH_DIR/$artifact_file"
-  (cd "$staging" && COPYFILE_DISABLE=1 tar czf "$artifact_path" package) || fail "could not pack the installed tree"
 
-  tree_sha="$(package_tree_sha "$root")"
-  cli_sha="$(sha256_file "$root/dist/bundle/cli.js")"
+  # The orchestrator can edit its own runtime mid-copy, which would record the
+  # live tree's fingerprint against a differently-shaped archive: verify would
+  # pass here and apply would reject the artifact later. Fingerprint what was
+  # actually archived, then require the live tree to still match it.
+  for attempt in 1 2 3; do
+    staging="$(mktemp -d)"
+    mkdir -p "$staging/package"
+    # Exactly the entries package_tree_sha fingerprints: no node_modules, no marker.
+    for name in dist docs examples skills postinstall.cjs CHANGELOG.md README.md package.json; do
+      [[ -e "$root/$name" ]] || fail "install is missing $name"
+      cp -R "$root/$name" "$staging/package/$name"
+    done
+    find "$staging/package" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
+    find "$staging/package" -name "*.pyc" -delete 2>/dev/null || true
+
+    tree_sha="$(package_tree_sha "$staging/package")"
+    cli_sha="$(sha256_file "$staging/package/dist/bundle/cli.js")"
+    if [[ "$tree_sha" == "$(package_tree_sha "$root")" ]]; then
+      (cd "$staging" && COPYFILE_DISABLE=1 tar czf "$artifact_path" package) ||
+        fail "could not pack the installed tree"
+      break
+    fi
+
+    rm -rf "$staging"
+    staging=""
+    printf 'warning: install changed while packing; retrying (%s/3)\n' "$attempt" >&2
+  done
+  [[ -n "$staging" ]] || fail "install kept changing while packing; retry once the orchestrator is idle"
   artifact_sha="$(sha256_file "$artifact_path")"
 
-  node - "$MANIFEST" "$root" "$artifact_file" "$artifact_sha" "$tree_sha" "$cli_sha" <<'NODE'
+  node - "$MANIFEST" "$staging/package" "$artifact_file" "$artifact_sha" "$tree_sha" "$cli_sha" <<'NODE'
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -508,7 +523,8 @@ try {
     .map((name) => fs.readFileSync(path.join(bundleDir, name), "utf8"))
     .join("\n");
 } catch {}
-// Detection hashes describe the file as installed, so they move with the tree.
+// Detection hashes must describe the archived tree, the same bytes the manifest
+// fingerprints, not a live file the orchestrator may have edited since.
 for (const patch of manifest.patches) {
   const detection = patch.installedDetection;
   const target = path.join(root, detection.file);

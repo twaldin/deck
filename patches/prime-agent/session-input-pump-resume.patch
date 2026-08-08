@@ -1,20 +1,6 @@
---- pristine/package/dist/core/agent-session.js
-+++ /Users/twaldin/.deck/.prime/runtime/lib/node_modules/prime-agent/dist/core/agent-session.js
-@@ -4001,6 +4001,13 @@
-         }
-         const coalescedOwner = options.restore ? undefined : this._coalescedFollowUpOwner(action);
-         if (coalescedOwner) {
-+            // A coalesced re-fire is still evidence a producer wants delivery: resume a
-+            // pump suspended by an abort so the owning queued action can drain at idle.
-+            if (options.wake !== false && !this.isStreaming && this._sessionInputPumpSuspended) {
-+                this._sessionInputPumpSuspended = false;
-+                this._notifySessionInputCheckpointChange();
-+                this._scheduleSessionInputPump();
-+            }
-             if (action.agentMessageId !== coalescedOwner.agentMessageId) {
-                 this._rejectAgentMessage(action.agentMessageId, new Error("Prompt was not queued because an equivalent follow-up is already pending."));
-             }
-@@ -4033,6 +4040,17 @@
+--- a/dist/core/agent-session.js
++++ b/dist/core/agent-session.js
+@@ -4033,6 +4033,17 @@
                  this._sessionInputPumpSuspended = false;
              this._scheduleSessionInputPump();
          }
@@ -32,8 +18,8 @@
          return { accepted: true, disposition, ticket: controller.ticket };
      }
      async _queuePreparedPrompt(schedule, text, images, options = {}) {
---- pristine/package/dist/core/cron-jobs.js
-+++ /Users/twaldin/.deck/.prime/runtime/lib/node_modules/prime-agent/dist/core/cron-jobs.js
+--- a/dist/core/cron-jobs.js
++++ b/dist/core/cron-jobs.js
 @@ -529,7 +529,15 @@
                      return job;
                  }

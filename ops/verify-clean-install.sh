@@ -78,8 +78,10 @@ done
 [ ! -e "$DECK_HOME/.pi" ] || fail "fresh install produced a retired .pi home"
 PRIME_VERSION="$("$DECK_BIN/prime-agent" --version 2>&1)" ||
   fail "freshly installed prime-agent cannot run"
-[ "$PRIME_VERSION" = "0.7.0" ] ||
-  fail "fresh install has Prime Agent $PRIME_VERSION instead of pinned 0.7.0"
+# Derived from the reviewed patch manifest so a version bump needs one edit.
+PINNED_PRIME_VERSION="$(node -e 'process.stdout.write(require(process.argv[1]).base.version)' "$(dirname "$0")/../patches/prime-agent/manifest.json")"
+[ "$PRIME_VERSION" = "$PINNED_PRIME_VERSION" ] ||
+  fail "fresh install has Prime Agent $PRIME_VERSION instead of pinned $PINNED_PRIME_VERSION"
 UV_DESCRIPTION="$("$DECK_BIN/uv" --version 2>&1)" ||
   fail "freshly installed uv cannot run"
 case "$UV_DESCRIPTION" in

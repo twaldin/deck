@@ -166,7 +166,7 @@ const fs = require("node:fs");
 const [manifestPath, legacyCheckout] = process.argv.slice(2);
 fs.writeFileSync(manifestPath, `${JSON.stringify({
   profile: "deck-prime-conversation-v1",
-  primeAgentVersion: "0.7.0",
+  primeAgentVersion: require(`${legacyCheckout}/patches/prime-agent/manifest.json`).base.version,
   deckRepo: legacyCheckout,
 }, null, 2)}\n`);
 NODE
