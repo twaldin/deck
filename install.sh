@@ -598,6 +598,16 @@ install_wake_drainer() {
       mkdir -p "$(dirname "$plist")"
       render "$REPO/ops/deck-wake-drain.plist.template" > "$plist"
       plutil -lint "$plist" >/dev/null || fail "rendered wake-drain plist is malformed"
+      # A sandboxed install (HOME overridden, as in the verify scripts) must
+      # not boot out the real user's drainer and replace it with a job whose
+      # repo is about to be deleted. launchd only reads the real home anyway.
+      local real_home
+      real_home="$(dscl . -read "/Users/$(id -un)" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
+      if [ -n "$real_home" ] && [ "$HOME" != "$real_home" ]; then
+        printf 'WARNING: sandboxed HOME (%s); wake-drain plist written but NOT loaded into launchd.
+' "$HOME"
+        return 0
+      fi
       # Reload rather than bootstrap: a stale job from a previous install would
       # otherwise keep running the old path silently.
       launchctl bootout "gui/$(id -u)/ai.deck.wake-drain" 2>/dev/null || true
@@ -612,9 +622,18 @@ install_wake_drainer() {
       render "$REPO/ops/deck-wake-drain.timer.template" > "$unit_dir/deck-wake-drain.timer"
       if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
         systemctl --user daemon-reload
-        systemctl --user enable --now deck-wake-drain.timer ||
-          fail "could not enable the wake drainer timer"
-        printf 'wake drainer enabled (systemd user timer, every 30s)\n'
+        # A sandboxed install (HOME overridden, as in CI) writes units under a
+        # HOME the running user manager never reads, so the unit is invisible
+        # to it. That is a skip, not a failure: the real-install path below
+        # still fails hard when the manager can see the unit and enable breaks.
+        if ! systemctl --user cat deck-wake-drain.timer >/dev/null 2>&1; then
+          printf 'WARNING: systemd user instance does not see %s (sandboxed HOME?); units written but NOT enabled.\n' "$unit_dir"
+          printf 'WARNING: run `systemctl --user daemon-reload && systemctl --user enable --now deck-wake-drain.timer` from a real session.\n'
+        else
+          systemctl --user enable --now deck-wake-drain.timer ||
+            fail "could not enable the wake drainer timer"
+          printf 'wake drainer enabled (systemd user timer, every 30s)\n'
+        fi
       else
         # A headless box with no user session bus. Say so loudly: a silent skip
         # here reads exactly like a working install with a quiet factory.
