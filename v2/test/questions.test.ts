@@ -857,6 +857,45 @@ describe("questions extension", () => {
 		expect(captain.customRenders.count).toBe(0);
 	});
 
+
+	test("REGRESSION: a throwing host dialog names the open question and stops", async () => {
+		const file = freshFile();
+		const agent = new Harness();
+		registerQuestions(agent as any, envFor(file), agent.runtime);
+		ask(file, { question: "risky merge?", options: ["yes"], sessionId: "s1", cwd: "/" });
+		const captain = fakeContext("session-captain");
+		captain.ui.select = async () => {
+			throw new Error("dialog backend gone");
+		};
+		await agent.commands.get("questions")!.handler("", captain);
+		// The entry stays open, and the fallback notice identifies it.
+		expect(openQuestions(file)).toHaveLength(1);
+		expect(captain.notices.some((n) => n.includes("risky merge?") && n.includes("remains open"))).toBe(true);
+	});
+
+	test("REGRESSION: Dismiss losing the race drops the stale card and shows the next one", async () => {
+		const file = freshFile();
+		const agent = new Harness();
+		registerQuestions(agent as any, envFor(file), agent.runtime);
+		ask(file, { question: "first", options: ["a"], sessionId: "s1", cwd: "/" });
+		ask(file, { question: "second", options: ["b"], sessionId: "s2", cwd: "/" });
+		const captain = fakeContext("session-captain", ["Dismiss", "1. b"]);
+		// Another session resolves the first card while its dialog is open.
+		const select = captain.ui.select;
+		let raced = false;
+		captain.ui.select = async (title: string) => {
+			if (!raced) {
+				raced = true;
+				const target = openQuestions(file)[0]!;
+				answer(file, target.id, "elsewhere");
+			}
+			return select(title);
+		};
+		await agent.commands.get("questions")!.handler("", captain);
+		// Both cards end resolved: first elsewhere, second answered here.
+		expect(openQuestions(file)).toHaveLength(0);
+	});
+
 	test("/questions Previous returns to the earlier question", async () => {
 		const file = freshFile();
 		const agent = new Harness();

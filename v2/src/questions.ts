@@ -277,7 +277,18 @@ export function registerQuestions(
 				// (observed live on the prime host). ctx.ui.select is the
 				// documented cross-host contract; component identity stays with
 				// the host.
-				const picked = await ctx.ui.select(title, choices);
+				let picked: string | undefined;
+				try {
+					picked = await ctx.ui.select(title, choices);
+				} catch (error) {
+					// Host dialog failure must never strand the review silently: the
+					// queue entry stays open; say WHICH question remains and stop.
+					ctx.ui.notify(
+						`Question dialog failed; "${entry.question}" (${entry.id}) remains open: ${error instanceof Error ? error.message : String(error)}`,
+						"error",
+					);
+					break;
+				}
 				if (picked === undefined) break;
 				const choice = choices.indexOf(picked);
 				if (choice < 0) break;
@@ -294,16 +305,24 @@ export function registerQuestions(
 				if (control === "Show detail") {
 					// Read-only scrollable view through the host select dialog: the
 					// same portable surface /usage settled on. The choice is ignored.
-					await ctx.ui.select(
-						`Question ${entry.id}`,
-						[...fullDetail(entry, runtime.now()).split("\n"), RESUBMIT_DONE],
-					);
+					try {
+						await ctx.ui.select(
+							`Question ${entry.id}`,
+							[...fullDetail(entry, runtime.now()).split("\n"), RESUBMIT_DONE],
+						);
+					} catch {
+						// Detail view is optional; the review loop continues on the card.
+					}
 					continue;
 				}
 				if (control === "Dismiss") {
 					if (entry.workflow === undefined) {
 						if (resolve(ctx, entry, DISMISSED, "dismissed")) {
 							answered += 1;
+							pending.splice(index, 1);
+						} else if (!openQuestions(file).some((q) => q.id === entry.id)) {
+							// Resolved elsewhere while the dialog was open: drop the
+							// stale card so the next unanswered one is shown.
 							pending.splice(index, 1);
 						}
 						continue;
@@ -316,6 +335,9 @@ export function registerQuestions(
 						if (terminal) {
 							if (resolve(ctx, entry, DISMISSED, "dismissed")) {
 								answered += 1;
+								pending.splice(index, 1);
+							} else if (!openQuestions(file).some((q) => q.id === entry.id)) {
+								// Lost the race to another session: retire the stale card.
 								pending.splice(index, 1);
 							}
 						} else {
