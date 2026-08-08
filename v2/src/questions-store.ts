@@ -151,7 +151,7 @@ interface DeliverEvent {
 	deliveredAt: number;
 }
 
-type QueueEvent = AskEvent | AnswerEvent | DeliverEvent;
+type QueueEvent = AskEvent | AnswerEvent | DeliverEvent | RetireRunEvent;
 
 export interface Question extends AskEvent {
 	status: QuestionStatus;
@@ -506,6 +506,12 @@ export function workflowQuestionId(
 	return `workflow:${digest}`;
 }
 
+/** Test-only seam: runs between the ask append and the tombstone re-check. */
+export let lateAskTestHook: (() => void) | undefined;
+export function setLateAskTestHook(hook: (() => void) | undefined): void {
+	lateAskTestHook = hook;
+}
+
 /** Appends one decision-shaped workflow ask, once, across retries and resumes. */
 export function askWorkflowQuestion(
 	file: string,
@@ -548,7 +554,7 @@ export function askWorkflowQuestion(
 			? {}
 			: { approvalValue: input.approvalValue }),
 	};
-	return askIfAbsent(file, {
+	const event = askIfAbsent(file, {
 		id: workflowQuestionId(runId, nodeId, decisionKey),
 		idScope: "global",
 		origin: "workflow",
@@ -570,6 +576,29 @@ export function askWorkflowQuestion(
 		cwd: input.cwd,
 		now: input.now,
 	});
+	// Test seam for the late-ask race: fires between the ask append and the
+	// tombstone re-read, where a concurrent sweep can retire the run.
+	lateAskTestHook?.();
+	// Late-ask race: an ask for a run already retired can never consume an
+	// answer. The tombstone is read AFTER the append — a sweep that retires the
+	// run between our append and this read is still observed — and re-read
+	// under the question lock before dismissing.
+	if (retiredRunReason(file, runId) !== undefined) {
+		const open = readQuestions(file).find((entry) => entry.id === event.id && entry.status === "open");
+		if (open !== undefined) {
+			const lock = acquireQuestionLock(file, event.id);
+			try {
+				const tombstone = retiredRunReason(file, runId);
+				const current = readQuestions(file).find((entry) => entry.id === event.id);
+				if (tombstone !== undefined && current?.status === "open") {
+					answer(file, event.id, tombstone, "dismissed", input.now ?? Date.now());
+				}
+			} finally {
+				rmSync(lock, { recursive: true, force: true });
+			}
+		}
+	}
+	return event;
 }
 
 /** Workflow questions for reconciliation and answer hydration. */
@@ -586,6 +615,145 @@ export function workflowQuestions(
 			entry.workflow?.runId === canonicalRunId &&
 			(canonicalNodeId === undefined || entry.workflow.nodeId === canonicalNodeId),
 	);
+}
+
+/**
+ * Terminal tombstone for one run, recorded in the same append-only log and
+ * folded on read like answers. It survives the retirement pass, so a question
+ * asked AFTER the pass (a cancellation race is an observed, honest-mistake
+ * class) is dismissed on arrival instead of surviving as queue noise.
+ */
+interface RetireRunEvent {
+	kind: "retire-run";
+	runId: string;
+	reason: string;
+	retiredAt: number;
+}
+
+/**
+ * The latest retire-run tombstone per run, in file order. Compaction rewrites
+ * these back verbatim: a tombstone dropped from the log would reopen the
+ * late-ask race for that run forever.
+ */
+export function retireRunEvents(file: string): RetireRunEvent[] {
+	let raw: string;
+	try {
+		raw = readFileSync(file, "utf8");
+	} catch {
+		return [];
+	}
+	const byRun = new Map<string, RetireRunEvent>();
+	for (const line of raw.split("\n")) {
+		if (line.trim() === "") continue;
+		let event: Partial<RetireRunEvent>;
+		try {
+			event = JSON.parse(line) as Partial<RetireRunEvent>;
+		} catch {
+			continue;
+		}
+		if (
+			event.kind === "retire-run" &&
+			typeof event.runId === "string" &&
+			typeof event.reason === "string"
+		) {
+			byRun.set(event.runId, {
+				kind: "retire-run",
+				runId: event.runId,
+				reason: event.reason,
+				retiredAt: typeof event.retiredAt === "number" ? event.retiredAt : 0,
+			});
+		}
+	}
+	return [...byRun.values()];
+}
+
+/** The recorded retirement reason for a run, or undefined when the run is live. */
+export function retiredRunReason(file: string, runId: string): string | undefined {
+	const canonicalRunId = canonicalWorkflowIdentity(runId, "runId", 300);
+	let raw: string;
+	try {
+		raw = readFileSync(file, "utf8");
+	} catch {
+		return undefined;
+	}
+	let reason: string | undefined;
+	for (const line of raw.split("\n")) {
+		if (line.trim() === "") continue;
+		let event: { kind?: unknown; runId?: unknown; reason?: unknown };
+		try {
+			event = JSON.parse(line) as { kind?: unknown; runId?: unknown; reason?: unknown };
+		} catch {
+			continue;
+		}
+		if (event.kind === "retire-run" && event.runId === canonicalRunId && typeof event.reason === "string") {
+			reason = event.reason;
+		}
+	}
+	return reason;
+}
+
+/**
+ * Dismiss every still-open question owned by a run that reached a terminal
+ * state. A cancelled or failed run can never consume an answer, so its open
+ * questions are pure queue noise (observed: dry-run artifacts surviving their
+ * cancelled run indefinitely). Returns the dismissed question ids.
+ *
+ * Also records a durable per-run tombstone (once), so a question appended after
+ * this pass — the late-ask race — is dismissed by `askWorkflowQuestion` itself.
+ */
+export function retireRunQuestions(
+	file: string,
+	runId: string,
+	reason: string,
+	now = Date.now(),
+): string[] {
+	const canonicalRunId = canonicalWorkflowIdentity(runId, "runId", 300);
+	if (retiredRunReason(file, canonicalRunId) === undefined) {
+		append(file, {
+			kind: "retire-run",
+			runId: canonicalRunId,
+			reason: truncateBytes(reason, 1000),
+			retiredAt: now,
+		});
+	}
+	const retired: string[] = [];
+	for (const entry of readQuestions(file)) {
+		if (entry.status !== "open" || entry.workflow?.runId !== canonicalRunId) continue;
+		const lock = acquireQuestionLock(file, entry.id);
+		try {
+			const current = readQuestions(file).find((row) => row.id === entry.id);
+			if (current?.status !== "open") continue;
+			if (answer(file, entry.id, reason, "dismissed", now)) retired.push(entry.id);
+		} finally {
+			rmSync(lock, { recursive: true, force: true });
+		}
+	}
+	return retired;
+}
+
+/**
+ * Retirement must never break the path that noticed the terminal run. A missing
+ * queue is genuinely nothing to retire; every other failure is reported loudly
+ * (it means open questions may be leaking) and then swallowed.
+ */
+export function retireRunQuestionsSafely(
+	file: string,
+	runId: string,
+	reason: string,
+	warn: (message: string) => void = (message) => process.stderr.write(`${message}\n`),
+): string[] {
+	try {
+		return retireRunQuestions(file, runId, reason);
+	} catch (error) {
+		const code = (error as NodeJS.ErrnoException | null)?.code;
+		if (code !== "ENOENT") {
+			warn(
+				`deck: could not retire questions for terminal run ${runId}: ` +
+					`${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+		return [];
+	}
 }
 
 /** Appends the terminal event matching one workflow wait, if it is still open. */
@@ -721,7 +889,10 @@ export function compact(file: string, now = Date.now()): { kept: number; archive
 		if (keptArchive.length !== archiveLines.length) writeFileSync(archive, `${keptArchive.join("\n")}\n`, { encoding: "utf8", mode: 0o600 });
 	} catch { /* The live queue remains authoritative if archive maintenance fails. */ }
 	const tmp = `${file}.tmp`;
-	const body = keep.flatMap(eventLines).join("\n");
+	// Retire-run tombstones are not Question records, so a fold over questions
+	// alone would drop them and reopen the late-ask race. Keep the latest per run.
+	const tombstoneLines = retireRunEvents(file).map((event) => JSON.stringify(event));
+	const body = [...tombstoneLines, ...keep.flatMap(eventLines)].join("\n");
 	writeFileSync(tmp, body === "" ? "" : `${body}\n`, { encoding: "utf8", mode: 0o600 });
 	renameSync(tmp, file);
 	return { kept: keep.length, archived: drop.length };

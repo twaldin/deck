@@ -31,6 +31,7 @@ import * as path from "node:path";
 import { appendStatus } from "./events";
 import { stateDir } from "./home";
 import { readMeta } from "./meta";
+import { queueFile, retireRunQuestionsSafely } from "./questions-store";
 import { findProfile } from "./projects";
 import type { ProjectProfile } from "./projects";
 import { SMITHERS_SPEC } from "./smithers";
@@ -411,6 +412,15 @@ export function observeOnce(taskId: string, observation: Observation): EmittedEv
 		} catch { /* non-ship tasks have no ship input */ }
 		const worktree = metaWorktree ?? inputWorktree;
 		if (worktree !== undefined) releaseWorktree(worktree, observation.run.id);
+		// A terminal run can never consume an answer; its open questions are
+		// queue noise. Dismissal is idempotent and scoped to this run id, and a
+		// retirement failure must never break the observation that noticed the
+		// terminal run — it is reported as a warning instead.
+		retireRunQuestionsSafely(
+			queueFile(),
+			observation.run.id,
+			`run ${observation.run.id} reached terminal state ${observation.run.status}; question retired automatically`,
+		);
 	}
 	return events;
 }

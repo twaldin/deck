@@ -264,6 +264,40 @@ describe("observer event selection", () => {
 		expect(observer.isFinished({ run: run("running"), nodes: [] })).toBe(false);
 	});
 
+	test("REGRESSION: a terminal run retires its own open questions but not a live run's", async () => {
+		const { observer } = await mods();
+		const questions = await import("../src/questions-store");
+		const file = path.join(home, "state", "questions.jsonl");
+		process.env.DECK_QUESTIONS_FILE = file;
+		try {
+			const base = {
+				answerLane: "store" as const,
+				resumeHint: "hint",
+				originalIssue: "issue",
+				proposedAction: "action",
+				blastRadius: "radius",
+				cwd: "/workflow",
+			};
+			questions.askWorkflowQuestion(file, { ...base, runId: "run-1", nodeId: "n1" });
+			questions.askWorkflowQuestion(file, { ...base, runId: "run-other", nodeId: "n1" });
+
+			observer.observeOnce("t1", { run: run("cancelled"), nodes: [] });
+
+			const open = questions.openQuestions(file);
+			expect(open).toHaveLength(1);
+			expect(open[0]?.workflow?.runId).toBe("run-other");
+			expect(
+				questions.workflowQuestions(file, "run-1", "n1")[0]?.status,
+			).toBe("dismissed");
+
+			// A second poll of the same terminal run changes nothing.
+			observer.observeOnce("t1", { run: run("cancelled"), nodes: [] });
+			expect(questions.openQuestions(file)).toHaveLength(1);
+		} finally {
+			delete process.env.DECK_QUESTIONS_FILE;
+		}
+	});
+
 	test("planning is pure: it decides without writing", async () => {
 		const { observer, events } = await mods();
 		const planned = observer.planEvents("t1", { run: run("succeeded"), nodes: [] }, { emitted: [] });
