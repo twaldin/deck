@@ -502,7 +502,11 @@ export function registerDeckUsage(
 				try {
 					await select.call(ctx.ui, "Broker quota", [...message.split("\n"), "Close"]);
 				} catch {
-					ctx.ui?.notify?.(message, "info");
+					try {
+						ctx.ui?.notify?.(message, "info");
+					} catch {
+						// Presentation is best-effort; the status chip below still updates.
+					}
 				}
 			} else {
 				try {

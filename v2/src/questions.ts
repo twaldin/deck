@@ -399,8 +399,12 @@ export function registerQuestions(
 				} else if ((action === "stamp" && trustedStamp || action === undefined && trustedStamp && selectedLabel === "Stamp")) {
 					applied = await approveStamp(ctx, entry);
 				} else if ((action === "approve" && trustedReviewGate || action === undefined && trustedReviewGate && entry.questionKind === "approve" && selectedLabel === "Approve")) {
+					// Permanent refusal, not a transport failure: approving again can
+					// never succeed, so do not offer a resubmit loop. Move on; the
+					// entry stays open for the workflow path that CAN resolve it.
 					ctx.ui.notify("Legacy review-gate approvals cannot be submitted. Re-queue this decision through its Smithers workflow.", "error");
-					applied = false;
+					index += 1;
+					continue;
 				} else if ((action === "deny-gate" && (trustedStamp || trustedReviewGate) || action === undefined && trustedStamp && selectedLabel === "Close")) {
 					applied = await closeStamp(ctx, entry);
 				} else if ((action === "close-pr" && trustedReviewGate || action === undefined && trustedReviewGate && entry.questionKind === "agent" && selectedLabel === "Close")) {

@@ -896,6 +896,32 @@ describe("questions extension", () => {
 		expect(openQuestions(file)).toHaveLength(0);
 	});
 
+
+	test("REGRESSION: a permanent review-gate refusal advances instead of looping", async () => {
+		const file = freshFile();
+		const agent = new Harness();
+		registerQuestions(agent as any, envFor(file), agent.runtime);
+		ask(file, {
+			question: "approve the legacy gate?",
+			options: ["Approve"],
+			sessionId: "s1",
+			cwd: "/",
+			questionKind: "approve",
+			origin: "review-gate",
+			prContext: { repo: "o/r", number: 1 },
+		} as any);
+		ask(file, { question: "after the gate", options: ["ok"], sessionId: "s2", cwd: "/" });
+		// Extra scripted picks: if the refused card looped, "Approve" would be
+		// consumed again instead of the second card's option.
+		const captain = fakeContext("session-captain", ["1. Approve", "1. ok", "1. Approve", "1. Approve"]);
+		await agent.commands.get("questions")!.handler("", captain);
+		// The gate stays open (only its workflow can resolve it); the plain
+		// question after it was reachable and answered.
+		const remaining = openQuestions(file);
+		expect(remaining).toHaveLength(1);
+		expect(remaining[0]!.questionKind).toBe("approve");
+	});
+
 	test("/questions Previous returns to the earlier question", async () => {
 		const file = freshFile();
 		const agent = new Harness();
