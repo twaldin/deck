@@ -601,10 +601,15 @@ install_wake_drainer() {
       # A sandboxed install (HOME overridden, as in the verify scripts) must
       # not boot out the real user's drainer and replace it with a job whose
       # repo is about to be deleted. launchd only reads the real home anyway.
-      local real_home
+      local real_home home_canon real_canon
       # Tilde expansion consults the account database, not $HOME.
       real_home="$(eval printf '%s' "~$(id -un)")"
-      if [ -n "$real_home" ] && [ "$HOME" != "$real_home" ]; then
+      # Compare canonical directory identities: trailing slashes or a
+      # symlinked spelling of the real home must not read as a sandbox
+      # (a real install would then silently skip loading the drainer).
+      home_canon="$(cd "$HOME" 2>/dev/null && pwd -P || printf '%s' "$HOME")"
+      real_canon="$(cd "$real_home" 2>/dev/null && pwd -P || printf '%s' "$real_home")"
+      if [ -n "$real_home" ] && [ "$home_canon" != "$real_canon" ]; then
         printf 'WARNING: sandboxed HOME (%s); wake-drain plist written but NOT loaded into launchd.
 ' "$HOME"
         return 0
