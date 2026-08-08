@@ -157,8 +157,9 @@ AGENTS_SIZE="$(wc -c < "$DECK_HOME/AGENTS.md" | tr -d '[:space:]')"
 # Budget is injected into EVERY session, so it stays tight. It moved from 12288
 # once, deliberately, to fit three things a production repo cannot ship without:
 # the human-reviewer contract, the global-memory privacy boundary, and the CLI
-# table. Keep this in lockstep with v2/test/home.test.ts.
-[ "$AGENTS_SIZE" -lt 6144 ] || fail "installed AGENTS.md is $AGENTS_SIZE bytes (must be under 6144)"
+# table. Keep this in lockstep with v2/test/home.test.ts. It moved again to
+# 7168 for the wake contract; see the rationale in v2/test/home.test.ts.
+[ "$AGENTS_SIZE" -lt 7168 ] || fail "installed AGENTS.md is $AGENTS_SIZE bytes (must be under 7168)"
 
 REVIEWERS_FILE="$DECK_HOME/config/reviewers.json"
 [ -f "$REVIEWERS_FILE" ] || fail "fresh install is missing private reviewer config"
