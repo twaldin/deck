@@ -252,8 +252,10 @@ describe("home seed", () => {
 	test("is compact and identifies the plain-session boundaries", () => {
 		const seed = fs.readFileSync(path.join(import.meta.dir, "..", "v2", "seed", "AGENTS.md"), "utf8");
 		// Single source of truth for this budget: keep in lockstep with
-		// v2/test/home.test.ts and ops/verify-clean-install.sh.
-		expect(Buffer.byteLength(seed, "utf8")).toBeLessThan(6 * 1024);
+		// v2/test/home.test.ts and ops/verify-clean-install.sh. The budget moved
+		// from 6KB to 7KB when the wake contract joined the seed (see the
+		// rationale in v2/test/home.test.ts); these checks drifted apart.
+		expect(Buffer.byteLength(seed, "utf8")).toBeLessThan(7 * 1024);
 		expect(seed).toContain("You are a Deck conversation seat");
 		expect(seed).toContain("## MEMORY CONTRACT");
 		expect(seed).toContain("## THE FACTORY");
