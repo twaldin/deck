@@ -15,6 +15,7 @@ import {
 } from "../src/wake-runner";
 import { askWorkflowQuestion, openQuestions, workflowQuestions } from "../src/questions-store";
 import {
+	defaultConditionTier,
 	dueWakes,
 	enqueueWakeConditions,
 	ackWakes,
@@ -120,6 +121,74 @@ describe("drainOnce", () => {
 		expect(result.deliveredIds).toEqual(["urgent-a", "urgent-b"]);
 	});
 
+	test("same-fact T0s across tasks fold into one interrupt", async () => {
+		// Three runs watching one broker each produced a broker-no-quota wake;
+		// the captain got three separate mid-turn interruptions carrying the
+		// same fact (observed live 2026-08-08). Same key + same note = one
+		// message covering every task, retiring every entry.
+		const outage = (id: string) => wake(id, "T0", { key: "broker-no-quota", verb: "broker-no-quota", note: "broker has no available quota" });
+		const { deps, sent, retired } = harness([outage("q-a"), outage("q-b"), outage("q-c"), wake("other", "T0", { verb: "failed" })]);
+
+		const result = await drainOnce(deps);
+
+		expect(sent).toHaveLength(2);
+		expect(sent[0]?.content).toContain("task-q-a");
+		expect(sent[0]?.content).toContain("task-q-c");
+		expect(sent[0]?.content).toContain("[wake:q-a,q-b,q-c]");
+		expect(retired).toEqual(["q-a", "q-b", "q-c", "other"]);
+		expect(result.deliveredIds).toEqual(["q-a", "q-b", "q-c", "other"]);
+	});
+
+	test("fold identity separates different verbs and same-task repeats", async () => {
+		// "blocked: X" and "failed: X" with an identical note are different
+		// facts; two failures of ONE task are also two facts. Neither may
+		// share a fold — a real failure can never hide inside one.
+		const { deps, sent } = harness([
+			wake("v-a", "T0", { taskId: "t1", key: "default", verb: "blocked", note: "same words" }),
+			wake("v-b", "T0", { taskId: "t2", key: "default", verb: "failed", note: "same words" }),
+			wake("v-c", "T0", { taskId: "t1", key: "default", verb: "failed", note: "same words" }),
+		]);
+
+		const result = await drainOnce(deps);
+
+		// v-a (blocked) never joins the failed group; v-b and v-c carry the
+		// same fact about two DIFFERENT tasks so they fold: 2 messages.
+		expect(sent).toHaveLength(2);
+		expect(result.deliveredIds.sort()).toEqual(["v-a", "v-b", "v-c"]);
+	});
+
+	test("same-task repeats of one fact never fold together", async () => {
+		const { deps, sent } = harness([
+			wake("s-a", "T0", { taskId: "t1", key: "default", verb: "failed", note: "same words" }),
+			wake("s-b", "T0", { taskId: "t1", key: "default", verb: "failed", note: "same words" }),
+		]);
+
+		const result = await drainOnce(deps);
+
+		expect(sent).toHaveLength(2);
+		expect(result.deliveredIds.sort()).toEqual(["s-a", "s-b"]);
+	});
+
+	test("broker quota exhaustion classifies T1 through the production default", () => {
+		expect(defaultConditionTier("broker-no-quota")).toBe("T1");
+		expect(defaultConditionTier("ci-fail")).toBe("T0");
+	});
+
+	test("broker condition with no explicit tier delivers as one T1 batch", async () => {
+		// The producer omits tier; classification happens in the store. Three
+		// tasks hitting the shared outage must produce one batched message,
+		// not three interrupts.
+		const tier = defaultConditionTier("broker-no-quota");
+		const outage = (id: string) => wake(id, tier, { key: "broker-no-quota", verb: "broker-no-quota", note: "broker has no available quota" });
+		const { deps, sent } = harness([outage("n-a"), outage("n-b"), outage("n-c")]);
+
+		const result = await drainOnce(deps);
+
+		expect(tier).toBe("T1");
+		expect(sent).toHaveLength(1);
+		expect(result.deliveredIds.sort()).toEqual(["n-a", "n-b", "n-c"]);
+	});
+
 	test("a rejected send keeps the wake owed instead of retiring it", async () => {
 		// The daemon answers {success:false} for a prompt it will not accept. That
 		// resolves, so awaiting the request is not proof of delivery; retiring on
@@ -161,7 +230,7 @@ describe("drainOnce", () => {
 		// there are too many messages must not itself be another interrupt.
 		expect(sent).toHaveLength(6);
 		expect(result.deliveredIds).toEqual(["urgent-0", "urgent-1", "urgent-2", "urgent-3", "urgent-4"]);
-		expect(sent[5]?.content).toContain("4 more urgent wake(s) still owed");
+		expect(sent[5]?.content).toContain("4 more urgent wake group(s) still owed");
 
 		// The overflow is deferred, never dropped: not marked in flight, not
 		// suppressed, and carrying no id into the marker, so it is redelivered.

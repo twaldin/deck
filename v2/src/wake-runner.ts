@@ -158,10 +158,36 @@ export async function drainOnce(deps: WakeDrainDependencies): Promise<DrainResul
 	// The overflow is NOT dropped and NOT suppressed: it stays owed, is not
 	// marked in flight, and is delivered on later cycles. Oldest first, so a
 	// backlog drains in order instead of starving.
-	const admitted = interrupts.slice(0, MAX_INTERRUPTS_PER_CYCLE);
-	const deferred = interrupts.length - admitted.length;
-	for (const { entry, item } of admitted) {
-		await deliver(formatInterrupt(item), [entry.id]);
+	// T0s owed at the same instant that carry the SAME fact about several
+	// tasks (same condition key, same note - a broker outage seen by every
+	// watching run) deliver as ONE message, so a shared condition costs one
+	// interruption instead of one per task. Distinct facts stay separate
+	// messages: each is owed its own turn.
+	const groups = new Map<string, { entries: string[]; items: WakeItem[] }>();
+	// Collision safety: the identity includes the event kind (verb), so
+	// "blocked" and "failed" with an identical note never share a fold. A fold
+	// only merges the SAME fact about DIFFERENT tasks: repeated events from one
+	// task each keep their own group (occurrence counter per task within the
+	// fact) because two failures of one task are two facts, not one.
+	const seenPerTask = new Map<string, number>();
+	for (const { entry, item } of interrupts) {
+		const semantic = `${item.event.verb}\u0000${item.event.key}\u0000${item.event.note}`;
+		const taskKey = `${semantic}\u0000${item.taskId}`;
+		const occurrence = seenPerTask.get(taskKey) ?? 0;
+		seenPerTask.set(taskKey, occurrence + 1);
+		const fact = `${semantic}\u0000${occurrence}`;
+		const group = groups.get(fact) ?? { entries: [], items: [] };
+		group.entries.push(entry.id);
+		group.items.push(item);
+		groups.set(fact, group);
+	}
+	const admitted = [...groups.values()].slice(0, MAX_INTERRUPTS_PER_CYCLE);
+	const deferred = groups.size - admitted.length;
+	for (const group of admitted) {
+		const content = group.items.length === 1
+			? formatInterrupt(group.items[0] as WakeItem)
+			: group.items.map((item) => formatInterrupt(item)).join("\n");
+		await deliver(content, group.entries);
 	}
 	// The overflow notice is a rendering concern, never a stored wake: it must
 	// not enter the id list, or markInFlight would stamp an id that has no file.
@@ -173,7 +199,7 @@ export async function drainOnce(deps: WakeDrainDependencies): Promise<DrainResul
 			event: {
 				verb: "resolved",
 				key: "wake-overflow",
-				note: `${deferred} more urgent wake(s) still owed; delivered next cycle`,
+				note: `${deferred} more urgent wake group(s) still owed; delivered next cycle`,
 				raw: `wake-overflow:${deferred}`,
 			},
 		});
