@@ -468,6 +468,10 @@ export async function collectPsSnapshot(
             : {}),
         },
         body: JSON.stringify({}),
+        // A hung gateway must not pin sockets: callers that time out and retry
+        // (the wake sweep evicts the cached promise) would otherwise leave one
+        // detached connection per sweep for the life of the hang.
+        signal: AbortSignal.timeout(30_000),
       },
     );
     if (!response.ok) throw new Error(`Gateway HTTP ${response.status}`);
@@ -515,6 +519,16 @@ export async function collectRuns(
   } finally {
     if (collectingRuns.get(cwd) === collection) collectingRuns.delete(cwd);
   }
+}
+
+/**
+ * Drops the in-flight collection for `cwd` so the next collectRuns issues a
+ * fresh request. Used when a caller's deadline fires while the underlying
+ * gateway request hangs; the abandoned promise settles into the void and its
+ * finally guard tolerates the eviction.
+ */
+export function evictCollectRunsCache(cwd: string): void {
+  collectingRuns.delete(cwd);
 }
 
 type HerdrAgent = {

@@ -6,12 +6,14 @@ import {
 	claimWakeDrain,
 	drainOnce,
 	recordSweep,
+	retireQuestionsForTerminalRuns,
 	selectLiveSession,
 	runWakeDrain,
 	staleWatcherCondition,
 	WAKE_DRAIN_LEASE_MS,
 	type WakeDrainDependencies,
 } from "../src/wake-runner";
+import { askWorkflowQuestion, openQuestions, workflowQuestions } from "../src/questions-store";
 import {
 	dueWakes,
 	enqueueWakeConditions,
@@ -314,6 +316,247 @@ describe("drainOnce", () => {
 			reason: "classified T2; wake policy forbids delivery",
 		}]);
 		expect(result.silentIds).toEqual(["terminal"]);
+	});
+});
+
+describe("terminal-run question retirement (production sweep seam)", () => {
+	const base = {
+		answerLane: "store" as const,
+		resumeHint: "hint",
+		originalIssue: "issue",
+		proposedAction: "action",
+		blastRadius: "radius",
+		cwd: "/workflow",
+	};
+
+	function questionsFile(): string {
+		return path.join(home, "questions", "queue.jsonl");
+	}
+
+	test("retires questions for terminal runs and leaves live runs alone", () => {
+		const file = questionsFile();
+		process.env.DECK_QUESTIONS_FILE = file;
+		try {
+			askWorkflowQuestion(file, { ...base, runId: "run-dead", nodeId: "n1" });
+			askWorkflowQuestion(file, { ...base, runId: "run-live", nodeId: "n1" });
+
+			const retired = retireQuestionsForTerminalRuns([
+				{ id: "run-dead", status: "finished", state: "cancelled" },
+				{ id: "run-live", status: "running" },
+			]);
+
+			expect(retired).toHaveLength(1);
+			expect(workflowQuestions(file, "run-dead", "n1")[0]?.status).toBe("dismissed");
+			expect(openQuestions(file)).toHaveLength(1);
+			expect(openQuestions(file)[0]?.workflow?.runId).toBe("run-live");
+
+			// Idempotent across sweeps.
+			expect(retireQuestionsForTerminalRuns([
+				{ id: "run-dead", status: "finished", state: "cancelled" },
+			])).toEqual([]);
+		} finally {
+			delete process.env.DECK_QUESTIONS_FILE;
+		}
+	});
+
+	test("INTEGRATION: one wake-drain sweep retires a cancelled run's question via the gateway snapshot", async () => {
+		const file = questionsFile();
+		process.env.DECK_QUESTIONS_FILE = file;
+		// collectRuns requires the workspace dir to exist before it consults the gateway.
+		fs.mkdirSync(path.join(home, "state", "smithers"), { recursive: true });
+		const server = Bun.serve({
+			port: 0,
+			fetch: () => Response.json({
+				ok: true,
+				payload: [{ id: "run-cx", workflow: "pr-pipeline", status: "finished", state: "cancelled" }],
+			}),
+		});
+		process.env.SMITHERS_GATEWAY_URL = `http://127.0.0.1:${server.port}`;
+		try {
+			askWorkflowQuestion(file, { ...base, runId: "run-cx", nodeId: "gate" });
+			expect(openQuestions(file)).toHaveLength(1);
+
+			await runWakeDrain({ once: true });
+
+			const entry = workflowQuestions(file, "run-cx", "gate")[0];
+			expect(entry?.status).toBe("dismissed");
+			expect(entry?.answer).toContain("terminal state cancelled");
+			expect(openQuestions(file)).toEqual([]);
+		} finally {
+			server.stop(true);
+			delete process.env.SMITHERS_GATEWAY_URL;
+			delete process.env.DECK_QUESTIONS_FILE;
+		}
+	});
+
+	test("REGRESSION: a hung gateway never blocks the sweep — GC is skipped with a warning", async () => {
+		const file = questionsFile();
+		process.env.DECK_QUESTIONS_FILE = file;
+		fs.mkdirSync(path.join(home, "state", "smithers"), { recursive: true });
+		// A gateway that accepts the request and never responds.
+		const server = Bun.serve({
+			port: 0,
+			fetch: () => new Promise<Response>(() => {}),
+		});
+		process.env.SMITHERS_GATEWAY_URL = `http://127.0.0.1:${server.port}`;
+		process.env.DECK_RUN_SNAPSHOT_DEADLINE_MS = "200";
+		const warnings: string[] = [];
+		const realWrite = process.stderr.write.bind(process.stderr);
+		process.stderr.write = ((chunk: string | Uint8Array) => {
+			warnings.push(String(chunk));
+			return true;
+		}) as typeof process.stderr.write;
+		try {
+			askWorkflowQuestion(file, { ...base, runId: "run-hung", nodeId: "n1" });
+			// The sweep completes: wake delivery ran, GC was skipped.
+			await runWakeDrain({ once: true });
+			expect(warnings.join("")).toContain("skipping question GC");
+			// GC was skipped, so the question is untouched (the run may be live).
+			expect(openQuestions(file)).toHaveLength(1);
+		} finally {
+			process.stderr.write = realWrite;
+			server.stop(true);
+			delete process.env.SMITHERS_GATEWAY_URL;
+			delete process.env.DECK_QUESTIONS_FILE;
+			delete process.env.DECK_RUN_SNAPSHOT_DEADLINE_MS;
+		}
+	});
+
+	test("REGRESSION: a hung snapshot is evicted on timeout — the next sweep issues a fresh request and GC recovers", async () => {
+		const file = questionsFile();
+		process.env.DECK_QUESTIONS_FILE = file;
+		fs.mkdirSync(path.join(home, "state", "smithers"), { recursive: true });
+		process.env.DECK_RUN_SNAPSHOT_DEADLINE_MS = "200";
+		// Sweep 1: a gateway that accepts the request and never responds.
+		const hung = Bun.serve({
+			port: 0,
+			fetch: () => new Promise<Response>(() => {}),
+		});
+		process.env.SMITHERS_GATEWAY_URL = `http://127.0.0.1:${hung.port}`;
+		const warnings: string[] = [];
+		const realWrite = process.stderr.write.bind(process.stderr);
+		process.stderr.write = ((chunk: string | Uint8Array) => {
+			warnings.push(String(chunk));
+			return true;
+		}) as typeof process.stderr.write;
+		let healthy: ReturnType<typeof Bun.serve> | undefined;
+		try {
+			askWorkflowQuestion(file, { ...base, runId: "run-recover", nodeId: "n1" });
+			await runWakeDrain({ once: true });
+			expect(warnings.join("")).toContain("skipping question GC");
+			expect(openQuestions(file)).toHaveLength(1);
+
+			// Sweep 2: a healthy gateway. Without eviction, the cached hung
+			// promise would be re-awaited and GC would stay disabled forever.
+			healthy = Bun.serve({
+				port: 0,
+				fetch: () => Response.json({
+					ok: true,
+					payload: [{ id: "run-recover", workflow: "pr-pipeline", status: "finished", state: "cancelled" }],
+				}),
+			});
+			process.env.SMITHERS_GATEWAY_URL = `http://127.0.0.1:${healthy.port}`;
+			await runWakeDrain({ once: true });
+			expect(workflowQuestions(file, "run-recover", "n1")[0]?.status).toBe("dismissed");
+			expect(openQuestions(file)).toEqual([]);
+		} finally {
+			process.stderr.write = realWrite;
+			hung.stop(true);
+			healthy?.stop(true);
+			delete process.env.SMITHERS_GATEWAY_URL;
+			delete process.env.DECK_QUESTIONS_FILE;
+			delete process.env.DECK_RUN_SNAPSHOT_DEADLINE_MS;
+		}
+	});
+
+	test("REGRESSION: a gateway HTTP error (degraded health, no rejection) skips GC with a warning", async () => {
+		const file = questionsFile();
+		process.env.DECK_QUESTIONS_FILE = file;
+		fs.mkdirSync(path.join(home, "state", "smithers"), { recursive: true });
+		// collectRuns swallows this into { runs: [], health: missing } — it never
+		// rejects, so the deadline path alone would silently no-op.
+		const server = Bun.serve({
+			port: 0,
+			fetch: () => new Response("boom", { status: 500 }),
+		});
+		process.env.SMITHERS_GATEWAY_URL = `http://127.0.0.1:${server.port}`;
+		const warnings: string[] = [];
+		const realWrite = process.stderr.write.bind(process.stderr);
+		process.stderr.write = ((chunk: string | Uint8Array) => {
+			warnings.push(String(chunk));
+			return true;
+		}) as typeof process.stderr.write;
+		try {
+			askWorkflowQuestion(file, { ...base, runId: "run-err", nodeId: "n1" });
+			await runWakeDrain({ once: true });
+			expect(warnings.join("")).toContain(
+				"skipping question GC this sweep: gateway snapshot missing",
+			);
+			// GC skipped: the question is untouched.
+			expect(openQuestions(file)).toHaveLength(1);
+		} finally {
+			process.stderr.write = realWrite;
+			server.stop(true);
+			delete process.env.SMITHERS_GATEWAY_URL;
+			delete process.env.DECK_QUESTIONS_FILE;
+		}
+	});
+
+	test("REGRESSION: retirement stops at the budget deadline and warns, resuming next sweep", () => {
+		const file = questionsFile();
+		process.env.DECK_QUESTIONS_FILE = file;
+		try {
+			askWorkflowQuestion(file, { ...base, runId: "run-a", nodeId: "n1" });
+			askWorkflowQuestion(file, { ...base, runId: "run-b", nodeId: "n1" });
+			const warnings: string[] = [];
+
+			// Deadline already in the past: the loop stops before any run.
+			const retired = retireQuestionsForTerminalRuns(
+				[
+					{ id: "run-a", status: "finished", state: "cancelled" },
+					{ id: "run-b", status: "finished", state: "cancelled" },
+				],
+				(message) => warnings.push(message),
+				Date.now() - 1,
+			);
+
+			expect(retired).toEqual([]);
+			expect(warnings.join("")).toContain(
+				"question GC budget exhausted after 0 run(s); resuming next sweep",
+			);
+			expect(openQuestions(file)).toHaveLength(2);
+
+			// The next sweep, with budget, finishes the work.
+			expect(retireQuestionsForTerminalRuns(
+				[
+					{ id: "run-a", status: "finished", state: "cancelled" },
+					{ id: "run-b", status: "finished", state: "cancelled" },
+				],
+				undefined,
+				Date.now() + 5_000,
+			)).toHaveLength(2);
+			expect(openQuestions(file)).toEqual([]);
+		} finally {
+			delete process.env.DECK_QUESTIONS_FILE;
+		}
+	});
+
+	test("a retirement failure warns and does not break the sweep path", () => {
+		// A directory where the queue file should be is a real write failure.
+		const asDir = path.join(home, "questions", "queue.jsonl");
+		fs.mkdirSync(asDir, { recursive: true });
+		process.env.DECK_QUESTIONS_FILE = asDir;
+		const warnings: string[] = [];
+		try {
+			expect(retireQuestionsForTerminalRuns(
+				[{ id: "run-z", state: "failed" }],
+				(message) => warnings.push(message),
+			)).toEqual([]);
+			expect(warnings).toHaveLength(1);
+			expect(warnings[0]).toContain("run-z");
+		} finally {
+			delete process.env.DECK_QUESTIONS_FILE;
+		}
 	});
 });
 

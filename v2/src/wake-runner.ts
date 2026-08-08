@@ -4,6 +4,9 @@ import { pathToFileURL } from "node:url";
 import * as path from "node:path";
 import { deckV2Home, stateDir } from "./home";
 import { readMeta } from "./meta";
+import { collectRuns, evictCollectRunsCache, type PsRun } from "./monitor";
+import { queueFile, retireRunQuestionsSafely } from "./questions-store";
+import { smithersWorkspaceCwd } from "./workspace";
 import { applyProjectTierPolicy as projectTierPolicy } from "./observer";
 import { loadProfiles, type ProjectProfile } from "./projects";
 import { produceDueSelfWakes } from "./self-wake";
@@ -442,15 +445,122 @@ function productionDependencies(now: number): WakeDrainDependencies {
 	};
 }
 
+/**
+ * Terminal outcomes as the durable Smithers run state reports them. `status:
+ * "finished"` means STOPPED, not succeeded; the outcome lives in `state`
+ * (see observer.ts RUN_TRANSITIONS), so both fields are checked.
+ */
+const RUN_TERMINAL_OUTCOMES = new Set(["succeeded", "failed", "cancelled"]);
+
+function terminalOutcome(run: Pick<PsRun, "status" | "state">): string | undefined {
+	if (typeof run.state === "string" && RUN_TERMINAL_OUTCOMES.has(run.state)) return run.state;
+	if (typeof run.status === "string" && RUN_TERMINAL_OUTCOMES.has(run.status)) return run.status;
+	return undefined;
+}
+
+/**
+ * A terminal run can never consume an answer, so its still-open workflow
+ * questions are queue noise (observed live: dry-run artifacts outliving their
+ * cancelled runs). This runs in the wake drainer because that is the production
+ * loop that durably sees terminal runs; retirement is idempotent per run and a
+ * failure is a warning, never a broken sweep.
+ */
+export function retireQuestionsForTerminalRuns(
+	runs: readonly Pick<PsRun, "id" | "status" | "state">[],
+	warn?: (message: string) => void,
+	deadlineAtMs?: number,
+): string[] {
+	const retired: string[] = [];
+	let processed = 0;
+	for (const run of runs) {
+		// Each retirement scans the queue and can wait on its lock, so the whole
+		// pass shares the sweep's time budget instead of running unbounded.
+		if (deadlineAtMs !== undefined && Date.now() > deadlineAtMs) {
+			warn?.(
+				`question GC budget exhausted after ${processed} run(s); resuming next sweep`,
+			);
+			break;
+		}
+		processed += 1;
+		const outcome = terminalOutcome(run);
+		if (outcome === undefined) continue;
+		retired.push(...retireRunQuestionsSafely(
+			queueFile(),
+			run.id,
+			`run ${run.id} reached terminal state ${outcome}; question retired automatically`,
+			warn,
+		));
+	}
+	return retired;
+}
+
 async function drainSweep(): Promise<DrainResult> {
 	const now = Date.now();
 	// Status and declarative self-wakes must reach the outbox before this cycle
 	// snapshots due entries. Reversing these calls adds a full interval of latency.
 	reconcile();
 	produceDueSelfWakes(now);
+	// Wakes drain FIRST: delivery must never wait on the run snapshot, which is
+	// a gateway fetch that can hang. Question GC rides behind, bounded — a slow
+	// or unavailable snapshot skips retirement this cycle and the next sweep
+	// retries.
 	const result = await drainOnce(productionDependencies(now));
+	// One budget covers the whole GC pass: snapshot AND retirement. collectRuns
+	// reports failure as degraded health instead of rejecting, so health is the
+	// real skip signal; the deadline guards a genuinely hung fetch.
+	const gcDeadlineAt = Date.now() + runSnapshotDeadlineMs();
+	const gcWarn = (message: string) =>
+		process.stderr.write(`deck: ${message}\n`);
+	try {
+		const { runs, health } = await withDeadline(
+			collectRuns(smithersWorkspaceCwd()),
+			runSnapshotDeadlineMs(),
+			"run snapshot",
+		);
+		if (health.state !== "ok") {
+			gcWarn(
+				`skipping question GC this sweep: gateway snapshot ${health.state} (${health.detail})`,
+			);
+		} else {
+			retireQuestionsForTerminalRuns(runs, gcWarn, gcDeadlineAt);
+		}
+	} catch (error) {
+		// The deadline fired while the gateway request still hangs; evict the
+		// cached in-flight promise so the next sweep issues a fresh request
+		// instead of re-awaiting the hung one forever.
+		evictCollectRunsCache(smithersWorkspaceCwd());
+		gcWarn(
+			`skipping question GC this sweep: ` +
+				`${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
 	recordSweep(now);
 	return result;
+}
+
+function runSnapshotDeadlineMs(): number {
+	const raw = Number(process.env.DECK_RUN_SNAPSHOT_DEADLINE_MS);
+	return Number.isFinite(raw) && raw > 0 ? raw : 5_000;
+}
+
+/** Bounds a promise that has no deadline of its own; the loser keeps running detached. */
+function withDeadline<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
+	return new Promise<T>((resolve, reject) => {
+		const timer = setTimeout(
+			() => reject(new Error(`${what} did not respond within ${ms}ms`)),
+			ms,
+		);
+		promise.then(
+			(value) => {
+				clearTimeout(timer);
+				resolve(value);
+			},
+			(error: unknown) => {
+				clearTimeout(timer);
+				reject(error instanceof Error ? error : new Error(String(error)));
+			},
+		);
+	});
 }
 
 type DrainSignal = "SIGHUP" | "SIGINT" | "SIGQUIT" | "SIGTERM";

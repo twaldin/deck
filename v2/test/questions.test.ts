@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { afterAll, describe, expect, test } from "bun:test";
@@ -14,6 +14,10 @@ import {
 	queueFile,
 	readQuestionHistory,
 	readQuestions,
+	retiredRunReason,
+	retireRunQuestions,
+	retireRunQuestionsSafely,
+	setLateAskTestHook,
 	STALE_AFTER_MS,
 	type Question,
 } from "../src/questions-store";
@@ -293,6 +297,114 @@ describe("questions store", () => {
 		askWorkflowQuestion(file, input);
 		expect(openQuestions(file)).toEqual([]);
 		expect(workflowQuestions(file, "run-42", "r0-stamp")[0]?.status).toBe("answered");
+	});
+	test("LATE-ASK RACE: an ask for a retired run is immediately dismissed with the retirement reason", () => {
+		const file = freshFile();
+		const base = {
+			answerLane: "store" as const,
+			resumeHint: "hint",
+			originalIssue: "issue",
+			proposedAction: "action",
+			blastRadius: "radius",
+			cwd: "/workflow",
+		};
+		retireRunQuestions(file, "run-x", "run run-x reached terminal state cancelled");
+		expect(retiredRunReason(file, "run-x")).toBe("run run-x reached terminal state cancelled");
+
+		askWorkflowQuestion(file, { ...base, runId: "run-x", nodeId: "late" });
+
+		const entry = workflowQuestions(file, "run-x", "late")[0];
+		expect(entry).toBeDefined();
+		expect(entry?.status).toBe("dismissed");
+		expect(entry?.answer).toBe("run run-x reached terminal state cancelled");
+		expect(openQuestions(file)).toEqual([]);
+
+		// A live run's asks are untouched by another run's tombstone.
+		askWorkflowQuestion(file, { ...base, runId: "run-live", nodeId: "n1" });
+		expect(openQuestions(file)).toHaveLength(1);
+	});
+	test("REGRESSION: compaction preserves retire-run tombstones (late-ask race stays closed)", () => {
+		const file = freshFile();
+		const base = {
+			answerLane: "store" as const,
+			resumeHint: "hint",
+			originalIssue: "issue",
+			proposedAction: "action",
+			blastRadius: "radius",
+			cwd: "/workflow",
+		};
+		retireRunQuestions(file, "run-gone", "run run-gone reached terminal state cancelled");
+		// A stale non-workflow question forces a real rewrite in compact().
+		ask(file, { id: "q-stale", question: "old", sessionId: "s", cwd: "/", now: 1 });
+		expect(compact(file, STALE_AFTER_MS * 100).archived).toBe(1);
+		expect(retiredRunReason(file, "run-gone")).toBe(
+			"run run-gone reached terminal state cancelled",
+		);
+		// The preserved tombstone still dismisses a late ask.
+		askWorkflowQuestion(file, { ...base, runId: "run-gone", nodeId: "late2" });
+		expect(workflowQuestions(file, "run-gone", "late2")[0]?.status).toBe("dismissed");
+	});
+	test("LATE-ASK TOCTOU: a sweep that retires the run DURING the ask still dismisses it", () => {
+		const file = freshFile();
+		const base = {
+			answerLane: "store" as const,
+			resumeHint: "hint",
+			originalIssue: "issue",
+			proposedAction: "action",
+			blastRadius: "radius",
+			cwd: "/workflow",
+		};
+		setLateAskTestHook(() => {
+			// The concurrent sweep lands between the ask append and the re-check.
+			retireRunQuestions(file, "run-race", "run run-race reached terminal state cancelled");
+		});
+		try {
+			askWorkflowQuestion(file, { ...base, runId: "run-race", nodeId: "n1" });
+		} finally {
+			setLateAskTestHook(undefined);
+		}
+		expect(workflowQuestions(file, "run-race", "n1")[0]?.status).toBe("dismissed");
+		expect(openQuestions(file)).toEqual([]);
+	});
+	test("retireRunQuestionsSafely: a missing queue is silent; other failures warn and never throw", () => {
+		const fine = freshFile();
+		const silentWarnings: string[] = [];
+		expect(retireRunQuestionsSafely(fine, "run-1", "reason", (message) => silentWarnings.push(message)).length).toBe(0);
+
+		// An unwritable queue path (a directory where the file should be) is a
+		// real failure: the warning fires and nothing throws into the caller.
+		const asDir = path.join(path.dirname(freshFile()), "queue-as-dir");
+		mkdirSync(asDir, { recursive: true });
+		const warnings: string[] = [];
+		expect(retireRunQuestionsSafely(asDir, "run-1", "reason", (message) => warnings.push(message))).toEqual([]);
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]).toContain("could not retire questions for terminal run run-1");
+		expect(silentWarnings).toEqual([]);
+	});
+	test("retireRunQuestions dismisses only the terminal run's open questions", () => {
+		const file = freshFile();
+		const base = {
+			answerLane: "store" as const,
+			resumeHint: "hint",
+			originalIssue: "issue",
+			proposedAction: "action",
+			blastRadius: "radius",
+			cwd: "/workflow",
+		};
+		askWorkflowQuestion(file, { ...base, runId: "run-dead", nodeId: "n1" });
+		askWorkflowQuestion(file, { ...base, runId: "run-dead", nodeId: "n2" });
+		askWorkflowQuestion(file, { ...base, runId: "run-alive", nodeId: "n1" });
+
+		const retired = retireRunQuestions(file, "run-dead", "run cancelled");
+		expect(retired.sort()).toEqual([
+			workflowQuestionId("run-dead", "n1"),
+			workflowQuestionId("run-dead", "n2"),
+		].sort());
+		expect(openQuestions(file)).toHaveLength(1);
+		expect(openQuestions(file)[0]?.workflow?.runId).toBe("run-alive");
+		expect(workflowQuestions(file, "run-dead", "n1")[0]?.status).toBe("dismissed");
+		// Idempotent: nothing left to retire.
+		expect(retireRunQuestions(file, "run-dead", "again")).toEqual([]);
 	});
 	test("workflow identity cannot alias delimiter-bearing run, node, or decision keys", () => {
 		expect(workflowQuestionId("run:a", "b", "c")).not.toBe(
