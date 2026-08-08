@@ -109,7 +109,16 @@ export function parseStampGateId(id: string): { runId?: string; node: string } {
 	return { runId: tail.slice(0, separator), node: tail.slice(separator + 1) || "r0-stamp" };
 }
 /** Control actions, always after the agent's own options and matched by position. */
-const CONTROLS = ["Write an answer...", "Dismiss", "Skip", "Stop reviewing"] as const;
+const CONTROLS = [
+	"Write an answer...",
+	"Dismiss",
+	"Skip",
+	"Previous",
+	"Show detail",
+	"Stop reviewing",
+] as const;
+/** Label offered when resolved questions can be re-opened for a corrected answer. */
+const RESUBMIT_DONE = "Close";
 const exec = promisify(execFile);
 type CommandExecutor = (command: string, args: string[], options: { cwd: string; timeout: number }) => Promise<unknown>;
 
@@ -152,6 +161,26 @@ export function describe(entry: Question, nowMs: number): string {
 	lines.push("", entry.question);
 	if (entry.context !== undefined) lines.push("", `context: ${entry.context}`);
 	if (entry.recommendation !== undefined) lines.push("", `agent recommends: ${entry.recommendation}`);
+	return lines.join("\n");
+}
+
+/** Complete card for one question: everything the queue knows, for Show detail. */
+export function fullDetail(entry: Question, nowMs: number): string {
+	const lines = [
+		`id: ${entry.id}`,
+		`status: ${entry.status}`,
+		...(entry.questionKind === undefined ? [] : [`kind: ${entry.questionKind}`]),
+		...(entry.origin === undefined ? [] : [`origin: ${entry.origin}`]),
+		describe(entry, nowMs),
+	];
+	const options = entry.options ?? [];
+	if (options.length > 0) {
+		lines.push("", "options:");
+		for (const [position, option] of options.entries()) {
+			const action = entry.actions?.[position];
+			lines.push(`  ${position + 1}. ${option}${action == null ? "" : ` [${action}]`}`);
+		}
+	}
 	return lines.join("\n");
 }
 
@@ -223,7 +252,13 @@ export function registerQuestions(
 			}
 
 			let answered = 0;
-			for (const [index, entry] of open.entries()) {
+			// Index-based navigation instead of a forward-only for..of: Skip moves
+			// forward, Previous moves back, and a resolved question drops out of
+			// the working list so navigation never re-offers it.
+			const pending = [...open];
+			let index = 0;
+			while (index < pending.length) {
+				const entry = pending[index]!;
 				// Choices are matched by POSITION, never by display string: an agent is
 				// free to offer an option literally named "Dismiss" or "Skip", and
 				// comparing labels would silently turn picking it into a control action.
@@ -233,7 +268,7 @@ export function registerQuestions(
 					...options.map((option, position) => `${position + 1}. ${option}`),
 					...CONTROLS,
 				];
-				const title = `(${index + 1}/${open.length}) ${describe(entry, runtime.now())}`;
+				const title = `(${index + 1}/${pending.length}) ${describe(entry, runtime.now())}`;
 				// Always use the host's own selector. The previous custom-overlay
 				// path built the component from this module's bundled pi-tui
 				// classes, and a host whose TUI runtime is a different pi-tui
@@ -248,10 +283,29 @@ export function registerQuestions(
 				if (choice < 0) break;
 				const control = choice < options.length ? undefined : CONTROLS[choice - options.length];
 				if (control === "Stop reviewing") break;
-				if (control === "Skip") continue;
+				if (control === "Skip") {
+					index += 1;
+					continue;
+				}
+				if (control === "Previous") {
+					index = Math.max(0, index - 1);
+					continue;
+				}
+				if (control === "Show detail") {
+					// Read-only scrollable view through the host select dialog: the
+					// same portable surface /usage settled on. The choice is ignored.
+					await ctx.ui.select(
+						`Question ${entry.id}`,
+						[...fullDetail(entry, runtime.now()).split("\n"), RESUBMIT_DONE],
+					);
+					continue;
+				}
 				if (control === "Dismiss") {
 					if (entry.workflow === undefined) {
-						if (resolve(ctx, entry, DISMISSED, "dismissed")) answered += 1;
+						if (resolve(ctx, entry, DISMISSED, "dismissed")) {
+							answered += 1;
+							pending.splice(index, 1);
+						}
 						continue;
 					}
 					try {
@@ -260,7 +314,10 @@ export function registerQuestions(
 							...(runtime.fetch === undefined ? {} : { fetch: runtime.fetch }),
 						});
 						if (terminal) {
-							if (resolve(ctx, entry, DISMISSED, "dismissed")) answered += 1;
+							if (resolve(ctx, entry, DISMISSED, "dismissed")) {
+								answered += 1;
+								pending.splice(index, 1);
+							}
 						} else {
 							ctx.ui.notify(
 								"Workflow decisions cannot be dismissed while their wait is active; choose Hold, approve/deny the gate, or answer the plain decision.",
@@ -285,7 +342,10 @@ export function registerQuestions(
 				const selectedOption = control === undefined ? choice : -1;
 				const selectedLabel = control === undefined ? text : undefined;
 				const action = selectedOption >= 0 ? entry.actions?.[selectedOption] : undefined;
-				if (action === "hold") continue;
+				if (action === "hold") {
+					index += 1;
+					continue;
+				}
 				const trustedStamp = entry.questionKind === "stamp" && entry.origin === "fleet";
 				const trustedReviewGate = entry.origin === "review-gate" && entry.prContext !== undefined;
 				if (entry.workflow !== undefined) {
@@ -326,7 +386,19 @@ export function registerQuestions(
 				} else {
 					applied = resolve(ctx, entry, text, "answered");
 				}
-				if (applied) answered += 1;
+				if (applied) {
+					answered += 1;
+					pending.splice(index, 1);
+				} else if (openQuestions(file).some((q) => q.id === entry.id)) {
+					// Stay on the same card: a failed stamp/workflow submission is
+					// resubmittable right here, instead of silently advancing past
+					// a decision that never landed. Skip is the explicit way out.
+					ctx.ui.notify("The answer was not recorded; pick again to resubmit, or Skip.", "warning");
+				} else {
+					// Resolved elsewhere (a second captain, another session): it is
+					// no longer open, so drop it from the working list.
+					pending.splice(index, 1);
+				}
 			}
 
 			// Answers to questions this very session asked are deliverable right away.

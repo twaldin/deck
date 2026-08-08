@@ -64,6 +64,8 @@ type UsageContext = {
 		theme?: unknown;
 		setStatus?: (id: string, value: string | undefined) => void;
 		notify?: (message: string, level?: "info") => void;
+		/** Host select dialog; the portable scrollable-report surface. */
+		select?: (title: string, options: string[]) => Promise<string | undefined>;
 	};
 };
 
