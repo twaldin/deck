@@ -25,12 +25,21 @@ import * as os from "node:os";
  * capabilities: capability loss is silent and total, controlled inheritance
  * is auditable here.
  */
+/**
+ * Ambient Herdr IDENTITY only. HERDR_CONFIG_PATH (and future config inputs)
+ * are capabilities and must flow; the pipeline engine itself preserves the
+ * config override when querying herdr status.
+ */
+const HERDR_IDENTITY_KEYS = new Set([
+	"HERDR_ENV", "HERDR_SOCKET_PATH", "HERDR_PANE_ID", "HERDR_TAB_ID", "HERDR_WORKSPACE_ID",
+]);
+
 export function detachedSpawnEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
 	const env: NodeJS.ProcessEnv = {};
 	for (const [key, value] of Object.entries(base)) {
 		if (value === undefined) continue;
 		if (key.startsWith("PRIME_AGENT_INTERNAL_")) continue;
-		if (key.startsWith("HERDR_")) continue;
+		if (HERDR_IDENTITY_KEYS.has(key)) continue;
 		env[key] = value;
 	}
 	return env;
@@ -39,6 +48,6 @@ export function detachedSpawnEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.
 /** True when the current environment carries daemon-worker-internal state. */
 export function seatInternalEnvKeys(base: NodeJS.ProcessEnv = process.env): string[] {
 	return Object.keys(base).filter(
-		(key) => key.startsWith("PRIME_AGENT_INTERNAL_") || key.startsWith("HERDR_"),
+		(key) => key.startsWith("PRIME_AGENT_INTERNAL_") || HERDR_IDENTITY_KEYS.has(key),
 	);
 }

@@ -14,6 +14,7 @@ describe("detached spawn environment", () => {
 			PRIME_AGENT_INTERNAL_SESSION_LEASES: "1",
 			HERDR_WORKSPACE_ID: "stale",
 			HERDR_PANE_ID: "stale",
+			HERDR_CONFIG_PATH: "/Users/cap/.config/herdr/config.toml",
 			PRIME_AGENT_SESSION_DIR: "/Users/cap/.deck/.prime/sessions",
 		};
 		const env = detachedSpawnEnv(base);
@@ -28,10 +29,12 @@ describe("detached spawn environment", () => {
 		expect(env.PRIME_AGENT_INTERNAL_SESSION_LEASES).toBeUndefined();
 		expect(env.HERDR_WORKSPACE_ID).toBeUndefined();
 		expect(env.HERDR_PANE_ID).toBeUndefined();
+		// Config inputs are capabilities, not identity: they must survive.
+		expect(env.HERDR_CONFIG_PATH).toBe(base.HERDR_CONFIG_PATH);
 	});
 
 	test("names the internal keys present in an environment", () => {
-		expect(seatInternalEnvKeys({ PATH: "x", HERDR_TAB_ID: "y", PRIME_AGENT_INTERNAL_Z: "z" }).sort())
+		expect(seatInternalEnvKeys({ PATH: "x", HERDR_TAB_ID: "y", HERDR_CONFIG_PATH: "keep", PRIME_AGENT_INTERNAL_Z: "z" }).sort())
 			.toEqual(["HERDR_TAB_ID", "PRIME_AGENT_INTERNAL_Z"]);
 		expect(seatInternalEnvKeys({ PATH: "x" })).toEqual([]);
 	});
