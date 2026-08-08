@@ -274,6 +274,60 @@ describe("deck usage broker integration", () => {
 		expect(extension.wasCleared()).toBe(true);
 	});
 
+	test("/quota renders the full report through the host select dialog when one exists", async () => {
+		const broker = startStubBroker(() => Response.json(FAST_ROSTER));
+		const extension = fixture(broker.origin);
+		await extension.emit("session_start");
+		await extension.waitForStatuses(2);
+
+		// A host with a select dialog gets the scrollable multi-line viewer;
+		// notify would collapse the report to its last line (observed on prime).
+		const dialogs: Array<{ title: string; options: string[] }> = [];
+		(extension.ctx.ui as { select?: (title: string, options: string[]) => Promise<string | undefined> }).select =
+			async (title, options) => {
+				dialogs.push({ title, options });
+				return undefined;
+			};
+		await extension.commands.get("quota")!.handler("", extension.ctx);
+		expect(dialogs).toHaveLength(1);
+		expect(dialogs[0]!.title).toBe("Broker quota");
+		const body = dialogs[0]!.options.join("\n");
+		expect(body).toContain("alice@example.com · claude");
+		expect(body).toContain("fast tier · trailing 7d");
+		expect(dialogs[0]!.options.at(-1)).toBe("Close");
+		// The report is not double-delivered through notify.
+		expect(extension.notifications).toHaveLength(0);
+	});
+
+	test("/quota falls back to notify when the select dialog rejects", async () => {
+		const broker = startStubBroker(() => Response.json(ROSTER));
+		const extension = fixture(broker.origin);
+		await extension.emit("session_start");
+		await extension.waitForStatuses(2);
+		(extension.ctx.ui as { select?: () => Promise<string | undefined> }).select = async () => {
+			throw new Error("dialog unavailable");
+		};
+		await extension.commands.get("quota")!.handler("", extension.ctx);
+		expect(extension.notifications.at(-1)).toContain("alice@example.com · claude");
+	});
+
+	test("/quota survives both select and notify throwing and still updates the chip", async () => {
+		const broker = startStubBroker(() => Response.json(ROSTER));
+		const extension = fixture(broker.origin);
+		await extension.emit("session_start");
+		await extension.waitForStatuses(2);
+		const statusesBefore = extension.statuses.length;
+		(extension.ctx.ui as { select?: () => Promise<string | undefined> }).select = async () => {
+			throw new Error("dialog unavailable");
+		};
+		(extension.ctx.ui as unknown as { notify?: () => void }).notify = () => {
+			throw new Error("notify torn down");
+		};
+		await expect(extension.commands.get("quota")!.handler("", extension.ctx)).resolves.toBeUndefined();
+		// Presentation failed twice, but the status chip still refreshed.
+		expect(extension.statuses.length).toBeGreaterThan(statusesBefore);
+	});
+
 	test("degrades an unreachable broker to a neutral chip without throwing", async () => {
 		const broker = startStubBroker(() => Response.json(ROSTER));
 		// Keep the stub's allocated origin but close its listener: fetch must reject

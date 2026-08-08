@@ -31,7 +31,7 @@ import {
 	routeWorkflowQuestionAnswer,
 	workflowRunIsTerminal,
 } from "../src/workflow-questions";
-import { answerMessage, describe as describeQuestion, registerQuestions } from "../src/questions";
+import { answerMessage, describe as describeQuestion, fullDetail, registerQuestions } from "../src/questions";
 
 const dirs: string[] = [];
 function freshFile(): string {
@@ -841,17 +841,209 @@ describe("questions extension", () => {
 		}
 	});
 
-	test("/questions custom overlay confirms newline without scrollback rerenders", async () => {
+	test("/questions uses the host selector even when ui.custom exists", async () => {
+		// A custom overlay built from this module's bundled pi-tui classes
+		// renders nothing on a host with a different pi-tui version, resolving
+		// undefined and exiting the loop with "Resolved 0 of N" (observed live
+		// on the prime host). The host's own select is the portable contract.
 		const file = freshFile();
 		const agent = new Harness();
 		registerQuestions(agent as any, envFor(file), agent.runtime);
 		ask(file, { question: "Choose", options: ["yes", "no"], sessionId: "session-a", cwd: "/tmp" });
-		const captain = fakeContext("session-captain", [], undefined, ["x", "\n"]);
+		const captain = fakeContext("session-captain", ["1. yes"], undefined, ["x", "\n"]);
 		await agent.commands.get("questions")!.handler("", captain);
 		expect(openQuestions(file)).toHaveLength(0);
-		// The harness counts the component's real render calls. Navigation asks
-		// the TUI to repaint, but must not synchronously render scrollback itself.
-		expect(captain.customRenders.count).toBe(1);
+		// The overlay path must not run at all.
+		expect(captain.customRenders.count).toBe(0);
+	});
+
+
+	test("REGRESSION: a throwing host dialog names the open question and stops", async () => {
+		const file = freshFile();
+		const agent = new Harness();
+		registerQuestions(agent as any, envFor(file), agent.runtime);
+		ask(file, { question: "risky merge?", options: ["yes"], sessionId: "s1", cwd: "/" });
+		const captain = fakeContext("session-captain");
+		captain.ui.select = async () => {
+			throw new Error("dialog backend gone");
+		};
+		await agent.commands.get("questions")!.handler("", captain);
+		// The entry stays open, and the fallback notice identifies it.
+		expect(openQuestions(file)).toHaveLength(1);
+		expect(captain.notices.some((n) => n.includes("risky merge?") && n.includes("remains open"))).toBe(true);
+	});
+
+	test("REGRESSION: Dismiss losing the race drops the stale card and shows the next one", async () => {
+		const file = freshFile();
+		const agent = new Harness();
+		registerQuestions(agent as any, envFor(file), agent.runtime);
+		ask(file, { question: "first", options: ["a"], sessionId: "s1", cwd: "/" });
+		ask(file, { question: "second", options: ["b"], sessionId: "s2", cwd: "/" });
+		const captain = fakeContext("session-captain", ["Dismiss", "1. b"]);
+		// Another session resolves the first card while its dialog is open.
+		const select = captain.ui.select;
+		let raced = false;
+		captain.ui.select = async (title: string) => {
+			if (!raced) {
+				raced = true;
+				const target = openQuestions(file)[0]!;
+				answer(file, target.id, "elsewhere");
+			}
+			return select(title);
+		};
+		await agent.commands.get("questions")!.handler("", captain);
+		// Both cards end resolved: first elsewhere, second answered here.
+		expect(openQuestions(file)).toHaveLength(0);
+	});
+
+
+	test("REGRESSION: a permanent review-gate refusal advances instead of looping", async () => {
+		const file = freshFile();
+		const agent = new Harness();
+		registerQuestions(agent as any, envFor(file), agent.runtime);
+		ask(file, {
+			question: "approve the legacy gate?",
+			options: ["Approve"],
+			sessionId: "s1",
+			cwd: "/",
+			questionKind: "approve",
+			origin: "review-gate",
+			prContext: { repo: "o/r", number: 1 },
+		} as any);
+		ask(file, { question: "after the gate", options: ["ok"], sessionId: "s2", cwd: "/" });
+		// Extra scripted picks: if the refused card looped, "Approve" would be
+		// consumed again instead of the second card's option.
+		const captain = fakeContext("session-captain", ["1. Approve", "1. ok", "1. Approve", "1. Approve"]);
+		await agent.commands.get("questions")!.handler("", captain);
+		// The gate stays open (only its workflow can resolve it); the plain
+		// question after it was reachable and answered.
+		const remaining = openQuestions(file);
+		expect(remaining).toHaveLength(1);
+		expect(remaining[0]!.questionKind).toBe("approve");
+	});
+
+	test("/questions Previous returns to the earlier question", async () => {
+		const file = freshFile();
+		const agent = new Harness();
+		registerQuestions(agent as any, envFor(file), agent.runtime);
+		ask(file, { question: "first", options: ["a"], sessionId: "s1", cwd: "/" });
+		ask(file, { question: "second", options: ["b"], sessionId: "s2", cwd: "/" });
+		// Skip to the second card, step back with Previous, then answer the first.
+		const captain = fakeContext("captain", ["Skip", "Previous", "1. a", "1. b"]);
+		await agent.commands.get("questions")!.handler("", captain);
+		expect(openQuestions(file)).toHaveLength(0);
+		const history = readQuestionHistory(file);
+		expect(history.find((q) => q.question === "first")?.answer).toBe("a");
+		expect(history.find((q) => q.question === "second")?.answer).toBe("b");
+		// The loop showed: second card, first card (after Previous), and both got titles.
+		expect(captain.prompts.filter((title) => title.startsWith("(")).length).toBe(4);
+	});
+
+	test("/questions Previous on the first question stays on it", async () => {
+		const file = freshFile();
+		const agent = new Harness();
+		registerQuestions(agent as any, envFor(file), agent.runtime);
+		ask(file, { question: "only", options: ["a"], sessionId: "s", cwd: "/" });
+		const captain = fakeContext("captain", ["Previous", "1. a"]);
+		await agent.commands.get("questions")!.handler("", captain);
+		expect(openQuestions(file)).toHaveLength(0);
+	});
+
+	test("/questions Show detail renders the full card read-only and returns to the question", async () => {
+		const file = freshFile();
+		const agent = new Harness();
+		registerQuestions(agent as any, envFor(file), agent.runtime);
+		const asked = ask(file, {
+			question: "Pick one",
+			options: ["a", "b"],
+			context: "long background",
+			recommendation: "a",
+			sessionId: "s",
+			cwd: "/w",
+		});
+		const captain = fakeContext("captain", ["Show detail", "anything", "2. b"]);
+		await agent.commands.get("questions")!.handler("", captain);
+		// The detail view went through the host select dialog with the full card.
+		const detail = captain.prompts.find((title) => title.startsWith("Question "));
+		expect(detail).toBe(`Question ${asked.id}`);
+		// Viewing detail resolved nothing; the follow-up pick did.
+		expect(readQuestionHistory(file).find((q) => q.id === asked.id)?.answer).toBe("b");
+	});
+
+	test("fullDetail includes id, options with actions, and context", () => {
+		const file = freshFile();
+		ask(file, {
+			id: "det",
+			idScope: "global",
+			question: "Q?",
+			options: ["Stamp", "Close"],
+			actions: ["stamp", "deny-gate"],
+			context: "why this matters",
+			sessionId: "s",
+			cwd: "/w",
+		});
+		const detail = fullDetail(openQuestions(file)[0]!, 0);
+		expect(detail).toContain("id: det");
+		expect(detail).toContain("1. Stamp [stamp]");
+		expect(detail).toContain("2. Close [deny-gate]");
+		expect(detail).toContain("context: why this matters");
+	});
+
+	test("/questions stays on a card whose submission failed so it can be resubmitted", async () => {
+		const file = freshFile();
+		const agent = new Harness();
+		registerQuestions(
+			agent as any,
+			envFor(file),
+			agent.runtime,
+			// The stamp executor fails once, then succeeds: first pick fails,
+			// the loop re-offers the SAME card, second pick lands.
+			(() => {
+				let calls = 0;
+				return async (command: string) => {
+					if (command === "gh") {
+						return { stdout: JSON.stringify({ headRefOid: "abc", mergeable: "MERGEABLE", mergeStateStatus: "CLEAN", statusCheckRollup: [] }) };
+					}
+					calls += 1;
+					if (calls === 1) throw new Error("gateway down");
+					return {};
+				};
+			})() as any,
+		);
+		ask(file, {
+			id: "deck-fleet:stamp:o/r:7:stamp:run-1:gate",
+			idScope: "global",
+			questionKind: "stamp",
+			origin: "fleet",
+			prContext: { prNumber: 7, prRepo: "o/r", headSha: "abc" },
+			question: "Stamp?",
+			options: ["Stamp"],
+			actions: ["stamp"],
+			sessionId: "s",
+			cwd: "/w",
+		});
+		const captain = fakeContext("captain", ["1. Stamp", "1. Stamp"]);
+		await agent.commands.get("questions")!.handler("", captain);
+		expect(openQuestions(file)).toHaveLength(0);
+		expect(captain.notices.some((notice) => notice.includes("resubmit"))).toBe(true);
+	});
+
+	test("/questions drops a card another session already resolved instead of looping", async () => {
+		const file = freshFile();
+		const agent = new Harness();
+		registerQuestions(agent as any, envFor(file), agent.runtime);
+		const asked = ask(file, { question: "raced", options: ["a"], sessionId: "s", cwd: "/" });
+		const captain = fakeContext("captain", []);
+		captain.ui.select = async (title: string) => {
+			captain.prompts.push(title);
+			// A second captain resolves it while this dialog is open.
+			answer(file, asked.id, "other captain won");
+			return "1. a";
+		};
+		await agent.commands.get("questions")!.handler("", captain);
+		// Not answered by us, not stuck: the loop noticed it was closed and moved on.
+		expect(captain.prompts.filter((title) => title.startsWith("(")).length).toBe(1);
+		expect(readQuestionHistory(file).find((q) => q.id === asked.id)?.answer).toBe("other captain won");
 	});
 
 	test("/questions answers with a listed option and delivers to the asker", async () => {
