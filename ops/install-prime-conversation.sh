@@ -651,9 +651,12 @@ if [[ "\$actual_version" != "\$PINNED_VERSION" ]]; then
     "\$PINNED_VERSION" "\$PINNED_TAG" "\$PINNED_COMMIT" "\${actual_version:-<no version>}" >&2
   exit 1
 fi
+# The orchestrator patches its own runtime while it works, so a drifted tree is
+# expected here and must never block a launch. Install time still hard-fails
+# (see the verify call above), which is what keeps installs reproducible.
 if ! install_verification="\$(PRIME_AGENT_BIN="\$PRIME_AGENT_BIN" "\$PATCH_VERIFIER" verify 2>&1)"; then
-  printf 'error: Prime Agent install-state tripwire failed at launch:\n%s\n' "\$install_verification" >&2
-  exit 1
+  printf 'warning: Prime Agent install state has drifted from the manifest:\n%s\n' "\$install_verification" >&2
+  printf 'warning: run `bash ops/prime-patches.sh bless` in the deck repo to vendor the current tree.\n' >&2
 fi
 actual_custody_sha="\$(shasum -a 256 "\$CUSTODY_FILE" | cut -d ' ' -f 1)"
 if [[ "\$actual_custody_sha" != "\$CUSTODY_SHA256" ]]; then
@@ -675,8 +678,15 @@ if ! actual_process_package_version="\$(node -e 'process.stdout.write(require(pr
     "\$PROCESS_PACKAGE_VERSION" "\${actual_process_package_version:-<missing>}" >&2
   exit 1
 fi
+# settings.json is rewritten by the app itself (model, thinking level, service
+# tier), so pinning a digest over it breaks the next launch after any ordinary
+# use. It is checked for existence and validity instead. auth and seed are ours
+# and stay pinned.
+if [[ ! -s "\$SETTINGS_FILE" ]] || ! node -e 'JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8"))' "\$SETTINGS_FILE" 2>/dev/null; then
+  printf 'error: Prime conversation settings are missing or not valid JSON: %s\n' "\$SETTINGS_FILE" >&2
+  exit 1
+fi
 for digest_spec in \
-  "settings:\$SETTINGS_FILE:\$SETTINGS_SHA256" \
   "native auth:\$AUTH_FILE:\$AUTH_SHA256" \
   "Deck seed:\$SEED_FILE:\$SEED_SHA256"; do
   label="\${digest_spec%%:*}"

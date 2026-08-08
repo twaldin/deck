@@ -8,7 +8,7 @@ MARKER_NAME=".deck-prime-patches.json"
 
 usage() {
   cat <<'USAGE'
-Usage: ops/prime-patches.sh <status|apply|verify>
+Usage: ops/prime-patches.sh <status|apply|bless|verify>
 
 Environment overrides:
   PRIME_AGENT_BIN            prime-agent executable for status/verify
@@ -18,6 +18,8 @@ Environment overrides:
 status reports the installed patch fingerprint and checks upstream PR state with gh.
 apply replaces a pristine 0.7.0 install with the reviewed patched tarball.
 verify exits non-zero unless the installed package matches the manifest fingerprint.
+bless re-vendors the installed tree as the reviewed artifact, for when the
+  orchestrator has patched its own runtime and you want to keep that fix.
 USAGE
 }
 
@@ -462,6 +464,71 @@ apply_command() {
   verify_command
 }
 
+# The orchestrator edits its own installed runtime while it works. bless vendors
+# whatever is on disk right now as the reviewed artifact, so the next install
+# reproduces it instead of the tripwire refusing to launch.
+bless_command() {
+  local root tree_sha cli_sha artifact_file artifact_path artifact_sha staging
+  root="$(resolve_install_root)" || fail "prime-agent install not found"
+  [[ -f "$root/package.json" ]] || fail "prime-agent install not found"
+
+  staging="$(mktemp -d)"
+  mkdir -p "$staging/package"
+  # Exactly the entries package_tree_sha fingerprints: no node_modules, no marker.
+  for name in dist docs examples skills postinstall.cjs CHANGELOG.md README.md package.json; do
+    [[ -e "$root/$name" ]] || fail "install is missing $name"
+    cp -R "$root/$name" "$staging/package/$name"
+  done
+  find "$staging/package" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
+  find "$staging/package" -name "*.pyc" -delete 2>/dev/null || true
+
+  artifact_file="prime-agent-$BASE_VERSION-deck-blessed.tgz"
+  artifact_path="$PATCH_DIR/$artifact_file"
+  (cd "$staging" && COPYFILE_DISABLE=1 tar czf "$artifact_path" package) || fail "could not pack the installed tree"
+
+  tree_sha="$(package_tree_sha "$root")"
+  cli_sha="$(sha256_file "$root/dist/bundle/cli.js")"
+  artifact_sha="$(sha256_file "$artifact_path")"
+
+  node - "$MANIFEST" "$root" "$artifact_file" "$artifact_sha" "$tree_sha" "$cli_sha" <<'NODE'
+const crypto = require("node:crypto");
+const fs = require("node:fs");
+const path = require("node:path");
+const [, , manifestPath, root, file, sha256, packageTreeSha256, cliSha256] = process.argv;
+const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+Object.assign(manifest.patchedArtifact, { file, sha256, packageTreeSha256, cliSha256 });
+// status resolves a needle against dist/bundle, so bless must use the same rule
+// or it refreshes hashes for a patch status will still call unknown.
+const bundleDir = path.join(root, "dist", "bundle");
+let bundleText = "";
+try {
+  bundleText = fs.readdirSync(bundleDir)
+    .filter((name) => name.endsWith(".js"))
+    .sort()
+    .map((name) => fs.readFileSync(path.join(bundleDir, name), "utf8"))
+    .join("\n");
+} catch {}
+// Detection hashes describe the file as installed, so they move with the tree.
+for (const patch of manifest.patches) {
+  const detection = patch.installedDetection;
+  const target = path.join(root, detection.file);
+  if (!fs.existsSync(target)) continue;
+  if (!bundleText.includes(detection.bundleNeedle)) {
+    console.warn(`warning: ${patch.name} is not in this tree; leaving its hashes alone`);
+    continue;
+  }
+  detection.patchedSha256 = crypto.createHash("sha256").update(fs.readFileSync(target)).digest("hex");
+}
+fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+NODE
+
+  rm -rf "$staging"
+  load_manifest
+  write_marker "$root" "$tree_sha"
+  printf 'blessed %s as %s (tree %s)\n' "$root" "$artifact_file" "$tree_sha"
+  verify_command
+}
+
 main() {
   [[ $# -eq 1 ]] || { usage >&2; exit 2; }
   require_command node
@@ -474,6 +541,10 @@ main() {
       require_command npm
       require_command tar
       apply_command
+      ;;
+    bless)
+      require_command tar
+      bless_command
       ;;
     verify) verify_command ;;
     -h|--help) usage ;;

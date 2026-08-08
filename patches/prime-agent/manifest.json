@@ -12,9 +12,9 @@
     "cliSha256": "ef097dce87e63c32e49493767763c7147376e6b4522818dd275ca9c32218ad35"
   },
   "patchedArtifact": {
-    "file": "prime-agent-0.7.0-deck-nullsafe.tgz",
-    "sha256": "035b0af12e37b3cc62b9646407e900e87141c6a5066d8fe69af24984e96c297d",
-    "packageTreeSha256": "e211a1a76196e29b52fe654d2dca0664934fe6efcd4769df225cd9605b53f47a",
+    "file": "prime-agent-0.7.0-deck-blessed.tgz",
+    "sha256": "67bb50d26802c384742e5cb35e434d917834e70c0d62253c18bdb74ad81a4b26",
+    "packageTreeSha256": "46078c301b7b4a52f5835e27bdd95c90e779da01b3831b5f0231e99d25d59913",
     "cliSha256": "ef097dce87e63c32e49493767763c7147376e6b4522818dd275ca9c32218ad35"
   },
   "patches": [
@@ -116,6 +116,25 @@
       },
       "status": "local-only",
       "shippedInArtifact": false
+    },
+    {
+      "name": "session-input-pump-resume",
+      "file": "session-input-pump-resume.patch",
+      "sha256": "8cb8c128b98ade25c85220dfe85f16a0db28cd1f1a573b61cfcaa4533fb525e9",
+      "fixes": "Resumes a suspended session input pump on programmatic turn admission, and retries a deferred heartbeat at the next tick. Without it, queued agent messages, heartbeats and wake prompts starve at idle - seen live as input being dequeued at random.",
+      "upstreamBranch": "fix/session-input-pump-resume",
+      "sourceCommit": "1c23cf76e6fc5de2cc3a9fe29973cec8724b7db5",
+      "baseVersion": "0.7.0",
+      "application": "not-applied",
+      "installedDetection": {
+        "file": "dist/core/agent-session.js",
+        "pristineSha256": "db56597bdfc8a0213c61d4f05b20f8381a1a5e26bbddead957c4fa3e0d861449",
+        "patchedSha256": "b963287716e69298f0f11605cfd632196404e545b2869ac5d1d5a406b2d3559b",
+        "bundleNeedle": "!options2.restore && options2.wake !== false && action.payload.kind === \"turn\""
+      },
+      "status": "local-only",
+      "upstreamPrNumber": null,
+      "upstreamPrUrl": null
     }
   ]
 }

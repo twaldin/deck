@@ -1,0 +1,53 @@
+--- pristine/package/dist/core/agent-session.js
++++ /Users/twaldin/.deck/.prime/runtime/lib/node_modules/prime-agent/dist/core/agent-session.js
+@@ -4001,6 +4001,13 @@
+         }
+         const coalescedOwner = options.restore ? undefined : this._coalescedFollowUpOwner(action);
+         if (coalescedOwner) {
++            // A coalesced re-fire is still evidence a producer wants delivery: resume a
++            // pump suspended by an abort so the owning queued action can drain at idle.
++            if (options.wake !== false && !this.isStreaming && this._sessionInputPumpSuspended) {
++                this._sessionInputPumpSuspended = false;
++                this._notifySessionInputCheckpointChange();
++                this._scheduleSessionInputPump();
++            }
+             if (action.agentMessageId !== coalescedOwner.agentMessageId) {
+                 this._rejectAgentMessage(action.agentMessageId, new Error("Prompt was not queued because an equivalent follow-up is already pending."));
+             }
+@@ -4033,6 +4040,17 @@
+                 this._sessionInputPumpSuspended = false;
+             this._scheduleSessionInputPump();
+         }
++        if (!options.restore &&
++            options.wake !== false &&
++            action.payload.kind === "turn" &&
++            !this.isStreaming &&
++            this._sessionInputPumpSuspended) {
++            // Programmatic admissions resume a pump suspended by an abort, matching _prompt():
++            // otherwise queued agent messages, heartbeats, and wake prompts starve at idle.
++            this._sessionInputPumpSuspended = false;
++            this._notifySessionInputCheckpointChange();
++            this._scheduleSessionInputPump();
++        }
+         return { accepted: true, disposition, ticket: controller.ticket };
+     }
+     async _queuePreparedPrompt(schedule, text, images, options = {}) {
+--- pristine/package/dist/core/cron-jobs.js
++++ /Users/twaldin/.deck/.prime/runtime/lib/node_modules/prime-agent/dist/core/cron-jobs.js
+@@ -529,7 +529,15 @@
+                     return job;
+                 }
+                 if (result.outcome === "skipped" && result.error === undefined) {
+-                    const nextRunAt = nextRunAtForSchedule(job.schedule, now);
++                    const scheduledNextRunAt = nextRunAtForSchedule(job.schedule, now);
++                    // A deferred heartbeat fire retries at the next scheduler tick instead of
++                    // losing the fire until the following full interval.
++                    const heartbeatRetryAt = isHeartbeatCronJob(job) && job.schedule.kind !== "once"
++                        ? new Date(now.getTime() + ONE_MINUTE_MS)
++                        : undefined;
++                    const nextRunAt = heartbeatRetryAt && (!scheduledNextRunAt || heartbeatRetryAt < scheduledNextRunAt)
++                        ? heartbeatRetryAt
++                        : scheduledNextRunAt;
+                     updated = {
+                         ...job,
+                         status: job.schedule.kind === "once" ? "completed" : job.status,
