@@ -602,7 +602,8 @@ install_wake_drainer() {
       # not boot out the real user's drainer and replace it with a job whose
       # repo is about to be deleted. launchd only reads the real home anyway.
       local real_home
-      real_home="$(dscl . -read "/Users/$(id -un)" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
+      # Tilde expansion consults the account database, not $HOME.
+      real_home="$(eval printf '%s' "~$(id -un)")"
       if [ -n "$real_home" ] && [ "$HOME" != "$real_home" ]; then
         printf 'WARNING: sandboxed HOME (%s); wake-drain plist written but NOT loaded into launchd.
 ' "$HOME"
