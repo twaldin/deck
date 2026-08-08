@@ -119,6 +119,9 @@ jobs:
             echo "Expected prime-agent 0.7.0, got $version" >&2
             exit 1
           fi
+          # The manifest expects the patched tree; the engine's preflight runs
+          # ops/prime-patches.sh verify, so bring the pristine install up to it.
+          ./ops/prime-patches.sh apply
       - name: Run pipeline tests
         working-directory: workflows/pr-pipeline
         run: bun test

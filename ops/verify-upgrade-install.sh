@@ -137,6 +137,9 @@ curl -fsSL "$PRIME_ARTIFACT_URL" -o "$PRIME_ARTIFACT"
   fail "fixture Prime Agent artifact failed its SHA-256 check"
 npm install --global --prefix "$PRIME_RUNTIME" "$PRIME_ARTIFACT" >/dev/null
 PRIME_BIN="$PRIME_RUNTIME/bin/prime-agent"
+# The previous generation was installed by the previous install.sh, which
+# already brought the pristine artifact up to the manifest's patched tree.
+PRIME_PATCH_NPM_PREFIX="$PRIME_RUNTIME" "$CLONE_DIR/ops/prime-patches.sh" apply >/dev/null
 PRIME_AGENT_BIN="$PRIME_BIN" "$CLONE_DIR/ops/prime-patches.sh" verify >/dev/null
 [ ! -e "$PRIME_RUNTIME/lib/node_modules/@aliou/pi-processes" ] ||
   fail "previous-generation fixture unexpectedly contains the pinned process package"
